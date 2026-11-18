@@ -306,6 +306,7 @@ Control actions require a control lease:
 
 - `launch_app` launches or foregrounds one allowlisted app.
 - `click_element`, `perform_action`, `scroll_element`, and `set_value` act on an element from the latest state; `set_value` works only on elements that report they are writable.
+  On macOS, `click_element` on an enabled button that offers no press action, as some Brave buttons do, clicks the button's center instead, and only while an accessibility hit-test there still finds that button in its app's window.
 - `click`, `double_click`, `hover`, and `drag` use coordinates from `0` to `1000` inside the app window, not raw screen pixels, and `scroll` scrolls a bounded number of pages.
 - `type_text` types up to 2,000 characters; line breaks and tabs need an element target, otherwise send Enter or Tab with `keypress`.
 - `keypress` supports navigation keys, shift plus navigation, command or ctrl plus a, c, x, v, z, or f, and command or ctrl plus shift plus z.
@@ -318,6 +319,7 @@ Coordinate input, typing without an element, `scroll`, and `keypress` need a fre
 On macOS, keyboard input fails if the app has lost focus, and pointer input fails if another window, such as a notification banner, floating panel, or Picture in Picture, covers the target point.
 An app that stops answering accessibility requests makes its request fail with `did not answer accessibility requests in time` after several seconds instead of holding up other actions, and a `primary-screen` screenshot still works while that app hangs.
 Windows on secondary displays are supported when the window lies on one display; move a window that spans displays fully onto one.
+A `primary-screen` observation belongs to the display that was main when it was taken; once another display becomes main, input and screenshots with that observation are refused until the agent observes again.
 
 ## Read-Only Folders
 

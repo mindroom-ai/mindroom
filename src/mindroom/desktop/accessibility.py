@@ -87,6 +87,8 @@ _CONTAINER_ROLES = frozenset(
     },
 )
 _PRESENTATION_ONLY_ACTIONS = frozenset({"AXShowAlternateUI", "AXShowDefaultUI"})
+# What a hit-test may find inside a button pressed by pointer: its own label or icon, never a control of its own.
+_POINTER_PRESS_CONTENT_ROLES = frozenset({"AXGroup", "AXImage", "AXStaticText"})
 _PASSIVE_VOLATILE_ROLES = frozenset({"AXStaticText", "AXProgressIndicator", "AXBusyIndicator"})
 
 
@@ -195,6 +197,15 @@ class AccessibilityCapture:
 
 
 @dataclass(frozen=True, slots=True)
+class AccessibilityPointerPress:
+    """A center click for one revalidated element without AXPress, posted only while `hit` finds it at the point."""
+
+    point: tuple[int, int]
+    process_id: int
+    hit: Callable[[tuple[int, int]], bool]
+
+
+@dataclass(frozen=True, slots=True)
 class DesktopApp:
     """One locally allowed application and its current running state."""
 
@@ -251,8 +262,8 @@ class AccessibilityBackend(Protocol):
         """Validate a fresh state and return one indexed element and the process pointer input must reach."""
         ...
 
-    def click_element(self, app_id: str, state_id: str, element_index: int) -> None:
-        """Invoke the semantic press action on one element."""
+    def click_element(self, app_id: str, state_id: str, element_index: int) -> AccessibilityPointerPress | None:
+        """Press one element semantically, or return a hit-tested center click for a button that has no press action."""
         ...
 
     def prepare_typing(self, app_id: str, state_id: str, element_index: int) -> Callable[[], None]:
@@ -525,9 +536,92 @@ class MacAccessibilityBackend:
             raise AccessibilityError(msg)
         return element, None if current.application is None else int(current.application.processIdentifier())
 
-    def click_element(self, app_id: str, state_id: str, element_index: int) -> None:
-        """Perform AXPress only when the fresh element advertises it."""
-        self.perform_action(app_id, state_id, element_index, self._services.kAXPressAction)
+    def click_element(self, app_id: str, state_id: str, element_index: int) -> AccessibilityPointerPress | None:
+        """Perform AXPress when the element advertises it; otherwise return a center click for an enabled AXButton.
+
+        Some apps, such as Brave, expose enabled AXButton elements without AXPress. Such a button, revalidated on its
+        own before and after activation, gets a center click that the provider posts only while a system-wide
+        hit-test at the point still finds that button, or plain content inside it, in the same process.
+        """
+        observed = self._stored_state(app_id, state_id)
+        self._validate_element_index(observed, element_index)
+        if self._services.kAXPressAction in observed.public.elements[element_index].actions:
+            self.perform_action(app_id, state_id, element_index, self._services.kAXPressAction)
+            return None
+        # The revalidation keeps the observed actions, so the current element has no AXPress either.
+        current, current_index = self._current_action_state(app_id, state_id, element_index)
+        self._pointer_press_point(current, current_index)
+        self._activate(current.application)
+        current, current_index = self._current_action_state(app_id, state_id, element_index)
+        point = self._pointer_press_point(current, current_index)
+        application = current.application
+        if application is None:
+            msg = "Accessibility target is stale; request get_app_state again before acting."
+            raise AccessibilityError(msg)
+        reference = current.references[current_index]
+        process_id = int(application.processIdentifier())
+        return AccessibilityPointerPress(
+            point,
+            process_id,
+            lambda at: self._hit_is_element(app_id, at, reference, process_id),
+        )
+
+    def _pointer_press_point(self, stored: _StoredMacState, element_index: int) -> tuple[int, int]:
+        """Return the center of an enabled AXButton inside its window, the only element without AXPress clicked."""
+        self._require_element_enabled(stored, element_index)
+        element = stored.public.elements[element_index]
+        if element.role != "AXButton":
+            msg = f"Accessibility element {element_index} does not advertise action {self._services.kAXPressAction!r}."
+            raise AccessibilityError(msg)
+        if element.enabled is not True:
+            msg = f"Accessibility element {element_index} does not report that it is enabled."
+            raise AccessibilityError(msg)
+        if element.bounds is None:
+            msg = f"Accessibility element {element_index} has no screen bounds to click."
+            raise AccessibilityError(msg)
+        if not _rect_center_inside(element.bounds, stored.public.window):
+            msg = f"Accessibility element {element_index} is outside the allowed app window."
+            raise AccessibilityError(msg)
+        return element.bounds.x + element.bounds.width // 2, element.bounds.y + element.bounds.height // 2
+
+    def _hit_is_element(self, app_id: str, point: tuple[int, int], reference: object, process_id: int) -> bool:
+        """Hit-test all apps at `point`: true only for `reference`, or plain content inside it, in `process_id`.
+
+        Anything else on top there, such as another app's window, a popover or overlay of the same app, another window,
+        or a control that was never observed, fails the test, and so does a hit-test that macOS cannot answer in time.
+        """
+        self._collect_deadline = _CollectionDeadline(app_id, time.monotonic() + _COLLECT_DEADLINE_SECONDS)
+        try:
+            hit = self._hit_reaches(point, reference, process_id)
+        except AccessibilityError:
+            hit = False
+        finally:
+            self._collect_deadline = None
+        return hit
+
+    def _hit_reaches(self, point: tuple[int, int], reference: object, process_id: int) -> bool:
+        services = self._services
+        error, element = services.AXUIElementCopyElementAtPosition(
+            services.AXUIElementCreateSystemWide(),
+            float(point[0]),
+            float(point[1]),
+            None,
+        )
+        if error != services.kAXErrorSuccess or element is None:
+            return False
+        error, owner = services.AXUIElementGetPid(element, None)
+        if error != services.kAXErrorSuccess or owner != process_id:
+            return False
+        for _ in range(_MAX_ACCESSIBILITY_DEPTH):
+            if element == reference:
+                return True
+            role = _bounded_text(self._copy_attribute(element, services.kAXRoleAttribute))
+            if role not in _POINTER_PRESS_CONTENT_ROLES or not self._lacks_press_action(element):
+                return False
+            element = self._copy_attribute(element, services.kAXParentAttribute)
+            if element is None:
+                return False
+        return False
 
     def prepare_typing(self, app_id: str, state_id: str, element_index: int) -> Callable[[], None]:
         """Focus one exact nonsecure text field and return a guard for each input chunk."""
@@ -978,6 +1072,16 @@ class MacAccessibilityBackend:
         ]
         return tuple(sorted(names))[:8]
 
+    def _lacks_press_action(self, reference: object) -> bool:
+        """Read every action name, not the bounded public list, and treat an unreadable list as pressable."""
+        error, actions = self._copy_action_names(reference)
+        return (
+            error == self._services.kAXErrorSuccess
+            and isinstance(actions, Sequence)
+            and not isinstance(actions, str)
+            and self._services.kAXPressAction not in actions
+        )
+
     def _attribute_settable(self, reference: object, attribute: str) -> bool:
         self._check_collect_deadline()
         error, settable = self._services.AXUIElementIsAttributeSettable(reference, attribute, None)
@@ -1341,6 +1445,7 @@ __all__ = [
     "AccessibilityCapture",
     "AccessibilityElement",
     "AccessibilityError",
+    "AccessibilityPointerPress",
     "AccessibilityState",
     "DesktopApp",
     "DesktopRect",

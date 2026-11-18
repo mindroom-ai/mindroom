@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, cast
@@ -18,6 +19,7 @@ from mindroom.desktop.accessibility import (
     AccessibilityCapture,
     AccessibilityElement,
     AccessibilityError,
+    AccessibilityPointerPress,
     AccessibilityState,
     DesktopApp,
     DesktopRect,
@@ -582,10 +584,17 @@ class FakeAccessibilityBackend:
     keyboard_focus_checks_left: int | None = None
     # None models the primary-screen target, which is bound to no application process.
     process_id: int | None = 42
+    # A center click returned for a button without AXPress; None models an element pressed with AXPress.
+    pointer_press: AccessibilityPointerPress | None = None
 
     def launch_app(self, app_id: str) -> None:
         """Record one allowlisted application launch."""
         self.calls.append(("launch_app", app_id))
+
+    def get_app_state(self, app_id: str) -> AccessibilityState:
+        """Record one observation and return the state every other fake method validates."""
+        self.calls.append(("get_app_state", app_id))
+        return AccessibilityState("state-1", app_id, "Editor", self.window, (), False)
 
     def set_computer_scope(self, active: bool) -> None:
         """Record the whole-computer scope the provider forwards."""
@@ -626,6 +635,11 @@ class FakeAccessibilityBackend:
         )
         return element, self.process_id
 
+    def click_element(self, app_id: str, state_id: str, element_index: int) -> AccessibilityPointerPress | None:
+        """Record one press and return the configured center click, if any, for the provider to post."""
+        self.calls.append(("click_element", (app_id, state_id, element_index)))
+        return self.pointer_press
+
     def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
         """Record validation and return a focus guard that fails once its allowed checks run out."""
         self.calls.append(("prepare_keyboard", (app_id, state_id)))
@@ -656,6 +670,8 @@ def _provider() -> tuple[PyAutoGuiDesktopProvider, FakePyAutoGui, FakeAccessibil
     provider._jpeg_quality = 80
     provider._accessibility = accessibility
     provider._display_geometry = lambda: (DisplayGeometry("primary", DesktopRect(0, 0, 1512, 982), 1512, 982),)
+    provider._main_display = provider._screen_display
+    provider._primary_displays = OrderedDict()
     provider._input_enabled = threading.Event()
     provider.set_input_enabled(True)
     return provider, pyautogui, accessibility

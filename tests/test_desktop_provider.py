@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -11,11 +12,14 @@ import pytest
 from PIL import Image
 
 from mindroom.desktop.accessibility import (
+    PRIMARY_SCREEN_APP_ID,
     AccessibilityActionOutcomeUnknownError,
     AccessibilityError,
+    AccessibilityPointerPress,
     DesktopRect,
+    ScreenshotOnlyAccessibilityBackend,
 )
-from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError
+from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError, macos_displays, macos_main_display
 from mindroom.desktop.input import MINDROOM_APP_IDS
 from mindroom.desktop.provider import (
     DesktopControlRevokedError,
@@ -457,6 +461,7 @@ def test_primary_screen_pointer_input_never_reaches_a_mindroom_window(
     )
     owners: dict[int, str | None] = {7: "chat.mindroom.menubar", 42: "com.example.Editor"}
     monkeypatch.setattr("mindroom.desktop.macos_input.process_bundle_id", owners.get)
+    assert provider.get_app_state("primary-screen").state_id == "state-1"
 
     def act(x: int) -> None:
         target = {"app_id": "primary-screen", "state_id": "state-1"}
@@ -949,3 +954,288 @@ def test_revoke_while_typing_without_quartz_sends_no_further_chunk() -> None:
         provider.type_text(app_id="com.example.Editor", state_id="state-1", text="a" * 41)
 
     assert pyautogui.calls == [("write", ("a" * 20, 0.01))]
+
+
+def _main_display_quartz(
+    posted: list[dict[str, object]],
+    main: list[int],
+    missing_modes: frozenset[int] | set[int],
+) -> SimpleNamespace:
+    """Quartz with two active same-sized 1512x982 point displays, 4 and 9; `main[0]` is the main display's ID.
+
+    Displays in `missing_modes` report no active mode, as a display connected after the process started can.
+    """
+    quartz = _fake_quartz(posted, [_window(42, 0, 0, 3000)])
+    quartz.CGGetActiveDisplayList = lambda _limit, _ids, _count: (0, (4, 9), 2)
+    quartz.CGMainDisplayID = lambda: main[0]
+    quartz.CGDisplayBounds = lambda _display: SimpleNamespace(
+        origin=SimpleNamespace(x=0, y=0),
+        size=SimpleNamespace(width=1512, height=982),
+    )
+    quartz.CGDisplayCopyDisplayMode = lambda display: None if display in missing_modes else ("mode", display)
+    quartz.CGDisplayModeGetWidth = lambda _mode: 1512
+    quartz.CGDisplayModeGetHeight = lambda _mode: 982
+    quartz.CGDisplayModeGetPixelWidth = lambda _mode: 3024
+    quartz.CGDisplayModeGetPixelHeight = lambda _mode: 1964
+    quartz.CGEventCreateKeyboardEvent = lambda _source, _code, down: {"kind": "key", "down": down}
+    quartz.CGEventKeyboardSetUnicodeString = lambda event, _length, text: event.update(text=text)
+    return quartz
+
+
+def _primary_screen_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_modes: frozenset[int] | set[int] = frozenset(),
+) -> tuple[PyAutoGuiDesktopProvider, FakePyAutoGui, list[dict[str, object]], list[int], list[str]]:
+    provider, pyautogui, _ = _provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("mindroom.desktop.macos_input.process_bundle_id", lambda _pid: "com.example.Editor")
+    posted: list[dict[str, object]] = []
+    main = [4]
+    monkeypatch.setitem(sys.modules, "Quartz", _main_display_quartz(posted, main, missing_modes))
+    provider._accessibility = ScreenshotOnlyAccessibilityBackend(
+        frozenset({PRIMARY_SCREEN_APP_ID}),
+        provider._screen_size,
+    )
+    provider._main_display = macos_main_display
+    captures: list[str] = []
+
+    def capture() -> FakeImage:
+        captures.append(f"display {main[0]}")
+        return FakeImage((3024, 1964))
+
+    provider._capture_screen = capture
+    return provider, pyautogui, posted, main, captures
+
+
+def _primary_screen_operation(provider: PyAutoGuiDesktopProvider, operation: str, state_id: str) -> None:
+    target = {"app_id": PRIMARY_SCREEN_APP_ID, "state_id": state_id}
+    if operation == "click":
+        provider.click(**target, x=500, y=500, button="left")
+    elif operation == "double_click":
+        provider.double_click(**target, x=500, y=500)
+    elif operation == "hover":
+        provider.hover(**target, x=500, y=500)
+    elif operation == "scroll":
+        provider.scroll(**target, direction="down", pages=1, x=500, y=500)
+    elif operation == "drag":
+        provider.drag(**target, start_x=100, start_y=100, end_x=900, end_y=900)
+    elif operation == "keypress":
+        provider.keypress(**target, keys=["enter"])
+    elif operation == "type_text":
+        provider.type_text(**target, text="abc")
+    else:
+        provider.screenshot(**target)
+
+
+_PRIMARY_SCREEN_OPERATIONS = ("click", "double_click", "hover", "scroll", "drag", "keypress", "type_text", "screenshot")
+
+
+@pytest.mark.parametrize("missing_modes", [frozenset(), frozenset({4})], ids=["main mode", "no main mode"])
+@pytest.mark.parametrize("operation", _PRIMARY_SCREEN_OPERATIONS)
+def test_primary_screen_state_works_while_its_main_display_stays_main(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    missing_modes: frozenset[int],
+) -> None:
+    """The display binding does not get in the way while the observed main display is still the main display.
+
+    That holds when this process reads no mode for the main display too: its ID and logical bounds still bind the state.
+    """
+    provider, pyautogui, posted, _, captures = _primary_screen_provider(monkeypatch, missing_modes)
+    state = provider.get_app_state(PRIMARY_SCREEN_APP_ID)
+
+    _primary_screen_operation(provider, operation, state.state_id)
+
+    assert posted or captures or pyautogui.calls
+
+
+@pytest.mark.parametrize(
+    "missing_modes",
+    [frozenset(), frozenset({9}), frozenset({4, 9})],
+    ids=["both modes", "new display without mode", "neither with mode"],
+)
+@pytest.mark.parametrize("operation", _PRIMARY_SCREEN_OPERATIONS)
+def test_primary_screen_state_is_refused_after_a_same_sized_display_becomes_main(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    missing_modes: frozenset[int],
+) -> None:
+    """Coordinates and pixels observed on one main display never reach another same-sized display that became main.
+
+    Measured live (2026-11-17): a new 2560x1440 display took over main from a 2560x1440 one and an old primary-screen
+    state was still accepted, because the state bound only the screen size. The display IDs differ even when this
+    process reads no mode for either display, and a fresh state works on the new main display.
+    """
+    provider, pyautogui, posted, main, captures = _primary_screen_provider(monkeypatch, missing_modes)
+    state = provider.get_app_state(PRIMARY_SCREEN_APP_ID)
+    main[0] = 9
+
+    with pytest.raises((AccessibilityError, DesktopProviderError), match="main display changed"):
+        _primary_screen_operation(provider, operation, state.state_id)
+
+    assert (posted, captures, pyautogui.calls) == ([], [], [])
+    fresh = provider.get_app_state(PRIMARY_SCREEN_APP_ID)
+    _primary_screen_operation(provider, operation, fresh.state_id)
+
+
+def test_primary_screen_drag_stops_and_releases_when_the_main_display_changes_midway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A display switch during a whole-screen drag stops motion before the next event and still releases the button."""
+    provider, _, posted, main, _ = _primary_screen_provider(monkeypatch)
+    state = provider.get_app_state(PRIMARY_SCREEN_APP_ID)
+    sleeps: list[float] = []
+
+    def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            main[0] = 9
+
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", sleep)
+
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="main display changed"):
+        provider.drag(
+            app_id=PRIMARY_SCREEN_APP_ID,
+            state_id=state.state_id,
+            start_x=0,
+            start_y=0,
+            end_x=1000,
+            end_y=1000,
+        )
+
+    kinds = [event["kind"] for event in posted]
+    assert kinds[:2] == [8, 1]
+    assert kinds[-1] == 2
+    assert kinds.count(3) < 20
+
+
+def test_primary_screen_capture_is_refused_when_the_main_display_changes_during_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pixels captured while main moved to another display are not returned for the old observation."""
+    provider, _, _, main, _ = _primary_screen_provider(monkeypatch)
+    state = provider.get_app_state(PRIMARY_SCREEN_APP_ID)
+
+    def capture_while_switching() -> FakeImage:
+        main[0] = 9
+        return FakeImage((3024, 1964))
+
+    provider._capture_screen = capture_while_switching
+
+    with pytest.raises(DesktopProviderError, match="main display changed"):
+        provider.screenshot(app_id=PRIMARY_SCREEN_APP_ID, state_id=state.state_id)
+
+
+def _button_press_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    windows: list[dict[str, object]],
+    hits: list[bool],
+) -> tuple[PyAutoGuiDesktopProvider, FakePyAutoGui, list[dict[str, object]], list[tuple[int, int]]]:
+    """Provider whose backend returns a center click at (140, 215) for a button without AXPress in process 42."""
+    provider, pyautogui, accessibility = _provider()
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    posted: list[dict[str, object]] = []
+    monkeypatch.setitem(sys.modules, "Quartz", _fake_quartz(posted, windows))
+    tested: list[tuple[int, int]] = []
+
+    def hit(point: tuple[int, int]) -> bool:
+        tested.append(point)
+        return hits[len(tested) - 1]
+
+    accessibility.pointer_press = AccessibilityPointerPress((140, 215), 42, hit)
+    return provider, pyautogui, posted, tested
+
+
+def test_click_element_posts_one_hit_tested_center_click_for_a_button_without_axpress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The center click is one left press and release, each posted right after the hit-test finds the button."""
+    provider, pyautogui, posted, tested = _button_press_provider(monkeypatch, [_window(42, 0, 0, 3000)], [True, True])
+
+    provider.click_element(app_id="com.example.Editor", state_id="state-1", element_index=1)
+
+    assert [(event["kind"], event["point"]) for event in posted] == [(1, (140, 215)), (2, (140, 215))]
+    assert tested == [(140, 215), (140, 215)]
+    assert pyautogui.calls == []
+
+
+@pytest.mark.parametrize("failing_check", [1, 2], ids=["before press", "before release"])
+def test_click_element_center_click_stops_when_the_hit_test_no_longer_finds_the_button(
+    monkeypatch: pytest.MonkeyPatch,
+    failing_check: int,
+) -> None:
+    """A changed element at the center refuses before the press, or after it with an unknown outcome and a release."""
+    hits = [True] * (failing_check - 1) + [False]
+    provider, _, posted, _ = _button_press_provider(monkeypatch, [_window(42, 0, 0, 3000)], hits)
+
+    with pytest.raises(AccessibilityError, match="not the element at its center") as refused:
+        provider.click_element(app_id="com.example.Editor", state_id="state-1", element_index=1)
+
+    if failing_check == 1:
+        assert type(refused.value) is AccessibilityError
+        assert posted == []
+    else:
+        assert type(refused.value) is AccessibilityActionOutcomeUnknownError
+        assert [event["kind"] for event in posted] == [1, 2]
+
+
+def test_click_element_center_click_refuses_another_apps_window_over_the_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quartz still requires the app's own window on top at the point, so an occluded button gets no event."""
+    windows = [_window(7, 3, 0, 3000), _window(42, 0, 0, 3000)]
+    provider, _, posted, tested = _button_press_provider(monkeypatch, windows, [True, True])
+
+    with pytest.raises(AccessibilityError, match="Another window covers the allowed app"):
+        provider.click_element(app_id="com.example.Editor", state_id="state-1", element_index=1)
+
+    assert posted == []
+    assert tested == []
+
+
+def test_click_element_posts_no_pointer_event_after_a_semantic_press(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An element pressed with AXPress needs no pointer input."""
+    provider, pyautogui, posted, tested = _button_press_provider(monkeypatch, [_window(42, 0, 0, 3000)], [])
+    accessibility = provider._accessibility
+    accessibility.pointer_press = None
+
+    provider.click_element(app_id="com.example.Editor", state_id="state-1", element_index=0)
+
+    assert accessibility.calls == [("click_element", ("com.example.Editor", "state-1", 0))]
+    assert (posted, tested, pyautogui.calls) == ([], [], [])
+
+
+def test_primary_screen_state_is_refused_once_its_main_display_mode_becomes_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A known backing mode that turns unknown on the same display ID ends the old state, never assuming 1x for it."""
+    missing_modes: set[int] = set()
+    provider, pyautogui, posted, _, captures = _primary_screen_provider(monkeypatch, missing_modes)
+    state = provider.get_app_state(PRIMARY_SCREEN_APP_ID)
+    missing_modes.add(4)
+
+    with pytest.raises(DesktopProviderError, match="main display changed"):
+        provider.click(app_id=PRIMARY_SCREEN_APP_ID, state_id=state.state_id, x=500, y=500, button="left")
+
+    assert (posted, captures, pyautogui.calls) == ([], [], [])
+    fresh = provider.get_app_state(PRIMARY_SCREEN_APP_ID)
+    capture = provider.screenshot(app_id=PRIMARY_SCREEN_APP_ID, state_id=fresh.state_id)
+    assert capture.coordinates is not None
+    assert capture.coordinates["capture_scale"] == 2.0
+
+
+def test_status_reports_unknown_scale_for_a_display_without_a_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Status keeps working and reports scale null, valid JSON, for a display whose mode this process cannot read."""
+    provider, _, _ = _provider()
+    monkeypatch.setitem(sys.modules, "Quartz", _main_display_quartz([], [9], frozenset({9})))
+    provider._display_geometry = macos_displays
+    provider._accessibility = ScreenshotOnlyAccessibilityBackend(
+        frozenset({PRIMARY_SCREEN_APP_ID}),
+        provider._screen_size,
+    )
+
+    displays = provider.status()["displays"]
+
+    assert displays[1] == {"id": "9", "bounds": {"x": 0, "y": 0, "width": 1512, "height": 982}, "scale": None}
+    assert json.loads(json.dumps(displays, allow_nan=False)) == displays

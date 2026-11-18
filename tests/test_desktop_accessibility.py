@@ -109,6 +109,7 @@ class FakeMacServices:
     kAXValueAttribute = "value"
     kAXEnabledAttribute = "enabled"
     kAXChildrenAttribute = "children"
+    kAXParentAttribute = "parent"
     kAXValueCGPointType = "point"
     kAXValueCGSizeType = "size_value"
     kAXPressAction = "AXPress"
@@ -151,10 +152,32 @@ class FakeMacServices:
         self.actions = {"button": UserList(["AXPress", "Name:Unsafe\nTarget:0x0"])}
         self.apply_value_updates = True
         self.performed_actions: list[tuple[object, str]] = []
+        # The topmost accessible element across all apps at a point, as macOS hit-tests on the system-wide element.
+        self.element_at: Callable[[float, float], object | None] = lambda _x, _y: None
+        self.pids: dict[object, int] = {}
+        self.hit_tests: list[tuple[object, float, float]] = []
 
     @staticmethod
     def AXIsProcessTrusted() -> bool:
         return True
+
+    @staticmethod
+    def AXUIElementCreateSystemWide() -> str:
+        return "system-wide"
+
+    def AXUIElementCopyElementAtPosition(
+        self,
+        reference: object,
+        x: float,
+        y: float,
+        _unused: object,
+    ) -> tuple[int, object | None]:
+        self.hit_tests.append((reference, x, y))
+        element = self.element_at(x, y)
+        return (0, element) if element is not None else (1, None)
+
+    def AXUIElementGetPid(self, reference: object, _unused: object) -> tuple[int, int]:
+        return 0, self.pids.get(reference, 42)
 
     @staticmethod
     def AXUIElementCreateApplication(pid: int) -> tuple[str, int]:
@@ -1217,3 +1240,180 @@ def test_screenshot_only_backend_refuses_computer_scope() -> None:
     backend.set_computer_scope(False)
     with pytest.raises(AccessibilityError, match="Whole-computer control needs macOS accessibility"):
         backend.set_computer_scope(True)
+
+
+def _brave_buttons_backend(
+    **first: object,
+) -> tuple[MacAccessibilityBackend, FakeMacServices, FakeWorkspace, AccessibilityState]:
+    """Observe Brave's First and Second buttons as a live replay found them (2026-11-17), in a truncated tree.
+
+    Both are enabled AXButton elements with distinct bounds whose only actions are AXScrollToVisible and AXShowMenu;
+    each holds a text label past the element limit. `first` overrides First's attributes before the observation.
+    """
+    backend, services, workspace = _fake_mac_backend()
+    filler = [f"filler-{index}" for index in range(130)]
+    services.attributes["window-1"]["children"] = UserList(["first", "second", *filler])
+    for name, x in (("first", 100), ("second", 200)):
+        services.attributes[name] = {
+            "role": "AXButton",
+            "title": name.title(),
+            "enabled": True,
+            "parent": "window-1",
+            "position": SimpleNamespace(x=x, y=200),
+            "size": SimpleNamespace(width=80, height=30),
+            "children": UserList([f"{name}-label"]),
+        }
+        services.attributes[f"{name}-label"] = {"role": "AXStaticText", "value": name.title(), "parent": name}
+        services.actions[name] = UserList(["AXScrollToVisible", "AXShowMenu"])
+    for name in filler:
+        services.attributes[name] = {"role": "AXButton", "title": name, "parent": "window-1"}
+    for attribute, value in first.items():
+        if value is None:
+            services.attributes["first"].pop(attribute)
+        else:
+            services.attributes["first"][attribute] = value
+
+    def element_at(x: float, y: float) -> str:
+        if 200 <= y < 230 and 100 <= x < 180:
+            return "first-label"
+        if 200 <= y < 230 and 200 <= x < 280:
+            return "second-label"
+        return "window-1"
+
+    services.element_at = element_at
+    state = backend.get_app_state("com.example.Editor")
+    assert state.truncated
+    return backend, services, workspace, state
+
+
+def _first_button(state: AccessibilityState) -> AccessibilityElement:
+    return next(element for element in state.elements if element.name == "First")
+
+
+def test_mac_click_element_returns_a_hit_tested_center_click_for_an_enabled_button_without_axpress() -> None:
+    """An enabled AXButton without AXPress gets a hit-tested center click instead of a refusal.
+
+    A live replay of Brave's First and Second (2026-11-17) found enabled AXButton elements with distinct bounds and only
+    AXScrollToVisible and AXShowMenu, so click_element refused them and coordinates needed the whole primary screen.
+    Revalidated on its own before and after activation, such a button now gets a center click, which the provider posts
+    only while a system-wide hit-test there finds the button, or plain content inside it, in its process.
+    """
+    backend, services, workspace, state = _brave_buttons_backend()
+
+    press = backend.click_element(state.app_id, state.state_id, _first_button(state).index)
+
+    assert press is not None
+    assert (press.point, press.process_id) == ((140, 215), 42)
+    assert services.performed_actions == []
+    assert workspace.applications[0].activation_options == [0]
+    assert services.hit_tests == []
+    assert press.hit((140, 215))
+    assert services.hit_tests == [("system-wide", 140.0, 215.0)]
+    assert not press.hit((240, 215))
+
+
+@pytest.mark.parametrize(
+    "on_top",
+    ["same-app overlay", "unobserved control inside", "pressable content", "other process", "nothing", "other window"],
+)
+def test_mac_button_center_click_refuses_whatever_else_the_hit_test_finds_at_the_center(on_top: str) -> None:
+    """Matching tree reads cannot show what covers the point; only a hit-test there can, so anything else refuses."""
+    backend, services, _, state = _brave_buttons_backend()
+    press = backend.click_element(state.app_id, state.state_id, _first_button(state).index)
+    assert press is not None
+    assert press.hit(press.point)
+
+    if on_top == "same-app overlay":
+        services.attributes["popover"] = {"role": "AXGroup", "parent": "window-1"}
+        services.element_at = lambda _x, _y: "popover"
+    elif on_top == "unobserved control inside":
+        services.attributes["inner"] = {"role": "AXButton", "parent": "first"}
+        services.element_at = lambda _x, _y: "inner"
+    elif on_top == "pressable content":
+        services.actions["first-label"] = UserList(["AXPress"])
+    elif on_top == "other process":
+        services.pids["first-label"] = 99
+    elif on_top == "nothing":
+        services.element_at = lambda _x, _y: None
+    else:
+        services.attributes["other-label"] = {"role": "AXStaticText", "parent": "window-2"}
+        services.element_at = lambda _x, _y: "other-label"
+
+    assert not press.hit(press.point)
+
+
+@pytest.mark.parametrize("during_activation", [False, True])
+@pytest.mark.parametrize("change", ["title", "enabled", "bounds", "window", "replaced"])
+def test_mac_button_center_click_refuses_a_button_that_changed(change: str, during_activation: bool) -> None:
+    """The button itself is revalidated like any semantic target, before and after activation, before any hit-test."""
+    backend, services, workspace, state = _brave_buttons_backend()
+
+    def apply_change() -> None:
+        if change == "title":
+            services.attributes["first"]["title"] = "Renamed"
+        elif change == "enabled":
+            services.attributes["first"]["enabled"] = False
+        elif change == "bounds":
+            services.attributes["first"]["position"] = SimpleNamespace(x=101, y=200)
+        elif change == "window":
+            services.attributes["window-1"]["position"] = SimpleNamespace(x=11, y=20)
+        else:
+            services.attributes["first-copy"] = dict(services.attributes["first"])
+            services.actions["first-copy"] = services.actions["first"]
+            services.attributes["window-1"]["children"][0] = "first-copy"
+
+    if during_activation:
+        workspace.applications[0].activation_hook = apply_change
+    else:
+        apply_change()
+    with pytest.raises(AccessibilityError, match="target element changed"):
+        backend.click_element(state.app_id, state.state_id, _first_button(state).index)
+    assert services.hit_tests == []
+    assert services.performed_actions == []
+
+
+@pytest.mark.parametrize(
+    ("first", "error"),
+    [
+        ({"role": "AXLink"}, "does not advertise action 'AXPress'"),
+        ({"enabled": False}, "disabled"),
+        ({"enabled": None}, "does not report that it is enabled"),
+        ({"position": SimpleNamespace(x=900, y=200)}, "outside the allowed app window"),
+        ({"position": None}, "no screen bounds"),
+    ],
+    ids=["not a button", "disabled", "enabled unknown", "outside window", "no bounds"],
+)
+def test_mac_click_element_refuses_an_element_without_axpress_that_is_not_a_visible_enabled_button(
+    first: dict[str, object],
+    error: str,
+) -> None:
+    """Only an enabled AXButton whose center lies in its window qualifies; nothing is activated or hit-tested otherwise."""
+    backend, services, workspace, state = _brave_buttons_backend(**first)
+
+    with pytest.raises(AccessibilityError, match=error):
+        backend.click_element(state.app_id, state.state_id, _first_button(state).index)
+    assert workspace.applications[0].activation_options == []
+    assert services.hit_tests == []
+    assert services.performed_actions == []
+
+
+def test_mac_click_element_keeps_axpress_when_the_element_advertises_it() -> None:
+    """An element that advertises AXPress is still pressed semantically, never by pointer."""
+    backend, services, _ = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    button = next(element for element in state.elements if element.name == "Save")
+
+    assert backend.click_element(state.app_id, state.state_id, button.index) is None
+    assert services.performed_actions == [("button", "AXPress")]
+    assert services.hit_tests == []
+
+
+def test_mac_truncated_observation_still_refuses_coordinate_and_keyboard_fallback() -> None:
+    """Matching reads of a bounded prefix vouch for nothing unobserved at an arbitrary point, so coordinates stay closed."""
+    backend, _, workspace, state = _brave_buttons_backend()
+
+    with pytest.raises(AccessibilityError, match="stable complete observation"):
+        backend.prepare_fallback(state.app_id, state.state_id)
+    with pytest.raises(AccessibilityError, match="stable complete observation"):
+        backend.prepare_keyboard(state.app_id, state.state_id)
+    assert workspace.applications[0].activation_options == []

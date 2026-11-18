@@ -7,11 +7,14 @@ import math
 import sys
 import threading
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.desktop import macos_capture, macos_input
 from mindroom.desktop.accessibility import (
+    MAX_RETAINED_STATES,
+    PRIMARY_SCREEN_APP_ID,
     AccessibilityActionOutcomeUnknownError,
     AccessibilityBackend,
     AccessibilityError,
@@ -20,7 +23,13 @@ from mindroom.desktop.accessibility import (
     DesktopRect,
     create_accessibility_backend,
 )
-from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError, display_for_region, macos_displays
+from mindroom.desktop.displays import (
+    DisplayGeometry,
+    DisplayMappingError,
+    display_for_region,
+    macos_displays,
+    macos_main_display,
+)
 from mindroom.desktop.input import DESKTOP_SCROLL_DIRECTIONS, MINDROOM_APP_IDS, normalize_key_chord
 
 if TYPE_CHECKING:
@@ -30,6 +39,7 @@ if TYPE_CHECKING:
 
 _EMERGENCY_STOP_MESSAGE = "Desktop emergency stop engaged; restart the bridge locally before granting control again."
 _CONTROL_REVOKED_MESSAGE = "Local desktop control was revoked; input stopped and this action's outcome may be partial."
+_MAIN_DISPLAY_CHANGED = "The main display changed after this primary-screen observation"
 _TEXT_CHUNK_LENGTH = 20
 
 
@@ -240,6 +250,11 @@ class PyAutoGuiDesktopProvider:
             _capture_macos_window if sys.platform == "darwin" else None
         )
         self._display_geometry = macos_displays if sys.platform == "darwin" else self._primary_display_geometry
+        self._main_display: Callable[[], DisplayGeometry] = (
+            macos_main_display if sys.platform == "darwin" else self._screen_display
+        )
+        # The main display each retained primary-screen state was observed on, oldest first.
+        self._primary_displays: OrderedDict[str, DisplayGeometry] = OrderedDict()
         self._max_screenshot_width = max_screenshot_width
         self._jpeg_quality = jpeg_quality
         # Closed until the bridge opens it for a local control grant.
@@ -290,12 +305,23 @@ class PyAutoGuiDesktopProvider:
         self._accessibility.launch_app(app_id)
 
     def get_app_state(self, app_id: str) -> AccessibilityState:
-        """Capture a fresh semantic state for one allowed application."""
-        return self._accessibility.get_app_state(app_id)
+        """Capture a fresh semantic state for one allowed application; a primary-screen state is bound to the main display."""
+        if app_id != PRIMARY_SCREEN_APP_ID:
+            return self._accessibility.get_app_state(app_id)
+        display = self._current_main_display()
+        state = self._accessibility.get_app_state(app_id)
+        if self._current_main_display() != display:
+            msg = "The main display changed while the primary screen was observed; request get_app_state again."
+            raise DesktopProviderError(msg)
+        self._primary_displays[state.state_id] = display
+        while len(self._primary_displays) > MAX_RETAINED_STATES:
+            self._primary_displays.popitem(last=False)
+        return state
 
     def screenshot(self, *, app_id: str, state_id: str) -> ScreenCapture:
         """Revalidate, foreground, capture, and downscale one allowed app as JPEG."""
         target = self._accessibility.prepare_capture(app_id, state_id)
+        main_display = self._observed_main_display(app_id, state_id)
         state = target.state
         region = state.window
         screen_width, screen_height = self._screen_size()
@@ -317,6 +343,10 @@ class PyAutoGuiDesktopProvider:
             image = self._capture_app_window(target.process_id, region)
         if self._mapped_display(region) != display:
             msg = "The display changed during capture; request fresh app state."
+            raise DesktopProviderError(msg)
+        if main_display is not None and not self._is_main_display(main_display):
+            self._primary_displays.pop(state_id, None)
+            msg = f"{_MAIN_DISPLAY_CHANGED}; request get_app_state again."
             raise DesktopProviderError(msg)
         source_width, source_height = image.size
         capture_scale = source_width / region.width
@@ -350,9 +380,18 @@ class PyAutoGuiDesktopProvider:
         )
 
     def click_element(self, *, app_id: str, state_id: str, element_index: int) -> None:
-        """Invoke the element's semantic press action."""
+        """Invoke the element's semantic press action, or click the center of an enabled button that has none.
+
+        That center click is one left press and release, each posted only while the app's own window is on top at the
+        point and an accessibility hit-test there still finds the button.
+        """
         self._check_input()
-        self._accessibility.click_element(app_id, state_id, element_index)
+        press = self._accessibility.click_element(app_id, state_id, element_index)
+        if press is None:
+            return
+        x, y = press.point
+        self._mapped_display(DesktopRect(x, y, 1, 1))
+        macos_input.click(x, y, button="left", count=1, check=self._pointer_check(press.process_id, hit=press.hit))
 
     def set_value(self, *, app_id: str, state_id: str, element_index: int, value: str) -> None:
         """Set one writable semantic value without keyboard emulation."""
@@ -401,9 +440,17 @@ class PyAutoGuiDesktopProvider:
             raise DesktopProviderError(msg)
         self._check_input()
         target = self._accessibility.prepare_fallback(app_id, state_id)
+        main_display = self._observed_main_display(app_id, state_id)
         screen_x, screen_y = _normalized_point(target.state.window, x=x, y=y)
         self._mapped_display(target.state.window)
-        self._click_input(screen_x, screen_y, button=button, count=1, process_id=target.process_id)
+        self._click_input(
+            screen_x,
+            screen_y,
+            button=button,
+            count=1,
+            process_id=target.process_id,
+            main_display=main_display,
+        )
 
     def type_text(self, *, app_id: str, state_id: str, text: str, element_index: int | None = None) -> None:
         """Type bounded text into a validated app or an exact focused text element."""
@@ -420,6 +467,7 @@ class PyAutoGuiDesktopProvider:
         self._check_input()
         if element_index is None:
             guard = self._accessibility.prepare_keyboard(app_id, state_id)
+            self._observed_main_display(app_id, state_id)
         else:
             if type(element_index) is not int or element_index < 0:
                 msg = "element_index must be a nonnegative integer."
@@ -455,11 +503,12 @@ class PyAutoGuiDesktopProvider:
             raise DesktopProviderError(msg)
         self._check_input()
         target = self._accessibility.prepare_fallback(app_id, state_id)
+        main_display = self._observed_main_display(app_id, state_id)
         window = target.state.window
         point = _normalized_point(window, x=x, y=y) if x is not None and y is not None else _rect_center(window)
         self._mapped_display(window)
         clicks = _scroll_clicks(direction, pages)
-        self._scroll_input(direction, clicks, *point, process_id=target.process_id)
+        self._scroll_input(direction, clicks, *point, process_id=target.process_id, main_display=main_display)
 
     def keypress(self, *, app_id: str, state_id: str, keys: list[str]) -> None:
         """Press only an explicitly allowed application editing/navigation chord."""
@@ -468,7 +517,9 @@ class PyAutoGuiDesktopProvider:
         except ValueError as exc:
             raise DesktopProviderError(str(exc)) from exc
         self._check_input()
-        self._accessibility.prepare_keyboard(app_id, state_id)()
+        guard = self._accessibility.prepare_keyboard(app_id, state_id)
+        self._observed_main_display(app_id, state_id)
+        guard()
         if len(normalized) == 1:
             self._run_input(lambda: self._pyautogui.press(normalized[0]))
         else:
@@ -476,10 +527,10 @@ class PyAutoGuiDesktopProvider:
 
     def hover(self, *, app_id: str, state_id: str, x: int, y: int) -> None:
         """Move inside the revalidated allowed window without pressing a button."""
-        point, process_id = self._fallback_point(app_id, state_id, x, y)
+        point, process_id, main_display = self._fallback_point(app_id, state_id, x, y)
         self._run_input(
             lambda: (
-                macos_input.move(*point, check=self._pointer_check(process_id))
+                macos_input.move(*point, check=self._pointer_check(process_id, main_display=main_display))
                 if sys.platform == "darwin"
                 else self._pyautogui.moveTo(*point)
             ),
@@ -490,8 +541,8 @@ class PyAutoGuiDesktopProvider:
         if button not in {"left", "middle", "right"}:
             msg = "button must be left, middle, or right."
             raise DesktopProviderError(msg)
-        point, process_id = self._fallback_point(app_id, state_id, x, y)
-        self._click_input(*point, button=button, count=2, process_id=process_id)
+        point, process_id, main_display = self._fallback_point(app_id, state_id, x, y)
+        self._click_input(*point, button=button, count=2, process_id=process_id, main_display=main_display)
 
     def drag(
         self,
@@ -510,6 +561,7 @@ class PyAutoGuiDesktopProvider:
             raise DesktopProviderError(msg)
         self._check_input()
         target = self._accessibility.prepare_fallback(app_id, state_id)
+        main_display = self._observed_main_display(app_id, state_id)
         start = _normalized_point(target.state.window, x=start_x, y=start_y)
         end = _normalized_point(target.state.window, x=end_x, y=end_y)
         self._mapped_display(target.state.window)
@@ -519,7 +571,7 @@ class PyAutoGuiDesktopProvider:
                 start,
                 end,
                 duration=duration_ms / 1000,
-                check=self._pointer_check(target.process_id),
+                check=self._pointer_check(target.process_id, main_display=main_display),
                 before_press=lambda: self._accessibility.prepare_fallback(app_id, state_id),
             )
             return
@@ -537,59 +589,130 @@ class PyAutoGuiDesktopProvider:
             finally:
                 self._pyautogui.FAILSAFE = enabled
 
-    def _fallback_point(self, app_id: str, state_id: str, x: int, y: int) -> tuple[tuple[int, int], int | None]:
+    def _fallback_point(
+        self,
+        app_id: str,
+        state_id: str,
+        x: int,
+        y: int,
+    ) -> tuple[tuple[int, int], int | None, DisplayGeometry | None]:
         self._check_input()
         target = self._accessibility.prepare_fallback(app_id, state_id)
+        main_display = self._observed_main_display(app_id, state_id)
         point = _normalized_point(target.state.window, x=x, y=y)
         self._mapped_display(target.state.window)
-        return point, target.process_id
+        return point, target.process_id, main_display
 
-    def _pointer_check(self, process_id: int | None) -> Callable[[tuple[int, int]], None]:
+    def _observed_main_display(self, app_id: str, state_id: str) -> DisplayGeometry | None:
+        """Return the main display a primary-screen state was observed on, and refuse once another display is main.
+
+        The primary-screen window is (0, 0, width, height) in global points, which is always the main display, so after
+        another display of the same size becomes main, the state's coordinates and pixels would land on that display.
+        """
+        if app_id != PRIMARY_SCREEN_APP_ID:
+            return None
+        observed = self._primary_displays.get(state_id)
+        if observed is None:
+            msg = "Desktop state is stale; request get_app_state again before acting."
+            raise DesktopProviderError(msg)
+        if self._current_main_display() != observed:
+            self._primary_displays.pop(state_id, None)
+            msg = f"{_MAIN_DISPLAY_CHANGED}; request get_app_state again before acting."
+            raise DesktopProviderError(msg)
+        return observed
+
+    def _current_main_display(self) -> DisplayGeometry:
+        try:
+            return self._main_display()
+        except DisplayMappingError as exc:
+            raise DesktopProviderError(str(exc)) from exc
+
+    def _is_main_display(self, display: DisplayGeometry) -> bool:
+        """Return whether `display` is still the main display; a main display that cannot be read counts as changed."""
+        try:
+            return self._main_display() == display
+        except DisplayMappingError:
+            return False
+
+    def _pointer_check(
+        self,
+        process_id: int | None,
+        *,
+        main_display: DisplayGeometry | None = None,
+        hit: Callable[[tuple[int, int]], bool] | None = None,
+    ) -> Callable[[tuple[int, int]], None]:
         """Return a check for right before each Quartz pointer event: the window at the point, then the input gate.
 
         An app target needs its own window on top; the whole-screen target, bound to no process, needs any window but
-        MindRoom's.
+        MindRoom's, and the main display its state was observed on. An element's center click also needs `hit` to
+        find that element at the point.
         """
         posted = False
 
         # Quartz events go to whichever window is on top at the point, such as a notification or floating panel.
         def check(point: tuple[int, int]) -> None:
             nonlocal posted
+            if main_display is not None and not self._is_main_display(main_display):
+                _refuse_pointer(_MAIN_DISPLAY_CHANGED, posted=posted)
             owner = macos_input.window_owner_at(point)
             if process_id is not None and owner != process_id:
                 _refuse_pointer("Another window covers the allowed app at the pointer", posted=posted)
             if process_id is None and owner is not None and macos_input.process_bundle_id(owner) in MINDROOM_APP_IDS:
                 _refuse_pointer("A MindRoom window is at the pointer", posted=posted)
+            if hit is not None and not hit(point):
+                _refuse_pointer("The requested element is not the element at its center", posted=posted)
             self._check_input()
             # Every passing check is followed by an event.
             posted = True
 
         return check
 
-    def _click_input(self, x: int, y: int, *, button: str, count: int, process_id: int | None) -> None:
+    def _click_input(
+        self,
+        x: int,
+        y: int,
+        *,
+        button: str,
+        count: int,
+        process_id: int | None,
+        main_display: DisplayGeometry | None = None,
+    ) -> None:
         if sys.platform == "darwin":
-            macos_input.click(x, y, button=button, count=count, check=self._pointer_check(process_id))
+            check = self._pointer_check(process_id, main_display=main_display)
+            macos_input.click(x, y, button=button, count=count, check=check)
         elif count == 1:
             self._run_input(lambda: self._pyautogui.click(x=x, y=y, button=button))
         else:
             self._run_input(lambda: self._pyautogui.doubleClick(x=x, y=y, button=button, interval=0.1))
 
-    def _scroll_input(self, direction: str, clicks: int, x: int, y: int, *, process_id: int | None) -> None:
+    def _scroll_input(
+        self,
+        direction: str,
+        clicks: int,
+        x: int,
+        y: int,
+        *,
+        process_id: int | None,
+        main_display: DisplayGeometry | None = None,
+    ) -> None:
         if sys.platform == "darwin":
             macos_input.scroll(
                 x,
                 y,
                 clicks=clicks,
                 horizontal=direction in {"left", "right"},
-                check=self._pointer_check(process_id),
+                check=self._pointer_check(process_id, main_display=main_display),
             )
             return
         operation = self._pyautogui.hscroll if direction in {"left", "right"} else self._pyautogui.scroll
         self._run_input(lambda: operation(clicks, x=x, y=y))
 
     def _primary_display_geometry(self) -> tuple[DisplayGeometry, ...]:
+        return (self._screen_display(),)
+
+    def _screen_display(self) -> DisplayGeometry:
         width, height = self._screen_size()
-        return (DisplayGeometry("primary", DesktopRect(0, 0, width, height), width, height),)
+        return DisplayGeometry("primary", DesktopRect(0, 0, width, height), width, height)
 
     def _mapped_display(self, region: DesktopRect) -> DisplayGeometry:
         try:
