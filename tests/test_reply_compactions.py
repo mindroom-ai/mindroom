@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal
 
 import nio
 import pytest
@@ -26,9 +26,6 @@ from mindroom.history.types import (
 from mindroom.matrix.large_messages import prepare_large_message
 from tests.history_helpers import RecordingCompactionLifecycle
 from tests.test_large_messages import _UploadClient
-
-if TYPE_CHECKING:
-    from mindroom.delivery_gateway import MatrixCompactionLifecycle
 
 
 def _start(mode: CompactionMode = "auto") -> CompactionLifecycleStart:
@@ -100,8 +97,7 @@ def _lifecycle(
     recorder: ReplyCompactions,
     notice: RecordingCompactionLifecycle | None = None,
 ) -> ReplyCompactionLifecycle:
-    double = notice if notice is not None else RecordingCompactionLifecycle()
-    return ReplyCompactionLifecycle(recorder, cast("MatrixCompactionLifecycle", double))
+    return ReplyCompactionLifecycle(recorder, notice or RecordingCompactionLifecycle())
 
 
 @pytest.mark.asyncio

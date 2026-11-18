@@ -16,8 +16,8 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.delivery_gateway import MatrixCompactionLifecycle
     from mindroom.history.types import (
+        CompactionLifecycle,
         CompactionLifecycleFailure,
         CompactionLifecycleProgress,
         CompactionLifecycleStart,
@@ -100,7 +100,7 @@ class ReplyCompactionLifecycle:
     Every lifecycle event carries its compaction's mode, which picks the sink.
     """
 
-    def __init__(self, recorder: ReplyCompactions, notice: MatrixCompactionLifecycle) -> None:
+    def __init__(self, recorder: ReplyCompactions, notice: CompactionLifecycle) -> None:
         self._recorder = recorder
         self._notice = notice
 

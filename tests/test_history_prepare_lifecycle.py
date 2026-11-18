@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -92,7 +92,6 @@ from tests.providers.openai_family_support import responses_adapter
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delivery_gateway import MatrixCompactionLifecycle
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
@@ -1408,10 +1407,7 @@ async def test_a_failed_reply_compaction_records_the_runs_its_stored_chunks_fold
         new=summary_mock,
     ):
         recorder = ReplyCompactions()
-        lifecycle = ReplyCompactionLifecycle(
-            recorder,
-            cast("MatrixCompactionLifecycle", RecordingCompactionLifecycle()),
-        )
+        lifecycle = ReplyCompactionLifecycle(recorder, RecordingCompactionLifecycle())
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current prompt",
