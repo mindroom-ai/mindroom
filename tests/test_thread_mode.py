@@ -19,6 +19,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
+    ROUTE_EVENT_TYPE,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     resolve_runtime_paths,
@@ -452,7 +453,7 @@ class TestRouterHandoffThreadMode:
         room_mode_config: Config,
         router_user: AgentMatrixUser,
     ) -> None:
-        """Router should send handoff in-room when the suggested agent is room-mode."""
+        """A route to a room-mode agent names no thread, so that agent answers in the room."""
         bot = _agent_bot(config=room_mode_config, agent_user=router_user)
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
@@ -487,7 +488,10 @@ class TestRouterHandoffThreadMode:
                 requester_user_id="@user:localhost",
             )
         mock_get_latest.assert_not_called()
-        assert captured_content["m.relates_to"] == {"io.mindroom.in_reply_to": {"event_id": "$user_event"}}
+        assert captured_content[ROUTE_EVENT_TYPE] == {
+            "entity": "@mindroom_assistant:localhost",
+            "event_id": "$user_event",
+        }
 
     @pytest.mark.asyncio
     async def test_router_handoff_uses_suggested_thread_mode(
@@ -495,7 +499,7 @@ class TestRouterHandoffThreadMode:
         room_mode_config: Config,
         router_user: AgentMatrixUser,
     ) -> None:
-        """Router should keep thread replies when the suggested agent is thread-mode."""
+        """A route to a thread-mode agent names the thread its answer belongs in."""
         bot = _agent_bot(config=room_mode_config, agent_user=router_user)
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
@@ -527,10 +531,12 @@ class TestRouterHandoffThreadMode:
                 "$thread_root",
                 requester_user_id="@user:localhost",
             )
-        mock_get_latest.assert_awaited_once()
-        assert "m.relates_to" in captured_content
-        assert isinstance(captured_content["m.relates_to"], dict)
-        assert captured_content["m.relates_to"].get("rel_type") == "m.thread"
+        mock_get_latest.assert_not_called()
+        assert captured_content[ROUTE_EVENT_TYPE] == {
+            "entity": "@mindroom_coder:localhost",
+            "event_id": "$user_event",
+            "thread_id": "$thread_root",
+        }
 
 
 class TestCreateSessionIdWithNoneThread:

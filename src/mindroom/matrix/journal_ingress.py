@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Protocol, TypeIs, cast
 
 import nio
 
-from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE
+from mindroom.constants import ROUTE_EVENT_TYPE, SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.event_journal import (
     EventClass,
     EventKind,
@@ -39,6 +39,8 @@ _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _BACKGROUND_JOB_CANCEL_EVENT_TYPE = "io.mindroom.background_job_cancel"
 _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _RTC_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
+# Kinds only an account MindRoom manages may send; anyone else's is settled without work.
+_MANAGED_SENDER_KINDS = frozenset({EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
 
@@ -80,6 +82,11 @@ def _is_silent_schedule_trigger(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     return isinstance(event, nio.UnknownEvent) and event.type == SILENT_SCHEDULE_EVENT_TYPE
 
 
+def _is_route(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
+    """Return whether one event is a steward's hidden route to the responder it selected."""
+    return isinstance(event, nio.UnknownEvent) and event.type == ROUTE_EVENT_TYPE
+
+
 def _is_rtc_event(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     """Return whether one event is a supported MatrixRTC room event."""
     return isinstance(event, nio.UnknownEvent) and event.type in _RTC_EVENT_TYPES
@@ -108,6 +115,7 @@ _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     # still enumerated dropped emotes a second time, one layer further in.
     (lambda event: isinstance(event, nio.RoomMessage), EventKind.MESSAGE),
     (_is_silent_schedule_trigger, EventKind.SCHEDULE_TRIGGER),
+    (_is_route, EventKind.ROUTE),
     (_is_rtc_event, EventKind.RTC),
     (_is_tool_approval_response, EventKind.APPROVAL),
     (_is_background_job_cancel, EventKind.JOB_CANCEL),
@@ -261,7 +269,7 @@ def _projected_event(
     return projected
 
 
-def _ingested_kind(parsed: nio.Event, schedule_trigger_sender_is_managed: Callable[[str], bool]) -> EventKind | None:
+def _ingested_kind(parsed: nio.Event, sender_is_managed: Callable[[str], bool]) -> EventKind | None:
     """Return the kind one parsed timeline event is admitted as, or None to settle it without work."""
     if parsed.decrypted and (isinstance(parsed, nio.RedactionEvent) or "state_key" in parsed.source):
         # Redactions and state are never encrypted, so a decrypted one is a sender's claim the homeserver never checked.
@@ -270,7 +278,7 @@ def _ingested_kind(parsed: nio.Event, schedule_trigger_sender_is_managed: Callab
         # Nio's schema accepts an empty target, which deletes nothing and which batch validation would reject.
         return None
     kind = _event_kind(parsed)
-    if kind is EventKind.SCHEDULE_TRIGGER and not schedule_trigger_sender_is_managed(parsed.sender):
+    if kind in _MANAGED_SENDER_KINDS and not sender_is_managed(parsed.sender):
         return None
     if kind is None and isinstance(parsed, nio.RoomMemberEvent):
         return EventKind.ROOM_LIFECYCLE
@@ -285,7 +293,7 @@ def ingestion_timeline_views(
     provenance: nio.TimelineEventProvenance,
     expected_event_id: str | None = None,
     security_metadata: Mapping[str, object] | None = None,
-    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> tuple[InboundEvent, ProjectedEvent | None] | None:
     """Classify one durable timeline input, or return its compatibility fate."""
     message = "Unsupported ingestion event"
@@ -306,7 +314,7 @@ def ingestion_timeline_views(
         # Nio owns ciphertext recovery. Only historical identities need an
         # application tombstone so later decryption cannot revive old work.
         return None
-    kind = _ingested_kind(parsed, schedule_trigger_sender_is_managed)
+    kind = _ingested_kind(parsed, sender_is_managed)
     if kind is None:
         return None
     event_class = _event_class_for(provenance, parsed)

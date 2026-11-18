@@ -20,6 +20,7 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
@@ -1627,9 +1628,9 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         await bot._on_media_message(room, event)
         await drain_coalescing(bot)
 
-    assert bot._delivery_gateway.send_text.await_count == 2
-    echo_request = bot._delivery_gateway.send_text.call_args_list[0].args[0]
-    handoff_request = bot._delivery_gateway.send_text.call_args_list[1].args[0]
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    echo_request = bot._delivery_gateway.send_text.call_args.args[0]
+    route = dict(bot._delivery_gateway.send_route.await_args.args[1])
     assert echo_request.target.reply_to_event_id == "$voice_event"
     assert echo_request.response_text == "Router agent is transcribing…"
     assert echo_request.skip_mentions is True
@@ -1642,9 +1643,8 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
     assert VOICE_RAW_AUDIO_FALLBACK_KEY not in edit_request.extra_content
-    assert handoff_request.target.reply_to_event_id == "$voice_event"
-    assert handoff_request.response_text == "@home could you help with this?"
-    assert handoff_request.extra_content == {
+    assert route.pop(ROUTE_EVENT_TYPE)["event_id"] == "$voice_event"
+    assert route == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
@@ -1689,8 +1689,9 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
             "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
             "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
         },
-        send_response_side_effect=["$voice_echo", None, "$route"],
+        send_response_side_effect=["$voice_echo"],
     )
+    bot._delivery_gateway.send_route.side_effect = [None, "$route"]
 
     with (
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
@@ -1719,11 +1720,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         await drain_coalescing(bot)
 
     response_texts = [call.args[0].response_text for call in bot._delivery_gateway.send_text.call_args_list]
-    assert response_texts == [
-        "Router agent is transcribing…",
-        "@home could you help with this?",
-        "@home could you help with this?",
-    ]
+    assert response_texts == ["Router agent is transcribing…"]
+    assert bot._delivery_gateway.send_route.await_count == 2
     bot._delivery_gateway.edit_text.assert_awaited_once()
     assert await bot._turn_store.is_handled(room.room_id, event.event_id)
     assert (await bot._turn_store.visible_echo(event.event_id)).event_id == "$voice_echo"
@@ -1741,8 +1739,9 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
     bot, room, event = _make_visible_router_echo_scenario(
         tmp_path,
         agents=agents,
-        send_response_side_effect=["$voice_echo", None],
+        send_response_side_effect=["$voice_echo"],
     )
+    bot._delivery_gateway.send_route.return_value = None
     await bot._turn_store.warm()
 
     with (
@@ -1792,8 +1791,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         await restarted_bot._on_media_message(restarted_room, restarted_event)
         await drain_coalescing(restarted_bot)
 
-    response_texts = [call.args[0].response_text for call in restarted_bot._delivery_gateway.send_text.call_args_list]
-    assert response_texts == ["@home could you help with this?"]
+    restarted_bot._delivery_gateway.send_text.assert_not_called()
+    restarted_bot._delivery_gateway.send_route.assert_awaited_once()
     assert await restarted_bot._turn_store.is_handled(room.room_id, event.event_id)
     assert (await restarted_bot._turn_store.visible_echo(event.event_id)).event_id == "$voice_echo"
 
@@ -1858,13 +1857,14 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         await bot._on_media_message(room, event)
         await drain_coalescing(bot)
 
-    bot._delivery_gateway.send_text.assert_called_once()
-    request = bot._delivery_gateway.send_text.call_args.args[0]
-    assert request.target.reply_to_event_id == "$voice_event"
-    assert request.target.resolved_thread_id == "$voice_event"
-    assert request.target.resolved_thread_id == "$voice_event"
-    assert request.response_text == "@home could you help with this?"
-    assert request.extra_content == {
+    bot._delivery_gateway.send_text.assert_not_called()
+    route = dict(bot._delivery_gateway.send_route.await_args.args[1])
+    assert route.pop(ROUTE_EVENT_TYPE) == {
+        "entity": "@mindroom_home:localhost",
+        "event_id": "$voice_event",
+        "thread_id": "$voice_event",
+    }
+    assert route == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
@@ -1874,7 +1874,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     record = await turn_store.get_turn_record("$voice_event")
     assert record is not None
     assert record.completed is True
-    assert record.response_event_id == "$response"
+    assert record.response_event_id == "$route"
     assert record.response_owner == ROUTER_AGENT_NAME
     assert record.requester_id == "@alice:example.com"
     assert record.history_scope is None

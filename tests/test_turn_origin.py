@@ -204,15 +204,16 @@ def test_requester_id_from_trusted_original_sender_requires_original_sender() ->
 
 
 def test_router_handoff_is_trusted_user_relay() -> None:
-    """Router handoffs are trusted relays of the original human author."""
+    """A route from the room's steward, whichever managed account it is, relays the original human author."""
     origin = classify_turn_origin(
-        transport_sender_id="@mindroom_router:localhost",
+        transport_sender_id="@mindroom_helper:localhost",
         requester_id="@human:localhost",
-        sender_entity_name="router",
+        sender_entity_name="helper",
         requester_entity_name=None,
         source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         original_sender="@human:localhost",
         trusted_user_relay=True,
+        routed=True,
     )
 
     assert origin.intent == TurnIntent.ROUTER_HANDOFF
@@ -231,6 +232,7 @@ def test_router_notice_stays_internal_chatter() -> None:
         source_kind="message",
         original_sender=None,
         trusted_user_relay=False,
+        routed=True,
     )
 
     assert origin.intent == TurnIntent.ROUTER_NOTICE
@@ -275,6 +277,7 @@ def test_replay_guard_supersedable_policy_tracks_interactive_requester_turns() -
         source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         original_sender="@human:localhost",
         trusted_user_relay=True,
+        routed=True,
     )
     trusted_relay = classify_turn_origin(
         transport_sender_id="@mindroom_helper:localhost",

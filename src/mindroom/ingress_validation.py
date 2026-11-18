@@ -14,6 +14,7 @@ from mindroom.constants import (
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -176,7 +177,11 @@ class IngressValidator:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        router_relay_original_event_id = (
+        route = trusted_content.get(ROUTE_EVENT_TYPE)
+        routed_event_id = route.get("event_id") if isinstance(route, dict) else None
+        routed_event_id = routed_event_id if isinstance(routed_event_id, str) else None
+        # An old visible relay names the human message it relays by replying to it; see `IngressFacts.routed`.
+        visible_relay_original_event_id = (
             reply_to_event_id_from_content(content)
             if sender_entity_name == ROUTER_AGENT_NAME
             and resolved_source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -193,7 +198,9 @@ class IngressValidator:
             acting_requester_id=acting_requester_id,
             hook_source=_trusted_hook_source(trusted_content),
             message_received_depth=_trusted_message_received_depth(trusted_content),
-            discovery_event_id=router_relay_original_event_id
+            routed_event_id=routed_event_id,
+            discovery_event_id=routed_event_id
+            or visible_relay_original_event_id
             or _final_reply_original_event_id(sender_entity_name, source_dict),
             sender_entity_name=sender_entity_name,
             requester_entity_name=self.managed_entity_name_for_sender(acting_requester_id or lane_requester_id),

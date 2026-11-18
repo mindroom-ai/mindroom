@@ -18,7 +18,7 @@ import nio
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import classify_cancel_source
-from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import ACTING_REQUESTER_KEY, ROUTE_EVENT_TYPE, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
@@ -1567,6 +1567,11 @@ class DeliveryGateway:
             **resolved_target.log_context,
         )
         return None
+
+    async def send_route(self, room_id: str, content: dict[str, Any]) -> str | None:
+        """Send a steward's hidden route event, which no client shows, and return its event ID."""
+        outcome = await send_message_outcome(self._ready_client(), room_id, content, message_type=ROUTE_EVENT_TYPE)
+        return outcome.event_id if isinstance(outcome, DeliveredMatrixEvent) else None
 
     async def _edit_content(
         self,

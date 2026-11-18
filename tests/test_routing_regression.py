@@ -24,11 +24,12 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTE_EVENT_TYPE, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import MessageEnvelope
+from mindroom.journal_dispatch import _route_as_message
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
@@ -573,7 +574,7 @@ class TestRoutingRegression:
 
         mock_suggest_responder.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"] == "@mindroom_healthy:localhost could you help with this?"
+        assert content[ROUTE_EVENT_TYPE]["entity"] == "@mindroom_healthy:localhost"
         assert not await router_bot._journal_dispatcher.store.is_pending(event.event_id)
 
         blocked_event = _router_readiness_event("$blocked-recovery")
@@ -605,7 +606,7 @@ class TestRoutingRegression:
         await recover_until_settled(blocked_event.event_id)
 
         content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"] == "@mindroom_stuck:localhost could you help with this?"
+        assert content[ROUTE_EVENT_TYPE]["entity"] == "@mindroom_stuck:localhost"
         assert not await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
 
     @pytest.mark.asyncio
@@ -620,7 +621,7 @@ class TestRoutingRegression:
         sent_contents = [call.kwargs["content"] for call in router_bot.client.room_send.await_args_list]
         assert len(sent_contents) == 1
         assert sent_contents[0][SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-        assert sent_contents[0]["body"] == "@mindroom_general:localhost could you help with this?"
+        assert sent_contents[0][ROUTE_EVENT_TYPE]["entity"] == "@mindroom_general:localhost"
         assert sent_contents[0][ORIGINAL_SENDER_KEY] == "@user:localhost"
         assert await router_bot._turn_store.is_handled(room.room_id, "$before-ready")
 
@@ -858,7 +859,10 @@ class TestRoutingRegression:
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test that router DOES activate when no agents are mentioned."""
+        """One message that names nobody gets one hidden route from the steward, and only the routed agent answers.
+
+        The steward posts no message, and the answer replies to the message the person wrote.
+        """
         test_room_id = "!research:localhost"
 
         # Create test config with agents configured for the test room
@@ -941,17 +945,53 @@ class TestRoutingRegression:
         await router_bot._on_message(mock_room, message_event)
         await drain_coalescing(router_bot)
 
-        # Router SHOULD have been called
+        # The steward selected a responder and sent exactly one event: the hidden route, never a message.
         mock_suggest_responder.assert_called_once()
-        # Router bot should send the routing message
-        assert router_bot.client.room_send.call_count == 1  # Router doesn't use stop button
+        router_bot.client.room_send.assert_awaited_once()
+        route_send = router_bot.client.room_send.await_args.kwargs
+        assert route_send["message_type"] == ROUTE_EVENT_TYPE
+        assert route_send["content"] == {
+            ROUTE_EVENT_TYPE: {
+                "entity": mock_research_agent.user_id,
+                "event_id": "$user_msg_456",
+                "thread_id": "$user_msg_456",
+            },
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+        }
 
-        # Process with other bots - they should not do anything
+        # The person's message itself leaves both candidates silent.
         await research_bot._on_message(mock_room, message_event)
         await drain_coalescing(research_bot)
         await news_bot._on_message(mock_room, message_event)
         await drain_coalescing(news_bot)
         assert research_bot.client.room_send.call_count == 0
+        assert news_bot.client.room_send.call_count == 0
+
+        # Every bot receives the route; the one it names answers the person's message, the other stays silent.
+        route_event = nio.Event.parse_event(
+            {
+                "type": ROUTE_EVENT_TYPE,
+                "event_id": "$route",
+                "sender": router_agent.user_id,
+                "origin_server_ts": 1001,
+                "content": route_send["content"],
+            },
+        )
+        assert isinstance(route_event, nio.UnknownEvent)
+        route = _route_as_message(route_event)
+        await research_bot._on_message(mock_room, route)
+        await drain_coalescing(research_bot)
+        await news_bot._on_message(mock_room, route)
+        await drain_coalescing(news_bot)
+        assert mock_ai_response.call_count == 1
+        answers = [call.kwargs["content"] for call in research_bot.client.room_send.await_args_list]
+        assert answers[0]["m.relates_to"] == {
+            "rel_type": "m.thread",
+            "event_id": "$user_msg_456",
+            "is_falling_back": False,
+            "m.in_reply_to": {"event_id": "$user_msg_456"},
+        }
         assert news_bot.client.room_send.call_count == 0
 
     @pytest.mark.asyncio
@@ -1038,8 +1078,7 @@ class TestRoutingRegression:
         mock_suggest_responder.assert_not_awaited()
         router_bot.client.room_send.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"] == "@mindroom_news_oldns:localhost could you help with this?"
-        assert content["m.mentions"]["user_ids"] == ["@mindroom_news_oldns:localhost"]
+        assert content[ROUTE_EVENT_TYPE]["entity"] == "@mindroom_news_oldns:localhost"
         assert content[ORIGINAL_SENDER_KEY] == "@bob:localhost"
         assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
@@ -1122,8 +1161,7 @@ class TestRoutingRegression:
 
         router_bot.client.room_send.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"] == f"{ids['beta'].full_id} could you help with this?"
-        assert content["m.mentions"]["user_ids"] == [ids["beta"].full_id]
+        assert content[ROUTE_EVENT_TYPE]["entity"] == ids["beta"].full_id
         if expected_original_sender is None:
             assert ORIGINAL_SENDER_KEY not in content
             assert SOURCE_KIND_KEY not in content
@@ -1215,7 +1253,7 @@ class TestRoutingRegression:
             return
         router_bot.client.room_send.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"] == f"{ids[relayed_to].full_id} could you help with this?"
+        assert content[ROUTE_EVENT_TYPE]["entity"] == ids[relayed_to].full_id
         assert content[ORIGINAL_SENDER_KEY] == "@user:localhost"
         assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
@@ -1375,8 +1413,7 @@ class TestRoutingRegression:
         mock_suggest_responder.assert_not_awaited()
         router_bot.client.room_send.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"] == f"{ids['alpha'].full_id} could you help with this?"
-        assert content["m.mentions"]["user_ids"] == [ids["alpha"].full_id]
+        assert content[ROUTE_EVENT_TYPE]["entity"] == ids["alpha"].full_id
         assert content[ORIGINAL_SENDER_KEY] == "@user:localhost"
 
     @pytest.mark.asyncio

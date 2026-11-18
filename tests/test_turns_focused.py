@@ -102,7 +102,7 @@ from mindroom.inbound_turn_normalizer import (
     TextNormalizationRequest,
 )
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
-from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
+from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher, _route_as_message
 from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -344,6 +344,8 @@ class _RecordingDeliveryGateway:
     """Typed DeliveryGateway stand-in that records visible sends."""
 
     sent: list[SendTextRequest] = field(default_factory=list)
+    # The content of each hidden route event a steward sent.
+    routes: list[dict[str, Any]] = field(default_factory=list)
     edited: list[EditTextRequest] = field(default_factory=list)
     # Whether a reply owns the event a dispatch failure names, as one owns every acknowledgement.
     replies_own_events: bool = False
@@ -364,6 +366,10 @@ class _RecordingDeliveryGateway:
     async def send_text(self, request: SendTextRequest) -> str | None:
         self.sent.append(request)
         return f"$sent-{len(self.sent)}:localhost"
+
+    async def send_route(self, _room_id: str, content: dict[str, Any]) -> str | None:
+        self.routes.append(content)
+        return f"$route-{len(self.routes)}:localhost"
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         self.edited.append(request)
@@ -1012,7 +1018,7 @@ def _obligation_runner(
             on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room,
-        schedule_trigger_sender_is_managed=lambda sender: sender == matrix_user_id,
+        sender_is_managed=lambda sender: sender == matrix_user_id,
     )
 
 
@@ -4591,31 +4597,21 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
 
     await router_harness.deliver(room, scheduled_event)
 
-    assert len(router_harness.gateway.sent) == 1
-    handoff = router_harness.gateway.sent[0]
-    assert handoff.target.resolved_thread_id == scheduled_event.event_id
-    assert handoff.extra_content is not None
-    assert handoff.extra_content[constants.SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    assert handoff.extra_content[constants.SCHEDULED_MODEL_KEY] == "cheap"
-    assert handoff.extra_content[constants.PER_FIRE_THREAD_ROOT_KEY] is True
-    assert handoff.extra_content[constants.PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] == scheduled_event.event_id
-
-    relay_content = {
-        "body": handoff.response_text,
-        "msgtype": "m.text",
-        **handoff.extra_content,
-        "m.relates_to": {"rel_type": "m.thread", "event_id": scheduled_event.event_id},
+    assert router_harness.gateway.sent == []
+    [route] = router_harness.gateway.routes
+    assert route[constants.ROUTE_EVENT_TYPE] == {
+        "entity": _entity_user_id(config, "general"),
+        "event_id": scheduled_event.event_id,
+        "thread_id": scheduled_event.event_id,
     }
-    relay_event = nio.RoomMessageText.from_dict(
-        {
-            "content": relay_content,
-            "event_id": "$scheduled-router-handoff:localhost",
-            "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
-            "origin_server_ts": 1_000_001,
-            "room_id": _ROOM_ID,
-            "type": "m.room.message",
-        },
-    )
+    # The task itself is a visible message the responder reads, so the route repeats no text.
+    assert "body" not in route
+    assert route[constants.SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert route[constants.SCHEDULED_MODEL_KEY] == "cheap"
+    assert route[constants.PER_FIRE_THREAD_ROOT_KEY] is True
+    assert route[constants.PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] == scheduled_event.event_id
+
+    relay_event = _route_as_delivered(config, route, steward=ROUTER_AGENT_NAME)
     agent_harness = _build_harness(config, tmp_path / "agent")
 
     await agent_harness.deliver(room, relay_event)
@@ -5872,7 +5868,7 @@ async def test_router_relay_replay_adopts_durable_response(config: Config, tmp_p
     pending_turn = await harness.turn_store.get_turn_record(event.event_id)
     assert pending_turn is not None
     assert pending_turn.completed is False
-    assert pending_turn.response_event_id == "$sent-1:localhost"
+    assert pending_turn.response_event_id == "$route-1:localhost"
 
     await execute_router_relay(
         harness.dispatcher.deps,
@@ -5883,11 +5879,11 @@ async def test_router_relay_replay_adopts_durable_response(config: Config, tmp_p
         handled_turn=handled_turn,
     )
 
-    assert len(harness.gateway.sent) == 1
+    assert len(harness.gateway.routes) == 1
     record = await harness.turn_store.get_turn_record(event.event_id)
     assert record is not None
     assert record.completed is True
-    assert record.response_event_id == "$sent-1:localhost"
+    assert record.response_event_id == "$route-1:localhost"
 
 
 @pytest.mark.asyncio
@@ -7497,8 +7493,8 @@ async def test_router_recovery_relays_once_past_every_echo_of_a_coalesced_voice_
         await harness.turn_store.record_visible_echo(_ROOM_ID, source, echo)
         await harness.turn_store.record_finalized_visible_echo(source, echo, is_fallback=False)
     handled_turn = TurnRecord.create(list(echoes), completed=False)
-    send_text = harness.gateway.send_text
-    monkeypatch.setattr(harness.gateway, "send_text", AsyncMock(side_effect=RuntimeError("crash before the relay")))
+    send_route = harness.gateway.send_route
+    monkeypatch.setattr(harness.gateway, "send_route", AsyncMock(side_effect=RuntimeError("crash before the relay")))
     with pytest.raises(RuntimeError, match="crash before the relay"):
         await execute_router_relay(
             harness.dispatcher.deps,
@@ -7508,7 +7504,7 @@ async def test_router_recovery_relays_once_past_every_echo_of_a_coalesced_voice_
             requester_user_id=_SENDER,
             handled_turn=handled_turn,
         )
-    monkeypatch.setattr(harness.gateway, "send_text", send_text)
+    monkeypatch.setattr(harness.gateway, "send_route", send_route)
 
     with patch(
         "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
@@ -7523,11 +7519,11 @@ async def test_router_recovery_relays_once_past_every_echo_of_a_coalesced_voice_
             handled_turn=handled_turn,
         )
 
-    assert len(harness.gateway.sent) == 1
+    assert len(harness.gateway.routes) == 1
     record = await harness.turn_store.get_turn_record(event.event_id)
     assert record is not None
     assert record.completed is True
-    assert record.response_event_id == "$sent-1:localhost"
+    assert record.response_event_id == "$route-1:localhost"
 
 
 async def _prepared_model_prompt(harness: _Harness, request: ResponseRequest) -> str:
@@ -7708,3 +7704,197 @@ async def test_edited_steer_behind_another_requester_keeps_its_followup_mark(con
     finally:
         idle.set()
         await gate.drain_all()
+
+
+def _route_as_delivered(
+    config: Config,
+    content: dict[str, Any],
+    *,
+    steward: str,
+    event_id: str = "$route:localhost",
+) -> nio.RoomMessageFormatted:
+    """Return a steward's hidden route event as journal dispatch hands it to turn ingress."""
+    event = nio.Event.parse_event(
+        {
+            "content": content,
+            "event_id": event_id,
+            "sender": _entity_user_id(config, steward),
+            "origin_server_ts": 1_000_001,
+            "room_id": _ROOM_ID,
+            "type": constants.ROUTE_EVENT_TYPE,
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
+    return _route_as_message(event)
+
+
+def _route_message(
+    config: Config,
+    *,
+    steward: str,
+    entity: str = "general",
+    thread_id: str | None = None,
+    event_id: str = "$route:localhost",
+) -> nio.RoomMessageFormatted:
+    """Return a steward's route of `$question:localhost` to an entity, as journal dispatch hands it to ingress."""
+    route = {"entity": _entity_user_id(config, entity), "event_id": "$question:localhost"}
+    return _route_as_delivered(
+        config,
+        {
+            constants.ROUTE_EVENT_TYPE: route if thread_id is None else {**route, "thread_id": thread_id},
+            constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            constants.ORIGINAL_SENDER_KEY: _SENDER,
+        },
+        steward=steward,
+        event_id=event_id,
+    )
+
+
+def _two_agent_config(tmp_path: Path) -> Config:
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "research": AgentConfig(display_name="Research"),
+            },
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "research"])
+@pytest.mark.parametrize("thread_id", [None, "$question:localhost", _THREAD_ROOT])
+async def test_a_routed_responder_answers_the_persons_own_event_for_that_person(
+    tmp_path: Path,
+    steward: str,
+    thread_id: str | None,
+) -> None:
+    """Whichever managed account is the room's steward, the responder its route names answers the person's event."""
+    config = _two_agent_config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 1
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+
+    with patch("mindroom.turns.dispatch.maybe_generate_prompt_summary", new=AsyncMock()) as early_title:
+        await harness.deliver(room, _route_message(config, steward=steward, thread_id=thread_id))
+
+    # The steward titles nothing, so the responder titles a new thread from the message the person wrote.
+    if thread_id != _THREAD_ROOT:
+        assert early_title.call_args.kwargs["prompt_event_id"] == "$question:localhost"
+        assert early_title.call_args.kwargs["prompt"] is None
+    else:
+        early_title.assert_not_called()
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.user_id == _SENDER
+    envelope = request.response_envelope
+    assert envelope.origin.intent is TurnIntent.ROUTER_HANDOFF
+    # The route is hidden, so the answer replies to the message the person wrote.
+    assert envelope.target.reply_to_event_id == "$question:localhost"
+    assert envelope.target.resolved_thread_id == (thread_id or "$question:localhost")
+
+
+@pytest.mark.asyncio
+async def test_a_route_to_another_responder_leaves_this_one_silent(tmp_path: Path) -> None:
+    """Every bot in the room receives the route; only the one it names answers."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+
+    await harness.deliver(room, _route_message(config, steward=ROUTER_AGENT_NAME, entity="research"))
+
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_persons_message_cannot_pose_as_a_route(tmp_path: Path) -> None:
+    """Route content in a message from an account MindRoom does not manage is read as that person's own message."""
+    config = _single_agent_config(tmp_path, "thread")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "hello",
+                "msgtype": "m.text",
+                constants.ROUTE_EVENT_TYPE: {"entity": _entity_user_id(config, "general"), "event_id": "$other"},
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                constants.ORIGINAL_SENDER_KEY: "@victim:localhost",
+            },
+            "event_id": _EVENT_ID,
+            "sender": _SENDER,
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.user_id == _SENDER
+    assert request.response_envelope.origin.intent is TurnIntent.USER_MESSAGE
+    assert request.response_envelope.target.reply_to_event_id == _EVENT_ID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("original_sender", "relay_context"), [(_SENDER, True), ("@telegram:localhost", False)])
+async def test_old_router_relay_event_still_answers_from_relay_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    original_sender: str,
+    relay_context: bool,
+) -> None:
+    """A visible router relay already in the room is still answered by the agent it mentions, for its original sender.
+
+    A human's relayed message reads the context the relay names; a bot account's relay reads the conversation.
+    """
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}, bot_accounts=["@telegram:localhost"]),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    resolver = harness.ingress.deps.resolver
+    trusted_context = AsyncMock(wraps=resolver.extract_trusted_router_relay_context)
+    monkeypatch.setattr(resolver, "extract_trusted_router_relay_context", trusted_context)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@general could you help with this?",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                constants.ORIGINAL_SENDER_KEY: original_sender,
+            },
+            "event_id": "$router-relay:localhost",
+            "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.user_id == original_sender
+    # The relay is a visible message, so the answer replies to it as before.
+    assert request.response_envelope.target.reply_to_event_id == "$router-relay:localhost"
+    assert trusted_context.await_count == (1 if relay_context else 0)
+
+
+@pytest.mark.asyncio
+async def test_a_second_route_of_an_answered_message_is_not_answered_again(tmp_path: Path) -> None:
+    """A steward that crashed before recording its route sends it again; the responder answers the person once."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+
+    await harness.deliver(room, _route_message(config, steward=ROUTER_AGENT_NAME))
+    await harness.deliver(room, _route_message(config, steward=ROUTER_AGENT_NAME, event_id="$route-again:localhost"))
+
+    assert len(harness.runner.requests) == 1

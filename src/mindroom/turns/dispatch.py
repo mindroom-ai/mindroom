@@ -363,18 +363,22 @@ class TurnDispatcher:
         """Start a new thread's title once selected to respond, before execution can block."""
         turn = prepared.turn
         thread_id = prepared.dispatch.target.resolved_thread_id
+        routed_event_id = turn.facts.routed_event_id
+        prompt_event_id = routed_event_id or turn.event.event_id
         if (
             thread_id is None
-            or thread_id != turn.event.event_id
+            or thread_id != prompt_event_id
             or turn.handled_turn.is_coalesced
             or turn.payload.raw_audio_fallback
+            or (routed_event_id is not None and turn.payload.voice_transcript)
             or not first_reply_reaches_first_threshold(self.deps.runtime.config)
         ):
             return
         # A single-event turn has no coalescing wrapper or reply enrichment;
         # voice normalization has already replaced the audio filename with text.
-        prompt = turn.event.body
-        if turn.payload.voice_transcript:
+        # A hidden route carries no text of the person's: their message is titled as the thread shows it.
+        prompt = None if routed_event_id is not None else turn.event.body
+        if prompt is not None and turn.payload.voice_transcript:
             prompt = prompt.removeprefix(VOICE_PREFIX)
         create_background_task(
             maybe_generate_prompt_summary(
@@ -383,7 +387,7 @@ class TurnDispatcher:
                 thread_id,
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
-                prompt_event_id=turn.event.event_id,
+                prompt_event_id=prompt_event_id,
                 prompt=prompt,
                 conversation_reader=self.deps.resolver.deps.conversation_reader,
                 entity_name=self.deps.agent_name,
@@ -803,8 +807,11 @@ class TurnDispatcher:
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=thread_id,
-            # A response to a finished reply answers the message that reply answered.
-            reply_to_event_id=self.deps.ingress.entity_final_reply_original_event_id(event) or event.event_id,
+            # A response to a finished reply answers the message that reply answered, and one to a hidden route
+            # answers the person's message it names.
+            reply_to_event_id=self.deps.ingress.entity_final_reply_original_event_id(event)
+            or facts.routed_event_id
+            or event.event_id,
             event_source=context_event.source,
         )
         emit_elapsed_timing(

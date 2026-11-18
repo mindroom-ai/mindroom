@@ -18,6 +18,7 @@ from mindroom.constants import (
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
     SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -330,6 +331,51 @@ def test_a_room_level_router_handoff_names_the_human_message_it_relays(tmp_path:
     )
 
     assert validator.classify(relay, room_id="!room:localhost").discovery_event_id == "$human"
+
+
+@pytest.mark.parametrize("steward", ["router", "research"])
+def test_a_route_is_trusted_from_any_managed_account_and_names_the_message_it_routes(
+    tmp_path: Path,
+    steward: str,
+) -> None:
+    """The room's steward is the owner account or an agent, and its route runs for the person it names."""
+    validator, ids = _validator(tmp_path)
+    route = _text(
+        ids[steward].full_id,
+        "could you help with this?",
+        **{
+            ROUTE_EVENT_TYPE: {"entity": ids["general"].full_id, "event_id": "$human"},
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        },
+    )
+
+    facts = validator.classify(route, room_id="!room:localhost")
+
+    assert (facts.routed_event_id, facts.discovery_event_id) == ("$human", "$human")
+    assert facts.run_requester_id == "@user:localhost"
+    assert facts.router_relay
+    assert facts.origin.intent is TurnIntent.ROUTER_HANDOFF
+
+
+def test_route_content_from_an_unmanaged_account_is_not_a_route(tmp_path: Path) -> None:
+    """Only an account the identity registry manages may route."""
+    validator, ids = _validator(tmp_path)
+    forged = _text(
+        "@user:localhost",
+        "hello",
+        **{
+            ROUTE_EVENT_TYPE: {"entity": ids["general"].full_id, "event_id": "$other"},
+            ORIGINAL_SENDER_KEY: "@victim:localhost",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        },
+    )
+
+    facts = validator.classify(forged, room_id="!room:localhost")
+
+    assert (facts.routed_event_id, facts.discovery_event_id, facts.router_relay) == (None, None, False)
+    assert facts.run_requester_id == "@user:localhost"
+    assert facts.origin.intent is TurnIntent.USER_MESSAGE
 
 
 def _entity_final_reply_with_tool_markers(validator: IngressValidator, sender: str) -> nio.RoomMessageFormatted:

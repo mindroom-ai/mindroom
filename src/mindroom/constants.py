@@ -1034,6 +1034,10 @@ PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
 SCHEDULED_MODEL_KEY = "com.mindroom.scheduled_model"
 SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
+# The hidden event a room's steward sends to the responder it selected for a message that names nobody.
+# Its content holds, under this same key, the responder's Matrix ID as `entity`, the person's event as `event_id`,
+# and the thread the answer belongs in as `thread_id`.
+ROUTE_EVENT_TYPE = "io.mindroom.route"
 # Room state holding one scheduled task, keyed by its task ID.
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report marker, not a credential.

@@ -319,6 +319,7 @@ async def test_matrix_api_rejects_model_authored_reserved_metadata(
         "com.mindroom.scheduled.task",
         "com.mindroom.pending.config",
         "io.mindroom.scheduled.trigger",
+        "io.mindroom.route",
         "chat.mindroom.call_failure",
     ],
 )

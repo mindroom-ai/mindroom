@@ -3563,6 +3563,8 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         )
 
     bot._delivery_gateway.send_text = AsyncMock(side_effect=_send_text)
+    # A steward's hidden route is no response; tests read its content from this mock.
+    bot._delivery_gateway.send_route = AsyncMock(return_value="$route")
 
     async def _deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
         event_id = await send_response(

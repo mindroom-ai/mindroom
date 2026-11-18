@@ -377,14 +377,17 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     runtime_paths: RuntimePaths,
     *,
     prompt_event_id: str,
-    prompt: str,
+    prompt: str | None,
     conversation_reader: ConversationReader,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
 ) -> None:
-    """Title a new thread from its prompt without advancing the post-reply schedule."""
+    """Title a new thread from its prompt without advancing the post-reply schedule.
+
+    `prompt` is the prompt's text as its turn read it, or None to title the prompt as the thread shows it.
+    """
     baselines = schedule.THREAD_SUMMARY_BASELINES
-    if not prompt.strip() or not baselines.claim_provisional_title(room_id, thread_id):
+    if (prompt is not None and not prompt.strip()) or not baselines.claim_provisional_title(room_id, thread_id):
         return
     try:
         async with baselines.lock(room_id, thread_id):
@@ -428,7 +431,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 return
             model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
             generated = await generate_summary(
-                [replace(prompt_message, body=prompt)],
+                [prompt_message if prompt is None else replace(prompt_message, body=prompt)],
                 config,
                 runtime_paths,
                 model_name=model_name,

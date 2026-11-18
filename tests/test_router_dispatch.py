@@ -17,6 +17,7 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SOURCE_KIND_KEY,
 )
@@ -467,8 +468,9 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_register_file.assert_awaited_once()
         assert mock_register_file.await_args.kwargs["thread_id"] is None
-        sent_extra_content = send_response.await_args.kwargs["extra_content"]
-        assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
+        route = bot._delivery_gateway.send_route.await_args.args[1]
+        assert route[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
+        send_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_router_routing_registers_image_with_effective_thread_scope(
@@ -526,7 +528,7 @@ class TestAgentBot(AgentBotTestBase):
         turn_store.finalized_visible_echoes = AsyncMock(return_value=())
         turn_store.record_responded_turn = AsyncMock()
         delivery_gateway = MagicMock()
-        delivery_gateway.send_text = AsyncMock(return_value="$route")
+        delivery_gateway.send_route = AsyncMock(return_value="$route")
 
         await execute_router_relay(
             SimpleNamespace(
@@ -553,10 +555,8 @@ class TestAgentBot(AgentBotTestBase):
 
         normalizer.register_routed_attachment.assert_awaited_once()
         assert normalizer.register_routed_attachment.await_args.kwargs["thread_id"] is None
-        delivery_request = delivery_gateway.send_text.await_args.args[0]
-        sent_extra_content = delivery_request.extra_content
-        assert sent_extra_content is not None
-        assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
+        route = delivery_gateway.send_route.await_args.args[1]
+        assert route[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
 
     @pytest.mark.asyncio
     async def test_multi_agent_file_event_registers_attachment_once(self, tmp_path: Path) -> None:
@@ -885,9 +885,10 @@ class TestAgentBot(AgentBotTestBase):
             scheduled_prompt=event.body,
         )
 
-        call = send_response.await_args.kwargs
-        assert call["response_text"] == "@general ⏰ [Automated Task]\nPoll the queue"
-        assert call["target"].reply_to_event_id == "$scheduled"
+        route = bot._delivery_gateway.send_route.await_args.args[1]
+        assert route["body"] == "⏰ [Automated Task]\nPoll the queue"
+        assert route[ROUTE_EVENT_TYPE]["event_id"] == "$scheduled"
+        send_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_router_delivery_without_event_raises_for_durable_retry(self, tmp_path: Path) -> None:
@@ -911,7 +912,8 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        install_send_response_mock(bot, AsyncMock(return_value=None))
+        install_send_response_mock(bot, AsyncMock())
+        bot._delivery_gateway.send_route.return_value = None
         bot._turn_policy.responder_candidates_for_room = AsyncMock(
             return_value=[entity_ids(config, runtime_paths_for(config))["general"]],
         )

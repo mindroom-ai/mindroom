@@ -1,4 +1,4 @@
-"""Routing a turn that names nobody: the room's steward selects a responder and relays the turn to it."""
+"""Routing a turn that names nobody: the room's steward selects a responder and sends it a hidden route event."""
 
 from __future__ import annotations
 
@@ -12,11 +12,12 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
+    ROUTE_EVENT_TYPE,
     SOURCE_KIND_KEY,
 )
-from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, content_owns_per_fire_thread_root
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.routing import suggest_responder_for_message
@@ -205,6 +206,7 @@ async def execute_router_relay(  # noqa: PLR0911
 ) -> bool:
     """Route one turn as the room's steward; return whether the steward itself was selected and answers it.
 
+    Another responder is told by a hidden `io.mindroom.route` event, which no client shows.
     Nobody answers a turn that no candidate fits.
     """
     source_turn = handled_turn or TurnRecord.create([event.event_id])
@@ -273,24 +275,26 @@ async def execute_router_relay(  # noqa: PLR0911
     # The responder may have stopped or restarted while the relay was prepared.
     if not await _responder_ready(deps, suggested_entity, tracked_handled_turn):
         return False
-    event_id = await deps.delivery_gateway.send_text(
-        SendTextRequest(
-            target=resolved_target,
-            response_text=(
-                f"@{suggested_entity} {scheduled_prompt}"
-                if scheduled_prompt is not None
-                else f"@{suggested_entity} could you help with this?"
-            ),
-            extra_content=routed_extra_content or None,
-        ),
-    )
+    route = {
+        "entity": entity_identity_registry(deps.runtime.config, deps.runtime_paths)
+        .current_id(suggested_entity)
+        .full_id,
+        "event_id": event.event_id,
+    }
+    if thread_event_id is not None:
+        route["thread_id"] = thread_event_id
+    content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route}
+    if scheduled_prompt is not None:
+        # A scheduled task's prompt may be in no visible message, so its route carries it.
+        content["body"] = scheduled_prompt
+    event_id = await deps.delivery_gateway.send_route(room.room_id, content)
     with bound_log_context(**resolved_target.log_context):
-        if not event_id:
+        if event_id is None:
             deps.logger.error("Failed to route to entity", entity=suggested_entity)
             msg = f"Failed to route to entity {suggested_entity!r}"
             raise RuntimeError(msg)
         deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
-        # The relay is not an outbox delivery, so a replay before the turn is recorded answered adopts it from here.
+        # The route is not an outbox delivery, so a replay before the turn is recorded answered adopts it from here.
         await deps.turn_store.record_placeholder(tracked_handled_turn, event_id)
         await deps.turn_store.record_responded_turn(
             canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),

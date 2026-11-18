@@ -247,8 +247,8 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         assert gate._active_thread_ids_for_room == runner.active_thread_ids_for_room
         assert gate._room_scope_is_single_conversation == bot._conversation_resolver.room_is_one_conversation
         # The journal's schedule trigger trusts exactly the senders the entity registry manages.
-        assert dispatcher.schedule_trigger_sender_is_managed(bot.matrix_id.full_id)
-        assert not dispatcher.schedule_trigger_sender_is_managed("@user:localhost")
+        assert dispatcher.sender_is_managed(bot.matrix_id.full_id)
+        assert not dispatcher.sender_is_managed("@user:localhost")
 
     @pytest.mark.asyncio
     async def test_live_redaction_callback_only_runs_what_its_admission_ended(self, bot: AgentBot) -> None:

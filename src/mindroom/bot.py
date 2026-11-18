@@ -529,9 +529,7 @@ class AgentBot:
             ),
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
-            schedule_trigger_sender_is_managed=lambda sender: (
-                self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
-            ),
+            sender_is_managed=lambda sender: self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender),
             runtime_generation=self._approval_runtime_generation,
         )
         self._turn_store = TurnStore(
@@ -2020,7 +2018,7 @@ class AgentBot:
                 after_sync=self._on_ingestion_frame_completion,
                 after_ack=self._ingestion_admission_progress.set,
                 on_decryption_failure=self._decryption_diagnostics.schedule,
-                schedule_trigger_sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
+                sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
             ),
             name=f"matrix_ingestion_pump_{self.agent_name}",
         )

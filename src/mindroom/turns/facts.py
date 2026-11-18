@@ -47,7 +47,9 @@ class IngressFacts:
     acting_requester_id: str | None = None
     hook_source: str | None = None
     message_received_depth: int = 0
-    # The earlier event a turn for this event also owns: a routed human message or a finalized reply.
+    # The person's event a steward's hidden route names: its responder answers that event.
+    routed_event_id: str | None = None
+    # The earlier event a turn for this event also owns: a routed message or a finalized reply.
     discovery_event_id: str | None = None
     sender_entity_name: str | None = None
     # The entity behind the run requester, if one is.
@@ -85,11 +87,24 @@ class IngressFacts:
         """Return whether a managed sender relayed a human's message."""
         return self.original_sender_is_human and self.source_kind in _USER_RELAY_SOURCE_KINDS
 
+    # LEGACY_COMPAT: visible router relay messages ("@agent could you help with this?") already in room history.
+    # Legacy format: an `m.room.message` the router account sent with the trusted-relay source kind and
+    # `com.mindroom.original_sender`, which mentions the agent the router chose and replies to the person's message.
+    # Last legacy release: v2026.11.396, the newest release when visible relays stopped; the next, still unreleased,
+    # release sends a hidden `io.mindroom.route` event from the room's steward instead.
+    # Handling: every message of the router account still counts as routed, so the mentioned agent answers such a
+    # relay for its original sender, in reply to the relay, exactly as before.
+    # Coverage: tests/test_turns_focused.py::test_old_router_relay_event_still_answers_from_relay_context
+    @property
+    def routed(self) -> bool:
+        """Return whether the room's steward routed this event to its responder."""
+        return self.routed_event_id is not None or self.sender_entity_name == ROUTER_AGENT_NAME
+
     @property
     def router_relay(self) -> bool:
-        """Return whether the router relayed a human's or a configured bot account's message."""
+        """Return whether a route relays a human's or a configured bot account's message."""
         return (
-            self.sender_entity_name == ROUTER_AGENT_NAME
+            self.routed
             and self.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
             and (self.original_sender is not None)
         )
@@ -106,6 +121,7 @@ class IngressFacts:
             original_sender=self.original_sender,
             trusted_user_relay=self.trusted_user_relay,
             acts_for_requester=self.acts_for_requester,
+            routed=self.routed,
         )
 
 

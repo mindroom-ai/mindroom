@@ -800,7 +800,7 @@ class TestMaybeGenerateThreadSummary:
     def _count(self) -> int:
         return self.baselines.count(_ROOM, _THREAD)
 
-    async def _provisional(self, prompt: str = "Plan a trip", *, config: Config | None = None) -> None:
+    async def _provisional(self, prompt: str | None = "Plan a trip", *, config: Config | None = None) -> None:
         await automatic.maybe_generate_prompt_summary(
             self.client,
             _ROOM,
@@ -813,6 +813,17 @@ class TestMaybeGenerateThreadSummary:
             entity_name="router",
             membership_index=AgentReplyMembershipIndex(),
         )
+
+    async def test_provisional_title_without_a_prompt_text_titles_the_message_the_thread_shows(self) -> None:
+        """A routed responder's hidden route carries no text, so the person's message is read from the thread."""
+        model = self._summarizer(_title("Trip plan"))
+        self._history(_make_thread_history(1))
+
+        await self._provisional(None)
+
+        assert "Message 0" in _prompt(model.requests[0])
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "Trip plan"
 
     async def test_provisional_title_uses_prompt_and_keeps_first_threshold(self) -> None:
         """A provisional title must not consume the first post-reply summary or request tags."""

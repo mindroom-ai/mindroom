@@ -511,10 +511,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         mock_send.assert_awaited_once()
         bot.client.room_get_event.assert_not_called()
-        content = mock_send.call_args.args[2]
-        assert content["m.relates_to"]["rel_type"] == "m.thread"
-        assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
-        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$plain_reply:localhost"
+        assert mock_send.call_args.kwargs["message_type"] == "io.mindroom.route"
+        route = mock_send.call_args.args[2]["io.mindroom.route"]
+        assert route["thread_id"] == "$thread_root:localhost"
+        assert route["event_id"] == "$plain_reply:localhost"
 
     @pytest.mark.asyncio
     async def test_message_with_multiple_relations_handled_correctly(self, bot: AgentBot) -> None:
