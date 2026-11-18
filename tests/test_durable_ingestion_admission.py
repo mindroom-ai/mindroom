@@ -293,6 +293,7 @@ async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batch
         await asyncio.wait_for(scanned.wait(), 1)
         assert handed == []
         await admit_room_membership(journal_store.principal("router@shared"), ROOM, "leave")
+        started = asyncio.get_running_loop().time()
         pump = asyncio.create_task(
             durable_ingestion.run_ingestion_pump(
                 Batches(batches[0]),
@@ -307,6 +308,8 @@ async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batch
         assert handed == []
         await asyncio.wait_for(handed_over.wait(), 5)
         assert handed == ["$source-1"]
+        # The pump woke the dispatcher one interval after it started, not at once and not much later.
+        assert 1.0 <= asyncio.get_running_loop().time() - started < 1.9
     finally:
         if pump is not None:
             pump.cancel()
