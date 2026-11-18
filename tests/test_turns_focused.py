@@ -66,6 +66,7 @@ from mindroom.dispatch_source import (
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
     ScheduledHistoryBudget,
 )
 from mindroom.entity_resolution import entity_identity_registry
@@ -100,6 +101,7 @@ from mindroom.inbound_turn_normalizer import (
     InboundTurnNormalizer,
     InboundTurnNormalizerDeps,
     TextNormalizationRequest,
+    _VoiceNormalizationResult,
 )
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher, _route_as_message
@@ -2937,6 +2939,90 @@ async def test_router_voice_echo_for_a_bot_account_is_display_only(tmp_path: Pat
     await harness.deliver(room, event)
 
     assert harness.runner.requests == []
+
+
+def _voice_echo_event(config: Config, sender_name: str) -> nio.RoomMessageText:
+    """Return the visible transcript one managed account posted of a person's voice message that names General."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "🎤 @general could you help with this?",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+                constants.ORIGINAL_SENDER_KEY: _SENDER,
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                constants.VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            },
+            "event_id": "$voice-echo:localhost",
+            "sender": _entity_user_id(config, sender_name),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_old_router_echo_is_not_a_turn(config: Config, tmp_path: Path) -> None:
+    """A transcript the router posted before agents posted their own stays display-only."""
+    harness = _build_harness(config, tmp_path)
+
+    await harness.deliver(
+        _room_with_members(config, "general", ROUTER_AGENT_NAME),
+        _voice_echo_event(config, ROUTER_AGENT_NAME),
+    )
+
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_agent_echo_is_not_a_turn_for_other_bots(config: Config, tmp_path: Path) -> None:
+    """The transcript an answering agent posts is display-only for every other bot, whomever it names."""
+    harness = _build_harness(config, tmp_path)
+
+    await harness.deliver(_room_with_members(config, "general", "research"), _voice_echo_event(config, "research"))
+
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_voice_message_is_routed_on_its_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A steward selects a voice message's responder from its transcript and posts nothing itself."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    event = _thread_upload_event("m.audio", event_id="$voice:localhost", origin_server_ts=1_000_000)
+    content = {
+        **event.source["content"],
+        "msgtype": "m.text",
+        "body": "who can review the new PR?",
+        constants.SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+        constants.ORIGINAL_SENDER_KEY: _SENDER,
+        constants.VOICE_TRANSCRIPT_KEY: True,
+    }
+    transcript = PreparedIngress(
+        sender=_SENDER,
+        event_id=event.event_id,
+        body=content["body"],
+        source={**event.source, "content": content},
+        payload_trusted=True,
+    )
+    monkeypatch.setattr(
+        InboundTurnNormalizer,
+        "prepare_voice_event",
+        AsyncMock(return_value=_VoiceNormalizationResult(event=transcript)),
+    )
+    select = AsyncMock(return_value=ResponderSelection("general"))
+    monkeypatch.setattr("mindroom.router.relay.suggest_responder_for_message", select)
+
+    await harness.ingress.handle_media_event(_room_with_members(config, ROUTER_AGENT_NAME, "general", "research"), event)
+    await harness.gate.drain_all()
+
+    assert select.await_args.args[0] == "who can review the new PR?"
+    assert len(harness.gateway.routes) == 1
+    assert harness.gateway.sent == []
 
 
 @pytest.mark.asyncio
