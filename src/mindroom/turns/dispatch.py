@@ -628,7 +628,8 @@ class TurnDispatcher:
                 body=body,
                 source={"content": voice.to_content() if voice is not None else {VOICE_TRANSCRIPT_KEY: True}},
             )
-            await self.deps.visible_voice_echo.publish(target.room_id, source_event_id, target, transcript)
+            reply = replace(target, reply_to_event_id=source_event_id)
+            await self.deps.visible_voice_echo.publish(target.room_id, source_event_id, reply, transcript)
 
     async def _execute_route_plan(
         self,

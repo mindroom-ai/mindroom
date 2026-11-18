@@ -219,6 +219,22 @@ async def test_prepare_encrypted_normal_message_fits_after_megolm_encryption() -
     assert _actual_encrypted_event_size(prepared, room_id="!room:server") <= _MATRIX_EVENT_HARD_LIMIT
 
 
+@pytest.mark.asyncio
+async def test_oversized_voice_transcript_preview_stays_a_display_only_echo() -> None:
+    """The one visible event of a transcript too large for it keeps the marker clients and turn ingress read."""
+    content = {"body": "x" * 70_000, "msgtype": "m.text", VISIBLE_ROUTER_VOICE_ECHO_KEY: True}
+
+    prepared = await prepare_large_message(
+        _UploadClient(nio.UploadResponse("mxc://server/transcript-sidecar")),
+        "!room:server",
+        content,
+        room_encrypted=False,
+    )
+
+    assert "io.mindroom.long_text" in prepared
+    assert prepared[VISIBLE_ROUTER_VOICE_ECHO_KEY] is True
+
+
 @pytest.mark.parametrize("is_edit", [False, True])
 @pytest.mark.asyncio
 async def test_oversized_interactive_values_do_not_escape_the_matrix_event_limit(is_edit: bool) -> None:

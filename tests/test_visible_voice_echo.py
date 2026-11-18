@@ -23,7 +23,14 @@ from mindroom.routing_judgment import ResponderSelection
 from mindroom.turn_policy import DispatchPlan, ResponseAction
 from mindroom.voice import visible_voice_echo
 from tests.conftest import bind_runtime_paths, test_runtime_paths
-from tests.test_turns_focused import _SENDER, _THREAD_ROOT, _build_harness, _room_with_members, _route_as_delivered
+from tests.test_turns_focused import (
+    _SENDER,
+    _THREAD_ROOT,
+    _build_harness,
+    _room_with_members,
+    _route_as_delivered,
+    _text_event,
+)
 from tests.test_voice_echo_retry import _force_readiness_fallback, _voice_event
 
 if TYPE_CHECKING:
@@ -359,6 +366,31 @@ async def test_contact_room_voice_is_answered_without_a_transcript(
     assert harness.gateway.sent == []
     assert [request.prompt for request in harness.runner.requests] == [_TRANSCRIPT]
     assert harness.retried_dispatch_sources == []
+
+
+@pytest.mark.asyncio
+async def test_transcript_replies_to_its_own_voice_message_in_a_coalesced_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn of a voice message and a later text answers the text; the transcript still replies to the audio."""
+    config = _config(tmp_path)
+    harness = _build_harness(config, tmp_path, debounce_seconds=0.05)
+    room = _room_with_members(config, "general")
+    event, normalized = _voice_event(config)
+    _transcribes(monkeypatch, normalized)
+    text = _text_event("and one more thing", event_id="$text:localhost", thread_id=_THREAD_ROOT)
+
+    await harness.ingress.handle_media_event(room, event)
+    await harness.ingress.handle_text_event(room, text)
+    await harness.gate.drain_all()
+    await harness.runner.settle_inbox_responses()
+
+    [request] = harness.runner.requests
+    assert request.response_envelope.target.reply_to_event_id == text.event_id
+    [transcript] = harness.gateway.sent
+    assert transcript.target.reply_to_event_id == event.event_id
+    assert transcript.target.resolved_thread_id == _THREAD_ROOT
 
 
 @pytest.mark.asyncio

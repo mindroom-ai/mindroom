@@ -137,6 +137,14 @@ class IngressFacts:
 
 def is_voice_echo(facts: IngressFacts, content: object) -> bool:
     """Return whether content is a managed account's display-only transcript of a human's or bot account's audio."""
+    # LEGACY_COMPAT: voice transcript echoes the router account posted, already in room history.
+    # Legacy format: an `m.room.message` of the router account with `com.mindroom.visible_router_voice_echo` true,
+    # the trusted-relay source kind and `com.mindroom.original_sender`; first a "transcribing" placeholder, then
+    # edited to the transcript or the fallback text.
+    # Last legacy release: v2026.11.396, the newest release when the router stopped posting echoes; the next, still
+    # unreleased, release has the answering agent post the transcript under the same content key.
+    # Handling: no router branch. Old and new echoes are read by this one rule, as display-only and never a turn.
+    # Coverage: tests/test_turns_focused.py::test_old_router_echo_is_not_a_turn.
     return facts.original_sender is not None and is_visible_router_voice_echo_content(content)
 
 
