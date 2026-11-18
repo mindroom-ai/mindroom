@@ -3920,6 +3920,32 @@ async def test_a_steward_runs_no_command_of_a_person_it_only_routes_for(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("may_answer", [True, False])
+async def test_a_steward_runs_none_of_its_hooks_on_a_message_it_only_routes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    may_answer: bool,
+) -> None:
+    """Permission to route runs no hook: a steward's `message:received` hooks see only people it may answer."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(harness.policy, "can_reply_to_sender_in_room", lambda *_args, **_kwargs: may_answer)
+    monkeypatch.setattr(harness.policy, "routes_for_sender_in_room", lambda *_args: True)
+    hooks = AsyncMock(return_value=False)
+    monkeypatch.setattr(harness.dispatcher.deps.ingress_hook_runner, "emit_message_received_hooks", hooks)
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+
+    await harness.deliver(room, _text_event("who can help with this?", event_id="$routed-only:localhost"))
+
+    assert hooks.await_count == (1 if may_answer else 0)
+    assert len(harness.gateway.routes) == 1
+
+
+@pytest.mark.asyncio
 async def test_policy_decision_reserves_config_until_response_handoff(
     config: Config,
     tmp_path: Path,

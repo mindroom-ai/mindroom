@@ -783,7 +783,11 @@ class TurnDispatcher:
         ) as allowed:
             if not allowed:
                 return True
-            suppressed = await self.deps.ingress_hook_runner.emit_message_received_hooks(
+            # A steward that only routes this requester's messages runs none of its own hooks on them.
+            suppressed = self.deps.turn_policy.can_reply_to_sender_in_room(
+                envelope.requester_id,
+                room.room_id,
+            ) and await self.deps.ingress_hook_runner.emit_message_received_hooks(
                 envelope=envelope,
                 correlation_id=envelope.source_event_id,
                 policy=hook_ingress_policy(envelope),
