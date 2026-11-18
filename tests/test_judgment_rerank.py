@@ -207,10 +207,14 @@ async def test_missing_credential_builds_no_reranker(tmp_path: Path) -> None:
 
 
 def test_judgment_provider_is_a_reranker_config(tmp_path: Path) -> None:
-    """``reranker`` accepts a judgment provider, keeps its 0.8 threshold, and builds a judgment reranker."""
+    """``reranker`` accepts a judgment provider, with a 0.3 threshold, and builds a judgment reranker.
+
+    Other judgment users keep their 0.8 threshold.
+    """
     config = Config(reranker={"provider": "openai_decisions"})
     assert isinstance(config.reranker, OpenAIDecisionsJudgmentConfig)
-    assert config.reranker.threshold == 0.8
+    assert config.reranker.threshold == 0.3
+    assert OpenAIDecisionsJudgmentConfig(provider="openai_decisions").threshold == 0.8
 
     paths = test_runtime_paths(tmp_path)
     get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "stored-openai-key"})

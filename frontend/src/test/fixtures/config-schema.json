@@ -3882,7 +3882,7 @@
             ],
             "exclude": [],
             "include_entrypoint": false,
-            "rerank": false
+            "rerank": null
           },
           "description": "Search behavior for file-backed memory"
         },
@@ -3958,10 +3958,17 @@
           "type": "boolean"
         },
         "rerank": {
-          "default": false,
-          "description": "When true, semantic file-memory searches rerank their hits with the root reranker, and recall keeps only hits that score at least its threshold",
-          "title": "Rerank",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When true, semantic file-memory searches rerank their hits with the root reranker, and recall keeps only hits that score at least its threshold; unset reranks with an openai_decisions or typesafe reranker",
+          "title": "Rerank"
         }
       },
       "title": "MemorySearchConfig",
@@ -4274,6 +4281,52 @@
         "provider"
       ],
       "title": "OpenAIDecisionsJudgmentConfig",
+      "type": "object"
+    },
+    "OpenAIDecisionsRerankerConfig": {
+      "additionalProperties": false,
+      "description": "OpenAI Decisions as the reranker: one probability per candidate, and recall keeps those at its threshold.",
+      "properties": {
+        "threshold": {
+          "default": 0.3,
+          "description": "Minimum probability, from 0 to 1, of a memory recalled without being asked for; 0.3 is the value the recall benchmark picked",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 1.5,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "provider": {
+          "const": "openai_decisions",
+          "description": "Judge with the OpenAI Decisions API; uses the OpenAI API key",
+          "title": "Provider",
+          "type": "string"
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Credential service holding the OpenAI API key; defaults to the OpenAI provider credential, which may hold a proxy key that api.openai.com rejects",
+          "title": "Credentials Service"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "OpenAIDecisionsRerankerConfig",
       "type": "object"
     },
     "ParticipationConfig": {
@@ -4778,9 +4831,9 @@
       "discriminator": {
         "mapping": {
           "cohere": "#/$defs/KnowledgeRerankerConfig",
-          "openai_decisions": "#/$defs/OpenAIDecisionsJudgmentConfig",
+          "openai_decisions": "#/$defs/OpenAIDecisionsRerankerConfig",
           "sentence_transformers": "#/$defs/KnowledgeRerankerConfig",
-          "typesafe": "#/$defs/TypeSafeJudgmentConfig",
+          "typesafe": "#/$defs/TypeSafeRerankerConfig",
           "vertex_ai": "#/$defs/KnowledgeRerankerConfig"
         },
         "propertyName": "provider"
@@ -4790,10 +4843,10 @@
           "$ref": "#/$defs/KnowledgeRerankerConfig"
         },
         {
-          "$ref": "#/$defs/TypeSafeJudgmentConfig"
+          "$ref": "#/$defs/TypeSafeRerankerConfig"
         },
         {
-          "$ref": "#/$defs/OpenAIDecisionsJudgmentConfig"
+          "$ref": "#/$defs/OpenAIDecisionsRerankerConfig"
         }
       ]
     },
@@ -5609,6 +5662,39 @@
       "title": "TypeSafeJudgmentConfig",
       "type": "object"
     },
+    "TypeSafeRerankerConfig": {
+      "additionalProperties": false,
+      "description": "System One as the reranker: one probability per candidate, and recall keeps those at its threshold.",
+      "properties": {
+        "threshold": {
+          "default": 0.3,
+          "description": "Minimum probability, from 0 to 1, of a memory recalled without being asked for; 0.3 is the value the recall benchmark picked",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 1.5,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "provider": {
+          "const": "typesafe",
+          "description": "Judge with System One; requires TYPESAFE_API_KEY",
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "TypeSafeRerankerConfig",
+      "type": "object"
+    },
     "VoiceConfig": {
       "additionalProperties": false,
       "description": "Configuration for voice message handling.",
@@ -6120,7 +6206,7 @@
           ],
           "include_entrypoint": false,
           "mode": "keyword",
-          "rerank": false
+          "rerank": null
         },
         "auto_flush": {
           "batch": {

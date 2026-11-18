@@ -75,11 +75,11 @@ class MemorySearchConfig(BaseModel):
         default=False,
         description="When true, include MEMORY.md in file-memory semantic search",
     )
-    rerank: bool = Field(
-        default=False,
+    rerank: bool | None = Field(
+        default=None,
         description=(
             "When true, semantic file-memory searches rerank their hits with the root reranker, and recall keeps "
-            "only hits that score at least its threshold"
+            "only hits that score at least its threshold; unset reranks with an openai_decisions or typesafe reranker"
         ),
     )
 

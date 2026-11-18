@@ -805,6 +805,9 @@ _RECALL_SEARCH_LIMIT = 20
 _RECALL_SELECTION = Selection(limit=5, token_budget=800, hybrid_score_gap=0.05)
 #: Seconds the per-turn recall waits for its reranker before keeping the hybrid selection.
 _RECALL_RERANK_DEADLINE_SECONDS = 2.0
+#: Reranker providers that passed the recall benchmark: with ``memory.search.rerank`` unset, memory search reranks
+#: with them and with no other.
+_RERANK_BY_DEFAULT_PROVIDERS = frozenset({"openai_decisions", "typesafe"})
 
 
 async def _retrieve_memories(
@@ -886,7 +889,8 @@ class FileMemoryBackend:
         semantic hits left. Keyword matches, a fallback's included, rank as
         in any search.
 
-        With ``memory.search.rerank`` and a configured reranker, semantic
+        With ``memory.search.rerank`` (unset: on for the providers in
+        ``_RERANK_BY_DEFAULT_PROVIDERS``) and a configured reranker, semantic
         hits are reranked from a wider search; recall then keeps those at or
         above the reranker's threshold, and keeps the hybrid selection if
         reranking fails or takes over two seconds.
@@ -904,7 +908,12 @@ class FileMemoryBackend:
         search_config = memory_search(config, agent_name)
         # Semantic matches are read-only locators, so an editable search matches by keyword.
         semantic_search = search_config.mode == "semantic" and not editable
-        reranker = configured_reranker(config, self.runtime_paths) if semantic_search and search_config.rerank else None
+        reranks = (
+            search_config.rerank
+            if search_config.rerank is not None
+            else config.reranker is not None and config.reranker.provider in _RERANK_BY_DEFAULT_PROVIDERS
+        )
+        reranker = configured_reranker(config, self.runtime_paths) if semantic_search and reranks else None
         if semantic_search:
             try:
                 results = await search_semantic_file_memories(

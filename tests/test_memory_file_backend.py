@@ -17,13 +17,14 @@ from unittest.mock import patch
 
 import pytest
 import tiktoken
+from pydantic import TypeAdapter
 
 import mindroom.knowledge.rerank as rerank_module
 import mindroom.memory._file_backend as file_backend_module
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig, RerankerConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import AgentMemorySearchConfig
 from mindroom.constants import resolve_runtime_paths
@@ -1117,6 +1118,125 @@ async def test_recall_uses_reranker_when_enabled(
     assert index_limits == [20]
     assert reranker.documents == ([memories] if reranked else [])
     assert _injected(prompt_parts, memories) == (memories[:1] if reranked else memories)
+
+
+def _configure_reranker_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    settings: dict[str, object] | None,
+    reranker: _StubReranker,
+) -> None:
+    """Configure the root reranker as a config file would set it, served by ``reranker`` whatever the settings."""
+    config.reranker = None if settings is None else TypeAdapter(RerankerConfig).validate_python(settings)
+    monkeypatch.setattr(file_backend_module, "configured_reranker", lambda _config, _runtime_paths: reranker)
+
+
+_OTHER_RERANKERS = [
+    {"provider": "cohere", "model": "rerank-v3.5"},
+    {"provider": "vertex_ai", "model": "semantic-ranker-default@latest"},
+    {"provider": "sentence_transformers", "model": "BAAI/bge-reranker-v2-m3"},
+    None,
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["typesafe", "openai_decisions"])
+async def test_recall_reranks_by_default_for_passing_provider(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+) -> None:
+    """With `rerank` unset, a judgment reranker reranks recall and keeps the hits it scores at least 0.3."""
+    config.memory.search.mode = "semantic"
+    reranker = _StubReranker([0.9, 0.2])
+    _configure_reranker_settings(monkeypatch, config, {"provider": provider}, reranker)
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    memories = [memory for memory, _score in _SHED_MEMORIES]
+    assert reranker.documents == [memories]
+    assert _injected(prompt_parts, memories) == memories[:1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings", _OTHER_RERANKERS)
+async def test_recall_does_not_rerank_by_default_for_other_providers(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: dict[str, object] | None,
+) -> None:
+    """With `rerank` unset, any other reranker, or none, leaves recall to the hybrid selection."""
+    config.memory.search.mode = "semantic"
+    reranker = _StubReranker([0.9, 0.2])
+    _configure_reranker_settings(monkeypatch, config, settings, reranker)
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    memories = [memory for memory, _score in _SHED_MEMORIES]
+    assert reranker.documents == []
+    assert _injected(prompt_parts, memories) == memories
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("global_rerank", "agent_rerank", "provider", "reranked"),
+    [
+        (False, None, "typesafe", False),
+        (None, False, "openai_decisions", False),
+        (False, True, "typesafe", True),
+        (None, True, "cohere", True),
+    ],
+)
+async def test_explicit_rerank_setting_overrides_the_provider_default(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    global_rerank: bool | None,
+    agent_rerank: bool | None,
+    provider: str,
+    reranked: bool,
+) -> None:
+    """An explicit `rerank`, globally or for the agent, wins over the default the reranker's provider gives."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = global_rerank
+    config.agents["general"].memory_search = AgentMemorySearchConfig(rerank=agent_rerank)
+    reranker = _StubReranker([0.9, 0.2])
+    settings: dict[str, object] = {"provider": provider}
+    if provider == "cohere":
+        settings["model"] = "rerank-v3.5"
+    _configure_reranker_settings(monkeypatch, config, settings, reranker)
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert bool(reranker.documents) == reranked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("threshold", "kept"),
+    [(None, 2), (0.8, 1)],
+)
+async def test_judgment_reranker_recall_threshold(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    threshold: float | None,
+    kept: int,
+) -> None:
+    """A judgment reranker's recall threshold is 0.3 when unset, and an explicitly set threshold is honored."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = True
+    settings: dict[str, object] = {"provider": "typesafe"}
+    if threshold is not None:
+        settings["threshold"] = threshold
+    _configure_reranker_settings(monkeypatch, config, settings, _StubReranker([0.9, 0.35]))
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    memories = [memory for memory, _score in _SHED_MEMORIES]
+    assert _injected(prompt_parts, memories) == memories[:kept]
 
 
 @pytest.mark.asyncio
