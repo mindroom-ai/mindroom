@@ -8,13 +8,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
-from mindroom.commands.handler import (
-    COMMAND_TYPES_WITH_SIDE_EFFECTS,
-    CommandHandlerContext,
-    agent_owns_command,
-    handle_command,
-)
-from mindroom.commands.parsing import CommandType
+from mindroom.commands.handler import CommandHandlerContext, handle_command
+from mindroom.commands.parsing import COMMAND_TYPES_WITH_SIDE_EFFECTS, CommandType
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.model_selection import model_selection_targets_other_runtime
 from mindroom.turn_record import canonicalize_turn_record
@@ -34,7 +29,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.model_selection import CommandResultContent
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
-    from mindroom.turn_policy import TurnPolicy
+    from mindroom.turn_policy import PreparedDispatch, TurnPolicy
     from mindroom.turn_record import TurnRecord
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -52,7 +47,6 @@ class CommandTurnExecutorDeps:
     runtime: SupportsClientConfigOrchestrator
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
-    agent_name: str
     normalizer: InboundTurnNormalizer
     conversation_reader: ConversationReader
     turn_policy: TurnPolicy
@@ -304,7 +298,7 @@ class CommandTurnExecutor:
         requester_user_id: str,
         command: Command,
         *,
-        target: MessageTarget,
+        dispatch: PreparedDispatch,
         handled_turn: TurnRecord,
         acts_for_requester: bool,
     ) -> bool:
@@ -315,20 +309,14 @@ class CommandTurnExecutor:
             self._client().device_id,
         ):
             return False
-        if not agent_owns_command(
-            command,
-            agent_name=self.deps.agent_name,
-            config=self.deps.runtime.config,
-            room=room,
-            requester_user_id=requester_user_id,
-        ):
+        if not await self.deps.turn_policy.owns_command(room, dispatch, command, source_event_id=event.event_id):
             return False
         await self.execute(
             room=room,
             event=event,
             requester_user_id=requester_user_id,
             command=command,
-            target=target,
+            target=dispatch.target,
             handled_turn=handled_turn,
             acts_for_requester=acts_for_requester,
         )

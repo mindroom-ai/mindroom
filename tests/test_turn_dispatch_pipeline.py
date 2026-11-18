@@ -754,7 +754,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         mock_execute_command.assert_awaited_once()
-        assert mock_execute_command.await_args.kwargs["target"] == dispatch.target
+        assert mock_execute_command.await_args.kwargs["dispatch"].target == dispatch.target
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_command_uses_snapshot_target_context(
@@ -837,7 +837,7 @@ class TestAgentBot(AgentBotTestBase):
             limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
         )
         mock_execute_command.assert_awaited_once()
-        assert mock_execute_command.await_args.kwargs["target"].resolved_thread_id == "$thread_root"
+        assert mock_execute_command.await_args.kwargs["dispatch"].target.resolved_thread_id == "$thread_root"
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_preserves_prompt_map_when_router_routes_coalesced_turn(

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -22,19 +23,43 @@ from mindroom.commands.parsing import (
     get_command_help,
     get_compact_command_entries,
 )
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config, load_config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.config.models import RouterConfig
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
+from mindroom.room_reply_modes import set_room_reply_mode_override
 from tests.authorization_helpers import (
     isolated_membership_index,
     make_test_command_handler_context,
 )
-from tests.conftest import make_conversation_reader_mock
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_visible_message,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_plugins import _write_broken_tool_plugin
+from tests.test_turn_policy import (
+    _EVENT_ID,
+    _ROOM_ID,
+    _SENDER,
+    _context,
+    _dispatch,
+    _entity_id,
+    _policy_for,
+    _room_with_members,
+)
+from tests.test_turn_policy import config as config  # noqa: PLC0414
+
+if TYPE_CHECKING:
+    from mindroom.conversation_resolver import MessageContext
+    from mindroom.event_journal import EventJournalStore
 
 WELCOME_QUICK_COMMAND_LINES = [
     "\u2022 `/hi` - Show this welcome message again",
@@ -839,3 +864,139 @@ async def test_welcome_lists_only_the_tools_an_agent_can_use_here(tmp_path: Path
 
     assert "• **Code** (alias `code`): Writes code (\U0001f527 `calculator`)" in welcome_message
     assert "broken_plugin_tool" not in welcome_message
+
+
+async def _command_owners(
+    config: Config,
+    text: str,
+    rooms: dict[str, nio.MatrixRoom],
+    context: MessageContext | None = None,
+    journal_store: EventJournalStore | None = None,
+) -> list[str]:
+    """Return the entities whose own policy says they run this command, each from its own copy of the room."""
+    command = command_parser.parse(text)
+    assert command is not None
+    owners = []
+    for name, room in rooms.items():
+        policy = _policy_for(config, name)
+        if journal_store is not None:
+            policy.deps.runtime.orchestrator.journal_store = journal_store
+        dispatch = _dispatch(context or _context(), agent_name=name)
+        if await policy.owns_command(room, dispatch, command, source_event_id=_EVENT_ID):
+            owners.append(name)
+    return owners
+
+
+def _shared_room(config: Config, *entity_names: str) -> dict[str, nio.MatrixRoom]:
+    """Return one room holding the person and these entities, as every MindRoom account sees it."""
+    room = _room_with_members(_SENDER, *(_entity_id(config, name).full_id for name in entity_names))
+    return dict.fromkeys(("general", "research", ROUTER_AGENT_NAME), room)
+
+
+@pytest.mark.asyncio
+async def test_mentioned_agent_handles_command(config: Config) -> None:
+    """A command that mentions an agent is run by that agent alone, though another has the lower Matrix ID."""
+    context = _context(mentioned=[_entity_id(config, "research")])
+
+    assert command_parser.parse("@research !model").type is CommandType.MODEL
+    assert await _command_owners(config, "@research !model", _shared_room(config, "general", "research"), context) == [
+        "research",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_thread_agent_handles_command_in_its_thread(config: Config) -> None:
+    """A command in a thread with one agent is run by that agent."""
+    history = [
+        make_visible_message(sender=_SENDER, body="please help"),
+        make_visible_message(sender=_entity_id(config, "research").full_id, body="sure thing"),
+    ]
+    context = _context(thread_id="$thread:localhost", thread_history=history)
+
+    assert await _command_owners(config, "!help", _shared_room(config, "general", "research"), context) == ["research"]
+
+
+@pytest.mark.asyncio
+async def test_untargeted_command_goes_to_lowest_id_candidate_without_model_call(config: Config) -> None:
+    """A command aimed at nobody is run by the candidate with the lowest Matrix ID, and nothing is routed."""
+    with patch("mindroom.router.relay.suggest_responder_for_message", new=AsyncMock()) as select:
+        owners = await _command_owners(config, "!help", _shared_room(config, "general", "research"))
+
+    assert owners == ["general"]
+    select.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_untargeted_command_answers_in_mentions_reply_mode(config: Config) -> None:
+    """A command addresses MindRoom itself, so a room that answers only mentions still answers it."""
+    set_room_reply_mode_override(runtime_paths_for(config), room_id=_ROOM_ID, mode="mentions")
+
+    assert await _command_owners(config, "!help", _shared_room(config, "general", "research")) == ["general"]
+
+
+@pytest.mark.asyncio
+async def test_command_in_one_agent_room_is_handled_by_that_agent(config: Config) -> None:
+    """A room with one agent and no owner account runs commands."""
+    assert await _command_owners(config, "!help", _shared_room(config, "research")) == ["research"]
+
+
+@pytest.mark.asyncio
+async def test_side_effect_command_runs_once_across_two_bots(config: Config) -> None:
+    """Two bots that each believe a command is theirs run a command with side effects once."""
+    rooms = {name: _room_with_members(_SENDER, _entity_id(config, name).full_id) for name in ("general", "research")}
+    saved: dict[tuple[str, ...], str] = {}
+
+    async def claim_room_event(*key_and_owner: str) -> str:
+        return saved.setdefault(key_and_owner[:3], key_and_owner[3])
+
+    journal_store = cast("EventJournalStore", SimpleNamespace(claim_room_event=claim_room_event))
+    assert await _command_owners(config, "!help", rooms) == ["general", "research"]
+    assert await _command_owners(config, "!thread_mode room", rooms, journal_store=journal_store) == ["general"]
+    # The saved owner still runs it when its copy of the command is replayed.
+    assert await _command_owners(config, "!thread_mode room", rooms, journal_store=journal_store) == ["general"]
+    assert saved == {(_ROOM_ID, _EVENT_ID, "command"): "general"}
+
+
+def _router_access_denies_everyone(tmp_path: Path, **general: Any) -> Config:  # noqa: ANN401
+    """Return a two-agent config whose agents admit the person and whose `router.access` does not."""
+    access = ResponderAccessConfig(users=[_SENDER])
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", access=access, **general),
+                "research": AgentConfig(display_name="Research", access=access),
+            },
+            router=RouterConfig(access=ResponderAccessConfig(users=["@owner:localhost"], current_room_members=False)),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_desktop_rule_unchanged(tmp_path: Path) -> None:
+    """A Desktop agent alone with the requester runs `/desktop` whatever else decides commands."""
+    config = _router_access_denies_everyone(tmp_path, tools=["desktop"])
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id)
+    client = AsyncMock()
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(user_id, None, None) for user_id in room.users],
+        room_id=room.room_id,
+    )
+    assert await ensure_room_membership_synced(client, room, sender_id=_SENDER)
+    room.update_summary(nio.RoomSummary(invited_member_count=0, joined_member_count=2))
+
+    assert await _command_owners(config, "!desktop status", {"general": room}) == ["general"]
+    assert await _command_owners(config, "!help", {"general": room}) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_router_access_denies_untargeted_command(tmp_path: Path) -> None:
+    """`router.access` gates a command aimed at nobody as it gates routing, and no command aimed at an agent."""
+    config = _router_access_denies_everyone(tmp_path)
+    rooms = _shared_room(config, "general", "research")
+    mention = _context(mentioned=[_entity_id(config, "research")])
+
+    assert await _command_owners(config, "!help", rooms) == []
+    assert await _command_owners(config, "!help @research", rooms, mention) == ["research"]

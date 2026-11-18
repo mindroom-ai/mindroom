@@ -677,7 +677,6 @@ class AgentBot:
                 runtime=self._runtime_view,
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
-                agent_name=self.agent_name,
                 normalizer=self._inbound_turn_normalizer,
                 turn_policy=self._turn_policy,
                 turn_store=self._turn_store,

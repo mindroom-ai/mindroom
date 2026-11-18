@@ -124,6 +124,25 @@ def get_compact_command_entries(
     ]
 
 
+COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
+    {
+        CommandType.RELOAD_PLUGINS,
+        CommandType.SCHEDULE,
+        CommandType.CANCEL_SCHEDULE,
+        CommandType.EDIT_SCHEDULE,
+        CommandType.CANCEL_JOB,
+        CommandType.DESKTOP,
+        CommandType.MODEL,
+        CommandType.MODE,
+        CommandType.ROOM_MODEL,
+        CommandType.THREAD_MODE,
+        CommandType.REPLY_MODE,
+        CommandType.AUTO_APPROVE,
+        CommandType.ENCRYPT,
+    },
+)
+
+
 @dataclass
 class Command:
     """Parsed command with arguments."""
@@ -155,6 +174,8 @@ class _CommandParser:
     ENCRYPT_PATTERN = re.compile(r"^!encrypt(?:\s+(.+))?$", re.IGNORECASE)
     E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
+    # Mentions before a command aim it at the agents they name: `@code !model`.
+    LEADING_MENTIONS_PATTERN = re.compile(r"^(?:@\S+\s+)+(?=[!/])")
 
     def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         """Parse a message for commands.
@@ -168,7 +189,7 @@ class _CommandParser:
         """
         message = message.strip()
 
-        raw_text = message.removeprefix(VOICE_PREFIX)
+        raw_text = self.LEADING_MENTIONS_PATTERN.sub("", message.removeprefix(VOICE_PREFIX))
         # `/cmd` parses like `!cmd`, but only a known command: other `/` text (paths, `/s`) is conversation.
         is_slash = raw_text.startswith("/")
         message = f"!{raw_text[1:]}" if is_slash else raw_text

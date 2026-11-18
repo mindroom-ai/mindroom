@@ -19,11 +19,16 @@ from mindroom.commands.desktop_commands import (
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
 from mindroom.commands.mode_commands import handle_mode_command
 from mindroom.commands.model_commands import handle_model_command, handle_structured_model_command
-from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
+from mindroom.commands.parsing import (
+    COMMAND_TYPES_WITH_SIDE_EFFECTS,
+    Command,
+    CommandType,
+    get_command_help,
+    get_compact_command_entries,
+)
 from mindroom.commands.reply_mode_commands import handle_reply_mode_command
 from mindroom.commands.room_model_commands import handle_room_model_command
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import (
     configured_routable_entity_ids_for_room,
     entity_identity_registry,
@@ -31,7 +36,7 @@ from mindroom.entity_resolution import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.room_membership import cached_member_ids, room_membership_is_complete
+from mindroom.matrix.room_membership import room_has_only, room_membership_is_complete
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
@@ -77,23 +82,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
-    {
-        CommandType.RELOAD_PLUGINS,
-        CommandType.SCHEDULE,
-        CommandType.CANCEL_SCHEDULE,
-        CommandType.EDIT_SCHEDULE,
-        CommandType.CANCEL_JOB,
-        CommandType.DESKTOP,
-        CommandType.MODEL,
-        CommandType.MODE,
-        CommandType.ROOM_MODEL,
-        CommandType.THREAD_MODE,
-        CommandType.REPLY_MODE,
-        CommandType.AUTO_APPROVE,
-        CommandType.ENCRYPT,
-    },
-)
 _SCHEDULE_COMMAND_TYPES = frozenset(
     {CommandType.SCHEDULE, CommandType.LIST_SCHEDULES, CommandType.EDIT_SCHEDULE, CommandType.CANCEL_SCHEDULE},
 )
@@ -321,44 +309,6 @@ def _room_admin_sender(context: CommandHandlerContext, event: _CommandEvent, req
     return event.sender
 
 
-def _room_has_only(config: Config, room: nio.MatrixRoom, member_ids: set[str]) -> bool:
-    """Return whether complete membership, including every invite, is exactly ``member_ids``."""
-    # The joined-member refresh never lists invites, so invites come from the synced projection.
-    # MindRoom's classic sync filter never loads members lazily, so that projection holds every invite.
-    # Sliding sync loads members lazily, so only the server's joined and invited counts can reveal an unseen invite.
-    # Without both counts, nio's member_count falls back to the projection size.
-    summary = room.summary
-    has_server_counts = (
-        summary is not None and summary.joined_member_count is not None and summary.invited_member_count is not None
-    )
-    return (
-        room_membership_is_complete(room)
-        and (has_server_counts or config.matrix_sync.mode == "classic")
-        and room.member_count == len(member_ids)
-        and cached_member_ids(room) == member_ids
-    )
-
-
-def agent_owns_command(
-    command: Command,
-    *,
-    agent_name: str,
-    config: Config,
-    room: nio.MatrixRoom,
-    requester_user_id: str,
-) -> bool:
-    """Return whether this bot owns one command response."""
-    if agent_name == ROUTER_AGENT_NAME:
-        return True
-    if command.type is not CommandType.DESKTOP:
-        return False
-    return chat_pairing_desktop_error(config, agent_name) is None and _room_has_only(
-        config,
-        room,
-        {requester_user_id, room.own_user_id},
-    )
-
-
 async def _desktop_agent_for_room(
     context: CommandHandlerContext,
     room: nio.MatrixRoom,
@@ -377,7 +327,7 @@ async def _desktop_agent_for_room(
     if len(eligible) != 1:
         return None
     agent_name, agent_user_id = eligible[0]
-    if not _room_has_only(context.config, room, {requester_user_id, room.own_user_id, agent_user_id}):
+    if not room_has_only(context.config, room, {requester_user_id, room.own_user_id, agent_user_id}):
         return None
     return agent_name
 

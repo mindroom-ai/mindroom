@@ -449,7 +449,7 @@ class TurnDispatcher:
                 requester_user_id=requester_user_id,
                 acts_for_requester=prepared.turn.facts.acts_for_requester,
                 command=prepared.turn.command,
-                target=prepared.dispatch.target,
+                dispatch=prepared.dispatch,
                 handled_turn=prepared.handled_turn,
             )
             if not command_owned:

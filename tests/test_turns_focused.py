@@ -726,7 +726,6 @@ def _build_harness(
             runtime=runtime,
             logger=logger,
             runtime_paths=runtime_paths,
-            agent_name=agent_name,
             normalizer=normalizer,
             conversation_reader=make_conversation_reader_mock(),
             turn_policy=cast("TurnPolicy", policy),

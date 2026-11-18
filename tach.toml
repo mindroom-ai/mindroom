@@ -5303,6 +5303,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.commands.handler",
+    "mindroom.turn_policy",
 ]
 
 [[modules]]
@@ -5392,7 +5393,6 @@ depends_on = [
     "mindroom.commands.thread_mode_commands",
     "mindroom.commands.reply_mode_commands",
     "mindroom.commands.auto_approve_commands",
-    "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.turn_record",
     "mindroom.matrix.event_info",
@@ -6320,10 +6320,13 @@ depends_on = [
 [[modules]]
 path = "mindroom.turn_policy"
 depends_on = [
+    "mindroom.commands.desktop_commands",
+    "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.contacts.turns",
     "mindroom.entity_resolution",
     "mindroom.managed_room_notice",
+    "mindroom.matrix.room_membership",
     "mindroom.matrix.rooms",
     "mindroom.responder_availability",
     "mindroom.runtime_protocols",
