@@ -181,7 +181,8 @@ class ThreadModelTools(Toolkit):
             )
         else:
             note = "The new model applies from the next message in this thread."
-        model = context.config.models[model_name]
+        # Later turns run the entry the current config holds for the name.
+        model = context.current_config.models[model_name]
         return self._payload(
             "ok",
             action="switch",

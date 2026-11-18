@@ -1005,6 +1005,20 @@ async def test_thread_model_tool_rejects_a_model_removed_since_the_turn_started(
 
 
 @pytest.mark.asyncio
+async def test_a_next_turn_switch_reports_the_model_later_turns_will_run(tmp_path: Path) -> None:
+    """A live reload that points a name at another model shows in what the switch confirms."""
+    context = _make_tool_context(tmp_path)
+    current = context.config.model_copy(deep=True)
+    current.models["large"].id = "larger-model"
+
+    with tool_runtime_context(replace(context, config_provider=lambda: current)):
+        payload = json.loads(await ThreadModelTools().switch_thread_model("large"))
+
+    assert payload["status"] == "ok"
+    assert payload["model_id"] == "larger-model"
+
+
+@pytest.mark.asyncio
 async def test_thread_model_tool_reports_stale_override_as_inactive(tmp_path: Path) -> None:
     """An override naming a removed model must not be reported as active."""
     context = _make_tool_context(tmp_path)
