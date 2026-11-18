@@ -1,4 +1,4 @@
-"""Publish the MindRoom accounts joined to a room as router state, so clients recognize agents by any user name."""
+"""Publish the router's room state that tells clients which MindRoom accounts and router are in a room."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import nio
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_room_members
-from mindroom.matrix.event_types import MINDROOM_ACCOUNTS_EVENT_TYPE
+from mindroom.matrix.event_types import MINDROOM_ACCOUNTS_EVENT_TYPE, ROUTER_BINDING_EVENT_TYPE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -63,4 +63,33 @@ async def reconcile_room_accounts(
                 return True
     except Exception:
         logger.warning("room_accounts_publish_failed", room_id=room_id, exc_info=True)
+        return False
+
+
+async def reconcile_room_router_binding(
+    client: nio.AsyncClient,
+    config: Config,  # noqa: ARG001 - shares the router room-state reconciler signature
+    runtime_paths: RuntimePaths,  # noqa: ARG001
+    room_id: str,
+) -> bool:
+    """Name this router as the room's router unless the binding already does, and return whether it is current.
+
+    Rooms whose power levels keep the router from sending state refuse it, which logs at debug. Failures leave it to
+    the next trigger.
+    """
+    try:
+        async with asyncio.timeout(10):
+            content = {"user_id": client.user_id}
+            current = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
+            if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
+                return True
+            response = await client.room_put_state(room_id, ROUTER_BINDING_EVENT_TYPE, content, state_key="")
+            if not isinstance(response, nio.RoomPutStateResponse):
+                forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+                log = logger.debug if forbidden else logger.warning
+                log("room_router_binding_publish_failed", room_id=room_id, error=str(response))
+                return False
+            return True
+    except Exception:
+        logger.warning("room_router_binding_publish_failed", room_id=room_id, exc_info=True)
         return False

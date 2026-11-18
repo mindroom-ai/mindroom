@@ -19,7 +19,7 @@ from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import AdmissionFacts, RoomMembershipPosition
-from mindroom.matrix.room_accounts import reconcile_room_accounts
+from mindroom.matrix.room_accounts import reconcile_room_accounts, reconcile_room_router_binding
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.users import AgentMatrixUser
@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
 EVENT_TYPE = "io.mindroom.thread_mode"
 ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
+ROUTER_EVENT_TYPE = "io.mindroom.router"
 ROOM_ID = "!room:localhost"
 
 type RoomState = tuple[Config, RuntimePaths, dict[str, MatrixID], dict[tuple[str, str], dict[str, str]], AsyncMock]
@@ -277,11 +278,56 @@ async def test_a_room_that_refuses_the_routers_state_is_no_warning(
     client.room_put_state.return_value = nio.RoomPutStateError("user_level (0) < send_level (50)", status_code)
     with capture_logs() as logs:
         await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
-    assert {write.args[1] for write in client.room_put_state.await_args_list} == {EVENT_TYPE, ACCOUNTS_EVENT_TYPE}
+    assert {write.args[1] for write in client.room_put_state.await_args_list} == {
+        EVENT_TYPE,
+        ACCOUNTS_EVENT_TYPE,
+        ROUTER_EVENT_TYPE,
+    }
     assert sorted((log["event"], log["log_level"]) for log in logs) == [
         ("room_accounts_publish_failed", level),
+        ("room_router_binding_publish_failed", level),
         ("room_thread_mode_reconcile_failed", level),
     ]
+
+
+@pytest.mark.asyncio
+async def test_router_binding_names_the_router_once(room_state: RoomState) -> None:
+    """The router claims the room's router binding, replaces another claim, and leaves its own claim alone."""
+    config, paths, ids, events, client = room_state
+    router = ids[ROUTER_AGENT_NAME].full_id
+    events[ROUTER_EVENT_TYPE, ""] = {"user_id": "@other_router:elsewhere.invalid"}
+
+    assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is True
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": router}
+    assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is True
+    assert len(_writes(client, ROUTER_EVENT_TYPE)) == 1
+    assert _writes(client, ROUTER_EVENT_TYPE)[0].kwargs["state_key"] == ""
+
+
+@pytest.mark.asyncio
+async def test_router_binding_failure_is_nonfatal(room_state: RoomState) -> None:
+    """A binding read that raises logs a warning and reports the room as not current instead of raising."""
+    config, paths, _, _, client = room_state
+    client.room_get_state_event.side_effect = RuntimeError("homeserver unavailable")
+    with capture_logs() as logs:
+        assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is False
+    assert [(log["event"], log["log_level"]) for log in logs] == [("room_router_binding_publish_failed", "warning")]
+
+
+@pytest.mark.asyncio
+async def test_router_publishes_its_binding_on_start_and_join(room_state: RoomState) -> None:
+    """Both router room-state paths, a start or reload and a room the router joined, publish the binding."""
+    config, paths, ids, events, client = room_state
+    binding = {"user_id": ids[ROUTER_AGENT_NAME].full_id}
+
+    await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+    assert events[ROUTER_EVENT_TYPE, ""] == binding
+
+    del events[ROUTER_EVENT_TYPE, ""]
+    duties = _router_duties(room_state)
+    duties.mark_joined_for_room_state(ROOM_ID)
+    await duties.publish_joined_room_state()
+    assert events[ROUTER_EVENT_TYPE, ""] == binding
 
 
 @pytest.mark.asyncio
