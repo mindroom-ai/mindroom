@@ -245,12 +245,12 @@ def _reasoning_segment_stream() -> AsyncIterator[Any]:
     )
 
 
-def _live_segments(sent: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The segments the frames left, taking each snapshot's and each delta that carries them."""
-    segments: list[dict[str, Any]] = []
+def _live_list(sent: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    """The list under ``key`` the frames left, taking each snapshot's and each delta that carries one."""
+    current: list[dict[str, Any]] = []
     for frame in sent:
-        segments = frame.get("snapshot", frame.get("delta", {})).get("segments", segments)
-    return segments
+        current = frame.get("snapshot", frame.get("delta", {})).get(key, current)
+    return current
 
 
 @pytest.mark.asyncio
@@ -269,7 +269,7 @@ async def test_reasoning_segments_record_where_each_began(tmp_path: Path, frames
     assert segments[1]["start"] == 10
     assert all(isinstance(segment["duration_ms"], int) and segment["duration_ms"] >= 0 for segment in segments)
     assert abs(sum(segment["duration_ms"] for segment in segments) - reasoning["duration_ms"]) <= len(segments)
-    assert _live_segments(frames.sent) == [
+    assert _live_list(frames.sent, "segments") == [
         {"start": segment["start"], "after_tool": segment["after_tool"]} for segment in segments
     ]
 
@@ -290,7 +290,7 @@ async def test_reasoning_segments_anchor_to_the_top_when_tool_calls_are_hidden(t
     segments = _terminal(records)["io.mindroom.reasoning"]["segments"]
     assert len(segments) == 2
     assert all(segment["after_tool"] == 0 for segment in segments)
-    assert all(segment["after_tool"] == 0 for segment in _live_segments(frames.sent))
+    assert all(segment["after_tool"] == 0 for segment in _live_list(frames.sent, "segments"))
 
 
 @pytest.mark.asyncio
@@ -324,7 +324,7 @@ async def test_empty_reasoning_deltas_open_no_segment(tmp_path: Path, frames: _F
     reasoning = _terminal(records)["io.mindroom.reasoning"]
     assert reasoning["text"] == "a\n\nb"
     assert [(segment["start"], segment["after_tool"]) for segment in reasoning["segments"]] == [(0, 1), (3, 1)]
-    assert _live_segments(frames.sent) == [{"start": 0, "after_tool": 1}, {"start": 3, "after_tool": 1}]
+    assert _live_list(frames.sent, "segments") == [{"start": 0, "after_tool": 1}, {"start": 3, "after_tool": 1}]
 
 
 @pytest.mark.asyncio
@@ -355,7 +355,7 @@ async def test_reasoning_after_two_tool_calls_anchors_after_the_second(tmp_path:
 
     (segment,) = _terminal(records)["io.mindroom.reasoning"]["segments"]
     assert (segment["start"], segment["after_tool"]) == (0, 2)
-    assert _live_segments(frames.sent) == [{"start": 0, "after_tool": 2}]
+    assert _live_list(frames.sent, "segments") == [{"start": 0, "after_tool": 2}]
 
 
 @pytest.mark.asyncio
@@ -420,10 +420,20 @@ class _Compaction:
         self.recorder.update(self.entry_id, status="failed", failure_reason="Summary model failed.", duration_ms=70)
 
 
-def _two_tool_calls_then(*after: str | float | Callable[[], object]) -> AsyncIterator[Any]:
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("show_tool_calls", "after_tool"), [(True, 2), (False, 0)])
+async def test_compaction_after_two_tool_calls_anchors_after_the_shown_ones(
+    tmp_path: Path,
+    frames: _Frames,
+    show_tool_calls: bool,
+    after_tool: int,
+) -> None:
+    """A compaction after two tool calls sits after the second when they show, else at the top of the reply."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
     first = ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={"query": "matrix"})
     second = ReportedCall(tool_call_id="call-2", tool_name="web_search", tool_args={"query": "nio"})
-    return _stream(
+    stream = _stream(
         ToolStarted(first),
         0.03,
         ToolCompleted(ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={}, result="ok")),
@@ -432,23 +442,13 @@ def _two_tool_calls_then(*after: str | float | Callable[[], object]) -> AsyncIte
         0.03,
         ToolCompleted(ReportedCall(tool_call_id="call-2", tool_name="web_search", tool_args={}, result="ok")),
         0.03,
-        *after,
+        compaction.start,
+        0.05,
+        compaction.succeed,
+        0.05,
+        "Answer.",
+        0.03,
     )
-
-
-def _live_compactions(sent: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The compaction entries the frames left, taking each snapshot's and each delta that carries them."""
-    compactions: list[dict[str, Any]] = []
-    for frame in sent:
-        compactions = frame.get("snapshot", frame.get("delta", {})).get("compactions", compactions)
-    return compactions
-
-
-async def _anchored_compaction(tmp_path: Path, frames: _Frames, *, show_tool_calls: bool) -> tuple[int, int]:
-    """Run a compaction after two tool calls; return where the final event and the frames anchor it."""
-    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
-    compaction = _Compaction(recorder)
-    stream = _two_tool_calls_then(compaction.start, 0.05, compaction.succeed, 0.05, "Answer.", 0.03)
     await _run(
         _config(tmp_path),
         stream,
@@ -460,21 +460,9 @@ async def _anchored_compaction(tmp_path: Path, frames: _Frames, *, show_tool_cal
     )
 
     [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
-    [live_entry] = _live_compactions(frames.sent)
+    [live_entry] = _live_list(frames.sent, "compactions")
     assert live_entry["status"] == "success"
-    return entry["after_tool"], live_entry["after_tool"]
-
-
-@pytest.mark.asyncio
-async def test_compaction_after_two_visible_tools_anchors_after_tool_2(tmp_path: Path, frames: _Frames) -> None:
-    """A compaction that began after two shown tool calls sits after the second, in frames and the final event."""
-    assert await _anchored_compaction(tmp_path, frames, show_tool_calls=True) == (2, 2)
-
-
-@pytest.mark.asyncio
-async def test_compaction_with_hidden_tool_calls_anchors_at_zero(tmp_path: Path, frames: _Frames) -> None:
-    """Without tool-call markers in the body, a compaction sits at the top of the reply."""
-    assert await _anchored_compaction(tmp_path, frames, show_tool_calls=False) == (0, 0)
+    assert entry["after_tool"] == live_entry["after_tool"] == after_tool
 
 
 @pytest.mark.asyncio
@@ -508,7 +496,7 @@ async def test_compaction_in_a_resumed_reply_anchors_after_the_resumed_tools(
 
     [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
     assert entry["after_tool"] == after_tool
-    assert [live["after_tool"] for live in _live_compactions(frames.sent)] == [after_tool]
+    assert [live["after_tool"] for live in _live_list(frames.sent, "compactions")] == [after_tool]
 
 
 @pytest.mark.asyncio
@@ -584,7 +572,7 @@ async def test_a_regenerations_compaction_never_blanks_the_answer_it_replaces(
     if live_frames:
         # No frame goes out before the first text, and every later one only grows from it.
         assert frames.sent[0]["snapshot"]["md"] == "New answer."
-        assert [live["status"] for live in _live_compactions(frames.sent)] == ["success"]
+        assert [live["status"] for live in _live_list(frames.sent, "compactions")] == ["success"]
     else:
         assert not frames.sent
     [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
@@ -628,7 +616,7 @@ async def test_with_frames_a_compaction_shows_live_without_a_durable_write(tmp_p
         compactions=recorder,
     )
 
-    assert [entry["status"] for entry in _live_compactions(frames.sent)] == ["running"]
+    assert [entry["status"] for entry in _live_list(frames.sent, "compactions")] == ["running"]
     assert PROGRESS_PLACEHOLDER not in [content["body"] for content in edits.contents]
 
 
@@ -715,7 +703,7 @@ async def test_failed_compaction_is_terminal_on_final_event(tmp_path: Path, fram
     assert entry["status"] == "failed"
     assert entry["failure_reason"] == "Summary model failed."
     assert "runs_remaining" not in entry
-    assert [live["status"] for live in _live_compactions(frames.sent)] == ["failed"]
+    assert [live["status"] for live in _live_list(frames.sent, "compactions")] == ["failed"]
 
 
 @pytest.mark.asyncio
@@ -725,7 +713,7 @@ async def test_reply_without_compactions_carries_no_key(tmp_path: Path, frames: 
     await _run(_config(tmp_path), _stream("Hello", 0.05), records, edits, compactions=recorder)
 
     assert COMPACTIONS_CONTENT_KEY not in _terminal(records)
-    assert _live_compactions(frames.sent) == []
+    assert _live_list(frames.sent, "compactions") == []
 
 
 @pytest.mark.asyncio
