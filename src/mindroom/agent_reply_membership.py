@@ -382,7 +382,8 @@ class AgentReplyMembershipIndex:
 
         A room without a row gets an unready one, and a room the snapshot holds unjoined counts as possibly joined;
         both ask the next refresh to read it. Another account's ready row for the room stays as it is.
-        The account having ``joined`` the room is discovery evidence only: it changes just a room held unjoined.
+        The account having ``joined`` the room is discovery evidence only: it changes just a room held unjoined,
+        and a refresh in flight notes it, because its room lists may predate the join.
         """
         signature = _agent_reply_membership_policy_signature(config)
         snapshot = self._snapshot
