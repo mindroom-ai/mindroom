@@ -432,13 +432,15 @@ async def test_sync_frames_request_one_refresh_without_waiting_for_it() -> None:
         await answered.wait()
         memberships.needs_refresh.return_value = False
 
-    assert membership_sync.request_refresh(config, held_refresh) is None
-    await asyncio.sleep(0)
-    assert membership_sync.request_refresh(config, held_refresh) is None
-    await asyncio.sleep(0)
+    try:
+        assert membership_sync.request_refresh(config, held_refresh) is None
+        await asyncio.sleep(0)
+        assert membership_sync.request_refresh(config, held_refresh) is None
+        await asyncio.sleep(0)
 
-    assert refreshes == 1
-    answered.set()
+        assert refreshes == 1
+    finally:
+        answered.set()
     await asyncio.wait_for(membership_sync.refresh_for_access_check(config, held_refresh), 5)
     assert refreshes == 1
     assert not memberships.needs_refresh(config)
