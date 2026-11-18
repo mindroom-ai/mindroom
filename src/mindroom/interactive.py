@@ -306,15 +306,23 @@ def _coerce_interactive_payload(raw_json: str) -> tuple[str, list[dict[str, str]
 
 
 def _with_distinct_emojis(options: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Give each option its own emoji, since the emoji is the option's reaction key."""
-    used = {opt["emoji"] for opt in options}
+    """Give each option its own emoji, since the emoji is the option's reaction key.
+
+    Emojis that differ only by a variation selector look the same, and bare digits collide with the numbered replies,
+    so both count as taken.
+    """
+
+    def look(emoji: str) -> str:
+        return emoji.replace("\ufe0f", "")
+
+    used = {look(opt["emoji"]) for opt in options if not opt["emoji"].isdigit()}
     seen: set[str] = set()
     for position, opt in enumerate(options):
-        if opt["emoji"] in seen:
+        if look(opt["emoji"]) in seen or opt["emoji"].isdigit():
             candidates = (_KEYCAP_EMOJIS[position], *_KEYCAP_EMOJIS)
-            opt["emoji"] = next(key for key in candidates if key not in used)
-            used.add(opt["emoji"])
-        seen.add(opt["emoji"])
+            opt["emoji"] = next(key for key in candidates if look(key) not in used)
+            used.add(look(opt["emoji"]))
+        seen.add(look(opt["emoji"]))
     return options
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -376,6 +377,27 @@ Second question:
             "4": "nothing",
         }
         assert "2. 1️⃣ Backup only" in response.formatted_text
+
+    @pytest.mark.parametrize(
+        ("emojis", "expected"),
+        [
+            (["🛟", "🛟", "2\u20e3"], ["🛟", "1️⃣", "2\u20e3"]),
+            (["2", "2"], ["1️⃣", "2️⃣"]),
+        ],
+    )
+    def test_parse_and_format_interactive_treats_lookalike_and_digit_emojis_as_taken(
+        self,
+        emojis: list[str],
+        expected: list[str],
+    ) -> None:
+        """A keycap without U+FE0F looks like one with it, and a bare digit is a numbered reply, so neither is free."""
+        options = [{"emoji": emoji, "label": f"Option {i}", "value": f"v{i}"} for i, emoji in enumerate(emojis)]
+        response_text = f"```interactive\n{json.dumps({'question': 'Q?', 'options': options})}\n```"
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.interactive_metadata is not None
+        assert [opt["emoji"] for opt in response.interactive_metadata.options_as_list()] == expected
 
     def test_parse_and_format_interactive_removes_malformed_extra_blocks(self) -> None:
         """Malformed extra blocks should not leak raw interactive fences into the message."""
