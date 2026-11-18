@@ -1915,7 +1915,7 @@ class TestConfigInit:
 
         config_text = target.read_text(encoding="utf-8")
         assert "# fable:" in config_text
-        assert "#   id: anthropic.claude-fable-5-2" in config_text
+        assert "#   id: anthropic.claude-fable-5-1" in config_text
         assert "# sonnet:" in config_text
         assert "#   id: anthropic.claude-sonnet-5-5" in config_text
         assert "# haiku:" in config_text

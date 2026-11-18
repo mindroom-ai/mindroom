@@ -144,7 +144,7 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
     )
     assert bedrock_alternatives["fable"] == model_defaults.ModelPreset(
         "bedrock_claude",
-        "anthropic.claude-fable-5-2",
+        "anthropic.claude-fable-5-1",
         1_000_000,
     )
     assert openrouter_alternatives["fable"] == model_defaults.ModelPreset(

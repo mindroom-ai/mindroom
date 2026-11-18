@@ -240,7 +240,8 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
 Model IDs were checked against the provider and Codex model catalogs on November 18, 2026.
-OpenRouter uses `anthropic/claude-fable-5.2`, Bedrock uses `anthropic.claude-fable-5-2` (global inference profile `global.anthropic.claude-fable-5-2`), and the direct Anthropic and Vertex APIs use `claude-fable-5-2`.
+OpenRouter uses `anthropic/claude-fable-5.2`, and the direct Anthropic and Vertex APIs use `claude-fable-5-2`.
+MindRoom's `bedrock_claude` provider calls Claude in Amazon Bedrock (the bedrock-mantle endpoint), which does not serve Fable 5.2 (Bedrock offers it on `bedrock-runtime` only), so `bedrock_claude` uses `anthropic.claude-fable-5-1`.
 Likewise, OpenRouter uses `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5`, and Bedrock uses `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5`.
 For the direct DeepSeek API, prefer `deepseek-flash` for V4.1 Flash and `deepseek-v4-pro` for Pro; do not substitute the OpenRouter V4.1 ID on the direct API.
 The older `deepseek-v4-flash` name remains accepted as a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).

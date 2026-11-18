@@ -139,7 +139,9 @@ TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES = (
     "claude-sonnet-4-20250514",
     "claude-sonnet-4@",
 )
-_AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5-2"
+# Claude in Amazon Bedrock (the bedrock-mantle endpoint `bedrock_claude` calls) does not serve Fable 5.2, which
+# Bedrock offers on its bedrock-runtime endpoint only, so this route keeps Fable 5.1.
+_AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5-1"
 _AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5-5"
 _AWS_BEDROCK_CLAUDE_SONNET = "anthropic.claude-sonnet-5-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "anthropic.claude-haiku-5-5"
