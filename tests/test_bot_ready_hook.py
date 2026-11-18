@@ -449,26 +449,27 @@ def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path) -> None:
-    """The first successful response in each receive generation rebuilds grants.
-
-    Startup publishes semantic callbacks on the router's ready signal, so the
-    rebuild must finish before that signal.
-    """
+async def test_second_bots_frame_completes_while_the_refresh_another_frame_asked_for_is_open(tmp_path: Path) -> None:
+    """A frame asks for the grant rebuild and goes on: no bot's frame waits for another account's Matrix reads."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot.mark_sync_loop_started()
-    call_order: list[str] = []
-    orchestrator.refresh_agent_reply_memberships.side_effect = lambda: call_order.append("refresh")
-    orchestrator.handle_bot_ready.side_effect = lambda _bot: call_order.append("ready")
+    other = _agent_bot(tmp_path, agent_name="other", orchestrator=orchestrator)
+    answered = asyncio.Event()
+    orchestrator.refresh_agent_reply_memberships.side_effect = answered.wait
+    completed: list[str] = []
 
-    with (
-        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-    ):
-        await _complete_frame(bot)
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        for frame_bot in (bot, other):
+            frame_bot.client = make_matrix_client_mock(user_id=frame_bot.agent_user.user_id)
+            frame_bot.mark_sync_loop_started()
+            await asyncio.wait_for(_complete_frame(frame_bot), SETTLE_TIMEOUT_SECONDS)
+            completed.append(frame_bot.agent_name)
+            await asyncio.sleep(0)
 
+    assert completed == ["router", "other"]
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
-    assert call_order == ["refresh", "ready"]
+    assert orchestrator.handle_bot_ready.await_count == 2
+    answered.set()
+    await orchestrator.agent_reply_membership_sync.close()
 
 
 @pytest.mark.asyncio
@@ -492,6 +493,7 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
         call(bot.config, bot.matrix_id.full_id, reason=reason)
         for reason in ("uncertain_sync_response", "sync_caught_up")
     ]
+    await asyncio.sleep(0)  # the frame asked for the refresh, which runs in a task of its own
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 
 

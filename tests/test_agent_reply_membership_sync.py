@@ -415,8 +415,95 @@ async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
 
 
 @pytest.mark.asyncio
-async def test_sync_frame_waits_at_most_ten_seconds_for_a_slow_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A slow refresh keeps running after the frame stops waiting, and the next frame waits for it instead of another."""
+async def test_sync_frames_request_one_refresh_without_waiting_for_it() -> None:
+    """A bot's sync frame only asks for the refresh, so a second bot's frame goes on while the first one's is open."""
+    config = Config()
+    memberships = MagicMock(spec=AgentReplyMembershipIndex)
+    memberships.needs_refresh.return_value = True
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
+    answered = asyncio.Event()
+    refreshes = 0
+
+    async def held_refresh() -> None:
+        nonlocal refreshes
+        refreshes += 1
+        await answered.wait()
+        memberships.needs_refresh.return_value = False
+
+    assert membership_sync.request_refresh(config, held_refresh) is None
+    await asyncio.sleep(0)
+    assert membership_sync.request_refresh(config, held_refresh) is None
+    await asyncio.sleep(0)
+
+    assert refreshes == 1
+    answered.set()
+    await membership_sync.refresh_for_access_check(config, held_refresh)
+    assert refreshes == 1
+    assert not memberships.needs_refresh(config)
+
+
+@pytest.mark.asyncio
+async def test_refresh_voided_by_a_grant_loss_runs_again_at_once_without_a_failure_backoff() -> None:
+    """Only a failed read backs off: a refresh a grant loss voided is followed by another in the same task."""
+    config = Config()
+    memberships = MagicMock(spec=AgentReplyMembershipIndex)
+    memberships.needs_refresh.return_value = True
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
+    refreshes = 0
+
+    async def refresh() -> None:
+        nonlocal refreshes
+        refreshes += 1
+        if refreshes == 1:
+            # A bot's receive loop failed while this refresh read Matrix, which voids it.
+            membership_sync.invalidate_observer(config, _OBSERVER, reason="sync_failure")
+        elif refreshes == 2:
+            memberships.needs_refresh.return_value = False
+
+    membership_sync.request_refresh(config, refresh)
+    await asyncio.wait_for(membership_sync.refresh_for_access_check(config, refresh), 5)
+
+    assert refreshes == 2
+    assert membership_sync._refresh_retry_at == 0.0
+
+    memberships.needs_refresh.return_value = True
+    refreshes = 2
+    membership_sync.request_refresh(config, refresh)
+    await asyncio.wait_for(membership_sync.refresh_for_access_check(config, refresh), 5)
+
+    assert refreshes == 3
+    assert membership_sync._refresh_retry_at > 0.0
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_the_refresh_in_flight_and_waits_for_its_end() -> None:
+    """The runtime ends the shared refresh once, at process shutdown."""
+    config = Config()
+    memberships = MagicMock(spec=AgentReplyMembershipIndex)
+    memberships.needs_refresh.return_value = True
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
+    started = asyncio.Event()
+    ended: list[str] = []
+
+    async def held_refresh() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            ended.append("refresh")
+
+    await membership_sync.close()
+    membership_sync.request_refresh(config, held_refresh)
+    await asyncio.wait_for(started.wait(), 5)
+
+    await asyncio.wait_for(membership_sync.close(), 5)
+
+    assert ended == ["refresh"]
+
+
+@pytest.mark.asyncio
+async def test_startup_gate_waits_at_most_ten_seconds_for_a_slow_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow refresh keeps running after the startup gate stops waiting, and a later wait joins it instead of another."""
     config = Config()
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     memberships.needs_refresh.return_value = True

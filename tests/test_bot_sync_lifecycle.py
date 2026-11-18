@@ -310,7 +310,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             patch.object(bot, "_schedule_delivery_recovery"),
             patch.object(bot._turn_store, "cleanup", side_effect=blocked_cleanup) as cleanup,
             # A grant refresh would schedule turn recovery, which runs a retention pass of its own.
-            patch.object(bot.orchestrator.agent_reply_membership_sync, "refresh_if_needed"),
+            patch.object(bot.orchestrator.agent_reply_membership_sync, "request_refresh"),
         ):
             bot._next_handled_turn_cleanup_at = 0.0
             await bot._run_sync_response_side_effects(first_sync_response=False)

@@ -1370,7 +1370,7 @@ class AgentBot:
         if not self.observes_room_members and self.accepting_work:
             # This receive loop caught up, so the account observes rooms from now on, and may be the only one in some.
             self.invalidate_agent_reply_memberships(reason="sync_caught_up", observing=True)
-        await orchestrator.agent_reply_membership_sync.refresh_if_needed(
+        orchestrator.agent_reply_membership_sync.request_refresh(
             orchestrator.config,
             orchestrator.refresh_agent_reply_memberships,
         )

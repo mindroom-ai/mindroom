@@ -5819,6 +5819,27 @@ async def test_shutdown_fails_room_grants_closed(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_shutdown_ends_the_grant_refresh_in_flight(tmp_path: Path) -> None:
+    """No bot owns the grant refresh, so the runtime itself cancels it and waits for its end at process shutdown."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+    ended: list[str] = []
+
+    async def held_refresh() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            ended.append("refresh")
+
+    with patch.object(orchestrator, "refresh_agent_reply_memberships", side_effect=held_refresh) as refresh:
+        orchestrator.agent_reply_membership_sync.request_refresh(orchestrator.config, refresh)
+        await _await_until(lambda: refresh.await_count == 1)
+
+        await asyncio.wait_for(orchestrator.stop(), 10)
+
+    assert ended == ["refresh"]
+
+
+@pytest.mark.asyncio
 async def test_grant_refresh_reads_through_the_synced_bots_only(tmp_path: Path) -> None:
     """A refresh is given the clients of the bots whose own sync is live; without one it still runs and grants nothing."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
@@ -5836,6 +5857,29 @@ async def test_grant_refresh_reads_through_the_synced_bots_only(tmp_path: Path) 
         await orchestrator.refresh_agent_reply_memberships()
 
     assert clients == [[], [synced.client]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ended_by", ["refresh", "shutdown"])
+async def test_startup_publication_waits_for_the_grant_refresh_after_the_routers_first_frame(
+    tmp_path: Path,
+    ended_by: str,
+) -> None:
+    """Sync frames only ask for the grant rebuild, so startup publication waits for it itself, unless shutdown wins."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+    answered = asyncio.Event()
+    shutdown = asyncio.Event()
+    orchestrator._router_reply_memberships_live_sync_ready.set()
+
+    with patch.object(orchestrator, "refresh_agent_reply_memberships", side_effect=answered.wait) as refresh:
+        gate = asyncio.create_task(orchestrator._wait_for_router_reply_memberships_or_shutdown(shutdown))
+        await _await_until(lambda: refresh.await_count == 1)
+        assert not gate.done()
+        (answered if ended_by == "refresh" else shutdown).set()
+
+        assert await asyncio.wait_for(gate, 5) is (ended_by == "refresh")
+        answered.set()
+        await orchestrator.agent_reply_membership_sync.close()
 
 
 @pytest.mark.asyncio

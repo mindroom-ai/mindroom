@@ -70,7 +70,7 @@ class RecordingRouter:
     client: object
     config: Config
     running: bool = True
-    first_sync_complete: bool = True
+    observes_room_members: bool = True
     accepting_work: bool = True
     follow_ups: list[str] = field(default_factory=list)
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import suppress
 from typing import TYPE_CHECKING, Protocol
 
 import nio
@@ -60,6 +59,8 @@ class AgentReplyMembershipSync:
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         self._refresh_task: asyncio.Task[None] | None = None
+        # Counts the grant losses, each of which voids the refresh in flight.
+        self._grant_losses = 0
         self._live_transition_lock = asyncio.Lock()
         self._live_effects_pending = False
 
@@ -122,22 +123,36 @@ class AgentReplyMembershipSync:
 
         This never starts a call. An own join only asks for the rebuild: it revokes nothing.
         """
+        self._grant_losses += 1
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         for bot in self._bots() if revoke else ():
             bot.schedule_reply_authorized_call_revocation()
 
-    async def refresh_if_needed(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
-        """Refresh once when due, apply bounded retry backoff on failure, and wait for the refresh at most 10 s.
+    def request_refresh(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
+        """Start the refresh when it is due and none is in flight, without waiting for it.
 
-        A slower refresh keeps running in the background, so a bot's sync frame never stalls behind a slow homeserver
-        and a large rebuild still finishes; the next frame waits for that refresh instead of starting one.
+        Every bot's sync frame calls this. A frame never waits for another account's Matrix reads: grants the
+        refresh has not rebuilt yet stay pending, which denies nothing and grants nothing.
         No bot owns the refresh, so a stopping one does not cancel it: its invalidation keeps it from publishing.
+        """
+        self._refresh_task_when_needed(config, refresh, after_backoff=True)
+
+    async def refresh_if_needed(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
+        """Request the refresh as above and wait for it at most 10 s, for the startup publication gate alone.
+
+        A slower refresh keeps running in the background, and one that raises leaves the grants as they were.
         """
         task = self._refresh_task_when_needed(config, refresh, after_backoff=True)
         if task is not None:
-            with suppress(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task), 10)
+            await asyncio.wait([task], timeout=10)
+
+    async def close(self) -> None:
+        """Cancel the refresh in flight and wait for its end; the runtime calls this once, at process shutdown."""
+        task = self._refresh_task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.wait([task])
 
     async def refresh_for_access_check(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
         """Refresh at once when grants need it, even during backoff, and wait until the refresh ends.
@@ -172,11 +187,15 @@ class AgentReplyMembershipSync:
         return self._refresh_task
 
     async def _refresh(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
-        await refresh()
-        if not self._memberships.needs_refresh(config):
-            self._refresh_attempt = 0
-            self._refresh_retry_at = 0.0
-            return
+        """Refresh, again at once while a grant loss voided the attempt; only a failed read sets the retry backoff."""
+        grant_losses = -1
+        while grant_losses != self._grant_losses:
+            grant_losses = self._grant_losses
+            await refresh()
+            if not self._memberships.needs_refresh(config):
+                self._refresh_attempt = 0
+                self._refresh_retry_at = 0.0
+                return
         self._refresh_attempt += 1
         self._refresh_retry_at = time.monotonic() + retry_delay_seconds(
             self._refresh_attempt,

@@ -1156,9 +1156,9 @@ class _MultiAgentOrchestrator:
                 return
 
             # Publish semantic callbacks once the router's initial owned sync
-            # frame has waited up to 10 s for room-backed reply grants to be
-            # rebuilt from Matrix; sources that need a grant not yet rebuilt
-            # stay pending and replay once the refresh publishes. Room setup
+            # frame settled and this gate has waited up to 10 s for room-backed
+            # reply grants to be rebuilt from Matrix; sources that need a grant
+            # not yet rebuilt stay pending and replay once the refresh publishes. Room setup
             # keeps running in the background: a grant room it has not joined
             # or created yet stays pending, and its sources replay after setup
             # refreshes the grants.
@@ -1202,7 +1202,13 @@ class _MultiAgentOrchestrator:
         runtime_shutdown_event: asyncio.Event,
     ) -> bool:
         """Wait until router sync closes the startup snapshot gap, or shutdown wins."""
-        ready_wait = asyncio.create_task(self._router_reply_memberships_live_sync_ready.wait())
+
+        async def router_synced_and_grants_rebuilt() -> None:
+            await self._router_reply_memberships_live_sync_ready.wait()
+            # Sync frames only request the rebuild; startup publication alone waits for it, at most 10 s.
+            await self.agent_reply_membership_sync.refresh_if_needed(self.config, self.refresh_agent_reply_memberships)
+
+        ready_wait = asyncio.create_task(router_synced_and_grants_rebuilt())
         shutdown_wait = asyncio.create_task(runtime_shutdown_event.wait())
         try:
             done, _pending = await asyncio.wait(
@@ -1561,6 +1567,8 @@ class _MultiAgentOrchestrator:
         await run_shutdown_step("mcp_manager", self._stop_mcp_manager())
 
         fleet_shutdown = await self.fleet.stop_all()
+        # No bot owns the grant refresh, and after the last bot stopped no sync frame asks for another.
+        await run_shutdown_step("reply_membership_refresh", self.agent_reply_membership_sync.close())
         await run_shutdown_step("plugin_lifespans", self._plugin_lifespans.stop())
         await run_shutdown_step("attachment_cleanup", wait_for_attachment_cleanup_tasks())
         # Last, because every bot borrows it: closing it earlier would pull the
