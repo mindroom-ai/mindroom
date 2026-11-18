@@ -2,16 +2,21 @@
 
 The setting is the room's `io.mindroom.room_settings` state with state key `reply_mode` and content `{"value": mode}`;
 `{}` or no event leaves it unset. The runtime keeps a copy per room, so checks that cannot wait for the homeserver use
-it. Only a read or write of the room's state confirms the copy; a change arriving in sync applies at once but leaves the
-copy unconfirmed, since each bot's sync delivers it on its own schedule, and the next refresh reads the room.
+it, and a turn reads the room unless a read confirmed the copy recently.
+
+One rule keeps the copy: every read and write is numbered when it starts, every write's acknowledgement and every live
+event when it arrives, and a result never replaces one numbered after it. So a read that started before a write took
+effect, or before a change arrived in sync, changes nothing once that write or change is in. Only a read confirms the
+copy. A live event applies at once but stays unconfirmed, since each bot's sync delivers it on its own schedule and it
+may be a late copy of an older change; the bot that saw it reads the room again.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
-from collections import defaultdict
-from typing import TYPE_CHECKING, cast, get_args
+from typing import TYPE_CHECKING, NamedTuple, cast, get_args
 
 from mindroom.config.agent import RoomReplyMode
 from mindroom.constants import tracking_dir
@@ -38,11 +43,25 @@ _REQUEST_TIMEOUT_SECONDS = 5.0
 # Runtimes before the room setting stored overrides in this file; each moves into its room's state when first read.
 _LEGACY_FILENAME = "room_reply_modes.json"
 _UNCONFIRMED = float("-inf")
+_order = itertools.count(1)
 
-# Per room: the mode, and when a read or write confirmed it, _UNCONFIRMED until one does.
-_known: dict[tuple[Path, str], tuple[RoomReplyMode | None, float]] = {}
-# Per room: bumped by each change arriving in sync and each write, so a read or write overlapping one confirms nothing.
-_changes: defaultdict[tuple[Path, str], int] = defaultdict(int)
+
+class _Copy(NamedTuple):
+    mode: RoomReplyMode | None
+    # The number of the read, acknowledgement, or event it came from.
+    order: int
+    # When the read it came from returned, or _UNCONFIRMED.
+    confirmed_at: float
+
+
+class ReplyModeRead(NamedTuple):
+    """What one refresh found: the room's setting, or with ``ok`` False the runtime's copy when the room was unread."""
+
+    ok: bool
+    mode: RoomReplyMode | None
+
+
+_known: dict[tuple[Path, str], _Copy] = {}
 
 
 def _key(runtime_paths: RuntimePaths, room_id: str) -> tuple[Path, str]:
@@ -58,19 +77,24 @@ def _is_setting(source: Mapping[str, object]) -> bool:
     return source.get("type") == ROOM_SETTINGS_EVENT_TYPE and source.get("state_key") == _SETTING_KEY
 
 
+def _take(key: tuple[Path, str], mode: RoomReplyMode | None, order: int, *, confirmed: bool) -> None:
+    """Keep a result unless one numbered after it is kept already."""
+    known = _known.get(key)
+    if known is None or known.order < order:
+        _known[key] = _Copy(mode, order, time.monotonic() if confirmed else _UNCONFIRMED)
+
+
 def resolve_room_reply_mode_override(runtime_paths: RuntimePaths, room_id: str) -> RoomReplyMode | None:
     """Return the room's reply mode setting as the runtime last knew it, None while unset or never read."""
     known = _known.get(_key(runtime_paths, room_id))
-    return None if known is None else known[0]
+    return None if known is None else known.mode
 
 
 def observe_room_settings_event(runtime_paths: RuntimePaths, room_id: str, source: Mapping[str, object]) -> bool:
     """Take a live `reply_mode` event's value, unconfirmed; return whether it was one, which the caller reads again."""
     if not _is_setting(source):
         return False
-    key = _key(runtime_paths, room_id)
-    _changes[key] += 1
-    _known[key] = (_mode_from_content(source.get("content")), _UNCONFIRMED)
+    _take(_key(runtime_paths, room_id), _mode_from_content(source.get("content")), next(_order), confirmed=False)
     return True
 
 
@@ -84,24 +108,8 @@ def seed_room_reply_mode(runtime_paths: RuntimePaths, room_id: str, events: Iter
         return
     for source in events:
         if _is_setting(source):
-            _known[key] = (_mode_from_content(source.get("content")), time.monotonic())
+            _take(key, _mode_from_content(source.get("content")), next(_order), confirmed=True)
             return
-
-
-def _confirm(key: tuple[Path, str], mode: RoomReplyMode | None, changes: int, *, wrote: bool) -> bool:
-    """Keep what a read or write found, confirmed only if no change or write came in while it was in flight.
-
-    When one did, which of the two is newer is unknown: the copy keeps what it has, unconfirmed, and the next refresh
-    reads. Returns whether the copy is confirmed.
-    """
-    if _changes[key] != changes:
-        known = _known.get(key)
-        _known[key] = (mode if known is None else known[0], _UNCONFIRMED)
-        return False
-    if wrote:
-        _changes[key] += 1
-    _known[key] = (mode, time.monotonic())
-    return True
 
 
 async def refresh_room_reply_mode(
@@ -110,24 +118,25 @@ async def refresh_room_reply_mode(
     room_id: str,
     *,
     force: bool = False,
-) -> bool:
-    """Read the room's reply mode setting unless a read or write confirmed the copy recently; return whether it is now.
+) -> ReplyModeRead:
+    """Read the room's reply mode setting unless a read confirmed the copy recently, and return what it found.
 
-    ``force`` reads it whatever the copy's age. A failed read keeps the copy.
+    ``force`` reads it whatever the copy's age. A caller deciding now uses the result, not the copy, which a later
+    event may already have changed. A failed read keeps the copy.
     """
     import nio  # noqa: PLC0415 - config reads the copy above without loading the Matrix client
 
     key = _key(runtime_paths, room_id)
     known = _known.get(key)
-    if not force and known is not None and time.monotonic() - known[1] < _REREAD_AFTER_SECONDS:
-        return True
-    changes = _changes[key]
+    if not force and known is not None and time.monotonic() - known.confirmed_at < _REREAD_AFTER_SECONDS:
+        return ReplyModeRead(ok=True, mode=known.mode)
+    started = next(_order)
     try:
         async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
             response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, _SETTING_KEY)
     except Exception:
         logger.warning("room_reply_mode_read_failed", room_id=room_id, exc_info=True)
-        return False
+        return ReplyModeRead(ok=False, mode=resolve_room_reply_mode_override(runtime_paths, room_id))
     if isinstance(response, nio.RoomGetStateEventResponse):
         mode = _mode_from_content(response.content)
     elif isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
@@ -136,11 +145,12 @@ async def refresh_room_reply_mode(
         mode = _legacy_override(runtime_paths, room_id)
         if mode is not None and await write_room_reply_mode(client, runtime_paths, room_id, mode):
             _drop_legacy_override(runtime_paths, room_id)
-            return _known[key][1] != _UNCONFIRMED
+            return ReplyModeRead(ok=True, mode=mode)
     else:
         logger.warning("room_reply_mode_read_failed", room_id=room_id, error=str(response))
-        return False
-    return _confirm(key, mode, changes, wrote=False)
+        return ReplyModeRead(ok=False, mode=resolve_room_reply_mode_override(runtime_paths, room_id))
+    _take(key, mode, started, confirmed=True)
+    return ReplyModeRead(ok=True, mode=mode)
 
 
 async def write_room_reply_mode(
@@ -149,11 +159,12 @@ async def write_room_reply_mode(
     room_id: str,
     mode: RoomReplyMode | None,
 ) -> bool:
-    """Set the room's reply mode setting, or clear it given None, as ``client``; return whether the room took it."""
+    """Set the room's reply mode setting, or clear it given None, as ``client``; return whether the room took it.
+
+    The room's acknowledgement is the newest the runtime knows, but unconfirmed: another change may follow it.
+    """
     import nio  # noqa: PLC0415 - config reads the copy above without loading the Matrix client
 
-    key = _key(runtime_paths, room_id)
-    changes = _changes[key]
     content = {} if mode is None else {"value": mode}
     try:
         async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
@@ -164,7 +175,7 @@ async def write_room_reply_mode(
     if not isinstance(response, nio.RoomPutStateResponse):
         logger.warning("room_reply_mode_write_failed", room_id=room_id, error=str(response))
         return False
-    _confirm(key, mode, changes, wrote=True)
+    _take(_key(runtime_paths, room_id), mode, next(_order), confirmed=False)
     return True
 
 
