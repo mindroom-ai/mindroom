@@ -468,6 +468,7 @@ async def _run_managed_call(
             reattach=True,
             # A Stop of the reply making the call refuses the job every later approval, and a stopped span starts none.
             reply_id=None if span is None else span.reply_id,
+            reply_stop_order=None if span is None else span.reply.stop_receipt_order,
             span_stopped=None if span is None else span.stopped,
         )
         waited = await runtime.wait(

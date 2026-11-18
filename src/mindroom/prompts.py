@@ -254,8 +254,9 @@ BACKGROUND_JOBS_ENDED_NOTICE = (
 )
 BACKGROUND_JOBS_CONTINUED_NOTICE = (
     "[RUNTIME NOTICE, NOT A USER MESSAGE] A restart interrupted this turn while the background jobs listed above "
-    "were running. They continue on their own, so do not start their work again: when you need a result, wait for "
-    'it with job(action="wait") and its job ID, otherwise go on; you are told when a job ends.'
+    "were running. MindRoom continues them on its own, or ends one that cannot go on, so do not start their work "
+    'again: when you need a result, wait for it with job(action="wait") and its job ID, otherwise go on; you are '
+    "told when a job ends."
 )
 BACKGROUND_JOBS_FOLLOW_UP_PROMPT = (
     "[RUNTIME UPDATE, NOT A USER MESSAGE] Background jobs you started earlier in this conversation have ended; this "

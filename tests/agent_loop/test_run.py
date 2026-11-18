@@ -1198,25 +1198,31 @@ async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_con
 
 
 @pytest.mark.asyncio
-async def test_a_resume_announces_its_approved_calls_before_the_first_runs() -> None:
-    """``before_dispatch`` sees a resume's approved calls while none has run, as it sees a batch's; a denial has none."""
+async def test_a_resume_announces_each_approved_call_before_it_runs() -> None:
+    """``before_dispatch`` sees each approved call of a resume alone, with the calls before it done; a denial has none."""
     log: list[object] = []
 
     async def before_dispatch(state: LoopState, planned: Sequence[PlannedCall]) -> None:
-        log.append(([call.execution.tool_call_id for call in planned], state.messages[-1].role))
+        done = [tool.tool_call_id for tool in state.record.tools or () if tool.result is not None]
+        log.append(([call.execution.tool_call_id for call in planned], done))
 
     async def observe(call: ToolCall, call_next: ToolNext) -> object:
         log.append(call.function.name)
         return await call_next(call.arguments)
 
+    def paused() -> RunRecord:
+        record = _paused_record(_gated_add("c1"), _gated_add("c2"))
+        record.messages[-1].tool_calls = [tool_call("add", "c1", a=1, b=2), tool_call("add", "c2", a=1, b=2)]
+        return record
+
     hooks = LoopHooks(before_dispatch=before_dispatch, tool_middleware=(observe,))
-    agent = spec(ScriptedModel([answer("Three.")]), gated(add))
-    await _resume(agent, _paused_record(_gated_add()), approved=[_approval("c1", "add", {"a": 1, "b": 2})], hooks=hooks)
-    assert log == [(["c1"], "assistant"), "add"]
+    approvals = [_approval(call_id, "add", {"a": 1, "b": 2}) for call_id in ("c1", "c2")]
+    await _resume(spec(ScriptedModel([answer("Three.")]), gated(add)), paused(), approved=approvals, hooks=hooks)
+    assert log == [(["c1"], []), "add", (["c2"], ["c1"]), "add"]
 
     log.clear()
-    agent = spec(ScriptedModel([answer("Skipped.")]), gated(add))
-    await _resume(agent, _paused_record(_gated_add()), denied={"c1": "No."}, hooks=hooks)
+    denials = {"c1": "No.", "c2": "No."}
+    await _resume(spec(ScriptedModel([answer("Skipped.")]), gated(add)), paused(), denied=denials, hooks=hooks)
     assert log == []
 
 

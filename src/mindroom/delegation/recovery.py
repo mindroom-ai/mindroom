@@ -60,7 +60,8 @@ async def load_settled_subagent(
     """
     child = await settled_subagent(subagent_id, owner=owner, config=config, runtime_paths=runtime_paths, depth=depth)
     if _job_still_runs(child, runtime_paths):
-        # A settled child's job still delivers its answer; until that job ends, the handle keeps naming its turn.
+        # A settled child's job still delivers its answer, or continues the turn a restart stopped; until that job
+        # ends, the subagent is its.
         raise SubagentSessionError(SUBAGENT_BUSY)
     return child
 
@@ -86,12 +87,16 @@ async def settled_subagent(
 
 
 def _job_still_runs(child: DelegationChild, runtime_paths: RuntimePaths) -> bool:
-    """Return whether a subagent job this process runs for the child's turn has not ended yet."""
+    """Return whether a subagent job of this process holds the child's subagent and has not ended yet.
+
+    The job is matched by the subagent, not by the turn: a job that continues after a restart names its next turn
+    before the handle does.
+    """
     runtime = get_background_runtime(runtime_paths)
     return runtime is not None and any(
         job.kind == "delegation"
         and job.status not in TERMINAL_STATUSES
-        and delegation_child(job).delegation_id == child.delegation_id
+        and delegation_child(job).subagent_id == child.subagent_id
         for job in runtime.retained_jobs()
     )
 

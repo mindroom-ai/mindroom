@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
@@ -12,7 +13,9 @@ from mindroom.delegation.personas import follow_up_refusal
 from mindroom.delegation.recovery import read_child_run, settled_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT, interrupted_by_restart
-from mindroom.history.run_checkpoint import is_recovered_run
+from mindroom.history.interrupted_replay import render_stopped_attempt
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run
+from mindroom.tool_system.events import format_tool_completed_event
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import require_tool_runtime_context
@@ -21,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
+    from mindroom.llm.runs import RunRecord
     from mindroom.tool_jobs.runtime import BackgroundJob, JobSpec, ToolJobRuntime
 
 # How many of a job's continuations its saved adapter counts, so the count survives further restarts.
@@ -36,8 +40,9 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     handle is settled first, so this writes state. The job continues only from a turn the restart settled: a turn
     that ended on its own stands, and a turn left paused, for an approval or a nested subagent, holds no run history
     replays. The continuation is a follow-up turn of the same subagent, which the caller's delegation and the
-    requester's access must still allow; it sends the continuation prompt after the cut-short run's own messages, or
-    the turn's task again when that run called no tool and so left nothing in history.
+    requester's access must still allow; it sends the continuation prompt, with an account of the cut-short run's
+    calls, after the child's history, which holds that run's own messages as far as its history limits replay them,
+    or the turn's task again when that run called no tool and so left nothing in history.
     """
     context = require_tool_runtime_context()
     config, runtime_paths, owner = context.current_config, context.runtime_paths, job.owner
@@ -49,7 +54,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         return child
     prompt = await _continuation_prompt(child, config, runtime_paths)
     if prompt is None:
-        return "its turn's run was left paused, which history never replays"
+        return "its turn's run holds calls recovery could not finish, as a run paused for a decision or a subagent does"
     tools = config_plugins(config, runtime_paths).tools
     refusal = follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth)
     if refusal is not None:
@@ -116,16 +121,33 @@ async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: Runti
         )
     except SubagentSessionError as error:
         return str(error)
-    # The handle names the turn the job ran, or the turn a continuation saved before a second restart was prepared from.
-    if child.delegation_id not in {saved.delegation_id, saved.previous_delegation_id}:
+    # The handle names the turn the job ran. A job that saved a continuation may find the turn before it instead: a
+    # second restart stopped it after that save and before the continuation reserved its turn. A manual follow-up's
+    # job names a previous turn too, which is not its own to continue.
+    continued = _CONTINUATIONS_KEY in job.adapter
+    if child.delegation_id not in (saved.delegation_id, saved.previous_delegation_id if continued else None):
         return "its subagent is on another turn than the one the job ran"
     return child if interrupted_by_restart(child) else f"its turn ended {child.status} before the restart settled it"
 
 
 async def _continuation_prompt(child: DelegationChild, config: Config, runtime_paths: RuntimePaths) -> str | None:
-    """Return what continues ``child``'s cut-short turn, or None for a paused run, which history never replays."""
+    """Return what continues ``child``'s cut-short turn, or None for a run recovery could not turn into history."""
     run = await read_child_run(child, config, runtime_paths)
-    recovered = run is not None and is_recovered_run(run)
-    if not recovered and run is not None and run.tools:
+    if run is None or not (run.tools or is_recovered_run(run)):
+        return child.task
+    if not is_recovered_run(run):
         return None
-    return config.get_prompt("SUBAGENT_RESTART_CONTINUATION_PROMPT") if recovered else child.task
+    return f"{config.get_prompt('SUBAGENT_RESTART_CONTINUATION_PROMPT')}\n\n{_calls_account(run)}"
+
+
+def _calls_account(run: RunRecord) -> str:
+    """Render the cut-short run's calls as the bounded account a replayed reply's prompt gets of its stopped attempt.
+
+    The child's history replays the recovered run like any other turn, so its limits may leave the run's calls out;
+    the account names each call from its preview either way, and which ones were cut short.
+    """
+    finished, cut_short = [], []
+    for tool in run.tools or ():
+        entry = replace(format_tool_completed_event(tool.call), call=None)
+        (cut_short if tool.result == INTERRUPTED_CALL_RESULT else finished).append(entry)
+    return render_stopped_attempt(partial_text="", completed_tools=finished, interrupted_tools=cut_short)

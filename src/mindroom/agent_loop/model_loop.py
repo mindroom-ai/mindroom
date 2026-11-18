@@ -127,7 +127,7 @@ class LoopHooks:
       (portable tool search), and the rewritten calls are what the message stores.
     - ``before_dispatch``: awaited with the loop state, whose messages end with the batch's assistant message and
       whose record holds the batch's executions, and the planned calls before any call of the batch runs (minimal
-      mode's checkpoint of the batch); a resume awaits it with its approved calls before the first of them runs.
+      mode's checkpoint of the batch); a resume awaits it with each approved call before that call runs.
     - ``tool_middleware``: wraps every tool call the loop executes, outermost first (job admission, the hook bridge).
     - ``after_tool_batch``: awaited in order with the live messages and the batch's result messages after the
       results and any media follow-up are appended, before the loop continues; a batch that stops the run, by a
@@ -397,22 +397,18 @@ async def _answer_resumed(
     """
     results: list[Message] = []
     answered: list[ToolExecution] = []
-    # The decision has been taken and covers each approved call whatever gate its function has now, so the dispatcher
-    # runs it without asking again.
-    approved = {
-        place: PlannedCall(
-            function=replace(state.offered.functions[requirement.tool_execution.tool_name], gate=None),
-            execution=requirement.tool_execution,
-        )
-        for place, requirement in enumerate(decided)
-        if requirement.tool_execution.confirmed is True
-    }
-    if approved and hooks.before_dispatch is not None:
-        await hooks.before_dispatch(state, list(approved.values()))
-    for place, requirement in enumerate(decided):
+    for requirement in decided:
         execution = requirement.tool_execution
-        if (planned := approved.get(place)) is not None:
+        if execution.confirmed is True:
+            # The decision has been taken and covers the call whatever gate its function has now, so the dispatcher
+            # runs it without asking again.
+            function = replace(state.offered.functions[execution.tool_name], gate=None)
             execution.requires_confirmation = False
+            planned = PlannedCall(function=function, execution=execution)
+            if hooks.before_dispatch is not None:
+                # Approved calls run one after another, so each is announced alone: the record then holds the
+                # results of those before it.
+                await hooks.before_dispatch(state, [planned])
             yield ToolStarted(execution.call)
             finished = dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware)
             async with closing_async_stream(finished):

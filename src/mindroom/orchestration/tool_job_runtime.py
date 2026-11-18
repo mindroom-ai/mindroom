@@ -34,6 +34,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
     JobGrant,
+    JobSpec,
     ToolJobRuntime,
     register_background_runtime,
 )
@@ -124,6 +125,8 @@ class ToolJobRuntimeCoordinator:
     agent_reply_memberships: AgentReplyMembershipIndex
     # The event journal jobs are kept in; it outlives this coordinator.
     journal_provider: Callable[[], EventJournalStore]
+    # Whether an entity's bot failed to start for good, so a job that waits for it to continue ends instead.
+    entity_unavailable: Callable[[str], bool] = lambda _entity_name: False
     _instance: ToolJobInstance | None = field(default=None, init=False)
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -309,8 +312,10 @@ class ToolJobRuntimeCoordinator:
             await asyncio.gather(task, return_exceptions=True)
         if self._runtime is not None:
             await self._runtime.quiesce()
-            # The jobs it interrupted leave the rooms' state now, not at the next start, which may have jobs off.
-            await self._publisher.publish(self.bot_provider, self._runtime.retained_jobs())
+            # The jobs it interrupted leave the rooms' state now, not at the next start, which may have jobs off; so
+            # do the subagent jobs it left running in storage for the next start to continue.
+            ended = [job for job in self._runtime.retained_jobs() if job.status in TERMINAL_STATUSES]
+            await self._publisher.publish(self.bot_provider, ended)
 
     async def stop(self) -> None:
         """Release the service after response finalization has stopped using its receipts."""
@@ -349,37 +354,63 @@ class ToolJobRuntimeCoordinator:
         await self._admit_follow_ups(self.runtime)
 
     async def _continue_stopped_jobs(self, runtime: ToolJobRuntime) -> None:
-        """Continue each subagent job a restart stopped, or end it interrupted when its child's turn cannot continue.
+        """Continue each subagent job a restart stopped, or end it interrupted when it cannot go on.
 
-        A job waits for a later pass while its requester's access still resolves or its bot has no Matrix client: the
-        first pass runs before the first sync, when room-backed reply grants are unresolved.
+        One job that fails here is retried on the next pass and does not hold up the others.
         """
         for job in runtime.awaiting_continuation():
-            context = self._conversation_context(job) if self._grant(job) == "allowed" else None
-            if context is None:
-                continue
             try:
-                # The job's task starts in this context, so its child runs in its conversation as a reply's job does.
-                with tool_runtime_context(context):
-                    try:
-                        spec = await continued_subagent_job(job, runtime)
-                    except Exception:
-                        logger.exception("Subagent job could not continue after a restart", job_id=job.job_id)
-                        spec = None
-                    if isinstance(spec, str):
-                        logger.info(
-                            "Subagent job ends instead of continuing after a restart", job_id=job.job_id, reason=spec
-                        )
-                        spec = None
-                    await runtime.continue_stopped(job.job_id, spec)
+                await self._continue_stopped_job(runtime, job)
             except Exception:
                 logger.exception("Subagent job a restart stopped was not settled; retrying", job_id=job.job_id)
 
-    def _conversation_context(self, job: BackgroundJob) -> ToolRuntimeContext | None:
+    async def _continue_stopped_job(self, runtime: ToolJobRuntime, job: BackgroundJob) -> None:
+        """Continue one stopped job, end it, or leave it for a later pass while its bot or its access is not ready.
+
+        A bot is ready once it has completed its first sync: by then it has seen the rooms it left while it was down
+        and cancelled their jobs, and room-backed reply grants can resolve, which the first pass runs too early for.
+        A bot that is only late keeps its job waiting; one whose start failed for good ends it.
+        """
+        recipient = job.owner.recipient
+        spec: JobSpec | str
+        if self.entity_unavailable(recipient):
+            spec = f"the bot of {recipient!r} could not start"
+        else:
+            bot = self.bot_provider(recipient)
+            if bot is None or not bot.running or not bot.first_sync_complete or self._grant(job) != "allowed":
+                return
+            context = self._conversation_context(bot, job)
+            if context is None:
+                return
+            # The job's task starts in this context, so its child runs in its conversation as a reply's job does.
+            with tool_runtime_context(context):
+                spec = await self._continuation(bot, job, runtime)
+                if not isinstance(spec, str):
+                    await runtime.continue_stopped(job.job_id, spec)
+                    return
+        logger.info("Subagent job ends instead of continuing after a restart", job_id=job.job_id, reason=spec)
+        await runtime.continue_stopped(job.job_id, None)
+
+    async def _continuation(self, bot: AgentBot, job: BackgroundJob, runtime: ToolJobRuntime) -> JobSpec | str:
+        """Return what a stopped job runs on as, or why it ends: a stopped reply's job, or a turn that cannot continue.
+
+        The reply's record is the authority for a Stop: it holds one this process never saw, such as a Stop the
+        process that recorded it did not live to apply to the job.
+        """
+        if job.reply_id is not None:
+            reply = await bot.journal_principal().replies.load(job.reply_id)
+            if reply is not None and reply.stop_receipt_order != job.reply_stop_order:
+                return "the reply that started it was stopped"
+        try:
+            return await continued_subagent_job(job, runtime)
+        except Exception:
+            logger.exception("Subagent job could not continue after a restart", job_id=job.job_id)
+            return "its continuation could not be prepared"
+
+    def _conversation_context(self, bot: AgentBot, job: BackgroundJob) -> ToolRuntimeContext | None:
         """Rebuild the tool context of the conversation a job belongs to, or None while its bot has no Matrix client."""
         owner = job.owner
-        bot = self.bot_provider(owner.recipient)
-        if bot is None or not bot.running or owner.room_id is None or owner.session_id is None:
+        if owner.room_id is None or owner.session_id is None:
             return None
         target = MessageTarget(
             room_id=owner.room_id,

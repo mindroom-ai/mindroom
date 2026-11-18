@@ -409,6 +409,7 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
             agent_reply_memberships=self.agent_reply_memberships,
             journal_provider=self.event_journal_store,
+            entity_unavailable=self.fleet.is_disabled,
         )
         self._thread_export_runner = WorkspaceThreadExportRunner(
             WorkspaceThreadExportDeps(

@@ -3069,6 +3069,7 @@ visibility = [
     "mindroom.teams",
     "mindroom.history.conversation_text",
     "mindroom.response_turn",
+    "mindroom.delegation.continuation",
 ]
 
 [[modules]]
@@ -9156,7 +9157,9 @@ depends_on = [
     "mindroom.delegation.recovery",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.run_checkpoint",
+    "mindroom.tool_system.events",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",

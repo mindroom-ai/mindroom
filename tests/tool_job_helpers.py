@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 from mindroom.agent_loop.build import prompt_for_turn
@@ -720,30 +720,92 @@ def settle_stopped_subagent(
     )
 
 
+class ResolvingMembership(AgentReplyMembershipIndex):
+    """Room membership that is still resolving until a test proves it either way."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.state = "pending"
+
+    def is_current_room_member(
+        self,
+        sender_id: str,
+        room_id: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
+        """Return whether the test proved the sender a member."""
+        del sender_id, room_id, config, runtime_paths
+        return self.state == "member"
+
+    def grants_pending(
+        self,
+        config: Config,
+        *,
+        joined_rooms: Sequence[str],
+        current_room_id: str | None,
+    ) -> bool:
+        """Return whether membership is still resolving."""
+        del config, joined_rooms, current_room_id
+        return self.state == "pending"
+
+
+# The journal principal of the bot whose replies start the jobs `stopped_job_coordinator` continues.
+JOB_BOT_PRINCIPAL = "leader@test"
+
+
+def stopped_job_coordinator(
+    runtime: ProcessRuntime,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    context: ToolRuntimeContext | None,
+    *,
+    synced: bool = True,
+    unavailable: bool = False,
+    memberships: AgentReplyMembershipIndex | None = None,
+) -> ToolJobRuntimeCoordinator:
+    """Return a coordinator over ``runtime`` whose one bot is a stand-in with the real journal principal.
+
+    ``context`` is the tool context the conversation's bot rebuilds, None for a bot without a Matrix client yet;
+    ``synced`` is whether that bot completed its first sync, and ``unavailable`` whether its start failed for good.
+    Access is the coordinator's own check of ``config`` and ``memberships``.
+    """
+    bot = MagicMock(running=True, first_sync_complete=synced, admit_job_follow_up=AsyncMock())
+    bot.tool_runtime_support.build_context.return_value = context
+    bot.journal_principal.return_value = runtime.journal.principal(JOB_BOT_PRINCIPAL)
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _name: bot,
+        agent_reply_memberships=memberships or AgentReplyMembershipIndex(),
+        journal_provider=lambda: runtime.journal,
+        entity_unavailable=lambda _name: unavailable,
+    )
+    coordinator._runtime = runtime
+    return coordinator
+
+
 async def continue_stopped_jobs(
     runtime: ProcessRuntime,
     config: Config,
     runtime_paths: RuntimePaths,
     context: ToolRuntimeContext | None,
     *,
-    grant: JobGrant = "allowed",
+    synced: bool = True,
+    unavailable: bool = False,
+    memberships: AgentReplyMembershipIndex | None = None,
 ) -> None:
-    """Run the coordinator's pass that continues or settles the subagent jobs a restart stopped.
-
-    ``context`` is the tool context the conversation's bot rebuilds, None for a bot without a Matrix client yet, and
-    ``grant`` is what every job's current access resolves to.
-    """
-    bot = MagicMock(running=True)
-    bot.tool_runtime_support.build_context.return_value = context
-    coordinator = ToolJobRuntimeCoordinator(
-        runtime_paths=runtime_paths,
-        config_provider=lambda: config,
-        bot_provider=lambda _name: bot,
-        agent_reply_memberships=MagicMock(),
-        journal_provider=lambda: runtime.journal,
+    """Run the coordinator's pass that continues or settles the subagent jobs a restart stopped."""
+    coordinator = stopped_job_coordinator(
+        runtime,
+        config,
+        runtime_paths,
+        context,
+        synced=synced,
+        unavailable=unavailable,
+        memberships=memberships,
     )
-    with patch.object(coordinator, "_grant", return_value=grant):
-        await coordinator._continue_stopped_jobs(runtime)
+    await coordinator._continue_stopped_jobs(runtime)
 
 
 def subagent_job_id(runtime: ToolJobRuntime, child: DelegationChild) -> str:

@@ -81,6 +81,8 @@ One backend PR: the runtime keeps and relaunches stopped jobs, `delegation/conti
 
 ## Round 2 plan
 
+This section supersedes the decisions above where they differ: the saved Stop mark, the fallback to the previous turn, and the single checkpoint of a resumed batch.
+
 Three reviews of `e327acb2b` found about ten defects; this section groups them by cause and says what changes.
 The identity stays: all three reviews keep "the same job stays running", its saved count, the serial worker pass, and the reservation against the settled turn.
 
@@ -125,3 +127,4 @@ The fix is one rule: every fact that decides whether a stopped job goes on is re
 ### Size
 
 Estimated source change: about +110 −50 (runtime −5, coordinator +35, continuation +25, loop −6, recovery +5, notices +8, others +5), well under the 250-line stop line, so the round is implemented.
+Measured after implementation: +189 −104 in `src`, net +85.

@@ -67,21 +67,18 @@ async def _unnoticed_notice(notices: JobNotices) -> str | None:
     return _job_notice_text(jobs, context.current_config.get_prompt("BACKGROUND_JOBS_ENDED_NOTICE"))
 
 
-def _continued_notice() -> str | None:
-    """Describe the jobs this turn started that a restart stopped and that continue on their own.
+def _continued_jobs() -> list[BackgroundJob]:
+    """Return the jobs this turn started that a restart stopped and that MindRoom continues on its own.
 
     A turn the same restart cut short while its call waited for such a job holds no handle of it: its recovered run
-    only says the call was interrupted, so without this the model would start the job's work again.
+    only says the call was interrupted, so without a note of them the model would start the job's work again.
     """
     current = current_conversation()
     context = get_tool_runtime_context()
     if current is None or context is None or context.membership_turn_id is None:
-        return None
+        return []
     runtime, key = current
-    jobs = [job for job in runtime.stopped_by_restart(key) if job.source_event_id == context.membership_turn_id]
-    if not jobs:
-        return None
-    return _job_notice_text(jobs, context.current_config.get_prompt("BACKGROUND_JOBS_CONTINUED_NOTICE"))
+    return [job for job in runtime.stopped_by_restart(key) if job.source_event_id == context.membership_turn_id]
 
 
 async def _turn_start_job_note() -> str | None:
@@ -95,8 +92,15 @@ async def _turn_start_job_note() -> str | None:
         return None
     if not notices.started:
         notices.started = True
-        notes = [note for note in (await _unnoticed_notice(notices), _continued_notice()) if note is not None]
-        notices.start_note = "\n\n".join(notes) or None
+        # Read before the ended jobs, so a job that ends between the two reads is in one of them.
+        continued = _continued_jobs()
+        notes = [await _unnoticed_notice(notices)]
+        continued = [job for job in continued if job.job_id not in notices.noticed]
+        context = get_tool_runtime_context()
+        if continued and context is not None:
+            notice = context.current_config.get_prompt("BACKGROUND_JOBS_CONTINUED_NOTICE")
+            notes.append(_job_notice_text(continued, notice))
+        notices.start_note = "\n\n".join(note for note in notes if note is not None) or None
     return notices.start_note
 
 

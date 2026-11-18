@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -24,12 +26,16 @@ from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import SUBAGENT_BUSY
 from mindroom.delegation.state import RESTART_INTERRUPTION_REASON
 from mindroom.event_journal import BackgroundApprovalDecision, tool_job_run_id
+from mindroom.event_journal.replies import ReplyStopped
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.orchestration import tool_job_runtime as tool_job_coordinator
 from mindroom.prompts import BACKGROUND_JOBS_CONTINUED_NOTICE, SUBAGENT_RESTART_CONTINUATION_PROMPT
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import pending_approval_requirements
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_jobs.client_cancel import cancel_stopped_reply_jobs
+from mindroom.tool_jobs.control import current_job_id
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.notices import JobNotices, append_turn_start_job_note, job_notice_context
@@ -38,11 +44,14 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
+from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
+from tests.reply_span_helpers import reply_span, seed_finished_reply
 from tests.scripted_agent_helpers import PROBE_TOOL, registered_probe_tools
 from tests.tool_job_helpers import (
     DELEGATING_REQUESTER,
+    JOB_BOT_PRINCIPAL,
     JOB_TEST_TIMEOUT,
     DelegatingLeader,
     JobApprovalCards,
@@ -53,15 +62,18 @@ from tests.tool_job_helpers import (
     saved_job_card_decision,
     saved_jobs,
     settle_stopped_subagent,
+    stopped_job_coordinator,
     tool_job_runtime,
     wait_for_status,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.reply_scope import SpanHandle
     from mindroom.tool_jobs.runtime import BackgroundJob
     from tests.tool_job_helpers import ProcessRuntime
 
@@ -124,8 +136,7 @@ class _Conversation:
     async def continue_stopped(self) -> None:
         """Run the worker's pass over the subagent jobs a restart stopped, in the conversation its bot rebuilds."""
         context = _delegate_runtime_context(self.config, self.paths, execution_identity=_IDENTITY)
-        grant = "allowed" if self.allowed else "denied"
-        await continue_stopped_jobs(self.runtime, self.config, self.paths, context, grant=grant)
+        await continue_stopped_jobs(self.runtime, self.config, self.paths, context)
 
     async def kill(self, *, settle: bool) -> None:
         """End this process's tasks without an orderly shutdown, then recover and continue in the next one.
@@ -172,6 +183,42 @@ class _Conversation:
 
     async def job(self, job_id: str) -> BackgroundJob:
         return await lookup(self.runtime, job_id, owner=_IDENTITY, depth=0)
+
+
+@dataclass
+class _Reply:
+    """A real reply of the leader's bot, in which the conversation's replies ran, and its Stop."""
+
+    conversation: _Conversation
+    span: SpanHandle
+    stops: int = 0
+
+    async def stop(self, *, applied: bool = True) -> None:
+        """Record a Stop of the reply in its journal; without ``applied``, the process dies before the Stop's effects."""
+        self.stops += 1
+        principal = self.conversation.runtime.journal.principal(JOB_BOT_PRINCIPAL)
+        stopped = await principal.replies.stop(self.span.reply_id, receipt_order=self.stops, now_ns=time.time_ns())
+        assert stopped is not None
+        assert ReplyStopped(self.span.reply_id) in stopped.post_commit
+        if applied:
+            await cancel_stopped_reply_jobs(self.conversation.paths, self.span.reply_id)
+
+
+@asynccontextmanager
+async def _replying(conversation: _Conversation, *, regenerates: str | None = None) -> AsyncIterator[_Reply]:
+    """Run the block's leader replies in a real reply of its bot, so the jobs they start name it.
+
+    With ``regenerates``, the reply is the finished one shown as that event, which an edit regenerates in place.
+    """
+    principal = conversation.runtime.journal.principal(JOB_BOT_PRINCIPAL)
+    async with reply_span(
+        principal,
+        source_event_id="$source",
+        room_id="!room:example.org",
+        placeholder_event_id=None if regenerates else "$reply",
+        regenerated_event_id=regenerates,
+    ) as span:
+        yield _Reply(conversation, span)
 
 
 async def _leave_child(_child: object, **_kwargs: object) -> None:
@@ -416,6 +463,79 @@ async def test_a_subagent_stopped_after_an_approval_resumed_it_continues_from_it
 
 
 @pytest.mark.asyncio
+async def test_a_continued_subagent_is_told_its_calls_when_its_history_limits_leave_them_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History limits apply to a recovered run as to any turn, so the prompt names the cut-short run's calls itself."""
+    config = delegating_config(child_tools=[PROBE_TOOL])
+    config.agents["code"].max_tool_calls_from_history = 0
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=config)
+        await conversation.open(calls(tool_call("read_file", "read", path="a")), _hang("shell"), answer("Continued"))
+        try:
+            record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            await conversation.kill(settle=False)
+            await wait_for_status(conversation.runtime, job_id, "completed")
+            _first, _cut_short, continued = conversation.agents.models["code"].requests
+            sent = _sent(continued)
+            assert [call_id for role, _content, call_id in sent if role == "tool"] == []
+            prompt = str(sent[-1][1])
+            assert SUBAGENT_RESTART_CONTINUATION_PROMPT in prompt
+            assert "The `read_file` tool finished with input preview" in prompt
+            assert "The `run_shell_command` tool was still running with input preview" in prompt
+            assert "check before repeating it" in prompt
+        finally:
+            await conversation.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["approved", "denied"])
+async def test_a_crash_in_a_resumed_batch_keeps_what_its_earlier_calls_did(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first: str,
+) -> None:
+    """A crash in a later approved call of one batch keeps the earlier call's result, or its denial, as recorded.
+
+    Only the call that was running is answered as interrupted, so the child neither repeats what took effect nor
+    takes a call its requester refused for one that may have run.
+    """
+    rules = [ApprovalRuleConfig(match=name, action="require_approval") for name in ("dangerous", "run_shell_command")]
+    config = delegating_config(child_tools=[PROBE_TOOL], rules=rules)
+    batch = calls(tool_call("dangerous", "first-call", value=1), tool_call("run_shell_command", "second-call", cmd="x"))
+
+    class Cards:
+        transport = FakeApprovalTransport()
+
+        async def request_background_approval(self, *, tool_name: str, **_kwargs: object) -> BackgroundApprovalDecision:
+            if tool_name == "dangerous" and first == "denied":
+                return BackgroundApprovalDecision("denied", "Requester said do not run.")
+            return BackgroundApprovalDecision("approved", None)
+
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=config)
+        await conversation.open(batch, answer("Continued"))
+        monkeypatch.setattr(approval_manager, "get_approval_store", Cards)
+        try:
+            record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            await conversation.kill(settle=False)
+            await wait_for_status(conversation.runtime, job_id, "completed")
+            _cut_short, continued = conversation.agents.models["code"].requests
+            answers = {call_id: content for role, content, call_id in _sent(continued) if role == "tool"}
+            assert answers == {
+                "first-call": "did 1" if first == "approved" else "Requester said do not run.",
+                "second-call": INTERRUPTED_CALL_RESULT,
+            }
+        finally:
+            await conversation.close()
+
+
+@pytest.mark.asyncio
 @_STOPS
 async def test_a_subagent_stopped_before_its_first_call_is_sent_its_task_again(
     tmp_path: Path,
@@ -473,26 +593,180 @@ async def test_a_continued_subagent_writes_its_answer_where_its_call_asked(
         await conversation.close()
 
 
+async def _only_job(conversation: _Conversation) -> BackgroundJob:
+    [job] = conversation.runtime.retained_jobs()
+    return job
+
+
+async def _working_job_of(conversation: _Conversation, reply: _Reply, started: asyncio.Event) -> str:
+    """Start a subagent job from ``reply`` that works on after the reply's call returned; return the job's ID."""
+    record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+    job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
+    await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
+    assert (await conversation.job(job_id)).reply_id == reply.span.reply_id
+    return job_id
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("applied", [True, False])
+@pytest.mark.parametrize("stop", ["restart", "crash"])
 async def test_a_stopped_replys_subagent_is_not_continued_after_a_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    applied: bool,
+    stop: str,
 ) -> None:
-    """A Stop of the reply that started a working subagent is saved with its job, so no restart continues it."""
+    """A Stop of the reply that started a working subagent keeps it working, and no restart continues it.
+
+    The reply's record decides: it holds the Stop even when the process died before it applied the Stop to the job.
+    """
     started, held = _held_child()
     conversation = _Conversation(tmp_path, monkeypatch)
     await conversation.open(held, answer("Never"))
     try:
-        record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
-        job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
-        await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
-        conversation.runtime._entries[job_id].reply_id = "reply"
-        await conversation.runtime.cancel_stopped_reply("reply")
-        assert (await conversation.job(job_id)).status == "running"
-        await conversation.restart()
+        async with _replying(conversation) as reply:
+            job_id = await _working_job_of(conversation, reply, started)
+            await reply.stop(applied=applied)
+            assert (await conversation.job(job_id)).status == "running"
+        with capture_logs() as logs:
+            await _stop(conversation, stop)
         job = await conversation.job(job_id)
         assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
         assert len(conversation.agents.models["code"].requests) == 1
+        # An orderly shutdown that saw the Stop ends the job itself; otherwise the next start reads the reply.
+        seen_at_shutdown = applied and stop == "restart"
+        assert _declined(logs) == ([] if seen_at_shutdown else [(job_id, "the reply that started it was stopped")])
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_arrives_while_the_process_shuts_down_ends_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop the runtime receives after its shutdown began still wins over keeping the job for the next start."""
+    started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, answer("Never"))
+    try:
+        async with _replying(conversation) as reply:
+            job_id = await _working_job_of(conversation, reply, started)
+            runtime = conversation.runtime
+            quiescing = asyncio.ensure_future(runtime.quiesce())
+            await asyncio.sleep(0)
+            assert runtime._shutdown_task is not None
+            await runtime.cancel_stopped_reply(reply.span.reply_id)
+            await quiescing
+        saved = (await saved_jobs(tmp_path))[job_id]
+        assert (saved.status, saved.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_after_a_restart_reaches_the_continued_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job a restart continued still belongs to its reply: a Stop of it ends the wait, or the next continuation."""
+    started, held = _held_child()
+    continued, held_again = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, held_again, answer("Never"))
+    try:
+        async with _replying(conversation) as reply:
+            job_id = await _working_job_of(conversation, reply, started)
+        await conversation.restart()
+        await asyncio.wait_for(continued.wait(), JOB_TEST_TIMEOUT)
+        await reply.stop()
+        assert (await conversation.job(job_id)).status == "running"
+        assert conversation.runtime._entries[job_id].control.reply_stopped
+        await conversation.kill(settle=False)
+        job = await conversation.job(job_id)
+        assert (job.status, job.adapter["restart_continuations"]) == ("interrupted", 1)
+        assert len(conversation.agents.models["code"].requests) == 2
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_ends_a_job_that_waits_to_continue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stopped reply's job that a restart left waiting to continue ends at once, and a racing launch is refused."""
+    started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, answer("Never"))
+    try:
+        async with _replying(conversation) as reply:
+            job_id = await _working_job_of(conversation, reply, started)
+        await conversation.runtime.shutdown()
+        await conversation._start_runtime()
+        await conversation.runtime.recover()
+        assert [job.job_id for job in conversation.runtime.awaiting_continuation()] == [job_id]
+        await reply.stop()
+        job = await conversation.job(job_id)
+        assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+        await conversation.continue_stopped()
+        assert len(conversation.agents.models["code"].requests) == 1
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_races_the_launch_of_a_continuation_wins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop marks its reply's jobs before it waits for the runtime, so a continuation launched meanwhile is refused."""
+    started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, answer("Never"))
+    try:
+        async with _replying(conversation) as reply:
+            job_id = await _working_job_of(conversation, reply, started)
+        await conversation.runtime.shutdown()
+        await conversation._start_runtime()
+        runtime = conversation.runtime
+        await runtime.recover()
+        async with runtime._lock:
+            stopping = asyncio.create_task(runtime.cancel_stopped_reply(reply.span.reply_id))
+            await asyncio.sleep(0)
+            assert runtime._entries[job_id].control.reply_stopped
+            # The Stop still waits for the lock when the pass launches the continuation it prepared before.
+            stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
+        await conversation.continue_stopped()
+        job = await conversation.job(job_id)
+        assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+        assert len(conversation.agents.models["code"].requests) == 1
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_before_the_job_began_does_not_end_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reply stopped and then regenerated keeps its earlier Stop on record, which its later jobs are not judged by."""
+    started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, answer("Regenerated answer"))
+    principal = conversation.runtime.journal.principal(JOB_BOT_PRINCIPAL)
+    sources = ResponseSources(pending_event_ids=("$source",), logical_source_event_ids=("$source",))
+    finished = await seed_finished_reply(
+        principal,
+        "$answer",
+        sources=sources,
+        room_id="!room:example.org",
+        thread_id=None,
+    )
+    assert await principal.replies.stop(finished.reply_id, receipt_order=1, now_ns=time.time_ns()) is not None
+    try:
+        async with _replying(conversation, regenerates="$answer") as reply:
+            assert reply.span.reply_id == finished.reply_id
+            job_id = await _working_job_of(conversation, reply, started)
+            assert (await conversation.job(job_id)).reply_stop_order == 1
+        await conversation.restart()
+        await wait_for_status(conversation.runtime, job_id, "completed")
+        assert str((await conversation.job(job_id)).result).startswith("Regenerated answer")
     finally:
         await conversation.close()
 
@@ -527,6 +801,128 @@ async def test_a_subagent_awaiting_approval_is_not_continued_after_a_restart(
 
 
 @pytest.mark.asyncio
+@_STOPS
+async def test_a_subagent_waiting_for_a_person_is_not_continued_after_a_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop: str,
+) -> None:
+    """A child whose call waits for a human decision, as a secret request does, ends however the process stops.
+
+    Unwinding the wait must not leave the job saved as working, which the next start would continue.
+    """
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=delegating_config(child_tools=[PROBE_TOOL]))
+        waiting = asyncio.Event()
+
+        async def run_shell_command(_self: object, cmd: str) -> str:
+            """Wait for a person.
+
+            Args:
+                cmd: The command.
+
+            """
+            del cmd
+            job_id = current_job_id()
+            assert job_id is not None
+            async with conversation.runtime.human_decision_wait(job_id):
+                waiting.set()
+                await asyncio.Event().wait()
+            return "never"
+
+        monkeypatch.setattr(probe, "run_shell_command", run_shell_command)
+        await conversation.open(_hang("ask"), answer("Never"))
+        try:
+            record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
+            await asyncio.wait_for(waiting.wait(), JOB_TEST_TIMEOUT)
+            assert (await conversation.job(job_id)).status == "awaiting_approval"
+            await _stop(conversation, stop)
+            job = await conversation.job(job_id)
+            assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+            assert len(conversation.agents.models["code"].requests) == 1
+        finally:
+            await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_manual_follow_up_stopped_before_it_reserved_its_turn_is_not_continued_as_the_turn_before_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a continuation the job itself saved may start from the turn before its child's: a follow-up's may not."""
+    started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, answer("Wrong task ran"))
+    reserving = asyncio.Event()
+
+    async def never_reserve(*_args: object, **_kwargs: object) -> None:
+        reserving.set()
+        await asyncio.Event().wait()
+
+    try:
+        async with _replying(conversation) as reply:
+            await _working_job_of(conversation, reply, started)
+            await reply.stop()
+        await conversation.restart()
+        with monkeypatch.context() as patched:
+            patched.setattr(delegation_execution, "reserve_child_turn", never_reserve)
+            follow_up = tool_call(
+                "continue_subagent",
+                "next",
+                subagent_id=(await _only_job(conversation)).adapter["child"]["subagent_id"],
+                message="DIFFERENT TASK",
+                background_after=0,
+            )
+            record = await conversation.reply(calls(follow_up), answer("Parent free"))
+            # A follow-up's handle is followed by the note that names its subagent.
+            job_id = json.JSONDecoder().raw_decode(str(answer_of(record, "next").content))[0]["job_id"]
+            await asyncio.wait_for(reserving.wait(), JOB_TEST_TIMEOUT)
+            with capture_logs() as logs:
+                await conversation.restart()
+        job = await conversation.job(job_id)
+        assert (job.status, job.adapter["child"]["task"]) == ("interrupted", "DIFFERENT TASK")
+        assert _declined(logs) == [(job_id, "its subagent is on another turn than the one the job ran")]
+        assert len(conversation.agents.models["code"].requests) == 1
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_is_busy_while_its_job_has_yet_to_reserve_the_continuation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job that continues holds its subagent before the continuation's turn is on the handle: a follow-up waits."""
+    started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, answer("Continued"), answer("Manual turn ran"))
+    reserve, reserving, release = delegation_execution.reserve_child_turn, asyncio.Event(), asyncio.Event()
+
+    async def reserve_late(*args: object, **kwargs: object) -> None:
+        reserving.set()
+        await release.wait()
+        await reserve(*args, **kwargs)
+
+    try:
+        record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+        handle = json.loads(str(answer_of(record, "first").content))
+        await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
+        monkeypatch.setattr(delegation_execution, "reserve_child_turn", reserve_late)
+        await conversation.restart()
+        await asyncio.wait_for(reserving.wait(), JOB_TEST_TIMEOUT)
+        follow_up = tool_call("continue_subagent", "manual", subagent_id=handle["subagent_id"], message="Manual")
+        manual = await conversation.reply(calls(follow_up), answer("Parent done"))
+        assert SUBAGENT_BUSY in str(answer_of(manual, "manual").content)
+        release.set()
+        await wait_for_status(conversation.runtime, handle["job_id"], "completed")
+        assert str((await conversation.job(handle["job_id"])).result).startswith("Continued")
+    finally:
+        release.set()
+        await conversation.close()
+
+
+@pytest.mark.asyncio
 async def test_a_subagent_that_waited_for_its_own_subagent_is_not_continued_after_a_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -552,7 +948,9 @@ async def test_a_subagent_that_waited_for_its_own_subagent_is_not_continued_afte
         job = await conversation.job(job_id)
         assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
         assert [len(conversation.agents.models[name].requests) for name in ("code", "helper")] == [1, 1]
-        assert _declined(logs) == [(job_id, "its turn's run was left paused, which history never replays")]
+        [(declined, reason)] = _declined(logs)
+        assert declined == job_id
+        assert "a run paused for a decision or a subagent" in reason
     finally:
         await conversation.close()
 
@@ -654,18 +1052,66 @@ async def test_the_turn_that_started_a_continued_subagent_is_told_it_continues(
             assert note.text == f"`{job.job_id}` (code subagent) running\n{BACKGROUND_JOBS_CONTINUED_NOTICE}"
             with tool_runtime_context(replace(context, membership_turn_id="$turn2")), job_notice_context(JobNotices()):
                 assert await append_turn_start_job_note(()) == ()
+            # A job whose requester's access is unresolved or gone is named to nobody.
+            conversation.allowed = False
+            with tool_runtime_context(replace(context, membership_turn_id="$turn1")), job_notice_context(JobNotices()):
+                assert await append_turn_start_job_note(()) == ()
         finally:
             await conversation.close()
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_subagent_waits_for_its_requesters_access_and_its_bot(
+async def test_a_job_that_ends_while_the_turn_note_is_read_is_still_named(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Before the first sync reply grants are unresolved and a bot may have no client: the job waits, still running."""
+    """The note reads the continuing jobs and the ended ones apart; a job that ends in between is in one of them."""
+    started, held = _held_child()
+    continued, finish = asyncio.Event(), asyncio.Event()
+
+    async def hold_again() -> None:
+        continued.set()
+        await finish.wait()
+
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, [Await(hold_again), *answer("Real answer")])
+    try:
+        record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+        job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
+        await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
+        await conversation.restart()
+        await asyncio.wait_for(continued.wait(), JOB_TEST_TIMEOUT)
+        runtime = conversation.runtime
+        ended_jobs = runtime.ended_jobs
+
+        async def ended_then_the_job_ends(key: ConversationKey) -> tuple[BackgroundJob, ...]:
+            ended = await ended_jobs(key)
+            finish.set()
+            await wait_for_status(runtime, job_id, "completed")
+            return ended
+
+        monkeypatch.setattr(runtime, "ended_jobs", ended_then_the_job_ends)
+        context = _delegate_runtime_context(conversation.config, conversation.paths, execution_identity=_IDENTITY)
+        with tool_runtime_context(replace(context, membership_turn_id="$turn1")), job_notice_context(JobNotices()):
+            [note] = await append_turn_start_job_note(())
+        assert note.text.startswith(f"`{job_id}` (code subagent) ")
+    finally:
+        finish.set()
+        await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_subagent_waits_for_its_bots_first_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job waits, still running, while its bot has no client or has not completed its first sync.
+
+    Until its first sync a bot has not seen the rooms it left while it was down, and room membership is unknown.
+    """
     started, held = _held_child()
     conversation = _Conversation(tmp_path, monkeypatch)
+    config = conversation.config
     await conversation.open(held, answer("Later"))
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
@@ -675,16 +1121,90 @@ async def test_a_stopped_subagent_waits_for_its_requesters_access_and_its_bot(
         await conversation._start_runtime()
         await conversation.runtime.recover()
         context = _delegate_runtime_context(conversation.config, conversation.paths, execution_identity=_IDENTITY)
-        runtime, config, paths = conversation.runtime, conversation.config, conversation.paths
-        await continue_stopped_jobs(runtime, config, paths, context, grant="pending")
-        assert [job.job_id for job in runtime.awaiting_continuation()] == [job_id]
-        await continue_stopped_jobs(runtime, config, paths, None)
-        assert [job.job_id for job in runtime.awaiting_continuation()] == [job_id]
-        assert (await conversation.job(job_id)).status == "running"
+        runtime, paths = conversation.runtime, conversation.paths
+        for bot in ({"context": None}, {"context": context, "synced": False}):
+            await continue_stopped_jobs(runtime, config, paths, **bot)
+            assert [job.job_id for job in runtime.awaiting_continuation()] == [job_id]
+            assert (await conversation.job(job_id)).status == "running"
         assert len(conversation.agents.models["code"].requests) == 1
-        await conversation.continue_stopped()
+        await continue_stopped_jobs(runtime, config, paths, context)
         await wait_for_status(conversation.runtime, job_id, "completed")
         assert str((await conversation.job(job_id)).result).startswith("Later")
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_subagent_whose_bot_cannot_start_ends_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot whose start failed for good never continues its job, so the job ends as a restart ended it before."""
+    started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, answer("Never"))
+    try:
+        record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+        job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
+        await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
+        await conversation.runtime.shutdown()
+        await conversation._start_runtime()
+        await conversation.runtime.recover()
+        with capture_logs() as logs:
+            await continue_stopped_jobs(
+                conversation.runtime,
+                conversation.config,
+                conversation.paths,
+                None,
+                unavailable=True,
+            )
+        job = await conversation.job(job_id)
+        assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+        assert _declined(logs) == [(job_id, "the bot of 'leader' could not start")]
+        assert len(conversation.agents.models["code"].requests) == 1
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_one_stopped_job_that_fails_does_not_hold_up_the_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job whose access check raises is retried next pass, and the jobs after it are still continued."""
+    _started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, held, answer("First done"), answer("Second done"))
+    try:
+        record = await conversation.reply(
+            calls(
+                tool_call("run_subagent", "first", task="Report", agent_name="code", background_after=0),
+                tool_call("run_subagent", "second", task="Report", agent_name="code", background_after=0),
+            ),
+            answer("Parent free"),
+        )
+        first, second = (json.loads(str(answer_of(record, call).content))["job_id"] for call in ("first", "second"))
+        while len(conversation.agents.models["code"].requests) < 2:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        await conversation.runtime.shutdown()
+        await conversation._start_runtime()
+        await conversation.runtime.recover()
+        context = _delegate_runtime_context(conversation.config, conversation.paths, execution_identity=_IDENTITY)
+        coordinator = stopped_job_coordinator(conversation.runtime, conversation.config, conversation.paths, context)
+        grant = coordinator._grant
+        failing, other = (job.job_id for job in conversation.runtime.awaiting_continuation())
+        assert {failing, other} == {first, second}
+
+        def failing_grant(job: BackgroundJob) -> str:
+            if job.job_id == failing:
+                msg = "membership store is down"
+                raise RuntimeError(msg)
+            return grant(job)
+
+        monkeypatch.setattr(coordinator, "_grant", failing_grant)
+        await coordinator._continue_stopped_jobs(conversation.runtime)
+        await wait_for_status(conversation.runtime, other, "completed")
+        assert [job.job_id for job in conversation.runtime.awaiting_continuation()] == [failing]
     finally:
         await conversation.close()
 
