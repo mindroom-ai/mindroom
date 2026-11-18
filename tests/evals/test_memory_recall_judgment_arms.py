@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -11,24 +10,21 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
-from evals.memory_recall import judge, rerank_arms, run
+from evals.memory_recall import rerank_arms, run
 from evals.memory_recall.arms import ARMS
 from evals.memory_recall.rerank_arms import RERANKERS, RerankerSpec, rerank_turns
 from evals.memory_recall.rerank_cache import CachedReranker, RerankCache
-from evals.memory_recall.turns import write_turns
 from mindroom.constants import resolve_runtime_paths
 from mindroom.judgment import rerank as judgment_rerank
 from mindroom.judgment.client import JudgmentClient
 from mindroom.memory._shared import MemoryResult
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from tests.evals.test_memory_recall_run import (
-    FIXTURE_MEMORY,
-    _CountingEmbedder,
+    _cli_argv,
     _judge_transport,
     _turn,
     _write_config,
 )
-from tests.knowledge_test_support import install_knowledge_embedder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -154,20 +150,10 @@ async def test_judgment_arms_sweep_thresholds_from_cached_scores_and_bill_their_
     provider: _Provider,
 ) -> None:
     """One request per turn serves every threshold, a rerun asks nothing, and the cost is the billed input."""
-    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _CountingEmbedder())
-    monkeypatch.setattr(judge, "_RETRY_DELAY_S", 0.0)
-    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-synthetic")
-    memory_dir = shutil.copytree(FIXTURE_MEMORY, tmp_path / "workspace" / "memory")
-    turns = [_turn("2026-01-15", "salmon kibble Pixel"), _turn("2026-01-15", "garden shed colour")]
-    write_turns(turns, tmp_path / "turns.jsonl")
-    out = tmp_path / "out"
-    argv = [
-        *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
-        *("--config", str(_write_config(tmp_path)), "--out", str(out), "--key-env", "TEST_JUDGE_KEY"),
-        *("--arms", "shipped,A6t,A7o", "--thresholds", "0.5,0.8"),
-    ]
+    turns = ["salmon kibble Pixel", "garden shed colour"]
+    argv, out = _cli_argv(monkeypatch, tmp_path, turns, *("--arms", "shipped,A6t,A7o", "--thresholds", "0.5,0.8"))
 
     await run.run_cli(argv, transport=_judge_transport())
     assert provider.requests_to("typesafe") == provider.requests_to("openai_decisions") == len(turns)
@@ -196,25 +182,15 @@ async def test_latency_mode_times_judgment_calls_with_the_live_timeout(
     provider: _Provider,
 ) -> None:
     """Quality calls wait up to the hard cap; timed calls time out after the production 1.5 s, as live recall does."""
-    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _CountingEmbedder())
-    monkeypatch.setattr(judge, "_RETRY_DELAY_S", 0.0)
-    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-synthetic")
-    memory_dir = shutil.copytree(FIXTURE_MEMORY, tmp_path / "workspace" / "memory")
-    write_turns(
-        [_turn("2026-01-15", "salmon kibble Pixel"), _turn("2026-01-15", "garden shed colour")],
-        tmp_path / "turns.jsonl",
+    argv, out = _cli_argv(
+        monkeypatch,
+        tmp_path,
+        ["salmon kibble Pixel", "garden shed colour"],
+        *("--arms", "A6t", "--thresholds", "0.5", "--latency-turns", "5"),
     )
-    out = tmp_path / "out"
 
-    await run.run_cli(
-        [
-            *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
-            *("--config", str(_write_config(tmp_path)), "--out", str(out), "--key-env", "TEST_JUDGE_KEY"),
-            *("--arms", "A6t", "--thresholds", "0.5", "--latency-turns", "5"),
-        ],
-        transport=_judge_transport(),
-    )
+    await run.run_cli(argv, transport=_judge_transport())
 
     # Two quality calls, then a warm-up and one timed call for the one held-out turn.
     assert provider.timeouts == [rerank_arms.CALL_CAP_S] * 2 + [1.5] * 2

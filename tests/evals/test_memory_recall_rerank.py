@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 
-from evals.memory_recall import judge, rerank_arms, run
+from evals.memory_recall import rerank_arms, run
 from evals.memory_recall.arms import ARMS
 from evals.memory_recall.rerank_arms import (
     LatencySample,
@@ -22,18 +21,14 @@ from evals.memory_recall.rerank_arms import (
 )
 from evals.memory_recall.rerank_cache import CachedReranker, RerankCache
 from evals.memory_recall.run import latency_metrics, split_turns
-from evals.memory_recall.turns import write_turns
 from mindroom.memory._file_backend import _RECALL_SELECTION, _retrieve_memories
 from mindroom.memory._shared import MemoryResult
 from mindroom.token_counting import families
 from tests.evals.test_memory_recall_run import (
-    FIXTURE_MEMORY,
-    _CountingEmbedder,
+    _cli_argv,
     _judge_transport,
     _turn,
-    _write_config,
 )
-from tests.knowledge_test_support import install_knowledge_embedder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -55,13 +50,13 @@ def _cached(stub: _StubReranker, cache: RerankCache, *, model: str = "stub-model
     return CachedReranker(stub, cache, provider="stub", model=model, rubric_version="v1")
 
 
-
 def test_every_rerank_arm_is_the_shipped_arm_with_a_reranker() -> None:
     """A rerank arm reranks the `shipped` candidates: it differs from `shipped` only in its name and reranker."""
     rerank_arms_by_name = {name: arm for name, arm in ARMS.items() if arm.reranker is not None}
     assert list(rerank_arms_by_name) == ["A5", "A6o", "A6t", "A7o", "A7t"]
     for arm in rerank_arms_by_name.values():
         assert replace(arm, name="shipped", reranker=None) == ARMS["shipped"]
+
 
 @pytest.mark.asyncio
 async def test_cached_reranker_skips_second_request(tmp_path: Path) -> None:
@@ -110,9 +105,9 @@ async def test_cached_reranker_rejects_bad_scores(tmp_path: Path) -> None:
         assert len(stub.requests) == 1
 
 
-def _candidates(count: int, *, text: str = "note") -> list[MemoryResult]:
+def _candidates(count: int) -> list[MemoryResult]:
     return [
-        MemoryResult(id=f"c{index}", memory=f"{text} {index}", user_id="u", score=1.0 - index / 100)
+        MemoryResult(id=f"c{index}", memory=f"note {index}", user_id="u", score=1.0 - index / 100)
         for index in range(count)
     ]
 
@@ -306,21 +301,11 @@ async def test_cost_estimate_adds_request_and_rubric_overhead(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_threshold_sweep_reuses_scores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every threshold reads one reranker request per turn, and a rerun reads them all from the cache."""
-    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _CountingEmbedder())
-    monkeypatch.setattr(judge, "_RETRY_DELAY_S", 0.0)
-    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
     stub = _StubReranker()
     spec = rerank_arms.RERANKERS["bge-reranker-v2-m3"]
     monkeypatch.setitem(rerank_arms.RERANKERS, "bge-reranker-v2-m3", replace(spec, create=lambda _paths: stub))
-    memory_dir = shutil.copytree(FIXTURE_MEMORY, tmp_path / "workspace" / "memory")
-    turns = [_turn("2026-01-15", "salmon kibble Pixel"), _turn("2026-01-15", "garden shed colour")]
-    write_turns(turns, tmp_path / "turns.jsonl")
-    out = tmp_path / "out"
-    argv = [
-        *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
-        *("--config", str(_write_config(tmp_path)), "--out", str(out), "--key-env", "TEST_JUDGE_KEY"),
-        *("--arms", "shipped,A5", "--thresholds", "0.5,0.8"),
-    ]
+    turns = ["salmon kibble Pixel", "garden shed colour"]
+    argv, out = _cli_argv(monkeypatch, tmp_path, turns, *("--arms", "shipped,A5", "--thresholds", "0.5,0.8"))
 
     await run.run_cli(argv, transport=_judge_transport())
     assert len(stub.requests) == len(turns)
@@ -347,25 +332,18 @@ async def test_threshold_sweep_reuses_scores(tmp_path: Path, monkeypatch: pytest
 @pytest.mark.asyncio
 async def test_latency_mode_samples_only_held_out_turns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Latency mode times uncached calls for held-out turns only, in order, and reports beside the quality rows."""
-    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _CountingEmbedder())
-    monkeypatch.setattr(judge, "_RETRY_DELAY_S", 0.0)
-    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
     stub = _StubReranker()
     spec = rerank_arms.RERANKERS["bge-reranker-v2-m3"]
     monkeypatch.setitem(rerank_arms.RERANKERS, "bge-reranker-v2-m3", replace(spec, create=lambda _paths: stub))
-    memory_dir = shutil.copytree(FIXTURE_MEMORY, tmp_path / "workspace" / "memory")
     queries = [f"garden shed colour {number}" for number in range(8)]
-    write_turns([_turn("2026-01-15", query) for query in queries], tmp_path / "turns.jsonl")
-    out = tmp_path / "out"
-
-    await run.run_cli(
-        [
-            *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
-            *("--config", str(_write_config(tmp_path)), "--out", str(out), "--key-env", "TEST_JUDGE_KEY"),
-            *("--arms", "A5", "--thresholds", "0.5", "--latency-turns", "100"),
-        ],
-        transport=_judge_transport(),
+    argv, out = _cli_argv(
+        monkeypatch,
+        tmp_path,
+        queries,
+        *("--arms", "A5", "--thresholds", "0.5", "--latency-turns", "100"),
     )
+
+    await run.run_cli(argv, transport=_judge_transport())
 
     _tuning, held_out = split_turns(len(queries), seed=0)
     # The quality pass scores every turn once; then a warm-up and one timed call per held-out turn follow.
@@ -382,10 +360,12 @@ async def test_latency_mode_samples_only_held_out_turns(tmp_path: Path, monkeypa
 @pytest.mark.asyncio
 async def test_judge_model_is_selectable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A second judge answers every request of its run and is named in the results."""
-    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _CountingEmbedder())
-    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
-    memory_dir = shutil.copytree(FIXTURE_MEMORY, tmp_path / "workspace" / "memory")
-    write_turns([_turn("2026-01-15", "salmon kibble Pixel")], tmp_path / "turns.jsonl")
+    argv, out = _cli_argv(
+        monkeypatch,
+        tmp_path,
+        ["salmon kibble Pixel"],
+        *("--arms", "shipped", "--judge-model", "google/gemini-3.8-flash"),
+    )
     inner = _judge_transport()
     models: list[str] = []
 
@@ -393,15 +373,8 @@ async def test_judge_model_is_selectable(tmp_path: Path, monkeypatch: pytest.Mon
         models.append(json.loads(request.content)["model"])
         return await inner.handle_async_request(request)
 
-    await run.run_cli(
-        [
-            *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
-            *("--config", str(_write_config(tmp_path)), "--out", str(tmp_path / "out"), "--key-env", "TEST_JUDGE_KEY"),
-            *("--arms", "shipped", "--judge-model", "google/gemini-3.8-flash"),
-        ],
-        transport=httpx.MockTransport(handle),
-    )
+    await run.run_cli(argv, transport=httpx.MockTransport(handle))
 
     assert models
     assert set(models) == {"google/gemini-3.8-flash"}
-    assert json.loads((tmp_path / "out" / "results.json").read_text())["judge_model"] == "google/gemini-3.8-flash"
+    assert json.loads((out / "results.json").read_text())["judge_model"] == "google/gemini-3.8-flash"

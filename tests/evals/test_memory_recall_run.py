@@ -174,6 +174,30 @@ def _sources(results: list[MemoryResult]) -> list[str]:
     return [(result.get("metadata") or {})["source_file"] for result in results]
 
 
+def _cli_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    queries: Sequence[str],
+    *options: str,
+) -> tuple[list[str], Path]:
+    """Prepare a benchmark CLI run over one turn per query on the fixture memory; return its argv and output dir.
+
+    It installs the counting embedder, needs no judge retry delay, and sets the judge key.
+    """
+    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _CountingEmbedder())
+    monkeypatch.setattr(judge, "_RETRY_DELAY_S", 0.0)
+    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
+    memory_dir = shutil.copytree(FIXTURE_MEMORY, tmp_path / "workspace" / "memory")
+    write_turns([_turn("2026-01-15", query) for query in queries], tmp_path / "turns.jsonl")
+    out = tmp_path / "out"
+    argv = [
+        *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
+        *("--config", str(_write_config(tmp_path)), "--out", str(out), "--key-env", "TEST_JUDGE_KEY"),
+        *options,
+    ]
+    return argv, out
+
+
 def _judge_transport() -> httpx.MockTransport:
     """Rate the first hit of each request directly relevant and the rest unrelated."""
 
