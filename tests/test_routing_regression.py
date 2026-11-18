@@ -796,7 +796,9 @@ class TestRoutingRegression:
 
         with (
             patch.object(
-                router_bot._turn_store, "record_placeholder", side_effect=RuntimeError("crash after the send")
+                router_bot._turn_store,
+                "record_placeholder",
+                side_effect=RuntimeError("crash after the send"),
             ),
             pytest.raises(RuntimeError, match="crash after the send"),
         ):
