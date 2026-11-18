@@ -1688,7 +1688,8 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     deploy_calls: list[str] = []
     model = _model()
     capture = SkillReviewCapture()
-    settings = ModelRequest(messages=(), deferred_tools=DeferredTools(names=frozenset({"shell"})))
+    deferred = DeferredTools(names=frozenset({"shell"}))
+    settings = ModelRequest(messages=(), deferred_tools=deferred, prompt_hold=tmp_path / "hold.json")
     tools = _agent_tools(config, paths, shell_calls, deploy_calls=deploy_calls)
     await _answer(model, capture, tools, settings=settings)
     model.script = [
@@ -1707,7 +1708,9 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     assert forked.tools == sent.tools
     assert "deploy" in {tool.name for tool in forked.tools}
     assert forked.deferred_tools == sent.deferred_tools == settings.deferred_tools
-    assert replace(forked, messages=(), tools=()) == replace(sent, messages=(), tools=())
+    # It reads the system prompt the conversation holds and never writes it: the conversation may have moved on.
+    assert (sent.prompt_hold_pin, forked.prompt_hold_pin) == (None, [])
+    assert replace(forked, messages=(), tools=()) == replace(sent, messages=(), tools=(), prompt_hold_pin=[])
     assert shell_calls == deploy_calls == []
     assert denied[-1] == (
         "This tool is not available during a skill review; only skill_manage, get_skill_instructions, "

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.llm.messages import tool_result_view, with_joined_system
+from mindroom.llm.messages import PROMPT_UPDATE_KEY, tool_result_view, with_joined_system
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     ReasoningDelta,
@@ -134,6 +134,9 @@ def _chat_call(call: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, Any]:
+    if PROMPT_UPDATE_KEY in (message.provider_data or {}):
+        # Only a request to a route that takes one where it stands holds one (``pipeline.prompt_hold``).
+        return {"role": "system", "content": message.content}
     values: dict[str, Any] = {
         "role": wire.system_role if message.role == "system" else message.role,
         "content": _message_content(message),
