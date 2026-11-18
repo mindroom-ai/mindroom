@@ -326,8 +326,9 @@ It acts only for the agent's owner, in any turn that runs for them, such as a ch
 
 Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
 
-`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachment=None, name=None)` acts as the owner, only in a chat with the agent, so not through the MCP gateway.
-Whether a call asks the owner first is decided by the [approval rules](../tool-approval.md), as for any tool; a deployment that wants a card for every write sets:
+`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachment=None, name=None)` acts as the owner in any turn that runs for them, such as a chat with the agent, one of their scheduled tasks, a hook or trigger, or a team run, but not through the MCP gateway.
+Whether a call asks the owner first is decided by the [approval rules](../tool-approval.md), as for any tool, so with no rule that requires approval and `tool_approval.default: auto_approve`, an unattended turn such as a scheduled task writes as the owner too.
+A deployment that wants a card for every write sets:
 
 ```yaml
 tool_approval:
@@ -340,15 +341,13 @@ A `script` rule can decide per call from the arguments, for example asking for `
 
 | Action | Does |
 |--------|------|
-| `send` | Sends one message into `room_id`, or into the owner's DM with `user_id`, which is made and added to the owner's DMs if they have none: the text `message`, or the file `attachment` names, an attachment ID of the conversation, so a text and a file are two calls; `thread_id` sends into that thread, and `event_id` makes `message` a reply to that message |
+| `send` | Sends one message into `room_id`, or into the owner's existing DM with `user_id`; with none, nothing is sent, and the owner can start one in their Matrix client, or the agent can make a room with `create_room`, `invite` them, and send there: the text `message`, or the file `attachment` names, an attachment ID of the conversation, so a text and a file are two calls; `thread_id` sends into that thread, and `event_id` makes `message` a reply to that message |
 | `react` | Reacts to the message `event_id` in `room_id` with `emoji`, one emoji of at most 8 characters and without spaces |
 | `edit` | Replaces the text of the owner's own text message `event_id` in `room_id` with `message`; a photo, file, or audio message cannot be edited |
 | `redact` | Deletes the owner's own message or reaction `event_id` in `room_id`, with `message` as the reason |
 | `join`, `leave` | Joins or leaves `room_id` |
 | `invite` | Invites `user_id` into `room_id` |
-| `create_room` | Creates a private room called `name`, inviting `user_id` if given |
-
-A DM made for a `send` that was not added to the owner's DMs, because that failed or the call was stopped right after the room was made, is not found by a later `send` to that person, which makes another; the first call's result names the room when it can.
+| `create_room` | Creates a private room called `name` and invites nobody; `invite` adds people |
 
 What it sends shows as the owner's to everyone, but MindRoom never takes it as the owner speaking: it starts no reply, runs no command, and approves or denies nothing, so the agent talks to other agents as itself.
 Nothing is sent, reacted, or edited into an encrypted room.

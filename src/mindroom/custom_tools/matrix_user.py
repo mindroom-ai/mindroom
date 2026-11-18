@@ -51,9 +51,11 @@ _PEOPLE_QUERY_NEEDED = "people needs query: a name, or a full Matrix ID such as 
 _SEARCH_QUERY_NEEDED = "search needs query: the words to look for."
 _EVENT_NEEDED = "download needs event_id: the ID of the message with the file."
 _TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
-# A write takes the conversation's files, its rate-limit context, and its place in the audit line from the chat turn,
-# so a call without one, such as the MCP gateway's, writes nothing.
-_WRITE_TURN_NEEDED = "matrix_user_write works only in a chat with the agent."
+# A write takes the conversation's files and its rate-limit context from the turn it runs in, any turn that runs for
+# the owner, so a call without one, such as the MCP gateway's, writes nothing; the audit line takes nothing from it.
+_WRITE_TURN_NEEDED = (
+    "matrix_user_write needs a conversation with the agent, so it does not work through the MCP gateway."
+)
 
 
 def _non_blank(value: str | None) -> str | None:

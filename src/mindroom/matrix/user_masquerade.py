@@ -3,7 +3,9 @@
 An application service may act as any user in its namespace by naming that user in each request's `user_id`
 parameter, so this client needs no login, device, or encryption keys of its own.
 Every message event, redaction, and state event it sends, which are the `send` and `redact` requests and a `PUT` of
-`state`, is marked as the agent's, so MindRoom never treats it as the person's own, whatever endpoint carried it.
+`state`, is marked as the agent's, so MindRoom never treats a message or state event as the person's own, whatever
+endpoint carried it. A homeserver may store a redaction with its reason only, and MindRoom does not read the marker on
+one.
 A membership change or a new room, which have endpoints of their own, goes out as the person's own.
 """
 

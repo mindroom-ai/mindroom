@@ -58,7 +58,9 @@ if TYPE_CHECKING:
 STRANGER = "@bob:example.com"
 NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
 TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
-WRITE_TURN_NEEDED = "matrix_user_write works only in a chat with the agent."
+WRITE_TURN_NEEDED = (
+    "matrix_user_write needs a conversation with the agent, so it does not work through the MCP gateway."
+)
 # An alias, and the room the homeserver's directory says it names.
 ALIAS = "#general:example.com"
 ALIASED_ROOM = "!general:example.com"
@@ -537,11 +539,11 @@ async def test_the_write_function_takes_no_user_to_act_as(
 
 
 @pytest.mark.asyncio
-async def test_the_gateway_write_needs_a_chat_turn(
+async def test_the_gateway_write_needs_a_conversation(
     gateway_agent: AgentToolContext,
     homeserver: FakeHomeserver,
 ) -> None:
-    """Without a rule that requires approval the gateway offers the write, which answers that it needs a chat turn."""
+    """Without a rule that requires approval the gateway offers the write, which answers that it needs a conversation."""
     with homeserver.serving_the_toolkit():
         found = await gateway.search_tools(gateway_agent, toolkit="matrix_user")
         refused = await gateway.invoke_tool(
@@ -590,12 +592,12 @@ async def test_the_gateway_offers_no_write_a_rule_asks_approval_for(
 
 
 @pytest.mark.asyncio
-async def test_a_write_without_a_chat_turn_is_refused(
+async def test_a_write_without_a_turn_is_refused(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """A write belongs to a conversation with the owner, which a call without a chat turn does not have."""
+    """A write belongs to a conversation with the agent, which a call without a turn does not have."""
     with homeserver.serving_the_toolkit():
         result = await owner_toolkit(config, paths).matrix_user_write(action="leave", room_id=ROOM)
 

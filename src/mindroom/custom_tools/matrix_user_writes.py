@@ -3,7 +3,9 @@
 Each write sends at most one message event or redaction, so none ends with only a part of it sent.
 Each message, file, reaction, edit, and redaction names the agent as its author in the content the send helpers are
 given, so the uploaded full text of a long message, which history reads instead of the event, says so too; the client
-marks each of them again on the wire. A join, leave, invitation, or new room carries no marker.
+marks each of them again on the wire. A homeserver may store a redaction with its reason only, and MindRoom does not
+read the marker on one: a redaction takes effect as the person's either way. A join, leave, invitation, or new room
+carries no marker.
 Nothing is sent into an encrypted room, or one whose encryption could not be read: the client has no device, so the
 event would go out in plain text.
 """
@@ -443,8 +445,8 @@ async def _event_write(
             sidecar_required=True,
         )
     written.event_id = _delivered(outcome)
-    # An edit's result names the message it edited: a later redaction or reaction naming the replacement event would
-    # act on the edit alone. The audit line names the replacement, which is what this write sent.
+    # An edit's result names the message it edited, the ID reads list it under. The audit line names the replacement,
+    # which is what this write sent.
     return {"room_id": room_id, "event_id": written.event_id if write.action == "react" else event_id}
 
 
