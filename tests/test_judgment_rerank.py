@@ -211,6 +211,28 @@ async def test_a_passage_that_ends_like_a_credential_key_is_left_out_alone() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "documents",
+    [["Remember the password:"], ["Remember the password:", "y" * 70_000]],
+    ids=["single", "several"],
+)
+async def test_no_candidate_left_to_send_scores_all_zero_without_a_request(documents: list[str]) -> None:
+    """When every candidate is left out, each scores 0.0, so the threshold drops them instead of keeping hybrid order."""
+    seen: list[httpx.Request] = []
+    scores = await _reranker(_answers({"c0": 0.9}), seen).ascore("query", documents)
+
+    assert scores == [0.0] * len(documents)
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_blank_query_raises_even_with_no_candidate_left_to_send() -> None:
+    """An invalid query still raises when no candidate would have been sent."""
+    with pytest.raises(JudgmentError):
+        await _reranker(_answers({"c0": 0.9}), []).ascore("   ", ["Remember the password:"])
+
+
+@pytest.mark.asyncio
 async def test_backend_failure_raises() -> None:
     """A failed batch raises, so retrieval falls back to the hybrid selection."""
     with pytest.raises(JudgmentError):

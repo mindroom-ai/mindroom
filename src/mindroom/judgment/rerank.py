@@ -64,6 +64,7 @@ class _JudgmentReranker:
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
         """Judge the leading documents one request holds; a refused, unsent or unreadable document scores 0.0.
 
+        With no readable document left, every one scores 0.0 without a request.
         A query the redactor cannot read raises, so the search keeps its own order.
         """
         message = _redacted(query)
@@ -73,6 +74,11 @@ class _JudgmentReranker:
         questions = ((index, _candidate_question(index, passage)) for index, passage in passages if passage is not None)
         # A clean passage can still end like a credential's key, which makes its question read as key and value.
         judged = [(index, question) for index, question in questions if is_unredacted(question.instructions)]
+        if documents and not judged:
+            # Nothing is left to ask, so every document scores 0.0; a query no request could carry still raises.
+            if not build_batch_request([_GATE], message, instructions="").complete:
+                raise JudgmentError(failure="incomplete_state")
+            return [0.0] * len(documents)
         count, request = self._packed([question for _index, question in judged], message)
         result = await self.batch.evaluate(request)
         if result.failure is not None or result.decision is None:
