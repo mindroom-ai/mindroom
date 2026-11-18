@@ -790,6 +790,35 @@ class ModelPricing(BaseModel):
         return self.input if self.cache_write is None else self.cache_write
 
 
+type ReasoningLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+class ReasoningConfig(BaseModel):
+    """The reasoning levels one model offers and the level its plain name runs at."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    levels: list[ReasoningLevel] = Field(
+        min_length=1,
+        description="Levels clients offer for this model, in order; `name@level` runs the model at one of them",
+    )
+    default: ReasoningLevel = Field(description="Level the plain model name runs at; one of levels")
+
+    @model_validator(mode="after")
+    def _validate_levels(self) -> Self:
+        if len(set(self.levels)) != len(self.levels):
+            msg = "reasoning.levels must not repeat a level"
+            raise ValueError(msg)
+        if self.default not in self.levels:
+            msg = f"reasoning.default {self.default!r} must be one of reasoning.levels"
+            raise ValueError(msg)
+        return self
+
+    def describe(self) -> str:
+        """Return the levels and the default for model listings."""
+        return f"levels: {', '.join(self.levels)}; default {self.default}"
+
+
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
@@ -840,6 +869,12 @@ class ModelConfig(BaseModel):
     pricing: ModelPricing | None = Field(
         default=None,
         description="Provider prices in USD per million tokens, used to measure spend against budgets",
+    )
+    reasoning: ReasoningConfig | None = Field(
+        default=None,
+        description=(
+            "Reasoning levels this model offers; its provider's reasoning key in extra_kwargs then follows the level"
+        ),
     )
 
     @field_validator("provider")
@@ -938,6 +973,49 @@ class ModelConfig(BaseModel):
     def configured_api_key(self) -> str | None:
         """Return the key set through ``api_key`` or ``extra_kwargs.api_key``, if any."""
         return self.api_key or (self.extra_kwargs or {}).get("api_key")
+
+    def at_level(self, level: ReasoningLevel) -> ModelConfig:
+        """Return this model running at ``level``, named ``"<display name> (<level>)"``."""
+        assert self.reasoning is not None
+        return self.model_copy(
+            update={
+                "reasoning": self.reasoning.model_copy(update={"default": level}),
+                "display_name": f"{self.display_name} ({level})" if self.display_name else None,
+            },
+        )
+
+
+def split_model_reference(reference: str) -> tuple[str, str | None]:
+    """Split a model reference ``name@level`` into the model name and the level, which is None without ``@``."""
+    name, separator, level = reference.partition("@")
+    return name, level if separator else None
+
+
+class ModelTable(dict[str, ModelConfig]):
+    """The configured models by name; a reference ``name@level`` also finds the model at one of its levels.
+
+    Iteration, ``len``, and serialization see only the configured names, so listings and saved config never show
+    a level.
+    """
+
+    def _at_level(self, reference: object) -> ModelConfig | None:
+        if not isinstance(reference, str):
+            return None
+        name, level = split_model_reference(reference)
+        model = super().get(name)
+        if level is None or model is None or model.reasoning is None or level not in model.reasoning.levels:
+            return None
+        return model if level == model.reasoning.default else model.at_level(cast("ReasoningLevel", level))
+
+    def __contains__(self, reference: object) -> bool:
+        return super().__contains__(reference) or self._at_level(reference) is not None
+
+    def __getitem__(self, reference: str) -> ModelConfig:
+        model = self._at_level(reference)
+        return super().__getitem__(reference) if model is None else model
+
+    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # type: ignore[override]
+        return self[reference] if reference in self else default
 
 
 class RouterConfig(BaseModel):

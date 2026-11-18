@@ -58,6 +58,8 @@ from tests.providers.golden_support import (
 from tests.providers.openai_family_support import write_cli_logins
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider, StreamEvent
 
@@ -714,6 +716,73 @@ async def test_routes_without_api_keys_never_send_a_configured_one(
         )
 
     assert all("sk-config" not in value for value in wire.requests[0].headers.values())
+
+
+# --- Reasoning levels on the wire ---------------------------------------------------------------------------
+
+
+_LEVELS = {"levels": ["low", "high"], "default": "low"}
+
+
+def _sends(body: Any, expected: Any) -> bool:  # noqa: ANN401 - JSON values
+    """Return whether ``body`` carries every value of ``expected``, recursing into objects."""
+    if isinstance(expected, dict):
+        return isinstance(body, dict) and all(key in body and _sends(body[key], value) for key, value in expected.items())
+    return body == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("codex", lambda level: {"reasoning": {"effort": level, "summary": "auto"}}),
+        ("openrouter", lambda level: {"reasoning_effort": level}),
+        ("anthropic", lambda level: {"output_config": {"effort": level}}),
+        ("google", lambda level: {"generationConfig": {"thinkingConfig": {"thinking_level": level.upper()}}}),
+    ],
+    ids=["codex", "openrouter", "anthropic", "google"],
+)
+async def test_a_model_reference_at_a_level_sends_that_level(
+    provider: str,
+    expected: Callable[[str], dict[str, Any]],
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    tmp_path: Path,
+) -> None:
+    """``name@level`` sends the level the route reads, where plain ``name`` sends the default."""
+    extra_kwargs: dict[str, Any] = {
+        "codex": {"codex_home": write_cli_logins(tmp_path)["<codex_home>"]},
+        "google": {"client_params": {"http_options": {"httpx_async_client": httpx.AsyncClient(transport=wire.transport)}}},
+    }.get(provider, {})
+    model = ModelConfig(provider=provider, id="m", api_key="sk-config", reasoning=_LEVELS, extra_kwargs=extra_kwargs)
+    config = Config(models={"target": model})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    for reference in ("target", "target@high"):
+        with pytest.raises(ProviderError):
+            await complete(build_model_provider(config, runtime_paths, reference), ModelRequest(messages=[_user()]))
+
+    assert _sends(wire.body(0), expected("low")), wire.body(0)
+    assert _sends(wire.body(1), expected("high")), wire.body(1)
+
+
+@pytest.mark.asyncio
+async def test_a_model_reference_at_a_level_uses_the_dashboard_key_of_its_model(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("model:target", {"api_key": "sk-dashboard"})
+    model = ModelConfig(provider="openai", api="chat_completions", id="m", api_key="sk-config", reasoning=_LEVELS)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model}), runtime_paths, "target@high"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer sk-dashboard"
+    assert wire.body()["reasoning_effort"] == "high"
 
 
 # --- One golden per family, through the registry ------------------------------------------------------------
