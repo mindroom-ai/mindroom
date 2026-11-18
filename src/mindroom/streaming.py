@@ -654,6 +654,8 @@ class StreamingResponse:
     live: LivePublisher | None = field(default=None, init=False, repr=False)
     # Frames start once the reply's event shows this stream: its adopted placeholder or its first progress write.
     _shows_stream: bool = field(default=False, init=False, repr=False)
+    # Queues the refresh that shows a compaction change, which waits while no event shows the stream.
+    _refresh_compactions: Callable[[], None] | None = field(default=None, init=False, repr=False)
     _transport_ended: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -1093,6 +1095,7 @@ class StreamingResponse:
 
         self._mark_first_visible_reply_if_needed(prepared_delivery.committed_state)
         if not is_final:
+            became_visible = not self._shows_stream
             self._shows_stream = True
             if not is_initial_send and self.event_id is not None:
                 self.progress_delivered(_progress_state(prepared_delivery.committed_state), self.event_id)
@@ -1102,9 +1105,15 @@ class StreamingResponse:
             self._mark_delivery_committed(prepared_delivery.committed_state)
             self._committed_live_seq = prepared_delivery.content.get(LIVE_CHECKPOINT_KEY, {}).get("seq", -1)
             self._mark_nonterminal_delivery(prepared_delivery, boundary_refresh=boundary_refresh)
+            self._refresh_compactions_changed_in_flight(became_visible=became_visible)
         else:
             self.placeholder_progress_sent = False
         return True
+
+    def _refresh_compactions_changed_in_flight(self, *, became_visible: bool) -> None:
+        """Show a compaction change the write that made the stream visible missed, whose refresh waited for it."""
+        if became_visible and self._compactions_unshown and self._refresh_compactions is not None:
+            self._refresh_compactions()
 
     def _nonterminal_send_failed(self, *, is_initial_send: bool) -> None:
         """Handle a progress send Matrix did not accept: a failed create fails the stream, a failed edit does not.
@@ -2298,6 +2307,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 tool_count=lambda: len(streaming.tool_trace) if streaming.show_tool_calls else 0,
                 changed=_compaction_changed,
             )
+            streaming._refresh_compactions = _compaction_changed
         try:
             try:
                 await _consume_stream_with_progress_supervision(

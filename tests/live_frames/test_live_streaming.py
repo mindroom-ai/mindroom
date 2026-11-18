@@ -573,6 +573,54 @@ async def test_a_regenerations_compaction_never_blanks_the_answer_it_replaces(
 
 
 @pytest.mark.asyncio
+async def test_a_compaction_starting_while_the_first_replacement_edit_lands_is_shown_once_it_lands(
+    tmp_path: Path,
+) -> None:
+    """A compaction that starts while a regeneration's first edit is in flight shows as running once that edit lands."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    first_edit_sent, release_first_edit = asyncio.Event(), asyncio.Event()
+    record_edit = edits.edit
+
+    async def hold_first_edit(*args: Any) -> DeliveredMatrixEvent:  # noqa: ANN401
+        if not first_edit_sent.is_set():
+            first_edit_sent.set()
+            await release_first_edit.wait()
+        return await record_edit(*args)
+
+    async def start_while_held() -> AsyncIterator[Any]:
+        yield TextDelta("New answer")
+        await first_edit_sent.wait()
+        compaction.start()
+        release_first_edit.set()
+        # The compaction keeps running, and no text arrives meanwhile.
+        await asyncio.sleep(0.3)
+        compaction.succeed()
+        yield TextDelta(", finished.")
+        await asyncio.sleep(0.03)
+
+    with patch.object(edits, "edit", new=hold_first_edit):
+        await _run(
+            _config(tmp_path, update_interval=0.05, live_frames=False),
+            start_while_held(),
+            records,
+            edits,
+            existing_answer_event_id="$prior_answer",
+            compactions=recorder,
+        )
+
+    assert COMPACTIONS_CONTENT_KEY not in edits.contents[0]
+    running = [
+        content
+        for content in edits.contents
+        if [entry["status"] for entry in content.get(COMPACTIONS_CONTENT_KEY, [])] == ["running"]
+    ]
+    assert running
+    assert running[0]["body"] == "New answer"
+    assert _terminal(records)[COMPACTIONS_CONTENT_KEY][0]["status"] == "success"
+
+
+@pytest.mark.asyncio
 async def test_compaction_start_on_placeholder_sends_progress_edit(tmp_path: Path) -> None:
     """A compaction that starts while only the placeholder shows edits the placeholder at once to show it."""
     records, edits, recorder = _records(), _Edits(), ReplyCompactions()
