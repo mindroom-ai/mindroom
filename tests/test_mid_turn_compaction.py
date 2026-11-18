@@ -1376,7 +1376,8 @@ async def test_first_request_over_the_limit_from_tools_compacts_history_before_d
     model = ToolLoopModel(tool_rounds=0)
     # Tool definitions alone push the first request, which has no exchanges of its own yet, over the limit.
     lookup = Function(name="lookup", description="d" * 10_000, entrypoint=lambda: "ok")
-    agent = _scoped_agent(model, config, paths, storage, tools=[lookup])
+    lifecycle = RecordingCompactionLifecycle()
+    agent = _scoped_agent(model, config, paths, storage, tools=[lookup], lifecycle=lifecycle)
 
     output = await _run(agent, "Do the task")
 
@@ -1389,6 +1390,9 @@ async def test_first_request_over_the_limit_from_tools_compacts_history_before_d
     assert folded_run_ids(storage) == [f"run-{index}" for index in range(4)]
     if earlier_summary is not None:
         assert earlier_summary in summary_calls.inputs[0]
+    # A fold before the reply's first model request sits before the reply, not between two of its requests.
+    [start] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleStart)]
+    assert start.phase == "pre_turn"
 
 
 @pytest.mark.asyncio

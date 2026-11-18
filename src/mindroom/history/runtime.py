@@ -569,7 +569,8 @@ async def compact_scope_mid_turn(
         runs_before=len(basis.runs) + 1,
         compaction_lifecycle=compaction_lifecycle,
         compact=compact,
-        phase="mid_turn",
+        # Only a fold before the reply's first model request finds none of the turn's exchanges or member runs to take.
+        phase="mid_turn" if fold.messages or fold.member_run_ids else "pre_turn",
     )
     return result.outcome
 
