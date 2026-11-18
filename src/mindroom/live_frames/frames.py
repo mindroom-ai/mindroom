@@ -56,7 +56,7 @@ def fitted_tools(tools: tuple[dict[str, object], ...], *, bare: int) -> tuple[di
     for index, entry in enumerate(tools):
         previews = {key: text for key in _PREVIEW_KEYS if isinstance(text := entry.get(key), str)}
         kept = {} if index < bare else {key: _clipped(text) for key, text in previews.items()}
-        handle = _job_handle(previews.get("result_preview"))
+        handle = _job_handle(previews.get("result_preview"), whole=index >= bare)
         if handle is not None:
             kept["result_preview"] = handle
         if kept == previews:
@@ -67,8 +67,11 @@ def fitted_tools(tools: tuple[dict[str, object], ...], *, bare: int) -> tuple[di
     return tuple(fitted)
 
 
-def _job_handle(text: str | None) -> str | None:
-    """Return the ``{job_id, tool, status}`` handle a result is, as the whole result when it fits, else None."""
+def _job_handle(text: str | None, *, whole: bool) -> str | None:
+    """Return the ``{job_id, tool, status}`` handle a result is, None for any other result.
+
+    With ``whole``, a result within the preview cap stays as it is; otherwise only those three fields are kept.
+    """
     if text is None or not text.lstrip().startswith("{"):
         return None
     try:
@@ -77,7 +80,7 @@ def _job_handle(text: str | None) -> str | None:
         return None
     if not isinstance(value, dict) or not all(isinstance(value.get(key), str) for key in ("job_id", "tool", "status")):
         return None
-    if len(text) <= _FRAME_PREVIEW_CHARACTERS:
+    if whole and len(text) <= _FRAME_PREVIEW_CHARACTERS:
         return text
     return json.dumps({key: value[key] for key in ("job_id", "tool", "status")})
 

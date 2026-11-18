@@ -120,5 +120,7 @@ def test_a_job_handle_result_keeps_its_handle_in_frames() -> None:
     assert json.loads(cut["result_preview"]) == minimal
     assert json.loads(bare["result_preview"]) == minimal
     assert cut["clipped"] is True
-    short = {**entry, "result_preview": json.dumps(minimal)}
+    short = {**entry, "result_preview": json.dumps({**minimal, "summary": None})}
     assert fitted_tools((short,), bare=0) == (short,)
+    (short_bare,) = fitted_tools((short,), bare=1)
+    assert json.loads(short_bare["result_preview"]) == minimal
