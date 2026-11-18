@@ -110,7 +110,10 @@ Shutdown closes callback admission before withdrawing runtime capabilities, and 
 A cleanup that outlasts its budget keeps its owners, and the Matrix client and journal stay open until it finishes.
 Shutdown invalidates membership readiness only after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
 Replay does not wait for a later sync token or Sliding Sync position: recovered callbacks may rely on the room ID, but cached membership and state are best-effort.
-A replayed message that mentions nobody reads the responder saved for it in `room_event_claims`, so a replay or a different set of candidates keeps its responder; only bots that split one burst of messages into different batches can each have saved a responder, and then each of those answers its batch.
+A message that mentions nobody and that no bot answers by its own rules is routed by one bot per room, the owner of the room's routing lane, which is the room's steward.
+The lane owner saves a handoff row in the journal (`routing_handoffs`) before the turn moves, and accepting the row puts the turn in the chosen bot's journal and settles the lane owner's events in one transaction.
+Startup accepts every saved handoff before any bot replays, and a replayed lane-owner turn finds the row of its sources instead of selecting again, so a crash at any point leaves one answer and one selection.
+The lane's generation in `routing_lanes` grows when its owner changes, and a bot that lost the lane while it selected saves nothing.
 
 ### Delivery and membership
 

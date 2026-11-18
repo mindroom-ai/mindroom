@@ -26,7 +26,8 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
 
 1. **Routing runs in the process, with no relay.**
    Picking a responder for an unmentioned message in a room with several candidates reuses `suggest_responder`, `router.model` and `router.judgment`.
-   The choice is saved per source event, so a replay or a second bot cannot pick again.
+   One bot per room, the owner of its routing lane, picks, and hands the turn to the chosen agent inside the process (decision 14).
+   The handoff is saved before it moves, so a replay or a second bot cannot pick again.
    The chosen agent answers the original message directly, and no relay message is posted.
    Mentions, thread continuation, `reply_mode: mentions` and the multi-human silence rules stay as they are.
    Relay events already in room history are still read as before.
@@ -69,7 +70,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     Every bot transcribes a voice message before the message enters its coalescing lane, through one shared in-process transcription and a durable per-bot checkpoint (`voice/readiness.py`), so routing already reads the transcript.
     Today the router posts a "transcribing" placeholder before that and the other bots wait on an in-process barrier and on the router's receipt.
     Publication moves to after the plan: the bot whose plan is to answer posts the transcript, records the receipt in its own turn rows, and only then starts its reply.
-    A restart replays the turn from the same checkpoint, reads the same saved routing choice, finds its own receipt and does not post again.
+    A restart replays the turn from the same checkpoint, a routed turn from the answering bot's own journal (decision 14), finds its own receipt and does not post again.
     The placeholder, the barrier, its grace timer and the read of another principal's receipt go away, because the poster and the answerer are the same bot.
     When two bots answer one voice message, a shared per-event claim lets one of them post the transcript and an in-process lock held during that send keeps the other's reply behind it.
     Consequence: the "transcribing" progress line disappears, since nobody is known to answer until the transcript exists.
@@ -80,16 +81,21 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     A row fails closed when its observer leaves the room, reports a sync gap, restarts its sync loop or stops, and the next refresh picks a new observer and reads the room again before the row is ready.
     A power-level change alone does not move the observer, because a joined, syncing account stays an authoritative witness of membership; this avoids a handover protocol.
     A grant room that no running MindRoom account has joined stays unready, which denies, and is reported as a config warning.
-14. **Selection agreement (question C): one process-wide service, one row per source event.**
-    All bots run in one process, so a candidate that reaches "several candidates, nobody mentioned, the thread names no responder" asks one orchestrator-owned service under a per-room lock.
-    The service reads the saved rows of the turn's source events; when the first source that has a row names an entity, that is the answer and the turn's other sources inherit it; otherwise it runs the selector once and saves the result for every source of the turn.
-    A bot answers a turn when the row of any of its sources names it, so a bot that batched a burst differently never ignores a message saved for it.
-    A bot that would answer an unmentioned turn by itself (the only candidate, the thread's one agent, a follow-up to its running reply, the agent that surfaces a team nobody mentioned) saves itself through the same service first, and a candidate still answering in the thread is saved before the selector runs, so a replay or a bot that sees other candidates reads one owner.
-    A candidate that would not answer by itself saves nothing but reads the rows, and answers only the sources whose own row names it: they go back to the journal and are answered as their own turn, and the other sources of its batch inherit nothing.
-    Turns that mention an agent or a person, and adaptive participation in threads with several people, take no row.
-    Bots coalesce on their own timers, so two bots can group a burst differently; rows per source keep a later, larger batch on the choice an earlier, smaller batch made.
-    Accepted limitation: when two bots split a burst at different points and both splits reach the service before any larger batch does, two rows can name different agents, and a message at the split point can get an answer from each.
-    This errs toward a second answer, never toward silence; the router could likewise send the two halves of a burst it split to different agents.
+14. **Selection agreement (question C): one routing lane per room, and a durable handoff inside the process.**
+    A first design let every candidate coalesce and decide for itself and reconciled them through one saved row per source event.
+    Three review rounds kept finding holes with one root, several independent coalescers, so it was replaced.
+    Every bot first answers by its own rules, which are the rules of `origin/main`: the only candidate, a mention, the thread's agent, a follow-up to its running reply, a team, adaptive participation.
+    A turn those rules leave unanswered (several candidates, nobody mentioned, the thread names no responder and holds one person, `router.access` allows the requester when set) is routed by the room's lane owner alone, and every other bot ignores it, as it ignored it while a router existed.
+    The lane owner is the room's steward (decision 3), which may be the owner account or a candidate.
+    It coalesces and normalizes the turn as any bot does (edits, attachments, voice transcript), runs the selector once, and saves one handoff row in the event journal: a stable ID, the room, the exact source events, the normalized events that rebuild the prepared turn, the chosen bot or "nobody fits", and the lane's generation.
+    Accepting the handoff is one journal transaction: the turn becomes an event in the chosen bot's journal under the handoff's ID, the lane owner's events for it settle, and the row gives up its payload.
+    So the lane owner's events stay pending until acceptance, the turn is always in exactly one journal, and a second acceptance changes nothing.
+    The chosen bot answers the person's original event for the original requester, through the context path old router relays use, and checks that requester's access again when it takes the turn.
+    A restart accepts every saved handoff before any bot replays, and a replayed lane-owner turn finds the row of its sources and only moves it on, so no crash point asks the model again or answers twice.
+    A turn nobody fits is saved and settled, and nobody answers; when the selector fails, the candidate with the lowest Matrix ID is chosen.
+    Each room has one lane owner at a time, recorded with a generation that grows when the owner changes.
+    A new owner moves the handoffs its predecessor saved and never moved, which their rows alone carry, and a bot that lost the lane while it was selecting saves nothing.
+    The fast paths read no row, so their rare races are the ones the router had: a candidate that answers by its own rules while the lane owner routes the same message can produce a second answer.
 15. **Startup (question D): no account is required.**
     Every configured account starts through the same retrying path, with the owner account first when the config needs one.
     When room-backed access is configured, dispatch stays parked until every bot that started has finished its first own sync or has stopped, and then one refresh builds the member rows; a room whose observer is not ready stays unready and its messages wait, as they do today while the router's refresh is pending.
