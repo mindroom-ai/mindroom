@@ -109,22 +109,13 @@ ARMS: dict[str, Arm] = {
         skip_short=False,
         shipped=True,
     ),
-    # The `shipped` candidates, reranked by a local cross-encoder.
-    "A5": Arm(
-        "A5",
-        exclude=(),
-        entry_chunks=False,
-        selection="gap",
-        skip_short=False,
-        shipped=True,
-        search_exclude=("memory/archive/**",),
-        reranker="bge-reranker-v2-m3",
-    ),
 }
-# The `shipped` candidates, reranked by a judgment backend (A6), or by one that also asks the gate question (A7).
+# The `shipped` candidates, reranked by a local cross-encoder (A5), a judgment backend (A6), or one that also asks the
+# gate question (A7).
 ARMS |= {
-    name: replace(ARMS["A5"], name=name, reranker=reranker)
+    name: replace(ARMS["shipped"], name=name, reranker=reranker)
     for name, reranker in (
+        ("A5", "bge-reranker-v2-m3"),
         ("A6o", "openai_decisions"),
         ("A6t", "typesafe"),
         ("A7o", "openai_decisions-gate"),

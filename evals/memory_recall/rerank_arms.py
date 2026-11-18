@@ -20,15 +20,16 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.config.knowledge import KnowledgeRerankerConfig
 from mindroom.judgment import rerank as judgment_rerank
+from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.rerank import _create_reranker
-from mindroom.memory._file_backend import _RECALL_SELECTION, _retrieve_memories
+from mindroom.memory._file_backend import _RECALL_RERANK_DEADLINE_SECONDS, _RECALL_SELECTION, _retrieve_memories
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.token_counting.families import load_o200k
 
 from .rerank_cache import checked_scores
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Callable, Sequence
 
     from mindroom.config.judgment import ProbabilityJudgmentConfig
     from mindroom.constants import RuntimePaths
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
     from .turns import Turn
 
 #: Live recall falls back to the hybrid selection when its reranker takes longer than this.
-DEADLINE_S = 2.0
+DEADLINE_S = _RECALL_RERANK_DEADLINE_SECONDS
 #: Latency mode stops waiting for one call after this, records it as a timeout and moves on.
 CALL_CAP_S = 30.0
 _logger = logging.getLogger(__name__)
@@ -83,20 +84,15 @@ class _BilledJudgment:
         if reranker is None:
             msg = f"The {settings.provider} reranker has no API key"
             raise RuntimeError(msg)
-        batch = replace(reranker.batch, evaluate=self._billed(reranker.batch.evaluate))
-        self._reranker = replace(reranker, batch=batch, gate=gate)
-        self.last_input_tokens: int | None = None
+        evaluate = reranker.batch.evaluate
 
-    def _billed(
-        self,
-        evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResult[tuple[float | None, ...]]]],
-    ) -> Callable[[JudgmentRequest], Awaitable[JudgmentResult[tuple[float | None, ...]]]]:
         async def billed(request: JudgmentRequest) -> JudgmentResult[tuple[float | None, ...]]:
             result = await evaluate(request)
             self.last_input_tokens = result.input_tokens
             return result
 
-        return billed
+        self._reranker = replace(reranker, batch=replace(reranker.batch, evaluate=billed), gate=gate)
+        self.last_input_tokens: int | None = None
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
         """Score `documents` as the production reranker does."""
@@ -114,7 +110,6 @@ def _judgment(
     provider: Literal["openai_decisions", "typesafe"],
     *,
     gate: bool,
-    usd_per_million_input_tokens: float,
 ) -> RerankerSpec:
     """Return a judgment arm's spec: quality calls wait up to `CALL_CAP_S`, latency calls time out as live ones."""
 
@@ -125,9 +120,9 @@ def _judgment(
 
     return RerankerSpec(
         provider=provider,
-        model="jev-1.13.0" if provider == "typesafe" else OPENAI_DECISIONS_MODEL,
+        model=_PINNED_MODEL if provider == "typesafe" else OPENAI_DECISIONS_MODEL,
         rubric_version=_rubric_version(gate=gate),
-        usd_per_million_input_tokens=usd_per_million_input_tokens,
+        usd_per_million_input_tokens=0.042 if provider == "typesafe" else 0.10,
         create=lambda paths: _BilledJudgment(settings(timeout_seconds=CALL_CAP_S), paths, gate=gate),
         request_overhead_tokens=_JUDGMENT_REQUEST_OVERHEAD_TOKENS,
         candidate_overhead_tokens=_JUDGMENT_CANDIDATE_OVERHEAD_TOKENS,
@@ -146,10 +141,10 @@ RERANKERS: dict[str, RerankerSpec] = {
         usd_per_million_input_tokens=0.0,
         create=_cross_encoder("BAAI/bge-reranker-v2-m3"),
     ),
-    "openai_decisions": _judgment("openai_decisions", gate=False, usd_per_million_input_tokens=0.10),
-    "typesafe": _judgment("typesafe", gate=False, usd_per_million_input_tokens=0.042),
-    "openai_decisions-gate": _judgment("openai_decisions", gate=True, usd_per_million_input_tokens=0.10),
-    "typesafe-gate": _judgment("typesafe", gate=True, usd_per_million_input_tokens=0.042),
+    "openai_decisions": _judgment("openai_decisions", gate=False),
+    "typesafe": _judgment("typesafe", gate=False),
+    "openai_decisions-gate": _judgment("openai_decisions", gate=True),
+    "typesafe-gate": _judgment("typesafe", gate=True),
 }
 
 
@@ -288,13 +283,11 @@ async def select_reranked(
     """
     # Counts exact o200k tokens: `retrieve` estimates them until the encoder has loaded in the background.
     load_o200k()
-    if scores is None:
-        return await _retrieve_memories(query, candidates, _RECALL_SELECTION)
     return await _retrieve_memories(
         query,
         candidates,
         replace(_RECALL_SELECTION, min_rerank_score=threshold),
-        reranker=_Scored(scores),
+        reranker=None if scores is None else _Scored(scores),
     )
 
 

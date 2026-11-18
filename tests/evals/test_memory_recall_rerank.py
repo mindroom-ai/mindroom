@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from evals.memory_recall import judge, rerank_arms, run
+from evals.memory_recall.arms import ARMS
 from evals.memory_recall.rerank_arms import (
     LatencySample,
     RerankerSpec,
@@ -53,6 +54,14 @@ class _StubReranker:
 def _cached(stub: _StubReranker, cache: RerankCache, *, model: str = "stub-model") -> CachedReranker:
     return CachedReranker(stub, cache, provider="stub", model=model, rubric_version="v1")
 
+
+
+def test_every_rerank_arm_is_the_shipped_arm_with_a_reranker() -> None:
+    """A rerank arm reranks the `shipped` candidates: it differs from `shipped` only in its name and reranker."""
+    rerank_arms_by_name = {name: arm for name, arm in ARMS.items() if arm.reranker is not None}
+    assert list(rerank_arms_by_name) == ["A5", "A6o", "A6t", "A7o", "A7t"]
+    for arm in rerank_arms_by_name.values():
+        assert replace(arm, name="shipped", reranker=None) == ARMS["shipped"]
 
 @pytest.mark.asyncio
 async def test_cached_reranker_skips_second_request(tmp_path: Path) -> None:

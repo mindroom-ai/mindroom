@@ -145,17 +145,17 @@ async def run_cli(argv: Sequence[str], *, transport: httpx.AsyncBaseTransport | 
     with JudgeCache(out / "judge.sqlite") as cache, RerankCache(out / "rerank.sqlite") as rerank_cache:
         async with httpx.AsyncClient(transport=transport) as client:
             for name in args.arms.split(","):
+                arm = ARMS[name]
                 replayed = await replay(
                     turns,
-                    ARMS[name],
+                    arm,
                     memory_dir=args.memory_dir,
                     config=config,
                     runtime_paths=runtime_paths,
                     index_dir=index_dir,
                 )
                 rows, sample = await _arm_rows(
-                    name,
-                    ARMS[name],
+                    arm,
                     turns,
                     replayed,
                     thresholds=thresholds,
@@ -213,7 +213,6 @@ def split_turns(count: int, *, seed: int) -> tuple[list[int], list[int]]:
 
 
 async def _arm_rows(
-    name: str,
     arm: Arm,
     turns: Sequence[Turn],
     replayed: list[list[MemoryResult] | None],
@@ -229,7 +228,7 @@ async def _arm_rows(
     The rows are the arm itself, or for a rerank arm one row per threshold, all from one scoring of the turns.
     """
     if arm.reranker is None:
-        return [(name, replayed, None)], None
+        return [(arm.name, replayed, None)], None
     spec = RERANKERS[arm.reranker]
     inner = spec.create(runtime_paths)
     reranker = CachedReranker(
@@ -250,7 +249,7 @@ async def _arm_rows(
         )
     rows: list[_Row] = [
         (
-            f"{name}@{threshold:g}",
+            f"{arm.name}@{threshold:g}",
             [
                 None
                 if candidates is None
