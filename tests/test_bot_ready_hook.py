@@ -493,19 +493,21 @@ async def test_second_bots_frame_completes_while_the_refresh_another_frame_asked
     orchestrator.refresh_agent_reply_memberships.side_effect = answered.wait
     completed: list[str] = []
 
-    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        for frame_bot in (bot, other):
-            frame_bot.client = make_matrix_client_mock(user_id=frame_bot.agent_user.user_id)
-            frame_bot.mark_sync_loop_started()
-            await asyncio.wait_for(_complete_frame(frame_bot), SETTLE_TIMEOUT_SECONDS)
-            completed.append(frame_bot.agent_name)
-            await asyncio.sleep(0)
+    try:
+        with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+            for frame_bot in (bot, other):
+                frame_bot.client = make_matrix_client_mock(user_id=frame_bot.agent_user.user_id)
+                frame_bot.mark_sync_loop_started()
+                await asyncio.wait_for(_complete_frame(frame_bot), SETTLE_TIMEOUT_SECONDS)
+                completed.append(frame_bot.agent_name)
+                await asyncio.sleep(0)
 
-    assert completed == ["router", "other"]
-    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
-    assert orchestrator.handle_bot_ready.await_count == 2
-    answered.set()
-    await orchestrator.agent_reply_membership_sync.close()
+        assert completed == ["router", "other"]
+        orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
+        assert orchestrator.handle_bot_ready.await_count == 2
+    finally:
+        answered.set()
+        await asyncio.wait_for(orchestrator.agent_reply_membership_sync.close(), SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio

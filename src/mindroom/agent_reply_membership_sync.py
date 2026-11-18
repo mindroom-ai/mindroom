@@ -81,10 +81,7 @@ class AgentReplyMembershipSync:
         self._memberships.forget_joined_rooms()
 
     def observer_frame_settled(self, observer_user_id: str) -> None:
-        """Open an armed account as an observer of room members and ask for the read of its rooms.
-
-        A frame of a loop that is closed, as one still draining after a failure or a stall, opens nothing.
-        """
+        """Open an armed account as an observer and ask for its rooms' read; a closed loop's late frame opens nothing."""
         if self._observer_open.get(observer_user_id) is False:
             self._observer_open[observer_user_id] = True
             self._grants_lost(revoke=False)
@@ -109,10 +106,9 @@ class AgentReplyMembershipSync:
     ) -> None:
         """Fence one account's sync uncertainty and its own departures before admission, revoking the calls they deny.
 
-        A departure counts whether the account's sync reported it or its own leave command made it: the command's
-        record carries no timeline event, and no later sync need report that leave again.
-        The account's own join never grants: it makes the room one whose members must be read, so a new DM's first
-        message waits for that read instead of being denied by a room list taken before the join.
+        A departure counts whether the account's sync reported it or its own leave command made it, whose record
+        has no timeline event. The account's own join never grants: it asks for the room's members read, so a new
+        DM's first message waits for it instead of being denied by a room list taken before the join.
         """
         if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
             self.invalidate_observer(config, observer_user_id, reason="uncertain_sync_response")
@@ -156,8 +152,7 @@ class AgentReplyMembershipSync:
     def request_refresh(self, config: Config, refresh: Callable[[], Awaitable[object]]) -> None:
         """Start the refresh when it is due and none is in flight, without waiting for it.
 
-        Every bot's sync frame calls this. A frame never waits for another account's Matrix reads: grants the
-        refresh has not rebuilt yet stay pending, which denies nothing and grants nothing.
+        Every bot's sync frame calls this and goes on: grants the refresh has not rebuilt yet stay pending.
         No bot owns the refresh, so a stopping one does not cancel it: its invalidation keeps it from publishing.
         """
         self._refresh_task_when_needed(config, refresh, after_backoff=True)
