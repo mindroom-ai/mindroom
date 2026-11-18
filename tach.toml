@@ -3085,6 +3085,7 @@ visibility = [
     "mindroom.teams",
     "mindroom.history.conversation_text",
     "mindroom.response_turn",
+    "mindroom.delegation.continuation",
 ]
 
 # A reply's automatic compactions, recorded on the reply itself instead of a separate notice.
@@ -8466,6 +8467,7 @@ visibility = [
     "mindroom.tool_system.agent_tools",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.delegation.targets",
+    "mindroom.delegation.continuation",
 ]
 
 [[modules]]
@@ -8493,6 +8495,7 @@ visibility = [
     "mindroom.approval.continuation_runner",
     "mindroom.delegation.execution",
     "mindroom.delegation.targets",
+    "mindroom.delegation.continuation",
 ]
 
 [[modules]]
@@ -9083,6 +9086,7 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.consumption",
+    "mindroom.delegation.continuation",
 ]
 
 [[modules]]
@@ -9167,10 +9171,32 @@ depends_on = [
     "mindroom.tool_jobs.follow_ups",
     "mindroom.event_journal",
     "mindroom.tool_system.plugins",
+    "mindroom.delegation.continuation",
+    "mindroom.tool_system.runtime_context",
 ]
 visibility = [
     "mindroom.orchestrator",
 ]
+
+[[modules]]
+path = "mindroom.delegation.continuation"
+depends_on = [
+    "mindroom.ai",
+    "mindroom.delegation.background",
+    "mindroom.delegation.execution",
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.personas",
+    "mindroom.delegation.recovery",
+    "mindroom.delegation.sessions",
+    "mindroom.delegation.state",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.run_checkpoint",
+    "mindroom.tool_system.events",
+    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = ["mindroom.orchestration.tool_job_runtime"]
 
 [[modules]]
 path = "mindroom.orchestration.storage_preparation"
@@ -9528,6 +9554,7 @@ path = "mindroom.delegation.job_approvals"
 depends_on = [
     "mindroom.approval.response",
     "mindroom.delegation.lifecycle",
+    "mindroom.delegation.state",
     "mindroom.event_journal",
     "mindroom.response_turn",
     "mindroom.tool_jobs.approvals",
@@ -10207,6 +10234,7 @@ visibility = [
     "mindroom.history.conversation_text",
     "mindroom.loop_hooks",
     "mindroom.response_turn",
+    "mindroom.delegation.continuation",
 ]
 
 [[modules]]

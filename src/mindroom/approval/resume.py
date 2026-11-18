@@ -228,6 +228,8 @@ class ResumeRunner:
     user_id: str | None
     steering: bool = False
     """Whether the resumed run owns its reply, as a top-level approval's does; a delegated child's does not."""
+    checkpoints: bool = False
+    """Whether the resume saves checkpoints: a paused reply's approval settles from the paused row, so its does not."""
 
     @cached_property
     def _replay_plan(self) -> ResolvedReplayPlan:
@@ -244,7 +246,7 @@ class ResumeRunner:
                 storage=self.storage,
                 replay_plan=self._replay_plan,
                 prompt_id=None,
-                checkpoints=False,
+                checkpoints=self.checkpoints,
             ),
             steering=self.steering,
         )

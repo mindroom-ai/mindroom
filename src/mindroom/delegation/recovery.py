@@ -19,11 +19,13 @@ from mindroom.delegation.sessions import (
 )
 from mindroom.delegation.state import (
     DELEGATION_STATE_KEY,
+    RESTART_INTERRUPTION_REASON,
     TERMINAL_CHILD_STATUSES,
     DelegationChild,
     DelegationState,
     child_execution_identity,
     child_scope,
+    interrupted_by_restart,
 )
 from mindroom.delegation.storage import delegation_storage_config
 from mindroom.history.run_checkpoint import is_recovered_run, recover_interrupted_run
@@ -43,8 +45,6 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-_RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
-
 
 async def load_settled_subagent(
     subagent_id: str,
@@ -54,10 +54,27 @@ async def load_settled_subagent(
     runtime_paths: RuntimePaths,
     depth: int,
 ) -> DelegationChild:
-    """Load a scoped handle, first settling an abandoned attempt under its recovery lock, so this writes state.
+    """Load a scoped handle for a follow-up, settled as `settled_subagent` settles it.
 
     A handle whose current turn's job has not ended yet is refused as busy.
     """
+    child = await settled_subagent(subagent_id, owner=owner, config=config, runtime_paths=runtime_paths, depth=depth)
+    if _job_still_runs(child, runtime_paths):
+        # A settled child's job still delivers its answer, or continues the turn a restart stopped; until that job
+        # ends, the subagent is its.
+        raise SubagentSessionError(SUBAGENT_BUSY)
+    return child
+
+
+async def settled_subagent(
+    subagent_id: str,
+    *,
+    owner: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    depth: int,
+) -> DelegationChild:
+    """Load a scoped handle, first settling an abandoned attempt under its recovery lock, so this writes state."""
     load = partial(load_subagent, subagent_id, owner=owner, config=config, runtime_paths=runtime_paths, depth=depth)
     child = await load()
     if child.status == "running":
@@ -66,19 +83,20 @@ async def load_settled_subagent(
                 child = await load()
                 if child.status == "running":
                     await _recover_subagent_turn(child, config=config, runtime_paths=runtime_paths)
-    if _job_still_runs(child, runtime_paths):
-        # A settled child's job still delivers its answer; until that job ends, the handle keeps naming its turn.
-        raise SubagentSessionError(SUBAGENT_BUSY)
     return child
 
 
 def _job_still_runs(child: DelegationChild, runtime_paths: RuntimePaths) -> bool:
-    """Return whether a subagent job this process runs for the child's turn has not ended yet."""
+    """Return whether a subagent job of this process holds the child's subagent and has not ended yet.
+
+    The job is matched by the subagent, not by the turn: a job that continues after a restart names its next turn
+    before the handle does.
+    """
     runtime = get_background_runtime(runtime_paths)
     return runtime is not None and any(
         job.kind == "delegation"
         and job.status not in TERMINAL_STATUSES
-        and delegation_child(job).delegation_id == child.delegation_id
+        and delegation_child(job).subagent_id == child.subagent_id
         for job in runtime.retained_jobs()
     )
 
@@ -127,7 +145,7 @@ async def _recover_subagent_turn(child: DelegationChild, *, config: Config, runt
         child,
         config=config,
         runtime_paths=runtime_paths,
-        reason=_RESTART_INTERRUPTION_REASON,
+        reason=RESTART_INTERRUPTION_REASON,
         status="failed",
     )
 
@@ -139,15 +157,21 @@ async def interrupt_stopped_child(
     runtime_paths: RuntimePaths,
     cancel_reason: str = "Delegation cancelled.",
 ) -> None:
-    """Settle a child its job stopped: a shutdown or restart interrupts it as crash recovery does, else it is cancelled."""
+    """Settle a child its job stopped: a shutdown or restart interrupts it as crash recovery does, else it is cancelled.
+
+    A job cancelled while it waited to continue a turn a restart had already settled ends cancelled too: its handle
+    keeps that turn as the restart left it, for a follow-up to continue.
+    """
     shutdown = job_stopped_by_shutdown()
     await interrupt_child(
         child,
         config=config,
         runtime_paths=runtime_paths,
-        reason=_RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
+        reason=RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
         status="failed" if shutdown else "cancelled",
     )
+    if not shutdown and interrupted_by_restart(child):
+        child.status, child.result = "cancelled", cancel_reason
 
 
 async def interrupt_child(

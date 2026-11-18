@@ -434,8 +434,9 @@ async def test_a_job_card_names_the_reply_whose_call_started_the_job(
     reply_event_id: str | None,
 ) -> None:
     """A gated call's card names the event of the reply that made the call, when that reply already shows one."""
-    handle = MagicMock(spec=SpanHandle)
-    handle.reply = MagicMock(event_id=reply_event_id)
+    handle = MagicMock(spec=SpanHandle, reply_id="reply")
+    # The job saves which reply started it and the Stop that reply had recorded by then.
+    handle.reply = MagicMock(event_id=reply_event_id, stop_receipt_order=None)
     handle.stopped.return_value = False
     token = _current_slot.set(SpanSlot(handle=handle) if in_reply else None)
     try:

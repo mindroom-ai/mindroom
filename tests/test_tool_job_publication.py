@@ -317,23 +317,39 @@ async def test_recovered_interrupted_jobs_leave_the_published_state(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_an_orderly_shutdown_clears_the_published_jobs(tmp_path: Path) -> None:
-    """Jobs a shutdown interrupts leave the rooms' state at once, so no client lists them while MindRoom is down."""
-    runtime = await tool_job_runtime(tmp_path)
+@pytest.mark.parametrize("kind", ["tool", "delegation"])
+async def test_an_orderly_shutdown_clears_the_published_jobs(tmp_path: Path, kind: str) -> None:
+    """Jobs a shutdown stops leave the rooms' state at once, so no client lists them while MindRoom is down.
+
+    That holds for a subagent job the shutdown leaves running in storage too: the next start may have jobs off.
+    """
+    runtime = await tool_job_runtime(tmp_path, continues=tool_job_runtime_module._is_subagent_job)
     owner = job_owner()
     bot = _bot(owner.recipient)
     bot.client.rooms = {owner.room_id: MagicMock()}
     coordinator = job_coordinator(tmp_path, runtime, bot)
+    adapter = completed_delegation_job().adapter if kind == "delegation" else {}
 
     async def forever() -> BackgroundOutcome:
         await asyncio.Event().wait()
         raise AssertionError
 
     try:
-        await start_job(runtime, "job_1", tool_name="run_tests", depth=0, adapter={}, owner=owner, operation=forever)
+        await start_job(
+            runtime,
+            "job_1",
+            tool_name="run_tests",
+            kind=kind,
+            depth=0,
+            adapter=adapter,
+            owner=owner,
+            operation=forever,
+        )
         await coordinator._publisher.publish(coordinator.bot_provider, runtime.retained_jobs())
         assert bot.client.room_put_state.await_args.kwargs["content"]["jobs"]
         await coordinator.quiesce()
+        [job] = runtime.retained_jobs()
+        assert job.status == ("running" if kind == "delegation" else "interrupted")
         assert bot.client.room_put_state.await_args.kwargs["content"] == {"jobs": [], "total": 0}
     finally:
         await runtime.shutdown()

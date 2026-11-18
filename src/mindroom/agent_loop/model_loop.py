@@ -127,7 +127,7 @@ class LoopHooks:
       (portable tool search), and the rewritten calls are what the message stores.
     - ``before_dispatch``: awaited with the loop state, whose messages end with the batch's assistant message and
       whose record holds the batch's executions, and the planned calls before any call of the batch runs (minimal
-      mode's checkpoint of the batch).
+      mode's checkpoint of the batch); a resume awaits it with each approved call before that call runs.
     - ``tool_middleware``: wraps every tool call the loop executes, outermost first (job admission, the hook bridge).
     - ``after_tool_batch``: awaited in order with the live messages and the batch's result messages after the
       results and any media follow-up are appended, before the loop continues; a batch that stops the run, by a
@@ -405,6 +405,10 @@ async def _answer_resumed(
             function = replace(state.offered.functions[execution.tool_name], gate=None)
             execution.requires_confirmation = False
             planned = PlannedCall(function=function, execution=execution)
+            if hooks.before_dispatch is not None:
+                # Approved calls run one after another, so each is announced alone: the record then holds the
+                # results of those before it.
+                await hooks.before_dispatch(state, [planned])
             yield ToolStarted(execution.call)
             finished = dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware)
             async with closing_async_stream(finished):

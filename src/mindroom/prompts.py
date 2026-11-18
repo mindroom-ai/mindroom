@@ -11,6 +11,7 @@ __all__ = [
     "AVATAR_ROOM_STYLE",
     "AVATAR_ROOM_SYSTEM_PROMPT",
     "AVATAR_TEAM_SYSTEM_PROMPT",
+    "BACKGROUND_JOBS_CONTINUED_NOTICE",
     "BACKGROUND_JOBS_ENDED_NOTICE",
     "BACKGROUND_JOBS_FOLLOW_UP_PROMPT",
     "CODEX_DEFAULT_INSTRUCTIONS",
@@ -55,6 +56,7 @@ __all__ = [
     "ROUTER_THREAD_CONTEXT_HEADER",
     "SKILLS_TOOL_USAGE_PROMPT",
     "SKILL_REVIEW_PROMPT",
+    "SUBAGENT_RESTART_CONTINUATION_PROMPT",
     "TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
     "TEAM_MODE_SELECTION_PROMPT_TEMPLATE",
     "THREAD_FORK_CONTEXT_TEMPLATE",
@@ -249,6 +251,12 @@ BACKGROUND_JOBS_ENDED_NOTICE = (
     "[RUNTIME NOTICE, NOT A USER MESSAGE] The background jobs listed above have ended. "
     'Acknowledge them by calling job(action="collect") once, which returns their results; do this even for jobs '
     "whose output you do not need. Then continue your current task."
+)
+BACKGROUND_JOBS_CONTINUED_NOTICE = (
+    "[RUNTIME NOTICE, NOT A USER MESSAGE] A restart interrupted this turn while the background jobs listed above "
+    "were running. MindRoom continues them on its own, or ends one that cannot go on, so do not start their work "
+    'again: when you need a result, wait for it with job(action="wait") and its job ID, otherwise go on; you are '
+    "told when a job ends."
 )
 BACKGROUND_JOBS_FOLLOW_UP_PROMPT = (
     "[RUNTIME UPDATE, NOT A USER MESSAGE] Background jobs you started earlier in this conversation have ended; this "
@@ -718,6 +726,11 @@ Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM
 Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
 
 
+# What a subagent is sent when the runtime continues the turn a restart cut short, after that turn's own messages.
+SUBAGENT_RESTART_CONTINUATION_PROMPT = (
+    "[RUNTIME NOTE, NOT A USER MESSAGE] A restart interrupted your previous turn. Continue the task from where it "
+    "stopped. Do not repeat tool calls with side effects that already finished."
+)
 DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept background_after like other managed calls, so a child can keep working as a job.
 A child tool that requires approval asks the requester through an approval card of the child's job; only the child waits for the decision.
 Waiting neither restarts the child nor grants tool approval.

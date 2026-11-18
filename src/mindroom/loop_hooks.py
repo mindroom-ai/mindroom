@@ -66,9 +66,10 @@ class HookTurn:
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
     ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
     member lack. ``checkpoints`` is off for a run that saves no checkpoint: a voice call's, and an approved run's
-    resume, whose paused row is what settles it when it is cut short. ``memory_copy`` is the file of the MEMORY.md
-    copy this turn's system prompt holds (``memory._entrypoint_snapshots``), None for a turn that sends none and for
-    a resume, which may send a copy the file no longer holds.
+    resume, whose paused row is what settles it when it is cut short, unless a job runs it as its subagent.
+    ``memory_copy`` is the file of the MEMORY.md copy this turn's system prompt holds
+    (``memory._entrypoint_snapshots``), None for a turn that sends none and for a resume, which may send a copy the
+    file no longer holds.
     """
 
     config: Config

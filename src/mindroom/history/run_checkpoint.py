@@ -119,9 +119,10 @@ def recover_interrupted_run(
     The turn keeps the run's stored messages exactly, reasoning included, so a later request replays what the run's
     own requests sent. Only what no request could follow changes: the usage a cut-off response left on a message
     without content goes (the run keeps its request's usage), and each call of the last batch that has no result
-    message gets one, the result its execution recorded when a sibling finished before the stop, else
-    ``INTERRUPTED_CALL_RESULT``. A run that called no tool, not even one a mid-turn fold took into the scope's
-    summary, holds no work to keep and stays as it is. The run's usage is recorded, which a checkpoint never is.
+    message gets one, the result its execution recorded when a sibling finished before the stop, the denial of a call
+    its approval denied, else ``INTERRUPTED_CALL_RESULT``. A run that called no tool, not even one a mid-turn fold
+    took into the scope's summary, holds no work to keep and stays as it is. The run's usage is recorded, which a
+    checkpoint never is.
 
     ``stopped`` says the run's user stopped it, so no replay continues it: its turn then ends with one more assistant
     message, the text of the response the stop cut off (``CUT_OFF_TEXT_KEY``), which the reply showed, and
@@ -160,10 +161,12 @@ def recover_interrupted_run(
             places[call_id] = len(tools)
             tools.append(ToolExecution(tool_call_id=call_id, tool_name=call["function"]["name"]))
         execution = tools[places[call_id]]
-        if execution.result is None and execution.is_error is None:
+        # A call its approval denied never ran: it is answered with the denial the run recorded.
+        denial = execution.confirmation_note if execution.confirmed is False else None
+        if execution.result is None and (execution.is_error is None or denial is not None):
             execution = tools[places[call_id]] = replace(
                 execution,
-                result=INTERRUPTED_CALL_RESULT,
+                result=denial or INTERRUPTED_CALL_RESULT,
                 is_error=True,
                 requires_confirmation=None,
                 external_execution_required=None,
