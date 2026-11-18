@@ -27,7 +27,7 @@ from mindroom.knowledge.read_protocol import DISTANCE_KEY, SearchHit
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
 from mindroom.llm.provider import ModelIdentity, TokenCounter
-from mindroom.memory import ConversationRef, MemoryPromptParts
+from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
 from mindroom.memory import delete_agent_memory as public_delete_agent_memory
@@ -38,7 +38,6 @@ from mindroom.memory import store_conversation_memory as public_store_conversati
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
-from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
 from mindroom.token_counting import families
 from mindroom.token_counting.counts import count
@@ -1497,6 +1496,11 @@ async def test_file_backend_capped_entrypoint_withholds_the_oldest_entries(
     assert "Oldest entry." not in prompt_parts.session_preamble
     assert "Middle entry." not in prompt_parts.session_preamble
     assert "[Memory entrypoint truncated - showing 3 of 5 lines" in prompt_parts.session_preamble
+    # A conversation compares the body, whose text only changes with the entries, to decide whether to keep its prompt.
+    body, marker = prompt_parts.session_preamble.rsplit("\n", 1)
+    assert prompt_parts.entrypoint_body == body
+    assert marker.startswith("[Memory entrypoint truncated")
+    assert prompt_parts.entrypoint_path == str(workspace / "MEMORY.md")
 
 
 @pytest.mark.asyncio
@@ -1540,50 +1544,6 @@ async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
     assert "is inlined below automatically every turn" in prompt_parts.session_preamble
     assert str(memory_path) in prompt_parts.session_preamble
     assert "truncated" not in prompt_parts.session_preamble
-
-
-@pytest.mark.asyncio
-async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_added(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """An entry added mid-conversation leaves its inlined MEMORY.md unchanged; a deleted line reloads it.
-
-    Only a kept copy tells the agent that newer entries may be missing, and an edited header loads again.
-    """
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text("# Memory\nCurated fact.\n", encoding="utf-8")
-
-    async def preamble(conversation: ConversationRef | None) -> str:
-        prompt_parts = await public_build_memory_prompt_parts(
-            "What should I remember?",
-            "general",
-            config,
-            runtime_paths_for(config),
-            current_execution_identity(),
-            conversation=conversation,
-            counter=fake_token_counter(),
-        )
-        return prompt_parts.session_preamble
-
-    first = await preamble(ConversationRef("thread", (None, None)))
-    await add_agent_memory("Added fact.", "general", config)
-
-    assert await preamble(ConversationRef("thread", (None, None))) == first
-    assert "Added fact." not in first
-    assert "Added fact." in await preamble(ConversationRef("other-thread", (None, None)))
-    assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] in first
-    fresh = await preamble(None)
-    assert "Added fact." in fresh
-    assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] not in fresh
-
-    (workspace / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-    assert "Curated fact." not in await preamble(ConversationRef("thread", (None, None)))
-
-    # A prompt override applies through hot reload, so an edited header loads again.
-    config.prompts["FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"] = "Edited header for `{memory_path}`."
-    assert (await preamble(ConversationRef("thread", (None, None)))).startswith("Edited header")
 
 
 @pytest.mark.asyncio

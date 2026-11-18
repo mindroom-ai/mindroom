@@ -53,14 +53,23 @@ def _minimal_build(runtime: ToolRuntimeContext, *, tools: tuple[str, ...] = ("sh
 
 
 def test_only_the_bootstrap_and_required_context_reach_the_provider(tmp_path: Path) -> None:
-    """The full prompt, memory, and optional enrichment are documents; required enrichment stays inline."""
+    """The full prompt, memory, and optional enrichment are documents; required enrichment stays inline.
+
+    Required system enrichment that may differ between turns follows the prompt, so the system prompt stays the same.
+    """
     build = _minimal_build(_runtime_context(tmp_path))
     turn = minimal_turn(
         build,
         session_preamble="Earlier the disk was nearly full.",
         transient_memory="The user prefers short answers.",
         system_enrichment=(
-            EnrichmentItem(key="required_system", text="Assigned task: rotate the logs.", minimal_required=True),
+            EnrichmentItem(
+                key="required_system",
+                text="Assigned task: rotate the logs.",
+                minimal_required=True,
+                cache_policy="stable",
+            ),
+            EnrichmentItem(key="required_volatile", text="Stay quiet when nothing changed.", minimal_required=True),
             EnrichmentItem(key="optional_system", text="The weather is sunny."),
         ),
         transient_enrichment=(
@@ -75,9 +84,10 @@ def test_only_the_bootstrap_and_required_context_reach_the_provider(tmp_path: Pa
     # The build's turn context, such as the current date, stays inline.
     assert build.prompt.turn_context
     assert build.prompt.turn_context in system
-    for hidden in ("Keep the build machine healthy.", "Check the disk", "nearly full", "sunny", "lunch"):
+    for hidden in ("Keep the build machine healthy.", "Check the disk", "nearly full", "sunny", "lunch", "Stay quiet"):
         assert hidden not in system
     assert "Reply in the thread." in turn.transient_context
+    assert '<mindroom_system_context>\n<item key="required_volatile"' in turn.transient_context
     assert "lunch" not in turn.transient_context
     documents = turn.context_documents
     assert "Keep the build machine healthy." in documents["agent-context"]

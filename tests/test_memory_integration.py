@@ -10,7 +10,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.ai import _memory_conversation, ai_response
+from mindroom.ai import _prompt_conversation, ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -104,7 +104,6 @@ class TestMemoryIntegration:
             config,
             runtime_paths,
             execution_identity=None,
-            conversation=ConversationRef("test_session", (None, None)),
             counter=ANY,
         )
 
@@ -145,7 +144,6 @@ class TestMemoryIntegration:
             config,
             runtime_paths,
             execution_identity=None,
-            conversation=None,
             counter=ANY,
         )
 
@@ -222,13 +220,13 @@ class TestMemoryIntegration:
     "history_limit",
     [{"num_history_runs": 5}, {"max_tool_calls_from_history": 3}, {"compaction": {"enabled": False}}],
 )
-def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
+def test_prompt_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
     history_limit: dict[str, object],
 ) -> None:
-    """Only a file-memory conversation whose system prompt can stay cached keeps a MEMORY.md copy.
+    """Only a conversation whose system prompt can stay cached keeps the prompt it last sent.
 
-    A persona recalls no memory, a minimal agent reads it on demand, and a replay limit shifts the history; without
-    compaction, fitting a long conversation into the context window drops its oldest runs, which acts as one.
+    A minimal agent's short prompt is not kept, and a replay limit shifts the history; without compaction, fitting a
+    long conversation into the context window drops its oldest runs, which acts as one.
     """
     session = ConversationSession(
         session_id="thread",
@@ -256,14 +254,15 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         memory={"backend": "file"},
     )
 
-    assert _memory_conversation(ctx, config, scope_context) == ConversationRef("thread", ("Earlier work.", None))
-    assert _memory_conversation(ctx, mem0, scope_context) is None
-    assert _memory_conversation(replace(ctx, agent_mode="minimal"), config, scope_context) is None
-    assert _memory_conversation(ctx, limited, scope_context) is None
-    scheduled = replace(ctx, scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"))
-    assert _memory_conversation(scheduled, config, scope_context) is None
+    kept = ConversationRef("thread", ("Earlier work.", None))
+    assert _prompt_conversation(ctx, config, scope_context) == kept
+    assert _prompt_conversation(ctx, mem0, scope_context) == kept
     persona = replace(ctx, persona=inline_persona("You are a reviewer.", None, None, None))
-    assert _memory_conversation(persona, config, scope_context) is None
+    assert _prompt_conversation(persona, config, scope_context) == kept
+    assert _prompt_conversation(replace(ctx, agent_mode="minimal"), config, scope_context) is None
+    assert _prompt_conversation(ctx, limited, scope_context) is None
+    scheduled = replace(ctx, scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"))
+    assert _prompt_conversation(scheduled, config, scope_context) is None
     # Compaction nobody configured never runs on its own, so a long conversation drops its oldest runs instead.
     unauthored = Config(
         agents={"general": AgentConfig(display_name="General")},
@@ -271,4 +270,4 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         models={"default": ModelConfig(provider="openai", id="test-model")},
         memory={"backend": "file"},
     )
-    assert _memory_conversation(ctx, unauthored, scope_context) is None
+    assert _prompt_conversation(ctx, unauthored, scope_context) is None

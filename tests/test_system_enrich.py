@@ -287,13 +287,16 @@ async def test_a_reply_renders_system_enrichment_into_its_system_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reply's system enrichment lands in the system message the model receives, after the agent's prompt."""
+    """A reply's stable system enrichment lands in the system message, after the agent's prompt.
+
+    Its volatile system enrichment follows the prompt instead, so it never changes the text before the conversation.
+    """
     config = _config(tmp_path)
     system_items = (
         EnrichmentItem(key="alpha", text="stable", cache_policy="stable"),
         EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
     )
-    rendered = render_system_enrichment_block(system_items)
+    rendered = render_system_enrichment_block(system_items[:1])
     model = ScriptedModel([answer("Done.")])
     install_model_providers(monkeypatch, {"default": model})
 
@@ -310,6 +313,8 @@ async def test_a_reply_renders_system_enrichment_into_its_system_message(
     assert turn.content.rstrip().endswith(rendered.strip())
     assert "Write code" in str(stable.content)
     assert rendered.strip() not in str(stable.content)
+    assert 'key="omega"' not in system_text(request.messages)
+    assert render_system_enrichment_block(system_items[1:]) in str(request.messages[-1].content)
 
 
 @pytest.mark.asyncio
