@@ -2,11 +2,11 @@
 
 Like Hermes' default review, the fork replays the finished response's final request on the same model with its
 request settings unchanged and appends the review prompt, so the review sees the conversation verbatim. Its tools are
-the definitions the run's functions declare, without the wait budget a request offered for calls that could become
-jobs, which the review's own functions do not accept; the provider serves the conversation from its prompt cache only
-when the request offered no such budget. Only the skill tools execute; every other tool keeps its definition and
-answers that it is not available. When the review uses another model, or the response left no request to fork, the
-review replays the stored conversation as a digest instead, like Hermes' routed review.
+the definitions that request offered, with the wait budget it offered for calls that could become jobs, so the
+provider serves the conversation from its prompt cache; the review runs its calls itself and ignores that budget.
+Only the skill tools execute; every other tool keeps its definition and answers that it is not available. When the
+review uses another model, or the response left no request to fork, the review replays the stored conversation as a
+digest instead, like Hermes' routed review.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 from mindroom.token_counting.counts import count, fit_text
+from mindroom.tool_jobs.background_after import application_arguments
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.tool_schema import validated_entrypoint
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     from mindroom.llm.usage import MessageMetrics
     from mindroom.skill_learning.capture import CapturedRequest
     from mindroom.skill_learning.tools import ReviewProgress
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -140,6 +142,11 @@ def _review_input_budget_tokens(config: Config, model_name: str) -> int:
     return min(_MAX_INPUT_TOKENS, int(context_window * _INPUT_CONTEXT_FRACTION))
 
 
+async def _run_in_review(call: ToolCall, call_next: ToolNext) -> object:
+    """Run a call in the review itself, without the wait budget a forked definition offers: no review call is a job."""
+    return await call_next(application_arguments(call.arguments))
+
+
 def _review_tools(
     definitions: Sequence[ToolSpec],
     tools: SkillTools,
@@ -174,6 +181,7 @@ def _review_tools(
             description=definition.description,
             parameters=definition.parameters,
             entrypoint=entrypoints.get(name, deny),
+            middleware=(_run_in_review,),
         )
         for name, definition in answered.items()
     }
