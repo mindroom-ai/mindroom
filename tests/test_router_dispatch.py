@@ -352,10 +352,10 @@ class TestAgentBot(AgentBotTestBase):
         root_response = nio.RoomGetEventResponse()
         root_response.event = upload
         bot.client.room_get_event.return_value = root_response
-        plans: list[tuple[str, str | None, tuple[str, ...]]] = []
+        plans: list[tuple[str, tuple[str, ...]]] = []
 
         async def record_plan(_dispatcher: object, _room: object, prepared: object, plan: object, **_: object) -> None:
-            plans.append((plan.kind, plan.ignore_reason, tuple(prepared.handled_turn.source_event_ids)))
+            plans.append((plan.kind, tuple(prepared.handled_turn.source_event_ids)))
 
         with (
             patch(
@@ -378,7 +378,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_message(room, caption)
             await drain_coalescing(bot)
 
-        assert plans == [("ignore", "router", ("$upload", "$caption"))]
+        assert plans == [("ignore", ("$upload", "$caption"))]
         mock_relay.assert_not_called()
 
     @pytest.mark.asyncio

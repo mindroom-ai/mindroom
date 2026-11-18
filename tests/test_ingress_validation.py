@@ -44,7 +44,7 @@ from mindroom.entity_resolution import mindroom_user_id
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.journal_dispatch import _route_as_message
 from mindroom.turn_origin import TurnIntent
-from mindroom.turns.facts import command_for, is_router_voice_echo
+from mindroom.turns.facts import command_for, is_voice_echo
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -146,7 +146,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
             SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
         }
-        assert is_router_voice_echo(
+        assert is_voice_echo(
             validator.classify_source(ids["router"].full_id, {"content": echo_content}, room_id=room.room_id),
             echo_content,
         )

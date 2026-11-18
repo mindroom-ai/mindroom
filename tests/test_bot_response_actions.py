@@ -1745,4 +1745,4 @@ class TestAgentBot(AgentBotTestBase):
 
         plan = await bot._turn_policy._plan_routing(room, event, dispatch)
 
-        assert plan == DispatchPlan(kind="ignore", ignore_reason="router")
+        assert plan == DispatchPlan(kind="ignore")

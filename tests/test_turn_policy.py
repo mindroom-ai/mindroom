@@ -628,7 +628,6 @@ async def test_only_the_rooms_steward_routes_an_untagged_message(config: Config,
     assert {name: plan.kind for name, plan in plans.items()} == {
         name: "route" if name == steward else "ignore" for name in plans
     }
-    assert plans[ROUTER_AGENT_NAME].ignore_reason == (None if steward == ROUTER_AGENT_NAME else "router")
 
 
 @pytest.mark.asyncio
@@ -732,7 +731,6 @@ async def test_router_ignores_untagged_message_with_single_candidate(config: Con
     plan = await _plan(policy, room, _dispatch(_context(), agent_name=ROUTER_AGENT_NAME))
 
     assert plan.kind == "ignore"
-    assert plan.ignore_reason == "router"
 
 
 @pytest.mark.asyncio
@@ -745,7 +743,6 @@ async def test_router_ignores_message_with_explicit_agent_mention(config: Config
     plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
 
     assert plan.kind == "ignore"
-    assert plan.ignore_reason == "router"
 
 
 @pytest.mark.asyncio
@@ -775,7 +772,6 @@ async def test_router_ignores_thread_already_owned_by_an_agent(config: Config) -
     plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
 
     assert plan.kind == "ignore"
-    assert plan.ignore_reason == "router"
 
 
 @pytest.mark.asyncio
@@ -792,7 +788,6 @@ async def test_router_ignores_thread_with_unavailable_policy_history(config: Con
     plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
 
     assert plan.kind == "ignore"
-    assert plan.ignore_reason == "router"
 
 
 def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:

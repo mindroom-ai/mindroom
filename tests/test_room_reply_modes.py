@@ -693,29 +693,6 @@ async def test_each_ingress_path_reaches_whom_the_reply_mode_says(
     assert acted == expected
 
 
-@pytest.mark.asyncio
-async def test_router_still_echoes_an_unanswered_voice_message_in_a_mentions_room(tmp_path: Path) -> None:
-    """With the default visible echo, the router shows the transcript of a voice message nobody answers.
-
-    docs/configuration/threads.md and docs/voice.md say so.
-    """
-    acted, bots = await _who_acts(
-        tmp_path,
-        _send_voice,
-        _BOTH,
-        "mentions",
-        voice={"enabled": True},
-        transcript="🎤 what is on today",
-    )
-
-    assert acted == {}
-    sent = [call.kwargs["content"] for call in bots[ROUTER_AGENT_NAME].client.room_send.await_args_list]
-    assert [content.get("m.new_content", content)["body"] for content in sent] == [
-        "Router agent is transcribing…",
-        "🎤 what is on today",
-    ]
-
-
 async def _mention_general(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
     await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$event", "@general hello", mention="general"))
 

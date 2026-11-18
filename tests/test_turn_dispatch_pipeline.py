@@ -12,7 +12,6 @@ import pytest
 
 from mindroom.coalescing.batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner, requester_coalescing_key
 from mindroom.coalescing.gate import ReadyPendingEvent
-from mindroom.coalescing.ingress_lanes import IngressRetryError
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -41,7 +40,7 @@ from mindroom.dispatch_source import (
 from mindroom.event_journal import ConversationPage
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
-from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, _VoiceNormalizationResult
+from mindroom.inbound_turn_normalizer import DispatchPayload, _VoiceNormalizationResult
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
@@ -56,7 +55,7 @@ from mindroom.response_sources import Owned
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
-from mindroom.turn_record import SourceVisibleEcho, TurnRecord
+from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
@@ -83,7 +82,6 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
-    make_ingress_facts,
     message_origin,
     patch_response_runner_module,
     replace_turn_deps,
@@ -132,69 +130,6 @@ async def _first_of(signal: Awaitable[object], handler: asyncio.Task[None]) -> N
 
 class TestAgentBot(AgentBotTestBase):
     """Turns through a test bot's ingress, dispatch, and delivery collaborators."""
-
-    @pytest.mark.asyncio
-    async def test_voice_normalization_fallback_obeys_echo_publication_barrier(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A normalization failure must not let a responder fallback overtake the router echo."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        room = _matrix_room(user_ids=("@user:localhost",))
-        voice_event = _room_audio_event(
-            sender="@user:localhost",
-            event_id="$voice-fallback-barrier",
-            room_id=room.room_id,
-        )
-        target = MessageTarget.resolve(
-            room_id=room.room_id,
-            thread_id="$thread-root",
-            reply_to_event_id=voice_event.event_id,
-        )
-        fallback_event = PreparedIngress(
-            sender=voice_event.sender,
-            event_id=voice_event.event_id,
-            body="🎤 [Attached voice message]",
-            source=voice_event.source,
-        )
-        with (
-            patch.object(
-                InboundTurnNormalizer,
-                "prepare_voice_event",
-                new=AsyncMock(side_effect=RuntimeError("normalization failed")),
-            ),
-            patch.object(
-                InboundTurnNormalizer,
-                "prepare_raw_voice_fallback_event",
-                new=AsyncMock(return_value=_VoiceNormalizationResult(event=fallback_event)),
-            ),
-            patch.object(
-                bot._visible_voice_echo,
-                "await_publication",
-                new=AsyncMock(return_value=False),
-            ) as await_publication,
-            pytest.raises(IngressRetryError),
-        ):
-            await bot._voice_ingress._ready_voice_event(
-                room=room,
-                event=voice_event,
-                facts=make_ingress_facts(voice_event.sender, source_kind=VOICE_SOURCE_KIND),
-                voice_target=target,
-                coalescing_thread_id="$thread-root",
-                dispatch_timing=None,
-            )
-
-        await_publication.assert_awaited_once_with(
-            room=room,
-            source_event_id=voice_event.event_id,
-            requester_user_id=voice_event.sender,
-        )
-        checkpoint = await bot._turn_store.prepared_voice_for_source(voice_event.event_id)
-        assert checkpoint is not None
-        assert checkpoint.body == "🎤 [Attached voice message]"
-        assert checkpoint.coalescing_thread_id == "$thread-root"
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
@@ -903,87 +838,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         mock_execute_command.assert_awaited_once()
         assert mock_execute_command.await_args.kwargs["target"].resolved_thread_id == "$thread_root"
-
-    @pytest.mark.asyncio
-    async def test_router_dispatch_marks_visible_echo_from_any_coalesced_source_event(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Router ignore plans should preserve visible echoes recorded on non-primary source events."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        _wrap_extracted_collaborators(bot)
-        bot.client = _make_matrix_client_mock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        # The router published and finalized the voice source's echo before the batch reached its ignore plan.
-        await bot._turn_store.record_visible_echo(room.room_id, "$voice", "$voice_echo")
-        await bot._turn_store.record_finalized_visible_echo("$voice", "$voice_echo", is_fallback=False)
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$text"
-        event.sender = "@user:localhost"
-        event.body = "hello"
-        event.server_timestamp = 1234567890
-        event.source = {"content": {"body": "hello"}}
-
-        dispatch = PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=MessageContext(
-                am_i_mentioned=False,
-                is_thread=True,
-                thread_id="$thread_root",
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=True,
-            ),
-            target=(
-                dispatch_target := MessageTarget.resolve(
-                    room_id=room.room_id,
-                    thread_id="$thread_root",
-                    reply_to_event_id=event.event_id,
-                )
-            ),
-            correlation_id="corr-visible-echo",
-            envelope=_hook_envelope(body="hello", source_event_id="$text", target=dispatch_target),
-        )
-
-        with (
-            patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
-            patch.object(
-                bot._turn_dispatcher,
-                "_prepare_dispatch",
-                new=AsyncMock(return_value=dispatch),
-            ),
-            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
-        ):
-            await dispatch_test_turn(
-                bot._turn_dispatcher,
-                room,
-                event,
-                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
-                handled_turn=TurnRecord.create(
-                    ["$voice", "$text"],
-                    source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
-                ),
-            )
-
-        await assert_turn_answered(
-            bot,
-            TurnRecord.create(
-                ["$voice", "$text"],
-                response_event_id="$voice_echo",
-                source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
-                visible_echoes={"$voice": SourceVisibleEcho("$voice_echo", is_fallback=False)},
-                requester_id="@user:localhost",
-            ),
-        )
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_preserves_prompt_map_when_router_routes_coalesced_turn(
