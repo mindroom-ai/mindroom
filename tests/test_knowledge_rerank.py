@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -321,6 +322,27 @@ async def test_local_reranking_does_not_need_the_shared_default_executor(
         release.set()
         await blocked
         busy.shutdown()
+
+
+@pytest.mark.parametrize(("device", "model_kwargs"), [("mps", {"attn_implementation": "eager"}), ("cpu", None)])
+def test_cross_encoder_is_built_with_eager_attention_on_mps_only_and_a_length_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    model_kwargs: dict[str, str] | None,
+) -> None:
+    """SDPA on MPS keeps driver memory for each new input length, and the model's 8192 tokens would ask for tens of GiB."""
+    built: list[dict[str, object]] = []
+
+    def cross_encoder(model: str, **kwargs: object) -> SimpleNamespace:
+        built.append({"model": model, **kwargs})
+        return SimpleNamespace(predict=lambda pairs: [0.5 for _pair in pairs])
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(CrossEncoder=cross_encoder))
+    monkeypatch.setitem(sys.modules, "sentence_transformers.util", SimpleNamespace(get_device_name=lambda: device))
+    monkeypatch.setattr(rerank_module, "_cross_encoders", {})
+
+    assert rerank_module._CrossEncoderReranker(model="local-model")._score("q", ["d"]) == [0.5]
+    assert built == [{"model": "local-model", "max_length": 1024, "model_kwargs": model_kwargs}]
 
 
 def _cohere_leaving_out_the_last(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Reranker:
