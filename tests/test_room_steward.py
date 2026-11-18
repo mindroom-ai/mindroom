@@ -138,13 +138,29 @@ def test_poster_is_the_owner_where_it_is_running_and_joined() -> None:
     assert room_poster({ROUTER_AGENT_NAME: bots[ROUTER_AGENT_NAME]}, ROOM) is bots[ROUTER_AGENT_NAME]
 
 
-def test_poster_of_a_retry_is_the_account_its_device_names_while_that_is_joined() -> None:
-    """A retried post keeps its first sender, whose device its transaction ID belongs to, until that account is gone."""
+def test_poster_of_a_retry_is_only_the_account_of_its_first_attempt() -> None:
+    """A retried post names the account and device of its first attempt and gets that account or none.
+
+    Device IDs are scoped to an account, so another bot with the same device ID is not that sender.
+    """
     bots = {"code": _bot(CODE), "helper": _bot(HELPER), ROUTER_AGENT_NAME: _bot(OWNER)}
-    assert room_poster(bots, ROOM, f"DEVICE-{HELPER}") is bots["helper"]
-    assert room_poster(bots, ROOM, "DEVICE-gone") is bots[ROUTER_AGENT_NAME]
+    for bot in bots.values():
+        bot.client.device_id = "DEVICE"
+    assert room_poster(bots, ROOM, (HELPER, "DEVICE")) is bots["helper"]
+    assert room_poster(bots, ROOM, (HELPER, "DEVICE-gone")) is None
     del bots["helper"]
-    assert room_poster(bots, ROOM, f"DEVICE-{HELPER}") is bots[ROUTER_AGENT_NAME]
+    assert room_poster(bots, ROOM, (HELPER, "DEVICE")) is None
+
+
+def test_poster_of_a_retry_saved_without_its_account_is_only_the_owner() -> None:
+    """A retry saved before accounts were pinned names a device alone, which only the owner account sent from."""
+    bots = {"code": _bot(CODE), ROUTER_AGENT_NAME: _bot(OWNER)}
+    for bot in bots.values():
+        bot.client.device_id = "DEVICE"
+    assert room_poster(bots, ROOM, (None, "DEVICE")) is bots[ROUTER_AGENT_NAME]
+    assert room_poster(bots, ROOM, (None, "DEVICE-gone")) is None
+    del bots[ROUTER_AGENT_NAME]
+    assert room_poster(bots, ROOM, (None, "DEVICE")) is None
 
 
 def test_poster_is_lowest_id_agent_or_team_without_the_owner() -> None:
@@ -160,7 +176,7 @@ def test_poster_is_lowest_id_agent_or_team_without_the_owner() -> None:
 def test_every_bot_gets_the_same_answer(tmp_path: Path) -> None:
     """No argument names the asking bot, so every bot asking its runtime about a room gets the same answer."""
     assert list(inspect.signature(room_steward).parameters) == ["bots", "room_id"]
-    assert list(inspect.signature(room_poster).parameters) == ["bots", "room_id", "device_id"]
+    assert list(inspect.signature(room_poster).parameters) == ["bots", "room_id", "sender"]
 
     runtime_paths = orchestrator_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(

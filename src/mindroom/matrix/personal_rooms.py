@@ -233,7 +233,7 @@ class PersonalRoomService:
         source_client: nio.AsyncClient,
         *,
         reinvite_departed_owner: bool = False,
-        poster: Callable[[str | None], nio.AsyncClient | None] | None = None,
+        poster: Callable[[tuple[str | None, str] | None], nio.AsyncClient | None] | None = None,
         admin: nio.AsyncClient | None = None,
     ) -> str | None:
         """Reconcile a currently eligible human from a room its steward observed through ``source_client``.
@@ -288,7 +288,7 @@ class PersonalRoomService:
                 await self._finish(record, path, source_room_id, human_joined=human_joined)
                 settings = self._require_current_settings(user_id, source_room_id)
                 if source_room_id == record.source_room_id:
-                    await self._confirm(record, path, settings, poster or (lambda _device_id: source_client))
+                    await self._confirm(record, path, settings, poster or (lambda _sender: source_client))
                 await self._invite_router_if_never_member(record)
                 return record.room_id
         except _PolicyChangedError:
@@ -852,12 +852,13 @@ class PersonalRoomService:
         record: PersonalRoomRecord,
         path: Path,
         settings: PersonalRoomsConfig,
-        poster: Callable[[str | None], nio.AsyncClient | None],
+        poster: Callable[[tuple[str | None, str] | None], nio.AsyncClient | None],
     ) -> None:
         if not settings.confirmation or record.confirmation_event_id is not None:
             return
-        # A retry keeps the account whose device its transaction ID is frozen to, while that account is in the room.
-        source_client = poster(record.confirmation_device_id)
+        # A retry keeps the account and device its transaction ID is frozen to, while that account is in the room.
+        device_id = record.confirmation_device_id
+        source_client = poster((record.confirmation_user_id, device_id) if device_id else None)
         if source_client is None:
             msg = "Personal-room confirmation has no account to send it"
             raise RuntimeError(msg)
@@ -866,12 +867,13 @@ class PersonalRoomService:
                 settings.confirmation.format(**self._template_values(record)),
             )
             record.confirmation_content["msgtype"] = "m.notice"
-            record.confirmation_device_id = source_client.device_id
+            record.confirmation_user_id, record.confirmation_device_id = source_client.user_id, source_client.device_id
             await run_blocking_until_complete(write_personal_room, path, record)
         if self._current_settings(record.user_id, record.source_room_id) is None:
             return
-        if not source_client.device_id or record.confirmation_device_id != source_client.device_id:
-            msg = "Personal-room pending confirmation belongs to a different Matrix device"
+        frozen = (record.confirmation_user_id or source_client.user_id, record.confirmation_device_id)
+        if not source_client.device_id or frozen != (source_client.user_id, source_client.device_id):
+            msg = "Personal-room pending confirmation belongs to a different Matrix account or device"
             raise RuntimeError(msg)
         delivered = await send_message_result(
             source_client,

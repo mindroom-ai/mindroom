@@ -3580,7 +3580,7 @@ async def test_steward_only_observes_while_the_poster_confirms_and_the_owner_acc
     steward, poster, admin = (RouterAccount(server, "!lobby:localhost") for _ in range(3))
     senders: list[object] = []
     admins: list[object] = []
-    devices: list[str | None] = []
+    pinned: list[tuple[str | None, str] | None] = []
 
     async def deliver(client: object, room_id: str, content: dict[str, Any], **kwargs: Any) -> object:
         senders.append(client)
@@ -3591,8 +3591,8 @@ async def test_steward_only_observes_while_the_poster_confirms_and_the_owner_acc
         server.set_member(room_id, user_id, "join")
         return None
 
-    def poster_for(device_id: str | None) -> RouterAccount:
-        devices.append(device_id)
+    def poster_for(sender: tuple[str | None, str] | None) -> RouterAccount:
+        pinned.append(sender)
         return poster
 
     owner = service(tmp_path, server, monkeypatch, auto_join_requester=True, welcome="", confirmation="Ready")
@@ -3606,5 +3606,33 @@ async def test_steward_only_observes_while_the_poster_confirms_and_the_owner_acc
 
     assert senders == [poster, poster]
     assert admins == [admin]
-    # The retry asks for the sender whose device the first attempt froze the confirmation to.
-    assert devices == [None, poster.device_id]
+    # The retry asks for the account and device the first attempt froze the confirmation to.
+    assert pinned == [None, (poster.user_id, poster.device_id)]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_retry_never_moves_to_another_account_with_the_same_device_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmation whose receipt was lost is not sent again by another account that shares its device ID."""
+    server = MatrixServer()
+    first, other = RouterAccount(server, "!lobby:localhost"), RouterAccount(server, "!lobby:localhost")
+    other.user_id = "@mindroom_other:localhost"
+    assert first.device_id == other.device_id
+    senders: list[object] = []
+
+    async def deliver(client: object, room_id: str, content: dict[str, Any], **kwargs: Any) -> object:
+        senders.append(client)
+        return await server.deliver(client, room_id, content, **kwargs)
+
+    owner = service(tmp_path, server, monkeypatch, welcome="", confirmation="Ready")
+    monkeypatch.setattr("mindroom.matrix.personal_rooms.send_message_result", deliver)
+    server.fail_send = True
+    with pytest.raises(RuntimeError, match="confirmation delivery failed"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", first, poster=lambda _sender: first)
+    server.fail_send = False
+    with pytest.raises(RuntimeError, match="belongs to a different Matrix account or device"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", first, poster=lambda _sender: other)
+
+    assert senders == [first]

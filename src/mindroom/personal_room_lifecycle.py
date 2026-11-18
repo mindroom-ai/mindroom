@@ -108,8 +108,8 @@ class PersonalRoomLifecycle:
     report_membership_change: Callable[[str, str], None]
     # Whether this bot is a room's steward now; an onboarding room's steward observes its joins.
     is_steward: Callable[[str], bool]
-    # The client that posts in a room for no agent, the one a retry's recorded device names where it is still joined.
-    poster_client: Callable[[str, str | None], nio.AsyncClient | None]
+    # The client that posts in a room for no agent; a retry names its first sender and gets that account or none.
+    poster_client: Callable[[str, tuple[str | None, str] | None], nio.AsyncClient | None]
     # The owner account's client while it runs, which backs the optional admin join.
     owner_client: Callable[[], nio.AsyncClient | None]
     # A live join and a reconciliation pass can both reach one user; only one may register the account.

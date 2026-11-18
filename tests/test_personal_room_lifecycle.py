@@ -308,8 +308,8 @@ async def test_agent_steward_onboards_through_the_rooms_poster_and_the_owner_acc
     ensure = coordination.owner.ensure.await_args
     assert ensure.args == ("@alice:localhost", "!lobby:localhost", lifecycle.runtime.client)
     assert ensure.kwargs["admin"] is owner_client
-    assert ensure.kwargs["poster"]("DEVICE") is poster
-    lifecycle.poster_client.assert_called_once_with("!lobby:localhost", "DEVICE")
+    assert ensure.kwargs["poster"](("@mindroom_code:localhost", "DEVICE")) is poster
+    lifecycle.poster_client.assert_called_once_with("!lobby:localhost", ("@mindroom_code:localhost", "DEVICE"))
 
 
 @pytest.mark.asyncio

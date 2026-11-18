@@ -57,6 +57,8 @@ class PersonalRoomRecord(BaseModel):
     welcome_completed: bool = False
     welcome_device_id: str | None = None
     confirmation_content: dict[str, Any] | None = None
+    # The account that sends the confirmation; absent in older records, which the owner account sent.
+    confirmation_user_id: str | None = None
     confirmation_device_id: str | None = None
     confirmation_event_id: str | None = None
     avatar_done: bool = False
