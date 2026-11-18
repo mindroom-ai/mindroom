@@ -344,7 +344,7 @@ Second question:
         assert response.interactive_metadata.option_labels == {"❓": "Option", "1": "Option"}
 
     def test_parse_and_format_interactive_replaces_repeated_emojis(self) -> None:
-        """A repeated emoji would merge two options into one reaction, so later repeats get a free keycap."""
+        """A repeated emoji would merge two options into one reaction, so later repeats get their own keycap or a spare."""
         response_text = """```interactive
 {
     "question": "How?",
@@ -362,13 +362,13 @@ Second question:
         assert response.interactive_metadata is not None
         assert [opt["emoji"] for opt in response.interactive_metadata.options_as_list()] == [
             "🛟",
-            "1️⃣",
+            "🔹",
             "2️⃣",
             "4️⃣",
         ]
         assert response.interactive_metadata.option_map == {
             "🛟": "both",
-            "1️⃣": "backup",
+            "🔹": "backup",
             "2️⃣": "cleanup",
             "4️⃣": "nothing",
             "1": "both",
@@ -376,12 +376,13 @@ Second question:
             "3": "cleanup",
             "4": "nothing",
         }
-        assert "2. 1️⃣ Backup only" in response.formatted_text
+        assert "2. 🔹 Backup only" in response.formatted_text
 
     @pytest.mark.parametrize(
         ("emojis", "expected"),
         [
-            (["🛟", "🛟", "2\u20e3"], ["🛟", "1️⃣", "2\u20e3"]),
+            (["🛟", "🛟", "2\u20e3"], ["🛟", "🔹", "2\u20e3"]),
+            (["☎", "☎\ufe0e"], ["☎", "2️⃣"]),
             (["2", "2"], ["1️⃣", "2️⃣"]),
         ],
     )
@@ -390,7 +391,7 @@ Second question:
         emojis: list[str],
         expected: list[str],
     ) -> None:
-        """A keycap without U+FE0F looks like one with it, and a bare digit is a numbered reply, so neither is free."""
+        """Emojis differing only by a variation selector look alike, and a bare digit is a numbered reply, so neither is free."""
         options = [{"emoji": emoji, "label": f"Option {i}", "value": f"v{i}"} for i, emoji in enumerate(emojis)]
         response_text = f"```interactive\n{json.dumps({'question': 'Q?', 'options': options})}\n```"
 
