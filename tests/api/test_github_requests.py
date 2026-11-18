@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
@@ -1764,3 +1764,45 @@ def test_a_removal_the_store_fails_is_a_sanitized_unavailable(
     assert str(error) not in repr(logs)
     assert ALICE_PAT not in repr(logs)
     assert stored_token(paths, ALICE) == {"token": ALICE_PAT, "login": "pat-gh"}
+
+
+def route_request(app: FastAPI, user_id: str) -> Request:
+    """A request to the app presenting a new client session of ``user_id``, for calling a route handler directly."""
+    headers = [(b"authorization", session(app, user_id)["Authorization"].encode())]
+    return Request({"type": "http", "app": app, "method": "PUT", "path": "/api/github/token", "headers": headers})
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_save_holds_the_users_lock_until_its_write_finishes(
+    app: FastAPI,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `PUT` cancelled while its write runs lets the user's queued `DELETE` run only after that write."""
+    github.handler = user_answer()
+    writing, release = threading.Event(), threading.Event()
+    publish = credentials_manager._atomic_write_private_file
+
+    def held_publish(path: Path, data: bytes) -> None:
+        if path.name == "github_user_token_credentials.json":
+            writing.set()
+            release.wait(10)
+        publish(path, data)
+
+    monkeypatch.setattr(credentials_manager, "_atomic_write_private_file", held_publish)
+    token = github_requests.GitHubToken(token=ALICE_PAT)
+    put = asyncio.create_task(github_requests.save_github_token(token, route_request(app, ALICE)))
+    try:
+        assert await asyncio.to_thread(writing.wait, 10)
+        delete = asyncio.create_task(github_requests.delete_github_token(route_request(app, ALICE)))
+        await asyncio.sleep(0.05)
+        put.cancel()
+        await asyncio.sleep(0.2)
+        assert not delete.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await put
+    assert await delete == {"connected": False}
+    assert stored_token(paths, ALICE) is None

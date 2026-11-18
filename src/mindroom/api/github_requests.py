@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from mindroom.api import config_lifecycle
 from mindroom.api.client_sessions import presented_session
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials.manager import (
     CredentialsUnreadableError,
     credential_layers,
@@ -360,7 +361,8 @@ async def save_github_token(payload: GitHubToken, request: Request) -> dict[str,
         if isinstance(login, JSONResponse):
             return login
         try:
-            await asyncio.to_thread(_save_token, context, {"token": payload.token, "login": login})
+            # Finished even when the request is cancelled, so the lock is never released while it still writes.
+            await run_blocking_until_complete(_save_token, context, {"token": payload.token, "login": login})
         except (OSError, ValueError) as exc:
             # A `ValueError` is the store's path guards refusing its directory; neither answer names the path.
             logger.warning("github_token_save_failed", error_type=type(exc).__name__)
@@ -377,7 +379,7 @@ async def delete_github_token(request: Request) -> dict[str, object] | JSONRespo
         # Waits for a save under way, which would otherwise publish its token after this removal.
         async with _token_lock(presented_session(request).user_id):
             try:
-                await asyncio.to_thread(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
+                await run_blocking_until_complete(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
             except (OSError, ValueError) as exc:
                 # As on save, a `ValueError` is the store's path guards refusing its directory.
                 logger.warning("github_token_delete_failed", error_type=type(exc).__name__)
