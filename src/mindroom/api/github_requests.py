@@ -306,6 +306,9 @@ async def _token_login(token: str) -> str | JSONResponse:
     except (httpx.HTTPError, TimeoutError) as exc:
         logger.warning("github_token_check_failed", error_type=type(exc).__name__)
         return _error(502, "github_unreachable")
+    if _rate_limited(response):
+        logger.warning("github_token_check_rate_limited", status=response.status_code)
+        return _error(502, "github_rate_limited")
     if response.status_code in {401, 403}:
         logger.info("github_token_rejected", status=response.status_code)
         return _error(400, "github_token_rejected")
@@ -314,6 +317,12 @@ async def _token_login(token: str) -> str | JSONResponse:
         logger.warning("github_token_check_failed", status=response.status_code)
         return _error(502, "github_unreachable")
     return login
+
+
+def _rate_limited(response: httpx.Response) -> bool:
+    """Tell whether GitHub answered with a rate limit: any 429, or a 403 with no requests left or a wait to keep."""
+    limited = response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers
+    return response.status_code == 429 or (response.status_code == 403 and limited)
 
 
 @router.get("/status", response_model=None)

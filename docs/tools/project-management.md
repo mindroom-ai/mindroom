@@ -75,6 +75,7 @@ A plugin calls `GET /api/github/status` with its client session for `{"connected
 MindRoom first checks it with GitHub's `GET /user`, following no redirect and giving up after 10 seconds, and stores it with the login GitHub names.
 The answer is `{"connected": true, "via": "token", "login": "<login>"}`.
 A token that is empty, longer than 512 characters, or holds anything but visible ASCII characters answers 422 `{"error": "github_request_invalid"}`, as any malformed body of these routes does, naming nothing it was sent (a body that is not UTF-8 gets FastAPI's own 400, which echoes nothing either), and a token GitHub refuses with 401 or 403 answers 400 `{"error": "github_token_rejected"}`.
+A rate limit on the check, which is any 429 and a 403 with `x-ratelimit-remaining: 0` or a `retry-after` header, says nothing about the token and answers 502 `{"error": "github_rate_limited"}`.
 When GitHub is unreachable, fails, or answers without a well-formed login or with more than 64 KiB, it answers 502 `{"error": "github_unreachable"}`, and a session that names no user gets 409 `{"error": "github_not_connected"}`.
 When the token cannot be written it answers 503 `{"error": "github_connection_unavailable"}`.
 In every failing case nothing is stored and an earlier token stays.

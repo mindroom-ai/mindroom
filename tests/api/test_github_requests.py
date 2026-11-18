@@ -1207,6 +1207,50 @@ def test_a_token_github_refuses_keeps_the_token_saved_before(
     assert github.requests[-1].headers["authorization"] == f"Bearer {ALICE_PAT}"
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(403, headers={"x-ratelimit-remaining": "0"}, json={"message": "API rate limit exceeded"}),
+        httpx.Response(403, headers={"retry-after": "60"}, json={"message": "secondary rate limit"}),
+        httpx.Response(429, headers={"retry-after": "60"}),
+        httpx.Response(429, headers={"x-ratelimit-remaining": "0"}),
+        httpx.Response(429),
+    ],
+    ids=["403-remaining-0", "403-retry-after", "429-retry-after", "429-remaining-0", "429"],
+)
+def test_a_rate_limited_token_check_is_a_bad_gateway_not_a_rejection(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    answer: httpx.Response,
+) -> None:
+    """GitHub limiting the check says nothing of the token: 502 `github_rate_limited`, and the token before stays."""
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
+    github.handler = lambda request: answer if request.url.path == "/user" else httpx.Response(200, json={})
+
+    response = save_token(client, session(app, ALICE), "ghp_limited-token")
+
+    assert (response.status_code, response.json()) == (502, {"error": "github_rate_limited"})
+    assert stored_token(paths, ALICE) == {"token": ALICE_PAT, "login": "pat-gh"}
+
+
+def test_a_403_with_rate_limit_left_is_a_rejection(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A 403 while GitHub still reports requests left refuses the token, whatever its rate headers say."""
+    github.handler = lambda _request: httpx.Response(403, headers={"x-ratelimit-remaining": "4999"})
+
+    response = save_token(client, session(app, ALICE))
+
+    assert (response.status_code, response.json()) == (400, {"error": "github_token_rejected"})
+    assert stored_token(paths, ALICE) is None
+
+
 @pytest.mark.parametrize("source", [{"_source": "ui"}, {"_source": "env"}, {}], ids=["ui", "env", "unmarked"])
 def test_a_global_or_shared_token_document_is_never_the_users(
     app: FastAPI,
