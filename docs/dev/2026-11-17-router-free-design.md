@@ -71,8 +71,12 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     Today the router posts a "transcribing" placeholder before that and the other bots wait on an in-process barrier and on the router's receipt.
     Publication moves to after the plan: the bot whose plan is to answer posts the transcript, records the receipt in its own turn rows, and only then starts its reply.
     A restart replays the turn from the same checkpoint, a routed turn from the answering bot's own journal (decision 14), finds its own receipt and does not post again.
-    The placeholder, the barrier, its grace timer and the read of another principal's receipt go away, because the poster and the answerer are the same bot.
+    The placeholder and the barrier go away, because the poster and the answerer are the same bot.
+    A routed turn's responder posts the transcript its route carries when retention has cleared its own checkpoint.
     When two bots answer one voice message, a shared per-event claim lets one of them post the transcript and an in-process lock held during that send keeps the other's reply behind it.
+    A bot that finds the claim's owner without a receipt waits 0.25 seconds for it and then answers.
+    The transcript is sent under a Matrix transaction ID derived from the room and the voice event, so a retry is not a second message.
+    An agent whose participation still decides whether to answer posts the transcript once it approves the reply, and a contact room gets no transcript.
     Consequence: the "transcribing" progress line disappears, since nobody is known to answer until the transcript exists.
 13. **Member tracking (question B): one pinned observer per room, chosen by the steward rule when the room's row is built.**
     The index keeps its single snapshot, its refresh lock and its replay of live transitions, and each room row records the account that observes it.
@@ -89,7 +93,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     A turn those rules leave unanswered (several candidates, nobody mentioned, the thread names no responder and holds one person, `router.access` allows the requester when set) is routed by the room's steward alone, and every other bot ignores it, as it ignored it while a router existed.
     The steward (decision 3) may be the owner account or a candidate.
     It coalesces and normalizes the turn as any bot does, runs the selector once, and sends one event of type `io.mindroom.route`.
-    The event's content names, under the `io.mindroom.route` key, the chosen account (`entity`), every message of the turn with the newest last (`event_ids`) and the thread the answer belongs in (`thread_id`), and carries the relay context the responder reads: the trusted-relay source kind, the original sender, attachment IDs, voice markers, and a scheduled task's per-run settings.
+    The event's content names, under the `io.mindroom.route` key, the chosen account (`entity`), every message of the turn with the newest last (`event_ids`) and the thread the answer belongs in (`thread_id`), and carries the relay context the responder reads: the trusted-relay source kind, the original sender, attachment IDs, voice markers, the transcript of each routed voice message (`io.mindroom.voice_transcripts`), and a scheduled task's per-run settings.
     The responder keeps only those keys, and only an event journaled as a route is read as one: every other journal event loses the route key when it is rebuilt.
     It has no `m.relates_to` and no `m.mentions`, so no homeserver counts it in a thread and no mention rule fires for it, and it has a `body` only when the responder could not read the text otherwise: for a scheduled task's prompt, and for a responder that answers in the room and reads no conversation.
     The steward routes under `router.access` alone, so a candidate steward whose own access denies the person still routes the person's message, and answers it itself, runs the person's commands and runs its own `message:received` hooks only when its own access allows.
