@@ -142,7 +142,7 @@ class AgentReplyMembershipSync:
     def _grants_lost(self, *, revoke: bool = True) -> None:
         """Rebuild at the next due check without an earlier backoff, and end every bot's denied calls without waiting.
 
-        This never starts a call. An own join only asks for the rebuild: it revokes nothing.
+        This never starts a call. An own join and an account that opened only ask for the rebuild: they revoke nothing.
         """
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
