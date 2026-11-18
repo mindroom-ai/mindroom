@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -352,6 +353,16 @@ def test_slash_prefix_parses_like_bang(text: str) -> None:
 def test_unknown_slash_text_is_conversation(text: str) -> None:
     """A ``/`` message that matches no command stays conversation."""
     assert command_parser.parse(text) is None
+
+
+def test_repeated_mentions_before_plain_text_parse_without_backtracking() -> None:
+    """Mention names that read the same prefix several ways never make a non-command slow to reject."""
+    names = ("Code", "code", "Code Code")
+    started = time.monotonic()
+
+    assert command_parser.parse("@code " * 60 + "hello", names) is None
+    assert time.monotonic() - started < 1
+    assert command_parser.parse("@code Code code !help", names) is not None
 
 
 def test_unknown_bang_command_stays_unknown() -> None:

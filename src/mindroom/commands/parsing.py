@@ -124,6 +124,8 @@ def get_compact_command_entries(
     ]
 
 
+_MAX_LEADING_MENTIONS = 16
+
 COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
     {
         CommandType.RELOAD_PLUGINS,
@@ -150,6 +152,18 @@ class Command:
     type: CommandType
     args: dict[str, Any]
     raw_text: str
+
+
+def _without_leading_mentions(text: str, names: tuple[str, ...]) -> str:
+    """Return a command without the mentions before it, which aim it: `@Research Expert !model`."""
+    rest = text
+    for _ in range(_MAX_LEADING_MENTIONS):
+        body = rest.removeprefix("@")
+        spans = [len(n) for n in names if body[: len(n)].lower() == n.lower() and body[len(n) :][:1].isspace()]
+        if not spans:
+            break
+        rest = body[max(spans) :].lstrip()
+    return rest if rest.startswith(("!", "/")) else text
 
 
 class _CommandParser:
@@ -186,11 +200,7 @@ class _CommandParser:
             Parsed command or None if no command found
 
         """
-        raw_text = message.strip().removeprefix(VOICE_PREFIX)
-        if mention_names:
-            # Mentions before a command aim it at the agents they name: `@Research Expert !model`.
-            names = "|".join(map(re.escape, mention_names))
-            raw_text = re.sub(rf"^(?:@?(?:{names})\s+)+(?=[!/])", "", raw_text, flags=re.IGNORECASE)
+        raw_text = _without_leading_mentions(message.strip().removeprefix(VOICE_PREFIX), mention_names)
         # `/cmd` parses like `!cmd`, but only a known command: other `/` text (paths, `/s`) is conversation.
         is_slash = raw_text.startswith("/")
         message = f"!{raw_text[1:]}" if is_slash else raw_text
