@@ -2104,40 +2104,6 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
 
 
 @pytest.mark.asyncio
-async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp_path: Path) -> None:
-    """Routed active follow-ups should clear the reservation after router handoff."""
-    bot = _bot(tmp_path)
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
-    case = _reserved_follow_up_case(bot, room, event_id="$routed")
-    try:
-        with (
-            patch.object(
-                bot._turn_dispatcher,
-                "_prepare_dispatch",
-                new=AsyncMock(return_value=case.dispatch),
-            ),
-            patch(
-                "mindroom.turn_policy.TurnPolicy.plan_turn",
-                new=AsyncMock(return_value=DispatchPlan(kind="route", router_message="route this")),
-            ),
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_route,
-        ):
-            await dispatch_test_turn(
-                bot._turn_dispatcher,
-                room,
-                case.event,
-                "@user:localhost",
-                queued_notice_reservation=case.reservation,
-            )
-    finally:
-        case.queued_signal.finish_response_turn()
-
-    mock_route.assert_awaited_once()
-    assert not case.queued_signal.has_pending_human_messages()
-
-
-@pytest.mark.asyncio
 async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(tmp_path: Path) -> None:
     """Exceptions before response lifecycle ownership should cancel the reservation."""
     bot = _bot(tmp_path)

@@ -583,7 +583,10 @@ class ConversationResolver:
         thread_id: str | None,
         payload_metadata: DispatchPayloadMetadata | None = None,
     ) -> MessageContext:
-        """Extract minimal context for a router relay, deferring its thread read until after the lock."""
+        """Extract minimal context for an old router relay, deferring its thread read until after the lock.
+
+        Kept for relays already in room history; see the LEGACY_COMPAT note on `IngressFacts.router_relay`.
+        """
         return await self._message_context(
             room,
             event,

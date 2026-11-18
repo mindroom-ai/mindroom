@@ -530,6 +530,7 @@ async def _dispatch_plan(
             envelope=envelope,
         ),
         has_active_response_for_target=lambda _target: False,
+        source_event_ids=("$event",),
     )
 
 

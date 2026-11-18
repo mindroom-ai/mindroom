@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path  # noqa: TC003
-from unittest.mock import AsyncMock
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -18,15 +20,20 @@ from mindroom.turn_policy import ResponseAction
 from tests.authorization_helpers import (
     make_test_bot_for_entity,
 )
+from tests.bot_helpers import AgentBotTestBase, make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_journal_support,
+    install_send_response_mock,
     orchestrator_runtime_paths,
     published_config_load,
     runtime_paths_for,
 )
 from tests.matrix_state_helpers import save_matrix_state
+
+if TYPE_CHECKING:
+    from mindroom.message_target import MessageTarget
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -299,3 +306,46 @@ async def test_router_updates_rooms_on_config_change(
         setup_rooms.assert_awaited_once()
     finally:
         await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_router_joined_room_startup_sends_welcome_after_join(tmp_path: Path) -> None:
+    """Startup room joins should cache the room locally before sending a welcome."""
+    agent_user = AgentMatrixUser(
+        agent_name="router",
+        user_id="@mindroom_router:localhost",
+        display_name="Router Agent",
+        password=TEST_PASSWORD,
+        access_token="mock_test_token",  # noqa: S106
+    )
+    config = AgentBotTestBase.create_mock_config(tmp_path)
+    bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+    install_runtime_journal_support(bot)
+    bot.rooms = ["!welcome:localhost"]
+    bot.client = AsyncMock()
+    bot.client.user_id = agent_user.user_id
+    bot.client.rooms = {}
+    bot.client.join = AsyncMock(return_value=nio.JoinResponse("!welcome:localhost"))
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(room_id="!welcome:localhost", chunk=[], start="", end=None),
+    )
+
+    async def fake_send_response(*, target: MessageTarget, **_: object) -> str:
+        assert target.room_id in bot.client.rooms
+        return "$welcome"
+
+    send_response = AsyncMock(side_effect=fake_send_response)
+    install_send_response_mock(bot, send_response)
+    with (
+        patch(
+            "mindroom.bot_room_lifecycle.generate_welcome_message_for_room",
+            new=AsyncMock(return_value="Welcome"),
+        ),
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", new=AsyncMock(return_value=[])),
+        patch("mindroom.bot.config_confirmation.restore_pending_changes", new=AsyncMock(return_value=0)),
+    ):
+        await bot.join_configured_rooms()
+
+    assert "!welcome:localhost" in bot.client.rooms
+    bot.client.join.assert_awaited_once_with("!welcome:localhost")
+    send_response.assert_awaited_once()

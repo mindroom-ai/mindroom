@@ -1467,43 +1467,6 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
 
 
 @pytest.mark.asyncio
-async def test_router_reply_to_hook_dispatch_text_preserves_original_envelope_metadata(tmp_path: Path) -> None:
-    """The router's reply to hook-dispatch text, which is conversation even when it looks like a command, keeps its targeting."""
-    bot = _agent_bot(tmp_path, agent_name="router")
-    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
-    event = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$hook-dispatch-command",
-            "sender": "@mindroom_router:localhost",
-            "origin_server_ts": 1234567890,
-            "content": {
-                "msgtype": "m.text",
-                "body": "!help",
-                SOURCE_KIND_KEY: "hook_dispatch",
-                "com.mindroom.hook_source": "origin-plugin:message:received",
-                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
-            },
-        },
-    )
-    bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=_dispatch_context(bot),
-    )
-    bot._delivery_gateway.send_text = AsyncMock(return_value="$reply")
-    replace_turn_deps(bot, delivery_gateway=bot._delivery_gateway)
-
-    await dispatch_test_turn(
-        bot._turn_dispatcher,
-        room,
-        event,
-        facts=bot._ingress_validator.classify(event, room_id=room.room_id),
-    )
-
-    request = bot._delivery_gateway.send_text.await_args.args[0]
-    assert request.target.resolved_thread_id == "$hook-dispatch-command"
-    assert request.target.reply_to_event_id == "$hook-dispatch-command"
-
-
-@pytest.mark.asyncio
 async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message_path(tmp_path: Path) -> None:
     """Deep synthetic relays should stop before interactive answers are consumed."""
     bot = _agent_bot(tmp_path)

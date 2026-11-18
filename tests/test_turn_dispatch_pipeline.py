@@ -986,131 +986,6 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_preserves_prompt_map_when_router_routes_coalesced_turn(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Router handoff for a coalesced turn should persist the full prompt map."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths)
-        _wrap_extracted_collaborators(bot)
-        bot.client = _make_matrix_client_mock()
-
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.canonical_alias = None
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$text"
-        event.sender = "@user:localhost"
-        event.body = "hello"
-        event.server_timestamp = 1234567890
-        event.source = {"content": {"body": "hello"}}
-
-        dispatch = PreparedDispatch(
-            requester_user_id="@user:localhost",
-            context=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-            target=(
-                dispatch_target := MessageTarget.resolve(
-                    room_id=room.room_id,
-                    thread_id=None,
-                    reply_to_event_id=event.event_id,
-                    thread_start_root_event_id=event.event_id,
-                )
-            ),
-            correlation_id="corr-router-coalesced",
-            envelope=_hook_envelope(body="hello", source_event_id="$text", target=dispatch_target),
-        )
-        coalesced_turn = TurnRecord.create(
-            ["$voice", "$text"],
-            source_event_prompts={"$voice": "voice prompt", "$text": "hello"},
-        )
-
-        async def fake_execute_router_relay(
-            _deps: object,
-            _room: nio.MatrixRoom,
-            _event: nio.RoomMessageText,
-            _thread_history: Sequence[ResolvedVisibleMessage],
-            _thread_id: str | None = None,
-            message: str | None = None,
-            *,
-            requester_user_id: str,
-            extra_content: dict[str, Any] | None = None,
-            media_events: list[object] | None = None,
-            handled_turn: TurnRecord | None = None,
-            scheduled_prompt: str | None = None,
-        ) -> None:
-            assert message == "hello"
-            assert requester_user_id == "@user:localhost"
-            assert extra_content is None
-            assert media_events is None
-            assert scheduled_prompt is None
-            assert handled_turn is not None
-            assert handled_turn.source_event_prompts == {"$voice": "voice prompt", "$text": "hello"}
-            await bot._turn_store.record_responded_turn(replace(handled_turn, response_event_id="$route"))
-
-        with (
-            patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
-            patch.object(
-                bot._turn_dispatcher,
-                "_prepare_dispatch",
-                new=AsyncMock(return_value=dispatch),
-            ),
-            patch.object(
-                bot._turn_policy,
-                "plan_turn",
-                new=AsyncMock(
-                    return_value=DispatchPlan(
-                        kind="route",
-                        router_message="hello",
-                        router_event=event,
-                    ),
-                ),
-            ),
-            patch(
-                "mindroom.turns.dispatch.execute_router_relay",
-                new=AsyncMock(side_effect=fake_execute_router_relay),
-            ),
-            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
-        ):
-            await dispatch_test_turn(
-                bot._turn_dispatcher,
-                room,
-                event,
-                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
-                handled_turn=coalesced_turn,
-            )
-
-        await assert_turn_answered(
-            bot,
-            replace(
-                TurnRecord.create(
-                    ["$voice", "$text"],
-                    response_event_id="$route",
-                    source_event_prompts={"$voice": "voice prompt", "$text": "hello"},
-                ),
-                response_owner="router",
-                requester_id="@user:localhost",
-                history_scope=None,
-                conversation_target=dispatch.target,
-            ),
-        )
-
-    @pytest.mark.asyncio
     async def test_trusted_internal_router_relays_use_gate_bypass(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -2732,13 +2607,13 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("prompt_kind", ["text", "voice_transcript", "raw_audio_fallback"])
-    @pytest.mark.parametrize("action", ["ignore", "route", "individual", "team", "skip", "reject"])
+    @pytest.mark.parametrize("action", ["ignore", "individual", "team", "skip", "reject"])
     async def test_prompt_title_is_queued_before_execution_without_waiting(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         prompt_kind: Literal["text", "voice_transcript", "raw_audio_fallback"],
-        action: Literal["ignore", "route", "individual", "team", "skip", "reject"],
+        action: Literal["ignore", "individual", "team", "skip", "reject"],
     ) -> None:
         """Turns that will be answered queue their prompt without waiting; others, and untranscribed audio, never do."""
         voice = prompt_kind != "text"
@@ -2777,11 +2652,11 @@ class TestAgentBot(AgentBotTestBase):
         started = asyncio.Event()
         release = asyncio.Event()
         plan = (
-            DispatchPlan(kind=action)
-            if action in {"ignore", "route"}
+            DispatchPlan(kind="ignore")
+            if action == "ignore"
             else DispatchPlan(kind="respond", response_action=ResponseAction(kind=action))
         )
-        queued = action in {"route", "individual", "team"} and prompt_kind != "raw_audio_fallback"
+        queued = action in {"individual", "team"} and prompt_kind != "raw_audio_fallback"
         replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
 
         async def summarize(*_args: object, **kwargs: object) -> None:

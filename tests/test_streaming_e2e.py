@@ -17,6 +17,7 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.routing_judgment import ResponderSelection
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
@@ -279,9 +280,13 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             },
         }
 
-        # Process - bot should not respond (not mentioned)
-        await bot._on_message(test_room, initial_event)
-        await drain_coalescing(bot)
+        # Process - bot should not respond (not mentioned, and the selection picks the other agent)
+        with patch(
+            "mindroom.turn_policy.suggest_responder_for_message",
+            new=AsyncMock(return_value=ResponderSelection("helper")),
+        ):
+            await bot._on_message(test_room, initial_event)
+            await drain_coalescing(bot)
         assert len(events_sent) == 0
 
         # User edits to add mention

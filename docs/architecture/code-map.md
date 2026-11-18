@@ -70,7 +70,6 @@ Matrix sync callback
 | `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
 | `voice/readiness.py` | Voice preparation and checkpointing, gated on the router's visible echo |
 | `router/duties.py` | What only the router bot does: keep room-backed reply grants current from its sync, set up and welcome the rooms it joins, clean orphaned bot accounts, and emit room-membership hooks |
-| `router/relay.py` | Router relay delivery: target readiness, handoff metadata, and visible delivery |
 | `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access at the first gate and again under the admission fence |
 | `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
@@ -213,6 +212,7 @@ Matrix sync callback
 | `custom_tools/temporary_secrets.py` | `temporary_secrets` agent tool: `request_temporary_secret` asks the requester for a secret that the conversation's shell commands receive as an environment variable |
 | `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, where to add missing ones, and `request_secret`, which asks the requester for a key with a card |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
+| `event_journal/room_claims.py` | Per-event room claims: one saved owner per room event and purpose, shared by every bot, where the first writer wins |
 | `tool_jobs/runtime.py` | Accepted execution ownership, what a job runs and how it is known, durable outcomes, scoped discovery, and result claims |
 | `delegation/background.py` | A subagent call's job: the child it is known by, its saved snapshot, its outcome, and its cleanup inside the generic execution owner |
 | `delegation/job_approvals.py` | A child's approval requests, asked through the cards of the job that runs it |
@@ -269,6 +269,7 @@ Matrix sync callback
 | `config/personal_agents.py` | `personal_agents` templates, the roster store, and expansion of roster entries into ordinary agents before config validation |
 | `config/slack.py` | The top-level `slack:` section: the email domain and Matrix user ID template that map Slack workspace members to Matrix users; also validates the `slack` tool's `channels` and `room` across agents and lists the agents that answer Slack channels |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
+| `responder_selection.py` | The process-wide saved responder choice per source event, so every bot that could answer an unmentioned turn agrees on the one that does |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
 | `teams/members.py` | Resolving a team's exact members without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, job controls, call budget, and history settings with each member's roster entry and the build its first delegation makes |

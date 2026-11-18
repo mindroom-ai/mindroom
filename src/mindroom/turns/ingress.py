@@ -258,53 +258,6 @@ class TurnIngress:
         if may_be_for_me:
             mark_waiting_for_approval(self.deps, target, envelope)
 
-    async def _should_skip_router_before_shared_ingress_work(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageFormatted,
-        *,
-        facts: IngressFacts,
-        thread_id: str | None,
-    ) -> bool:
-        """Return whether the router can safely skip shared ingress work for one text event."""
-        requester_user_id = facts.lane_requester_id
-        if (
-            self.deps.agent_name != ROUTER_AGENT_NAME
-            or command_for(facts, dispatch_prompt_for_event(event)) is not None
-            # A long text's preview is not its text yet, so it may hide a command.
-            or is_v2_sidecar_text_preview(event.source)
-            # A caption for an upload still waiting in this sender's burst must join that upload's
-            # turn, or the router routes the upload alone while the named agent answers the caption.
-            or any(
-                self.deps.coalescing_gate.has_pending_work(
-                    requester_coalescing_key(room.room_id, scope_thread_id, requester_user_id),
-                )
-                for scope_thread_id in {None, thread_id}
-            )
-        ):
-            return False
-
-        mention_skips = self.deps.turn_policy.router_mention_skips(room, event.source)
-        if mention_skips is not None:
-            return mention_skips
-        if thread_id is None:
-            return False
-
-        try:
-            thread_history = await self.deps.resolver.dispatch_thread_snapshot(
-                room.room_id,
-                thread_id,
-            )
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Router pre-ingress skip ignored thread snapshot failure",
-                room_id=room.room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-            return False
-        return await self.deps.turn_policy.router_thread_skips(room, requester_user_id, thread_history)
-
     @staticmethod
     async def _normalize_with_ingress_timing(
         normalize: Awaitable[PreparedIngress | None],
@@ -807,20 +760,6 @@ class TurnIngress:
                 self._log_unplaceable_event(room, event)
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
             raise
-        if await self._should_skip_router_before_shared_ingress_work(
-            room,
-            event,
-            facts=facts,
-            thread_id=ingress_thread_id,
-        ):
-            self.deps.logger.debug(
-                "skip_router_shared_ingress_work",
-                event_id=event.event_id,
-                room_id=room.room_id,
-                thread_id=ingress_thread_id,
-            )
-            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-
         self.deps.logger.info(
             "Received message",
             event_id=event.event_id,

@@ -334,10 +334,6 @@ class CoalescingGate:
         gate = self._gates.get(key)
         return tuple(queued.pending_event for queued in gate.queue) if gate is not None else ()
 
-    def has_pending_work(self, key: CoalescingKey) -> bool:
-        """Return whether a lane or queue still holds unclaimed work for one coalescing key."""
-        return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
-
     def queues_other_run(self, key: CoalescingKey, run_identity: RunIdentity) -> bool:
         """Return whether a queue still holds a run other than this run identity's own messages for this agent."""
         return any(

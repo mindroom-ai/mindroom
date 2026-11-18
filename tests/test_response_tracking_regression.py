@@ -7,7 +7,7 @@ are properly tracked to prevent re-processing after restart.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -19,7 +19,6 @@ from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.router.relay import execute_router_relay
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -231,109 +230,3 @@ class TestResponseTrackingRegression:
         assert await bot._turn_store.is_handled(test_room_id, unknown_command_event.event_id), (
             "Unknown command event should be marked as responded"
         )
-
-    @pytest.mark.asyncio
-    @patch("mindroom.router.relay.suggest_responder_for_message")
-    async def test_router_ai_routing_response_tracking(
-        self,
-        mock_suggest_responder: AsyncMock,
-        mock_router_agent: AgentMatrixUser,
-        mock_config: Config,
-    ) -> None:
-        """Test that router AI routing is tracked in the turn rows.
-
-        Regression test for issue where router would re-route messages
-        after restart.
-        """
-        test_room_id = "!test:localhost"
-
-        mock_config.defaults.enable_streaming = False
-        # Set up router bot
-        bot = make_test_agent_bot(
-            agent_user=mock_router_agent,
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            rooms=[test_room_id],
-        )
-        wrap_extracted_collaborators(bot)
-        bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
-        install_runtime_journal_support(bot)
-
-        # Mock successful room_send
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$router_response_123"
-        bot.client.room_send.return_value = mock_send_response
-
-        # Mock suggest_responder to return "research"
-        mock_suggest_responder.return_value = "research"
-
-        # Create a regular message (no mentions)
-        message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@user:localhost"
-        message_event.body = "What is quantum computing?"
-        message_event.event_id = "$user_msg_789"
-        message_event.server_timestamp = 1234567890
-        message_event.source = {
-            "content": {
-                "body": "What is quantum computing?",
-            },
-        }
-
-        mock_room = MagicMock()
-        mock_room.room_id = test_room_id
-        mock_room.users = {
-            mock_router_agent.user_id: MagicMock(),
-            "@mindroom_research:localhost": MagicMock(),
-        }
-
-        source_event_ids = ["$user_msg_788", message_event.event_id]
-        source_event_prompts = {
-            "$user_msg_788": "Earlier context",
-            message_event.event_id: "What is quantum computing?",
-        }
-
-        # Process routing
-        await execute_router_relay(
-            bot._turn_dispatcher.deps,
-            mock_room,
-            message_event,
-            [],
-            requester_user_id="@user:localhost",
-            handled_turn=TurnRecord.create(
-                source_event_ids,
-                source_event_prompts=source_event_prompts,
-            ),
-        )
-
-        # Verify routing message was sent
-        assert bot.client.room_send.call_count == 1
-
-        # IMPORTANT: Check if event was marked as responded
-        assert await bot._turn_store.is_handled(test_room_id, message_event.event_id), (
-            "Router event should be marked as responded to prevent re-routing"
-        )
-        turn_record = await bot._turn_store.get_turn_record(message_event.event_id)
-        assert turn_record is not None
-        assert turn_record.response_event_id == "$router_response_123"
-        assert turn_record.source_event_ids == tuple(source_event_ids)
-        assert turn_record.source_event_prompts == source_event_prompts
-
-        # Reset mock
-        bot.client.room_send.reset_mock()
-        mock_suggest_responder.reset_mock()
-
-        # Process same message again (simulating restart)
-        await execute_router_relay(
-            bot._turn_dispatcher.deps,
-            mock_room,
-            message_event,
-            [],
-            requester_user_id="@user:localhost",
-            handled_turn=TurnRecord.create(
-                source_event_ids,
-                source_event_prompts=source_event_prompts,
-            ),
-        )
-
-        # With proper tracking, this shouldn't happen again

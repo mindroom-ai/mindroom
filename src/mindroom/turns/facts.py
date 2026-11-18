@@ -85,6 +85,14 @@ class IngressFacts:
         """Return whether a managed sender relayed a human's message."""
         return self.original_sender_is_human and self.source_kind in _USER_RELAY_SOURCE_KINDS
 
+    # LEGACY_COMPAT: router relay messages ("@agent could you help with this?") already in room history.
+    # Legacy format: a router-sent message with the trusted-relay source kind and `com.mindroom.original_sender`, which
+    # mentions the agent the router chose and replies to the person's message.
+    # Last legacy release: v2026.11.390, the newest release when relays stopped; the next, still unreleased, release
+    # selects the responder in the process, and that agent answers the person's own message.
+    # Handling: the mentioned agent still answers such a relay for its original sender, from the context the relay
+    # names (`ConversationResolver.extract_trusted_router_relay_context`), exactly as before.
+    # Coverage: tests/test_turns_focused.py::test_old_router_relay_event_still_answers_from_relay_context
     @property
     def router_relay(self) -> bool:
         """Return whether the router relayed a human's or a configured bot account's message."""

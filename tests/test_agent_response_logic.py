@@ -32,7 +32,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
-from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
+from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _ResponderAvailability
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
@@ -358,6 +358,7 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
+                source_event_ids=("$event",),
             )
 
         assert multiple_visible_action.kind == "skip"
@@ -370,6 +371,7 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
+                source_event_ids=("$event",),
             )
 
         assert single_visible_action.kind == "individual"
@@ -438,6 +440,7 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
+                source_event_ids=("$event",),
             )
 
         assert action.kind == "skip"
@@ -510,6 +513,7 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
+                source_event_ids=("$event",),
             )
 
         assert action.kind == "skip"
@@ -591,6 +595,7 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
+                source_event_ids=("$event",),
             )
 
         assert action.kind == "individual"
@@ -907,15 +912,6 @@ class TestAgentResponseLogic:
         assert mentioned_agents == [router_id]
         assert am_i_mentioned is True
         assert has_non_agent_mentions is False
-        assert (
-            is_router_only_agent_mention(
-                mentioned_agents,
-                has_non_agent_mentions=has_non_agent_mentions,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-            )
-            is True
-        )
 
     def test_unsynced_member_cache_treats_any_human_mention_as_suppressing(self) -> None:
         """A failed membership refresh must degrade to silence, not to an interjection."""

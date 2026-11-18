@@ -125,7 +125,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparer,
 )
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
-from mindroom.router.relay import execute_router_relay
+from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.scheduling.executor import _prepare_scheduled_trigger
 from mindroom.scheduling.tasks import ScheduledWorkflow
@@ -409,12 +409,6 @@ class _SpyTurnPolicy:
     def adaptive_participation(self, **kwargs: Any) -> Any:  # noqa: ANN401
         return self.inner.adaptive_participation(**kwargs)
 
-    def router_mention_skips(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool | None:
-        return self.inner.router_mention_skips(room, source)
-
-    async def router_thread_skips(self, room: nio.MatrixRoom, requester_user_id: str, thread_history: Any) -> bool:  # noqa: ANN401
-        return await self.inner.router_thread_skips(room, requester_user_id, thread_history)
-
     def not_for_this_agent(self, *args: Any) -> bool:  # noqa: ANN401
         return self.inner.not_for_this_agent(*args)
 
@@ -424,6 +418,13 @@ class _SpyTurnPolicy:
     async def plan_turn(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         self.plan_turn_calls += 1
         return await self.inner.plan_turn(*args, **kwargs)
+
+
+def _select_responder(monkeypatch: pytest.MonkeyPatch, entity_name: str) -> AsyncMock:
+    """Make the responder selection of an unmentioned turn pick ``entity_name``; return the selector."""
+    selector = AsyncMock(return_value=ResponderSelection(entity_name))
+    monkeypatch.setattr("mindroom.turn_policy.suggest_responder_for_message", selector)
+    return selector
 
 
 async def _claim_semantic_consumer(_consumer: SemanticConsumer) -> bool:
@@ -1399,28 +1400,6 @@ async def test_recovery_prefers_untracked_terminal_fallback_over_persisted_place
             },
         },
     )
-
-
-@pytest.mark.asyncio
-async def test_recovery_lookup_excludes_visible_voice_echo(config: Config, tmp_path: Path) -> None:
-    """Router recovery must distinguish its relay from an earlier visible voice echo."""
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    pending_turn = await harness.turn_store.record_pending_turn(
-        _in_room(TurnRecord.create([_EVENT_ID], completed=False)),
-    )
-    assert pending_turn is not None
-
-    with patch(
-        "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
-        return_value=frozenset({"$voice-echo:localhost", "$relay:localhost"}),
-    ):
-        recovered = await harness.dispatcher.deps.visible_responses.recovered_response_event_id(
-            pending_turn.record,
-            room_id=_ROOM_ID,
-            excluded_event_ids=("$voice-echo:localhost",),
-        )
-
-    assert recovered == "$relay:localhost"
 
 
 @pytest.mark.asyncio
@@ -2672,11 +2651,16 @@ async def test_sender_outside_reply_allowlist_is_dropped_at_precheck(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_policy_ignore_sends_nothing_and_compacts_callback(config: Config, tmp_path: Path) -> None:
-    """An ignore plan compacts exact callback truth without recording a turn."""
+async def test_policy_ignore_sends_nothing_and_compacts_callback(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ignore plan, here of the candidate the selection did not pick, compacts exact callback truth."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
     event = _text_event("untagged message with multiple visible responders")
+    _select_responder(monkeypatch, "research")
 
     await harness.deliver(room, event)
 
@@ -2685,6 +2669,32 @@ async def test_policy_ignore_sends_nothing_and_compacts_callback(config: Config,
     assert harness.gateway.sent == []
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is False
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
+async def test_routed_reply_answers_original_event_and_sends_no_relay(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent selected for an unmentioned message answers the person's own event; nothing else is sent."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    event = _text_event("untagged message with multiple visible responders")
+    selector = _select_responder(monkeypatch, "general")
+
+    await harness.deliver(room, event)
+
+    selector.assert_awaited_once()
+    assert harness.gateway.sent == []
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.prompt == "untagged message with multiple visible responders"
+    assert request.user_id == _SENDER
+    assert request.response_envelope.source_event_id == event.event_id
+    assert request.response_envelope.target.reply_to_event_id == event.event_id
+    assert request.response_envelope.origin.intent is TurnIntent.USER_MESSAGE
+    assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is True
 
 
 @pytest.mark.asyncio
@@ -4561,11 +4571,16 @@ async def test_router_relay_keeps_original_alias_unsettled_through_gate_handoff(
 
 
 @pytest.mark.asyncio
-async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
+@pytest.mark.parametrize("old_relay", [False, True])
+async def test_scheduled_new_thread_survives_selection_in_room_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    old_relay: bool,
 ) -> None:
-    """A router relay preserves the scheduled fire's per-fire thread and session."""
+    """A scheduled fire that names no agent keeps its per-fire thread, session and model for the agent that answers.
+
+    The selected agent answers the fire itself; a router relay of such a fire already in the room is answered as before.
+    """
     config = bind_runtime_paths(
         Config(
             agents={
@@ -4581,44 +4596,35 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
         extra_content={constants.SCHEDULED_MODEL_KEY: "cheap"},
         new_thread=True,
     )
-    router_harness = _build_harness(config, tmp_path / "router", agent_name=ROUTER_AGENT_NAME)
-
-    async def _route_to_general(*_args: object, **_kwargs: object) -> str:
-        return "general"
-
-    monkeypatch.setattr("mindroom.router.relay.suggest_responder_for_message", _route_to_general)
-
-    await router_harness.deliver(room, scheduled_event)
-
-    assert len(router_harness.gateway.sent) == 1
-    handoff = router_harness.gateway.sent[0]
-    assert handoff.target.resolved_thread_id == scheduled_event.event_id
-    assert handoff.extra_content is not None
-    assert handoff.extra_content[constants.SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    assert handoff.extra_content[constants.SCHEDULED_MODEL_KEY] == "cheap"
-    assert handoff.extra_content[constants.PER_FIRE_THREAD_ROOT_KEY] is True
-    assert handoff.extra_content[constants.PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] == scheduled_event.event_id
-
-    relay_content = {
-        "body": handoff.response_text,
-        "msgtype": "m.text",
-        **handoff.extra_content,
-        "m.relates_to": {"rel_type": "m.thread", "event_id": scheduled_event.event_id},
-    }
-    relay_event = nio.RoomMessageText.from_dict(
-        {
-            "content": relay_content,
-            "event_id": "$scheduled-router-handoff:localhost",
-            "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
-            "origin_server_ts": 1_000_001,
-            "room_id": _ROOM_ID,
-            "type": "m.room.message",
-        },
-    )
+    event = scheduled_event
+    if old_relay:
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "@general Poll the queue",
+                    "msgtype": "m.text",
+                    "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+                    constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                    constants.ORIGINAL_SENDER_KEY: _SENDER,
+                    constants.SCHEDULED_MODEL_KEY: "cheap",
+                    constants.PER_FIRE_THREAD_ROOT_KEY: True,
+                    constants.PER_FIRE_THREAD_ROOT_EVENT_ID_KEY: scheduled_event.event_id,
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": scheduled_event.event_id},
+                },
+                "event_id": "$scheduled-router-handoff:localhost",
+                "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
+                "origin_server_ts": 1_000_001,
+                "room_id": _ROOM_ID,
+                "type": "m.room.message",
+            },
+        )
+    selector = _select_responder(monkeypatch, "general")
     agent_harness = _build_harness(config, tmp_path / "agent")
 
-    await agent_harness.deliver(room, relay_event)
+    await agent_harness.deliver(room, event)
 
+    assert selector.await_count == (0 if old_relay else 1)
+    assert agent_harness.gateway.sent == []
     assert len(agent_harness.runner.requests) == 1
     assert agent_harness.runner.requests[0].scheduled_model == "cheap"
     target = agent_harness.runner.requests[0].response_envelope.target
@@ -5841,45 +5847,6 @@ async def test_rejection_replay_adopts_durable_response(config: Config, tmp_path
         dispatch_started_at=0.0,
         handled_turn=pending_turn,
         reconcile_visible_response=True,
-    )
-
-    assert len(harness.gateway.sent) == 1
-    record = await harness.turn_store.get_turn_record(event.event_id)
-    assert record is not None
-    assert record.completed is True
-    assert record.response_event_id == "$sent-1:localhost"
-
-
-@pytest.mark.asyncio
-async def test_router_relay_replay_adopts_durable_response(config: Config, tmp_path: Path) -> None:
-    """A router replay must reuse the relay persisted before terminal settlement."""
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
-    event = _text_event("route this", event_id="$router-replay:localhost")
-    handled_turn = TurnRecord.create([event.event_id], completed=False)
-
-    with patch.object(harness.turn_store, "record_responded_turn"):
-        await execute_router_relay(
-            harness.dispatcher.deps,
-            room,
-            event,
-            (),
-            requester_user_id=_SENDER,
-            handled_turn=handled_turn,
-        )
-
-    pending_turn = await harness.turn_store.get_turn_record(event.event_id)
-    assert pending_turn is not None
-    assert pending_turn.completed is False
-    assert pending_turn.response_event_id == "$sent-1:localhost"
-
-    await execute_router_relay(
-        harness.dispatcher.deps,
-        room,
-        event,
-        (),
-        requester_user_id=_SENDER,
-        handled_turn=handled_turn,
     )
 
     assert len(harness.gateway.sent) == 1
@@ -7367,13 +7334,16 @@ async def test_hook_text_that_looks_like_a_command_is_conversation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("original_sender", "relay_context"), [(_SENDER, True), ("@telegram:localhost", False)])
-async def test_only_a_router_relay_of_a_human_reads_relay_context(
+async def test_old_router_relay_event_still_answers_from_relay_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     original_sender: str,
     relay_context: bool,
 ) -> None:
-    """A human's routed message reads the context the relay names; a bot account's relay reads the conversation."""
+    """A router relay already in the room is still answered by the agent it mentions, for its original sender.
+
+    A human's relayed message reads the context the relay names; a bot account's relay reads the conversation.
+    """
     config = bind_runtime_paths(
         Config(agents={"general": AgentConfig(display_name="General")}, bot_accounts=["@telegram:localhost"]),
         test_runtime_paths(tmp_path / "runtime"),
@@ -7479,54 +7449,6 @@ async def test_a_batch_source_ended_before_its_reply_hands_the_rest_back_once_th
     claim.release()
     assert harness.retried_dispatch_sources == [(second.event_id,)]
     assert not await harness.turn_store.is_handled(_ROOM_ID, second.event_id)
-
-
-@pytest.mark.asyncio
-async def test_router_recovery_relays_once_past_every_echo_of_a_coalesced_voice_turn(
-    config: Config,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two finalized echoes of one routing turn, then a crash before the relay: the replay relays exactly once."""
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
-    event = _text_event("route this", event_id="$voice-2:localhost")
-    echoes = {"$voice-1:localhost": "$echo-1:localhost", "$voice-2:localhost": "$echo-2:localhost"}
-    for source, echo in echoes.items():
-        await harness.turn_store.record_visible_echo(_ROOM_ID, source, echo)
-        await harness.turn_store.record_finalized_visible_echo(source, echo, is_fallback=False)
-    handled_turn = TurnRecord.create(list(echoes), completed=False)
-    send_text = harness.gateway.send_text
-    monkeypatch.setattr(harness.gateway, "send_text", AsyncMock(side_effect=RuntimeError("crash before the relay")))
-    with pytest.raises(RuntimeError, match="crash before the relay"):
-        await execute_router_relay(
-            harness.dispatcher.deps,
-            room,
-            event,
-            (),
-            requester_user_id=_SENDER,
-            handled_turn=handled_turn,
-        )
-    monkeypatch.setattr(harness.gateway, "send_text", send_text)
-
-    with patch(
-        "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
-        return_value=frozenset(echoes.values()),
-    ):
-        await execute_router_relay(
-            harness.dispatcher.deps,
-            room,
-            event,
-            (),
-            requester_user_id=_SENDER,
-            handled_turn=handled_turn,
-        )
-
-    assert len(harness.gateway.sent) == 1
-    record = await harness.turn_store.get_turn_record(event.event_id)
-    assert record is not None
-    assert record.completed is True
-    assert record.response_event_id == "$sent-1:localhost"
 
 
 async def _prepared_model_prompt(harness: _Harness, request: ResponseRequest) -> str:
