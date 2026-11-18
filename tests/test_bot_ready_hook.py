@@ -117,6 +117,13 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, ReadyRuntim
     return bot, orchestrator
 
 
+def _open_observer(bot: AgentBot) -> None:
+    """Let the bot's account observe room members, as after the first settled frame of its receive loop."""
+    membership_sync = bot.orchestrator.agent_reply_membership_sync
+    membership_sync.observer_loop_started(bot.config, bot.matrix_id.full_id)
+    membership_sync.observer_frame_settled(bot.matrix_id.full_id)
+
+
 def _invalidations(orchestrator: ReadyRuntime) -> MagicMock:
     """Return the observed invalidations of a bot's own rooms in a runtime from `_router_bot_with_orchestrator`."""
     return cast("MagicMock", orchestrator.agent_reply_membership_sync.invalidate_observer)
@@ -516,8 +523,7 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.mark_sync_loop_started()
-    _invalidations(orchestrator).reset_mock()
-    orchestrator.refresh_agent_reply_memberships.reset_mock()
+    _open_observer(bot)
     admission = _history_loss_admission("!project:localhost")
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
 
@@ -538,6 +544,7 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
 def test_router_limited_sync_invalidates_before_timeline_admission(tmp_path: Path) -> None:
     """The Matrix client's pre-admission hook must fail room grants closed immediately."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    _open_observer(bot)
     admission = _history_loss_admission("!project:localhost")
 
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)

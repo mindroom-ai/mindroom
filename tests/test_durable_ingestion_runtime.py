@@ -340,6 +340,10 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(
         client.joined_members.return_value = nio.JoinedMembersResponse(members=[control, member], room_id=ROOM)
         await refresh_memberships(index, bot.config, bot.runtime_paths, client)
         assert index.is_allowed(sender, ["grant"], bot.config, bot.runtime_paths)
+        # Only an account whose receive loop has caught up observes rooms, so only its recovered events revoke.
+        membership_sync = bot.orchestrator.agent_reply_membership_sync
+        membership_sync.observer_loop_started(bot.config, bot.matrix_id.full_id)
+        membership_sync.observer_frame_settled(bot.matrix_id.full_id)
         frame = {
             "next_batch": "next2",
             "rooms": {

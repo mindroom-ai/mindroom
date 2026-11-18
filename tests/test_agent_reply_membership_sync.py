@@ -90,17 +90,24 @@ def _ingestion_admission(
     )
 
 
+def _open(membership_sync: AgentReplyMembershipSync, config: Config) -> None:
+    """Let ``_OBSERVER`` observe room members, as after the first settled frame of its receive loop."""
+    membership_sync.observer_loop_started(config, _OBSERVER)
+    membership_sync.observer_frame_settled(_OBSERVER)
+
+
 def _fleet(*names: str, hold: asyncio.Event | None = None) -> tuple[list[_Bot], _Calls]:
     calls = _Calls(hold=hold)
     return [_Bot(name, calls) for name in names], calls
 
 
 def test_history_loss_invalidates_grants_and_revokes_every_bots_calls_before_admission(tmp_path: Path) -> None:
-    """A history-loss carrier fails its account's rooms closed and schedules every bot's revocation synchronously."""
+    """A history-loss carrier fails its open account's rooms closed and schedules every bot's revocation synchronously."""
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     bots, calls = _fleet("router", "voice")
     membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
     config = Config()
+    _open(membership_sync, config)
 
     membership_sync.pre_admit_ingestion(
         config,
@@ -205,6 +212,7 @@ def test_room_fence_revokes_every_bots_calls_before_admission(
     bots, calls = _fleet("router", "voice")
     membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
     config = Config()
+    _open(membership_sync, config)
     runtime_paths = test_runtime_paths(tmp_path)
 
     membership_sync.pre_admit_ingestion(config, runtime_paths, admission, provenance, observer_user_id=_OBSERVER)

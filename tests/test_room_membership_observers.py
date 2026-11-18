@@ -154,12 +154,37 @@ def _sync(index: AgentReplyMembershipIndex) -> AgentReplyMembershipSync:
 _OBSERVER_STATES = {None: "closed", False: "armed", True: "open"}
 
 
-def _enter(membership_sync: AgentReplyMembershipSync, config: Config, state: str) -> None:
-    """Bring account A's receive loop into one eligibility state through the events that lead there."""
+def _enter(membership_sync: AgentReplyMembershipSync, config: Config, state: str, user_id: str = _A) -> None:
+    """Bring one account's receive loop into one eligibility state through the events that lead there."""
     if state != "closed":
-        membership_sync.observer_loop_started(config, _A)
+        membership_sync.observer_loop_started(config, user_id)
     if state == "open":
-        membership_sync.observer_frame_settled(_A)
+        membership_sync.observer_frame_settled(user_id)
+
+
+def _recovered_member_event(**membership: str | None) -> tuple[IngestionRecordAdmission, nio.TimelineEventProvenance]:
+    """Return a membership event of ``_ROOM`` recovered after a gap, which may carry the account's own change too."""
+    event = InboundEvent(
+        event_id="$member",
+        room_id=_ROOM,
+        thread_id=None,
+        kind=EventKind.ROOM_LIFECYCLE,
+        event_class=EventClass.CONTEXT_ONLY,
+        sender=_ALICE,
+        origin_server_ts=1,
+        source={},
+    )
+    if membership:
+        admission = _ingestion_admission(
+            IngestionRecordDisposition.ROOM_LIFECYCLE,
+            source=DepartureSource.REPORTED,
+            room_id=_ROOM,
+            event=event,
+            **membership,
+        )
+    else:
+        admission = _ingestion_admission(IngestionRecordDisposition.ROOM_LIFECYCLE, event=event)
+    return admission, nio.TimelineEventProvenance.RECOVERED
 
 
 @pytest.mark.asyncio
@@ -175,6 +200,13 @@ def _enter(membership_sync: AgentReplyMembershipSync, config: Config, state: str
         ("open", "loop_started", "armed", True),
         ("open", "frame_settled", "open", False),
         ("open", "closed", "closed", True),
+        # Only an open account's sync vouched for anything, so only its lost history or recovered event revokes.
+        ("closed", "history_loss", "closed", False),
+        ("armed", "history_loss", "armed", False),
+        ("open", "history_loss", "open", True),
+        ("closed", "recovered_member", "closed", False),
+        ("armed", "recovered_member", "armed", False),
+        ("open", "recovered_member", "open", True),
     ],
 )
 async def test_observer_eligibility_moves_only_by_its_table(
@@ -199,8 +231,15 @@ async def test_observer_eligibility_moves_only_by_its_table(
         membership_sync.observer_loop_started(config, _A)
     elif event == "frame_settled":
         membership_sync.observer_frame_settled(_A)
-    else:
+    elif event == "closed":
         membership_sync.observer_closed(config, _A, reason="sync_failure")
+    else:
+        carrier = (
+            (_ingestion_admission(IngestionRecordDisposition.HISTORY_LOSS, room_id=_ROOM), None)
+            if event == "history_loss"
+            else _recovered_member_event()
+        )
+        membership_sync.pre_admit_ingestion(config, runtime_paths, *carrier, observer_user_id=_A)
 
     assert _OBSERVER_STATES[membership_sync._observer_open.get(_A)] == next_state
     assert membership_sync.observer_is_open(_A) is (next_state == "open")
@@ -208,7 +247,9 @@ async def test_observer_eligibility_moves_only_by_its_table(
     # Only the edge that opens an account asks for discovery at once, and a lost observer for a rebuild.
     assert (membership_sync._refresh_retry_at == 0.0) is (invalidated or (state, next_state) == ("armed", "open"))
     # While a loop is armed, its account's rooms are in no census, so no room counts as proven absent.
-    assert index.knows_joined_rooms() is (not invalidated and event != "loop_started")
+    # A recovered event voids its one room; every other loss voids the account's say in which rooms exist.
+    unknown = event == "loop_started" or (invalidated and event != "recovered_member")
+    assert index.knows_joined_rooms() is not unknown
 
 
 @pytest.mark.asyncio
@@ -341,7 +382,10 @@ async def _two_observed_rooms(
     b = _Account(_B, {_OTHER: (_B, _ALICE)})
     await _refresh(index, config, runtime_paths, a, b)
     assert _observers(index) == {_ROOM: _A, _OTHER: _B}
-    return index, _sync(index), config, runtime_paths
+    membership_sync = _sync(index)
+    for user_id in (_A, _B):
+        _enter(membership_sync, config, "open", user_id)
+    return index, membership_sync, config, runtime_paths
 
 
 @pytest.mark.asyncio
@@ -375,27 +419,8 @@ async def test_recovered_membership_unreadies_a_room_only_for_its_observer(
 ) -> None:
     """A membership event recovered after a gap voids its room when the room's observer recovered it, else nothing."""
     index, membership_sync, config, runtime_paths = await _two_observed_rooms(tmp_path)
-    recovered = _ingestion_admission(
-        IngestionRecordDisposition.ROOM_LIFECYCLE,
-        event=InboundEvent(
-            event_id="$member",
-            room_id=_ROOM,
-            thread_id=None,
-            kind=EventKind.ROOM_LIFECYCLE,
-            event_class=EventClass.CONTEXT_ONLY,
-            sender=_ALICE,
-            origin_server_ts=1,
-            source={},
-        ),
-    )
 
-    membership_sync.pre_admit_ingestion(
-        config,
-        runtime_paths,
-        recovered,
-        nio.TimelineEventProvenance.RECOVERED,
-        observer_user_id=reporter,
-    )
+    membership_sync.pre_admit_ingestion(config, runtime_paths, *_recovered_member_event(), observer_user_id=reporter)
 
     assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths) is still_ready
     assert index.is_current_room_member(_ALICE, _OTHER, config, runtime_paths)
@@ -683,26 +708,39 @@ async def test_one_failed_joined_rooms_keeps_discovery_unknown(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_invalidations_during_every_held_read_get_one_retry_then_the_backoff(tmp_path: Path) -> None:
-    """An account whose sync keeps losing history voids each attempt; the coordinator retries once, then waits."""
+@pytest.mark.parametrize("loser", ["open", "armed"])
+async def test_invalidations_during_every_held_read_get_one_retry_then_the_backoff(tmp_path: Path, loser: str) -> None:
+    """An open account whose sync keeps losing history voids each attempt; the coordinator retries once, then waits.
+
+    The same loss from an account that never opened voids nothing: the healthy account's row publishes.
+    """
     config, runtime_paths = _config(tmp_path)
     a = _Account(_A, {_ROOM: (_A, _ALICE)})
     index = AgentReplyMembershipIndex()
     membership_sync = _sync(index)
     outcomes: list[object] = []
+    loss = _ingestion_admission(IngestionRecordDisposition.HISTORY_LOSS, room_id=_OTHER)
 
     async def refresh() -> object:
         a.hold, a.reading = asyncio.Event(), asyncio.Event()
-        attempt = asyncio.create_task(index.refresh(config, runtime_paths, lambda: (_clients(a), _by_power({}), True)))
+        # While B's loop is only armed, B runs without observing, so the room lists are not complete.
+        observers = (_clients(a), _by_power({}), loser == "open")
+        attempt = asyncio.create_task(index.refresh(config, runtime_paths, lambda: observers))
         await _reached(a.reading)
-        membership_sync.invalidate_observer(config, _B, reason="uncertain_sync_response")
+        membership_sync.pre_admit_ingestion(config, runtime_paths, loss, None, observer_user_id=_B)
         a.hold.set()
         outcomes.append(await asyncio.wait_for(attempt, 5))
         return outcomes[-1]
 
     index.invalidate(config, reason="initial_config")
+    _enter(membership_sync, config, loser, _B)
     await asyncio.wait_for(membership_sync.refresh_for_access_check(config, refresh), 5)
 
+    if loser == "armed":
+        assert outcomes == ["read_failed"]
+        assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+        assert not index.knows_joined_rooms()
+        return
     assert outcomes == ["voided", "voided"]
     assert membership_sync._refresh_retry_at > 0.0
     assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
@@ -769,10 +807,23 @@ async def test_own_join_of_a_room_no_room_list_named_waits_for_that_accounts_rea
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("published", ["row_of_another_account", "discovery_unknown"])
+@pytest.mark.parametrize(
+    ("published", "carrier", "joiner", "fenced"),
+    [
+        ("row_of_another_account", "own_join", "closed", False),
+        ("discovery_unknown", "own_join", "closed", False),
+        # A recovered member event that carries the join too is a loss only for an account that was observing.
+        ("discovery_unknown", "recovered_own_join", "armed", False),
+        ("discovery_unknown", "recovered_own_join", "open", True),
+    ],
+)
 async def test_own_join_during_the_prospective_observers_read_is_discovery_evidence_only(
     tmp_path: Path,
     published: str,
+    carrier: str,
+    joiner: str,
+    *,
+    fenced: bool,
 ) -> None:
     """An own join never fences the read that makes its account the observer, never grants, and sets no backoff.
 
@@ -794,13 +845,19 @@ async def test_own_join_during_the_prospective_observers_read_is_discovery_evide
     async def refresh() -> object:
         return await index.refresh(config, runtime_paths, lambda: (_clients(a), _by_power({}), True))
 
+    _enter(membership_sync, config, joiner)
     membership_sync.request_refresh(config, refresh)
     await _reached(a.reading)
     epoch, snapshot = index._epoch, index.snapshot
+    join = (
+        (_own_join("invite"), None)
+        if carrier == "own_join"
+        else _recovered_member_event(previous_membership="invite", membership="join")
+    )
 
-    membership_sync.pre_admit_ingestion(config, runtime_paths, _own_join("invite"), None, observer_user_id=_A)
+    membership_sync.pre_admit_ingestion(config, runtime_paths, *join, observer_user_id=_A)
 
-    assert (index._epoch, index.snapshot) == (epoch, snapshot)
+    assert ((index._epoch, index.snapshot) != (epoch, snapshot)) is fenced
     assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
     assert index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)
     a.hold.set()
@@ -808,7 +865,8 @@ async def test_own_join_during_the_prospective_observers_read_is_discovery_evide
 
     assert _observers(index) == {_ROOM: _A}
     assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
-    assert a.reads == [_ROOM]
+    # A fenced read is voided, and the coordinator's one retry reads the room again.
+    assert a.reads == [_ROOM] * (2 if fenced else 1)
     assert membership_sync._refresh_retry_at == 0.0
     assert not index.needs_refresh(config)
 

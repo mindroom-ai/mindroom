@@ -2487,6 +2487,9 @@ async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *
     manager = _manager(client, bridge, tmp_path, config, agent_reply_memberships=memberships)
     bot = _ManagerBot(manager)
     membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
+    # Only an account whose receive loop has caught up observes rooms, so only its lost history revokes.
+    membership_sync.observer_loop_started(config, BOT_USER)
+    membership_sync.observer_frame_settled(BOT_USER)
     call = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
     await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
     if not starting:

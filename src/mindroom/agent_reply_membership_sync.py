@@ -109,12 +109,16 @@ class AgentReplyMembershipSync:
         A departure counts whether the account's sync reported it or its own leave command made it, whose record
         has no timeline event. The account's own join never grants: it asks for the room's members read, so a new
         DM's first message waits for it instead of being denied by a room list taken before the join.
+        Lost history and a recovered event count only from an open account: no other one's sync vouched for a row.
         """
+        observing = self.observer_is_open(observer_user_id)
         if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
-            self.invalidate_observer(config, observer_user_id, reason="uncertain_sync_response")
+            if observing:
+                self.invalidate_observer(config, observer_user_id, reason="uncertain_sync_response")
             return
         if (
-            timeline_provenance is nio.TimelineEventProvenance.RECOVERED
+            observing
+            and timeline_provenance is nio.TimelineEventProvenance.RECOVERED
             and admission.event is not None
             and admission.event.kind is EventKind.ROOM_LIFECYCLE
         ):
