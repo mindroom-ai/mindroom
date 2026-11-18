@@ -1675,8 +1675,13 @@ async def test_dynamic_workflow_tool_accepts_any_configured_participant_model(tm
         ("sol@low", "sol@low", True),
         ("sol@low", "sol@high", False),
         ("sol@low", "sol", False),
+        ("sol@high", "sol", True),
         ("sol", "sol@high", True),
         ("gpt-6.2-sol", "sol@high", True),
+        ("gpt-6.2-sol", "twin@low", True),
+        ("sol@low", "twin@low", False),
+        ("sol@low", "lookalike", False),
+        ("vendor/model@2026", "dated", True),
     ],
 )
 async def test_dynamic_workflow_permission_models_keep_a_reasoning_level(
@@ -1685,7 +1690,10 @@ async def test_dynamic_workflow_permission_models_keep_a_reasoning_level(
     participant_model: str,
     allowed: bool,
 ) -> None:
-    """A level-qualified permission admits that level only; a model name or provider ID admits every level."""
+    """A ``name@level`` permission admits only the model that runs as exactly that reference.
+
+    A model name or provider ID admits every level, and every other name for the same provider ID.
+    """
     tool = DynamicWorkflowTools()
     context = _make_context(tmp_path)
     reasoning = ReasoningConfig(levels=["low", "high"], default="high")
@@ -1695,6 +1703,9 @@ async def test_dynamic_workflow_permission_models_keep_a_reasoning_level(
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
                 "sol": ModelConfig(provider="codex", id="gpt-6.2-sol", reasoning=reasoning),
+                "twin": ModelConfig(provider="codex", id="gpt-6.2-sol", reasoning=reasoning),
+                "lookalike": ModelConfig(provider="openai", id="sol@low"),
+                "dated": ModelConfig(provider="openai", id="vendor/model@2026"),
             },
         ),
         context.runtime_paths,

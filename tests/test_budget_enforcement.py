@@ -635,19 +635,27 @@ async def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("participant_model", "allowed"), [("cheap@low", True), ("cheap@high", False)])
+@pytest.mark.parametrize(
+    ("participant_model", "allowed"),
+    [("cheap@low", True), ("cheap@high", False), ("lookalike", False), ("twin@low", False)],
+)
 async def test_a_level_permission_admits_only_its_fallbacks_level(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     participant_model: str,
     allowed: bool,
 ) -> None:
-    """Over budget, a permitted ``sol@low`` admits its fallback ``cheap@low``, not ``cheap`` at another level."""
+    """Over budget, a permitted ``sol@low`` admits its fallback ``cheap@low`` only.
+
+    Not ``cheap`` at another level, nor a model whose provider ID reads ``cheap@low`` or equals the fallback's.
+    """
     config = _subagent_workflow_config()
     reasoning = ReasoningConfig(levels=["low", "high"], default="high")
     pricing = ModelPricing(input=5, output=30)
     config.models["sol"] = ModelConfig(provider="openai", id="sol-model", reasoning=reasoning, pricing=pricing)
     config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning)
+    config.models["twin"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning)
+    config.models["lookalike"] = ModelConfig(provider="openai", id="cheap@low")
     config.budgets = BudgetsConfig(fallback_model="cheap@low", monthly_limit_usd=0)
     workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
     participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": participant_model}
