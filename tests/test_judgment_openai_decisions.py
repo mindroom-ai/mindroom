@@ -430,7 +430,7 @@ async def test_batch_evaluator_logs_a_count_not_every_probability(
     paths = test_runtime_paths(tmp_path)
     get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "stored-openai-key"})
     response = json.dumps(
-        _body(_predicate(0.25, "c0"), {"type": "refusal", "name": "c1"}, _predicate(0.75, "c2"))
+        _body(_predicate(0.25, "c0"), {"type": "refusal", "name": "c1"}, _predicate(0.75, "c2")),
     ).encode()
 
     async def post(_self: JudgmentClient, _request_body: bytes) -> bytes:
