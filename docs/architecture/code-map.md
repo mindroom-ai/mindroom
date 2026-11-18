@@ -470,6 +470,7 @@ Matrix sync callback
 | `matrix/state.py` | `matrix_state.yaml` accounts, rooms, space, and server emoji room, changed only through `update_matrix_state` |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/server_features.py` | The unstable features a homeserver lists in `/_matrix/client/versions` |
+| `matrix/user_masquerade.py` | HTTP-only client that acts as one person through an application service's token and marks each message event, redaction, and state event it sends as the agent's |
 | `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
 | `matrix/durable_ingestion.py` | Owned Nio batch validation, journal admission, and acknowledgement |
 | `matrix/sync_continuity.py` | Durable pending join-fence persistence |
@@ -659,6 +660,9 @@ Matrix sync callback
 | `knowledge/utils.py` | Resolves the knowledge bases an agent searches: published indexes, availability notices, and refresh scheduling |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
 | `custom_tools/react.py` | Reaction-only agent tool: reacts in the current room under `matrix_message`'s per-room rate limit |
+| `custom_tools/matrix_user.py` | The `matrix_user` toolkit: a personal agent reads Matrix as its owner, on a client created per call |
+| `custom_tools/matrix_user_authority.py` | Whom a `matrix_user` call acts as: the owner of the personal agent making it, decided by the call's identity and room alone |
+| `custom_tools/matrix_user_reads.py` | What `matrix_user_read` reads as the owner: rooms, messages, search, people, files, and read markers |
 | `custom_tools/stop_reply.py` | Agent tool that stops another agent's reply with a 🛑 reaction relaying the caller's requester |
 | `custom_tools/shared_directories.py` | Agent tool that creates shared directories, invites agents at once on behalf of a user who may use them or as pending invitations otherwise, and accepts or declines invitations through the invited agent |
 | `shared_directories/` | The primary-only membership ledger and storage of shared directories, the paths agents see, and the share roots `file` and `coding` accept |

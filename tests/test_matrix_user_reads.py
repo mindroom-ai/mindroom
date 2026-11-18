@@ -1,0 +1,1293 @@
+"""The person's own view of Matrix that the `matrix_user` toolkit reads: rooms, messages, files, and people."""
+
+from __future__ import annotations
+
+import json
+from functools import partial
+from typing import TYPE_CHECKING
+
+import aiohttp
+import pytest
+
+from mindroom.attachments.storage import load_attachment, register_audio_attachment
+from mindroom.custom_tools.matrix_user_reads import (
+    MatrixRequestError,
+    download_file,
+    mark_read,
+    read_messages,
+    read_people,
+    read_room,
+    read_rooms,
+    search_messages,
+)
+from mindroom.matrix.user_masquerade import create_user_masquerade_client
+from tests.matrix_user_helpers import (
+    OWNER,
+    ROOM,
+    SYNC_PATH,
+    TOKEN,
+    Answer,
+    FakeHomeserver,
+    edit_of,
+    invited_room,
+    joined_room,
+    matrix_error,
+    message_line,
+    owner_runtime_paths,
+    reaction,
+    room_event,
+    search_answer,
+    state_event,
+    sync_answer,
+    text_message,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import nio
+
+AGENT = "@mind:example.com"
+ROOM_PATH = f"/_matrix/client/v3/rooms/{ROOM}"
+MESSAGES_PATH = f"{ROOM_PATH}/messages"
+SEARCH_PATH = "/_matrix/client/v3/search"
+MEDIA_PATH = "/_matrix/client/v1/media/download/example.com/abc"
+MARKED_UNREAD_PATH = f"/_matrix/client/v3/user/{OWNER}/rooms/{ROOM}/account_data/m.marked_unread"
+# What a page of messages asks for: the messages, and the reactions to count on them.
+MESSAGES_FILTER = {"types": ["m.room.message", "m.room.encrypted", "m.reaction"]}
+CAROL = "@carol:example.com"
+CHAT = "!chat:example.com"
+NOT_FETCHED = "The file could not be fetched (refused, unreachable, or larger than 64 MiB)."
+
+
+@pytest.fixture
+def homeserver() -> FakeHomeserver:
+    """The person's homeserver, with no answers yet."""
+    return FakeHomeserver()
+
+
+@pytest.fixture
+def client(tmp_path: Path, homeserver: FakeHomeserver) -> nio.AsyncClient:
+    """A client that acts as the person, talking to the fake homeserver."""
+    return homeserver.serve(
+        create_user_masquerade_client(
+            owner_runtime_paths(tmp_path),
+            token=TOKEN,
+            person_user_id=OWNER,
+            agent_user_id=AGENT,
+        ),
+    )
+
+
+def _sync_filter(homeserver: FakeHomeserver, index: int = 0) -> dict[str, object]:
+    [sync_filter] = homeserver.requests_to(SYNC_PATH)[index].query["filter"]
+    return json.loads(sync_filter)
+
+
+@pytest.mark.asyncio
+async def test_rooms_lists_unread_first_then_invitations_then_the_rest(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Rooms that want attention come first, then invitations, then every other room, each group by name."""
+    renamed = state_event("m.room.name", {"name": "Team"})
+    homeserver.answers[SYNC_PATH] = sync_answer(
+        join={
+            "!zeta:example.com": joined_room("Zeta"),
+            "!busy:example.com": joined_room("Old team name", unread=3, mentions=1, timeline=(renamed,)),
+            "!quiet:example.com": joined_room("archive"),
+            "!flag:example.com": joined_room("Billing", marked_unread=True),
+        },
+        invite={"!party:example.com": invited_room(OWNER, "@bob:example.com", "Party")},
+    )
+
+    result = await read_rooms(client, query=None, limit=None)
+
+    assert result == {
+        "rooms": [
+            "!flag:example.com | Billing | marked unread",
+            "!busy:example.com | Team | unread 3, mentions 1",
+            "!party:example.com | Party | invited by @bob:example.com",
+            "!quiet:example.com | archive",
+            "!zeta:example.com | Zeta",
+        ],
+        "left_out": 0,
+    }
+    [request] = homeserver.requests
+    assert request.method == "GET"
+    assert request.query["timeout"] == ["0"]
+    assert request.query["set_presence"] == ["offline"]
+    assert request.query["user_id"] == [OWNER]
+
+
+@pytest.mark.asyncio
+async def test_the_sync_filter_asks_only_for_the_fields_it_reads(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Every event comes trimmed to what the room list reads, and the joined rooms' state is their names alone.
+
+    The newest event, whatever its type, can rename the room; an invitation's stripped state is not filtered.
+    """
+    homeserver.answers[SYNC_PATH] = sync_answer()
+
+    await read_rooms(client, query=None, limit=None)
+
+    sync_filter = _sync_filter(homeserver)
+    assert sync_filter["event_fields"] == [
+        "type",
+        "state_key",
+        "sender",
+        "content.name",
+        "content.is_direct",
+        "content.unread",
+    ]
+    room_filter = sync_filter["room"]
+    assert room_filter["state"] == {"types": ["m.room.name"], "lazy_load_members": True}
+    assert room_filter["timeline"] == {"limit": 1}
+    assert room_filter["ephemeral"] == {"types": []}
+    assert room_filter["account_data"] == {"types": ["m.marked_unread"]}
+
+
+@pytest.mark.asyncio
+async def test_rooms_names_a_dm_by_the_other_person(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A direct chat without a name is named by the other person, a direct invitation by who sent it."""
+    homeserver.answers[SYNC_PATH] = sync_answer(
+        join={"!dm:example.com": joined_room(unread=1), "!group:example.com": joined_room()},
+        invite={"!ask:example.com": invited_room(OWNER, "@carol:example.com", is_direct=True)},
+        direct={"@bob:example.com": ["!dm:example.com"]},
+    )
+
+    result = await read_rooms(client, query=None, limit=None)
+
+    assert result["rooms"] == [
+        "!dm:example.com | @bob:example.com | unread 1",
+        "!ask:example.com | @carol:example.com | invited by @carol:example.com",
+        "!group:example.com | (no name)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_unnamed_room_is_named_by_its_heroes(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A room with no name that is no direct chat is named by the members the homeserver picks, and found by them."""
+    homeserver.answers[SYNC_PATH] = sync_answer(
+        join={
+            "!trio:example.com": joined_room(heroes=("@bob:example.com", "@carol:example.com")),
+            "!quiet:example.com": joined_room(),
+        },
+    )
+
+    every = await read_rooms(client, query=None, limit=None)
+    found = await read_rooms(client, query="carol", limit=None)
+
+    assert every["rooms"] == [
+        "!trio:example.com | @bob:example.com, @carol:example.com",
+        "!quiet:example.com | (no name)",
+    ]
+    assert found["rooms"] == ["!trio:example.com | @bob:example.com, @carol:example.com"]
+
+
+@pytest.mark.asyncio
+async def test_a_name_cannot_fake_a_column(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A `|` that whoever named a room, a person, or an account wrote becomes `¦`, so a line keeps its own columns."""
+    homeserver.answers.update(
+        {
+            SYNC_PATH: sync_answer(
+                join={ROOM: joined_room("Team | unread 99")},
+                invite={
+                    "!ask:example.com": invited_room(OWNER, "@x|y:example.com", "Ask | invited by @bob:example.com"),
+                },
+            ),
+            "/_matrix/client/v3/user_directory/search": {
+                "results": [{"user_id": "@bob:example.com", "display_name": "Bob | @admin:example.com"}],
+            },
+        },
+    )
+
+    rooms = await read_rooms(client, query=None, limit=None)
+    people = await read_people(client, "bob", limit=None)
+
+    assert rooms["rooms"] == [
+        "!ask:example.com | Ask ¦ invited by @bob:example.com | invited by @x¦y:example.com",
+        f"{ROOM} | Team ¦ unread 99",
+    ]
+    assert people["people"] == ["@bob:example.com | Bob ¦ @admin:example.com"]
+
+
+@pytest.mark.asyncio
+async def test_rooms_filters_by_name(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A query keeps the rooms whose name contains it, whatever its case, a direct chat's other person included."""
+    homeserver.answers[SYNC_PATH] = sync_answer(
+        join={
+            "!team:example.com": joined_room("Team"),
+            "!work:example.com": joined_room("Teamwork", unread=2),
+            "!other:example.com": joined_room("Other"),
+            "!dm:example.com": joined_room(),
+        },
+        invite={"!steam:example.com": invited_room(OWNER, "@bob:example.com", "Steam room")},
+        direct={"@teammate:example.com": ["!dm:example.com"]},
+    )
+
+    result = await read_rooms(client, query="TEAM", limit=None)
+
+    assert result == {
+        "rooms": [
+            "!work:example.com | Teamwork | unread 2",
+            "!steam:example.com | Steam room | invited by @bob:example.com",
+            "!dm:example.com | @teammate:example.com",
+            "!team:example.com | Team",
+        ],
+        "left_out": 0,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("limit", "shown"), [(2, 2), (None, 20), (500, 200), (0, 1)])
+async def test_rooms_reports_how_many_it_left_out(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    limit: int | None,
+    shown: int,
+) -> None:
+    """At most ``limit`` rooms are listed, 20 unless asked, never more than 200, and the result says how many are not."""
+    homeserver.answers[SYNC_PATH] = sync_answer(
+        join={f"!room{number:03}:example.com": joined_room(f"Room {number:03}") for number in range(250)},
+    )
+
+    result = await read_rooms(client, query=None, limit=limit)
+
+    assert len(result["rooms"]) == shown
+    assert result["rooms"][0] == "!room000:example.com | Room 000"
+    assert result["left_out"] == 250 - shown
+
+
+@pytest.mark.asyncio
+async def test_two_rooms_calls_never_send_the_same_sync_filter(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Each call's filter differs, so a homeserver cannot answer it from a cache of an earlier sync."""
+    homeserver.answers[SYNC_PATH] = sync_answer()
+
+    await read_rooms(client, query=None, limit=None)
+    await read_rooms(client, query=None, limit=None)
+
+    first, second = _sync_filter(homeserver, 0), _sync_filter(homeserver, 1)
+    assert first != second
+    assert first["presence"]["types"] == second["presence"]["types"] == []
+    assert {key: value for key, value in first.items() if key != "presence"} == {
+        key: value for key, value in second.items() if key != "presence"
+    }
+
+
+@pytest.mark.asyncio
+async def test_room_reports_encryption_and_members(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A room's name, topic, encryption, whether it is a direct chat, and its joined members, as many as asked."""
+    plain = "!plain:example.com"
+    homeserver.answers.update(
+        {
+            f"{ROOM_PATH}/joined_members": {
+                "joined": {
+                    "@carol:example.com": {"display_name": "Carol"},
+                    OWNER: {"display_name": "Alice"},
+                    "@bob:example.com": {"display_name": None},
+                },
+            },
+            f"{ROOM_PATH}/state/m.room.name": {"name": "Planning"},
+            f"{ROOM_PATH}/state/m.room.topic": {"topic": "Next quarter"},
+            f"{ROOM_PATH}/state/m.room.encryption": {"algorithm": "m.megolm.v1.aes-sha2"},
+            f"/_matrix/client/v3/user/{OWNER}/account_data/m.direct": {"@bob:example.com": [ROOM]},
+            f"/_matrix/client/v3/rooms/{plain}/joined_members": {"joined": {OWNER: {"display_name": "Alice"}}},
+        },
+    )
+
+    encrypted = await read_room(client, ROOM, limit=2)
+    unencrypted = await read_room(client, plain, limit=None)
+
+    assert encrypted == {
+        "room_id": ROOM,
+        "name": "Planning",
+        "topic": "Next quarter",
+        "encrypted": True,
+        "dm": True,
+        "joined_members": 3,
+        "members": ["@alice:example.com | Alice", "@bob:example.com"],
+    }
+    assert unencrypted == {
+        "room_id": plain,
+        "name": None,
+        "topic": None,
+        "encrypted": False,
+        "dm": False,
+        "joined_members": 1,
+        "members": ["@alice:example.com | Alice"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_room_the_person_is_not_in_is_an_error(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """The homeserver's refusal is the error, with its code, and nothing else is asked."""
+    homeserver.answers[f"{ROOM_PATH}/joined_members"] = matrix_error(403, "M_FORBIDDEN", "You are not in this room")
+
+    with pytest.raises(MatrixRequestError) as error:
+        await read_room(client, ROOM, limit=None)
+
+    assert str(error.value) == "Matrix answered 403 M_FORBIDDEN: You are not in this room"
+    assert homeserver.paths() == [f"{ROOM_PATH}/joined_members"]
+
+
+@pytest.mark.asyncio
+async def test_people_returns_a_profile_for_a_full_id(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A full Matrix ID reads that person's profile and searches nothing."""
+    homeserver.answers["/_matrix/client/v3/profile/@bob:example.com"] = {"displayname": "Bob Builder"}
+
+    result = await read_people(client, " @bob:example.com ", limit=None)
+
+    assert result == {"people": ["@bob:example.com | Bob Builder"]}
+    assert homeserver.paths() == ["/_matrix/client/v3/profile/@bob:example.com"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("limit", "sent"), [(None, 10), (2, 2), (80, 50)])
+async def test_people_searches_the_directory(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    limit: int | None,
+    sent: int,
+) -> None:
+    """Anything but a full Matrix ID searches the user directory, 10 people unless asked, never more than 50."""
+    homeserver.answers["/_matrix/client/v3/user_directory/search"] = {
+        "limited": True,
+        "results": [
+            {"user_id": "@bob:example.com", "display_name": "Bob\nBuilder"},
+            {"user_id": "@bobby:example.com"},
+        ],
+    }
+
+    result = await read_people(client, "bob", limit=limit)
+
+    assert result == {"people": ["@bob:example.com | Bob Builder", "@bobby:example.com"][:sent], "limited": True}
+    [request] = homeserver.requests
+    assert request.method == "POST"
+    assert request.body == {"search_term": "bob", "limit": sent}
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_request_is_retried_at_most_twice(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A 429 with a short wait is retried twice; the third is the error."""
+    limited = matrix_error(429, "M_LIMIT_EXCEEDED", "Too many requests", retry_after_ms=1)
+    homeserver.answers[SYNC_PATH] = [limited, Answer(sync_answer(join={ROOM: joined_room("Room")}))]
+
+    assert (await read_rooms(client, query=None, limit=None))["rooms"] == [f"{ROOM} | Room"]
+
+    homeserver.answers[SYNC_PATH] = [limited]
+    with pytest.raises(MatrixRequestError, match="429 M_LIMIT_EXCEEDED"):
+        await read_rooms(client, query=None, limit=None)
+    assert homeserver.paths() == [SYNC_PATH] * 5
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_with_a_malformed_retry_after_uses_the_body(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A `Retry-After` that is no number, such as a superscript digit, counts as absent."""
+    limited = Answer(
+        {"errcode": "M_LIMIT_EXCEEDED", "error": "Too many requests", "retry_after_ms": 1},
+        status=429,
+        headers={"Retry-After": "²"},
+    )
+    homeserver.answers[SYNC_PATH] = [limited, Answer(sync_answer(join={ROOM: joined_room("Room")}))]
+
+    assert (await read_rooms(client, query=None, limit=None))["rooms"] == [f"{ROOM} | Room"]
+    assert homeserver.paths() == [SYNC_PATH] * 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "limited",
+    [
+        matrix_error(429, "M_LIMIT_EXCEEDED", "Too many requests", retry_after_ms=6000),
+        Answer({}, status=429, headers={"Retry-After": "6"}),
+    ],
+)
+async def test_a_rate_limit_longer_than_5_seconds_is_not_waited_out(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    limited: Answer,
+) -> None:
+    """A homeserver that asks for a wait over 5 seconds gets no retry."""
+    homeserver.answers[SYNC_PATH] = limited
+
+    with pytest.raises(MatrixRequestError, match="429"):
+        await read_rooms(client, query=None, limit=None)
+
+    assert homeserver.paths() == [SYNC_PATH]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_over_2_mib_is_refused(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """An answer is read up to 2 MiB and no further."""
+    homeserver.answers["/_matrix/client/v3/user_directory/search"] = Answer(b" " * (2 * 1024 * 1024) + b"{}")
+
+    with pytest.raises(MatrixRequestError, match="larger than 2 MiB"):
+        await read_people(client, "bob", limit=None)
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_room_list_says_what_to_do(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A room list too large to read says how to reach one room instead."""
+    homeserver.answers[SYNC_PATH] = Answer(b" " * (2 * 1024 * 1024) + b"{}")
+
+    with pytest.raises(MatrixRequestError) as error:
+        await read_rooms(client, query=None, limit=None)
+
+    assert str(error.value) == (
+        'This account has too many rooms to list at once. Ask your owner for the room\'s ID and use action "room".'
+    )
+
+
+# A page of ``ROOM``'s messages, leaving out what a call does not name.
+_messages = partial(read_messages, room_id=ROOM, event_id=None, thread_id=None, page_token=None, limit=None)
+
+
+def _encrypted_event(event_id: str, *, minute: int = 0, edits: str | None = None) -> dict[str, object]:
+    """Return a message that cannot be read, or an encrypted edit of ``edits`` when given."""
+    content: dict[str, object] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": "AwgA",
+        "session_id": "s",
+        "device_id": "D",
+    }
+    if edits is not None:
+        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": edits}
+    return room_event(event_id, "m.room.encrypted", content, minute=minute)
+
+
+def _thread_reply(event_id: str, root: str, body: str, *, minute: int) -> dict[str, object]:
+    relation = {"rel_type": "m.thread", "event_id": root, "is_falling_back": True, "m.in_reply_to": {"event_id": root}}
+    content = {"msgtype": "m.text", "body": body, "m.relates_to": relation}
+    return room_event(event_id, "m.room.message", content, minute=minute)
+
+
+@pytest.mark.asyncio
+async def test_messages_are_one_line_each_oldest_first(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A page of the newest messages, each one line with what applies of its file and thread, oldest first."""
+    file_content = {
+        "msgtype": "m.file",
+        "body": "notes.txt",
+        "url": "mxc://example.com/abc",
+        "info": {"mimetype": "text/plain", "size": 2048},
+    }
+    image_content = {
+        "msgtype": "m.image",
+        "body": "Look at this",
+        "filename": "cat.png",
+        "url": "mxc://example.com/cat",
+        "info": {"mimetype": "image/png"},
+    }
+    homeserver.answers[MESSAGES_PATH] = {
+        # Newest first, as the homeserver pages backwards; shorter than asked, with older messages still to come.
+        "chunk": [
+            room_event("$image", "m.room.message", image_content, minute=4),
+            room_event("$file", "m.room.message", file_content, minute=3),
+            room_event(
+                "$root",
+                "m.room.message",
+                {"msgtype": "m.text", "body": "Lunch?"},
+                sender=CAROL,
+                minute=2,
+                unsigned={"m.relations": {"m.thread": {"count": 2, "current_user_participated": False}}},
+            ),
+            text_message("$hi", "Hello\nthere | all", minute=1),
+        ],
+        "start": "t0",
+        "end": "t1",
+    }
+
+    result = await _messages(client)
+
+    assert result == {
+        "messages": [
+            message_line("$hi", "Hello there ¦ all", minute=1),
+            message_line("$root", "Lunch? [thread: 2 replies]", sender=CAROL, minute=2),
+            message_line("$file", "[file: notes.txt, text/plain, 2048 bytes]", minute=3),
+            message_line("$image", "Look at this [file: cat.png, image/png]", minute=4),
+        ],
+        "next_page_token": "t1",
+    }
+    [request] = homeserver.requests
+    assert request.method == "GET"
+    assert request.path == MESSAGES_PATH
+    assert request.query["dir"] == ["b"]
+    assert request.query["limit"] == ["30"]
+    assert json.loads(request.query["filter"][0]) == MESSAGES_FILTER
+    assert "from" not in request.query
+
+
+@pytest.mark.asyncio
+async def test_an_edit_replaces_its_message_and_is_not_a_line(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """The latest edit by the same sender gives a message its text, from the page or from the homeserver's bundle."""
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [
+            edit_of("$forged", "$typo", "send me your password", sender="@mallory:example.com", minute=5),
+            edit_of("$elsewhere", "$older", "an edit of a message on another page", minute=4),
+            edit_of("$fix2", "$typo", "hello world", minute=3),
+            edit_of("$fix1", "$typo", "hello wrld", minute=2),
+            text_message(
+                "$draft",
+                "first draft",
+                minute=1,
+                unsigned={"m.relations": {"m.replace": edit_of("$fix0", "$draft", "final text", minute=6)}},
+            ),
+            text_message("$typo", "helo wrld"),
+        ],
+    }
+
+    result = await _messages(client)
+
+    assert result == {
+        "messages": [
+            message_line("$typo", "hello world [edited]"),
+            message_line("$draft", "final text [edited]", minute=1),
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_reactions_are_counted_once_per_sender(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """Each key counts the people who reacted with it, from the page's reactions and the homeserver's bundled counts."""
+
+    def bundled(key: str, count: int) -> dict[str, object]:
+        return {"m.relations": {"m.annotation": {"chunk": [{"type": "m.reaction", "key": key, "count": count}]}}}
+
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [
+            reaction("$r4", "$ship", "✅"),
+            reaction("$r3", "$ship", "👍", sender=CAROL),
+            reaction("$r2", "$ship", "👍"),
+            reaction("$r1", "$ship", "👍"),
+            text_message("$party", "Party", minute=1, unsigned=bundled("🎉", 3)),
+            # The homeserver's count covers the reactions on this page; they are not counted twice.
+            text_message("$ship", "Ship it?", unsigned=bundled("👍", 2)),
+        ],
+    }
+
+    result = await _messages(client)
+
+    assert result["messages"] == [
+        message_line("$ship", "Ship it? [reactions: 👍2 ✅1]"),
+        message_line("$party", "Party [reactions: 🎉3]", minute=1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_encrypted_event_is_reported_not_dropped(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A message that cannot be read is a line that says so; an encrypted edit of it is no line of its own."""
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [_encrypted_event("$secret_edit", minute=1, edits="$secret"), _encrypted_event("$secret")],
+    }
+
+    result = await _messages(client)
+
+    assert result["messages"] == [message_line("$secret", "[encrypted, not readable]")]
+
+
+@pytest.mark.asyncio
+async def test_a_run_of_encrypted_messages_is_one_line(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """Messages that cannot be read, one after another, are one line that counts them; a single one keeps its line.
+
+    An edit among them is no message of its own, so it does not break the run.
+    """
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [
+            _encrypted_event("$e4", minute=6),
+            text_message("$back", "Back in the clear", minute=5),
+            _encrypted_event("$e3", minute=4),
+            _encrypted_event("$e2_edit", minute=3, edits="$e2"),
+            _encrypted_event("$e2", minute=2),
+            _encrypted_event("$e1", minute=1),
+            text_message("$hi", "Hello"),
+        ],
+    }
+
+    result = await _messages(client)
+
+    assert result["messages"] == [
+        message_line("$hi", "Hello"),
+        "[3 encrypted messages, not readable]",
+        message_line("$back", "Back in the clear", minute=5),
+        message_line("$e4", "[encrypted, not readable]", minute=6),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_long_text_is_cut_at_2000_characters(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A text over 2000 characters shows its first 2000 and says it goes on; one of 2000 shows whole."""
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [text_message("$exact", "b" * 2000, minute=1), text_message("$long", "a" * 2001)],
+    }
+
+    result = await _messages(client)
+
+    assert result["messages"] == [
+        message_line("$long", "a" * 2000 + " […]"),
+        message_line("$exact", "b" * 2000, minute=1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_file_name_and_a_reaction_key_are_cut(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A file's name, from its body when it has no filename, and a reaction's key show their first 200 characters."""
+    content = {"msgtype": "m.file", "body": "n" * 201, "url": "mxc://example.com/abc"}
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [reaction("$r1", "$file", "k" * 201), room_event("$file", "m.room.message", content)],
+    }
+
+    result = await _messages(client)
+
+    assert result["messages"] == [message_line("$file", f"[file: {'n' * 200} […]] [reactions: {'k' * 200} […]1]")]
+
+
+@pytest.mark.asyncio
+async def test_names_topics_and_types_are_cut(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+) -> None:
+    """A room's name, a display name, and a file's name and type show their first 200 characters.
+
+    A room member or whoever invites the person sets each of them; a topic shows as one line of its first 2000.
+    """
+    long, cut = "n" * 201, "n" * 200 + " […]"
+    long_type, cut_type = "t" * 201, "t" * 200 + " […]"
+    topic = "Next\nquarter " + "q" * 2000
+    bob = "@bob:example.com"
+    homeserver.answers.update(
+        {
+            SYNC_PATH: sync_answer(
+                join={ROOM: joined_room(long)},
+                invite={"!ask:example.com": invited_room(OWNER, bob, long)},
+            ),
+            f"{ROOM_PATH}/joined_members": {"joined": {bob: {"display_name": long}}},
+            f"{ROOM_PATH}/state/m.room.name": {"name": long},
+            f"{ROOM_PATH}/state/m.room.topic": {"topic": topic},
+            f"/_matrix/client/v3/profile/{bob}": {"displayname": long},
+            "/_matrix/client/v3/user_directory/search": {"results": [{"user_id": bob, "display_name": long}]},
+            MESSAGES_PATH: {"chunk": [_file_event("m.file", "notes.txt", long_type, 4)]},
+            f"{ROOM_PATH}/event/$file": _file_event("m.file", long, long_type, 4),
+            MEDIA_PATH: Answer(b"note"),
+        },
+    )
+
+    rooms = await read_rooms(client, query=None, limit=None)
+    room = await read_room(client, ROOM, limit=None)
+    profile = await read_people(client, bob, limit=None)
+    found = await read_people(client, "bob", limit=None)
+    messages = await _messages(client)
+    downloaded = await download_file(client, ROOM, "$file", storage_path=tmp_path, for_room_id=CHAT, for_thread_id=None)
+
+    assert rooms["rooms"] == [f"!ask:example.com | {cut} | invited by {bob}", f"{ROOM} | {cut}"]
+    assert (room["name"], room["topic"], room["members"]) == (
+        cut,
+        ("Next quarter " + "q" * 2000)[:2000] + " […]",
+        [f"{bob} | {cut}"],
+    )
+    assert profile["people"] == found["people"] == [f"{bob} | {cut}"]
+    assert messages["messages"] == [message_line("$file", f"[file: notes.txt, {cut_type}, 4 bytes]")]
+    assert (downloaded["name"], downloaded["mime_type"]) == (cut, cut_type)
+
+
+@pytest.mark.asyncio
+async def test_a_replys_quoted_original_is_not_repeated(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A reply shows its own text, not the quote of the message it answers; a message that is no reply keeps its quote."""
+    reply = {
+        "msgtype": "m.text",
+        "body": "> <@carol:example.com> Lunch at noon?\n> Or later?\n\nNoon works",
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$ask"}},
+    }
+    homeserver.answers[MESSAGES_PATH] = {
+        "chunk": [
+            text_message("$quote", "> to be or not to be\n\nthat is the question", minute=2),
+            room_event("$answer", "m.room.message", reply, minute=1),
+            text_message("$ask", "Lunch at noon?\nOr later?", sender=CAROL),
+        ],
+    }
+
+    result = await _messages(client)
+
+    assert result["messages"] == [
+        message_line("$ask", "Lunch at noon? Or later?", sender=CAROL),
+        message_line("$answer", "Noon works", minute=1),
+        message_line("$quote", "> to be or not to be that is the question", minute=2),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("relation", "text"),
+    [
+        (
+            {
+                "rel_type": "m.thread",
+                "event_id": "$root",
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": "$root"},
+            },
+            "> quoted line my comment [in thread $root]",
+        ),
+        ({"m.in_reply_to": {"event_id": "$root"}}, "my comment"),
+        (
+            {
+                "rel_type": "m.thread",
+                "event_id": "$root",
+                "is_falling_back": False,
+                "m.in_reply_to": {"event_id": "$a"},
+            },
+            "my comment [in thread $root]",
+        ),
+    ],
+)
+async def test_only_a_real_reply_loses_its_quoted_prefix(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    relation: dict[str, object],
+    text: str,
+) -> None:
+    """A thread message's fallback reply is no reply: its own leading quote stays; a real reply's quote goes."""
+    content = {"msgtype": "m.text", "body": "> quoted line\n\nmy comment", "m.relates_to": relation}
+    homeserver.answers[MESSAGES_PATH] = {"chunk": [room_event("$said", "m.room.message", content)]}
+
+    result = await _messages(client)
+
+    assert result["messages"] == [message_line("$said", text)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("malformed", "lines"),
+    [
+        (
+            room_event("$odd", "m.room.message", {"msgtype": "m.text"}),
+            [message_line("$odd", "(no text)")],
+        ),
+        (
+            room_event("$odd", "m.room.message", {"msgtype": "m.text", "body": 42}),
+            [message_line("$odd", "(no text)")],
+        ),
+        (
+            {"event_id": "$odd", "type": "m.room.message", "sender": CAROL, "content": {"body": "Undated"}},
+            [f"$odd | … | {CAROL} | Undated"],
+        ),
+        ({"type": "m.room.message", "sender": CAROL, "origin_server_ts": 0, "content": {"body": "Nameless"}}, []),
+        (
+            room_event("$odd", "m.room.message", {"msgtype": ["m.file"], "body": "Listed"}),
+            [message_line("$odd", "Listed")],
+        ),
+        (
+            room_event("$odd", "m.room.message", {"body": "Related", "m.relates_to": {"rel_type": ["m.replace"]}}),
+            [message_line("$odd", "Related")],
+        ),
+    ],
+    ids=["no-body", "body-not-text", "no-time", "no-event-id", "msgtype-not-text", "rel-type-not-text"],
+)
+async def test_malformed_events_are_listed_without_crashing(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    malformed: dict[str, object],
+    lines: list[str],
+) -> None:
+    """An event missing a field is listed with what it has, and the page's other messages all the same.
+
+    An event with no ID, which no later call could name, is left out.
+    """
+    homeserver.answers[MESSAGES_PATH] = {"chunk": [text_message("$ok", "Fine", minute=1), malformed]}
+
+    result = await _messages(client)
+
+    assert result["messages"] == [*lines, message_line("$ok", "Fine", minute=1)]
+
+
+@pytest.mark.asyncio
+async def test_a_page_token_continues_into_older_history(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """The token of the previous page asks for the messages before it, at most 100, and the oldest page has none."""
+    homeserver.answers[MESSAGES_PATH] = {"chunk": [text_message("$first", "Welcome")], "start": "t1"}
+
+    result = await _messages(client, page_token="t1", limit=500)  # noqa: S106
+
+    assert result == {"messages": [message_line("$first", "Welcome")]}
+    [request] = homeserver.requests
+    assert request.query["from"] == ["t1"]
+    assert request.query["dir"] == ["b"]
+    assert request.query["limit"] == ["100"]
+
+
+@pytest.mark.asyncio
+async def test_a_thread_is_its_root_and_newest_replies(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A thread shows its root, then its newest replies oldest first; the next page continues with older replies only.
+
+    The replies do not each name the thread asked for.
+    """
+    relations_path = f"/_matrix/client/v1/rooms/{ROOM}/relations/$root/m.thread"
+    homeserver.answers.update(
+        {
+            f"{ROOM_PATH}/event/$root": room_event(
+                "$root",
+                "m.room.message",
+                {"msgtype": "m.text", "body": "Lunch?"},
+                sender=CAROL,
+                unsigned={"m.relations": {"m.thread": {"count": 3}}},
+            ),
+            relations_path: [
+                Answer(
+                    {
+                        "chunk": [
+                            _thread_reply("$r3", "$root", "Tacos", minute=3),
+                            _thread_reply("$r2", "$root", "Pizza", minute=2),
+                        ],
+                        "next_batch": "n1",
+                    },
+                ),
+                Answer({"chunk": [_thread_reply("$r1", "$root", "Yes", minute=1)]}),
+            ],
+        },
+    )
+
+    newest = await _messages(client, thread_id="$root", limit=2)
+    older = await _messages(client, thread_id="$root", page_token="n1", limit=2)  # noqa: S106
+
+    assert newest == {
+        "messages": [
+            message_line("$root", "Lunch? [thread: 3 replies]", sender=CAROL),
+            message_line("$r2", "Pizza", minute=2),
+            message_line("$r3", "Tacos", minute=3),
+        ],
+        "next_page_token": "n1",
+    }
+    assert older == {"messages": [message_line("$r1", "Yes", minute=1)]}
+    assert homeserver.paths() == [f"{ROOM_PATH}/event/$root", relations_path, relations_path]
+    first, second = homeserver.requests_to(relations_path)
+    assert (first.query["dir"], first.query["limit"], "from" in first.query) == (["b"], ["2"], False)
+    assert second.query["from"] == ["n1"]
+
+
+@pytest.mark.asyncio
+async def test_a_thread_reply_names_its_thread(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A reply in a thread names the thread's root, in a page of the room and in a search; the root counts replies."""
+    root = text_message("$root", "Lunch?", sender=CAROL, unsigned={"m.relations": {"m.thread": {"count": 1}}})
+    reply = _thread_reply("$r1", "$root", "Tacos", minute=1)
+    homeserver.answers.update(
+        {
+            MESSAGES_PATH: {"chunk": [reply, root]},
+            SEARCH_PATH: search_answer({**reply, "room_id": ROOM}),
+        },
+    )
+
+    page = await _messages(client)
+    found = await search_messages(client, "tacos", room_id=None, page_token=None, limit=None)
+
+    assert page["messages"] == [
+        message_line("$root", "Lunch? [thread: 1 reply]", sender=CAROL),
+        message_line("$r1", "Tacos [in thread $root]", minute=1),
+    ]
+    assert found["messages"] == [f"{ROOM} | {message_line('$r1', 'Tacos [in thread $root]', minute=1)}"]
+
+
+@pytest.mark.asyncio
+async def test_an_event_comes_with_the_messages_around_it(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """An event comes with up to half the limit of messages on each side, in the order they were sent."""
+    homeserver.answers[f"{ROOM_PATH}/context/$mid"] = {
+        "event": text_message("$mid", "Middle", minute=3),
+        # Newest first, and one more than asked for, as a homeserver may send.
+        "events_before": [
+            text_message("$b2", "Two", minute=2),
+            text_message("$b1", "One", minute=1),
+            text_message("$b0", "Zero"),
+        ],
+        "events_after": [text_message("$a1", "Four", minute=4)],
+    }
+
+    result = await _messages(client, event_id="$mid", limit=5)
+
+    assert result == {
+        "messages": [
+            message_line("$b1", "One", minute=1),
+            message_line("$b2", "Two", minute=2),
+            message_line("$mid", "Middle", minute=3),
+            message_line("$a1", "Four", minute=4),
+        ],
+    }
+    [request] = homeserver.requests
+    assert request.query["limit"] == ["4"]
+    assert json.loads(request.query["filter"][0]) == MESSAGES_FILTER
+
+
+@pytest.mark.asyncio
+async def test_search_covers_joined_rooms_or_one_room(client: nio.AsyncClient, homeserver: FakeHomeserver) -> None:
+    """A search covers every joined room unless it names one; each hit names its room, and a token continues it."""
+    other = "!other:example.com"
+    homeserver.answers[SEARCH_PATH] = search_answer(
+        text_message("$due", "Budget is due", minute=1, room_id=ROOM),
+        text_message("$plan", "Budget plan", sender=CAROL, room_id=other),
+        next_batch="b1",
+    )
+
+    everywhere = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
+    one_room = await search_messages(client, "budget", room_id=ROOM, page_token="b1", limit=80)  # noqa: S106
+
+    assert everywhere == {
+        "messages": [
+            f"{ROOM} | {message_line('$due', 'Budget is due', minute=1)}",
+            f"{other} | {message_line('$plan', 'Budget plan', sender=CAROL)}",
+        ],
+        "next_page_token": "b1",
+    }
+    assert one_room == everywhere
+    first, second = homeserver.requests
+    assert first.method == "POST"
+    assert first.body == {
+        "search_categories": {
+            "room_events": {
+                "search_term": "budget",
+                "order_by": "recent",
+                "keys": ["content.body"],
+                "filter": {"limit": 10},
+            },
+        },
+    }
+    assert "next_batch" not in first.query
+    assert second.body["search_categories"]["room_events"]["filter"] == {"limit": 50, "rooms": [ROOM]}
+    assert second.query["next_batch"] == ["b1"]
+
+
+@pytest.mark.asyncio
+async def test_search_shows_an_edits_new_text_and_skips_redactions(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """An edit found is shown under the ID of the message it edits, with its own sender and text; a deletion is not.
+
+    Its sender need not be the message's author, so it is not shown as the message's own text.
+    """
+    mallory = "@mallory:example.com"
+    redacted = room_event(
+        "$gone",
+        "m.room.message",
+        {},
+        room_id=ROOM,
+        unsigned={"redacted_because": {"type": "m.room.redaction", "sender": "@bob:example.com"}},
+    )
+    homeserver.answers[SEARCH_PATH] = search_answer(
+        edit_of("$fix", "$typo", "budget is due friday", minute=5, room_id=ROOM),
+        redacted,
+        edit_of("$forged", "$plan", "budget cut", sender=mallory, minute=4, room_id=ROOM),
+    )
+
+    result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
+
+    assert result == {
+        "messages": [
+            f"{ROOM} | {message_line('$typo', 'budget is due friday [edit]', minute=5)}",
+            f"{ROOM} | {message_line('$plan', 'budget cut [edit]', sender=mallory, minute=4)}",
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_search_keeps_an_edit_when_another_sender_edited_the_same_message(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Each sender's edit of a message has its own line, so a newer forged edit cannot take the author's place."""
+    mallory = "@mallory:example.com"
+    homeserver.answers[SEARCH_PATH] = search_answer(
+        edit_of("$forged", "$plan", "budget cut", sender=mallory, minute=5, room_id=ROOM),
+        edit_of("$fix", "$plan", "budget is due friday", minute=4, room_id=ROOM),
+        edit_of("$older", "$plan", "budget is due thursday", minute=3, room_id=ROOM),
+    )
+
+    result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
+
+    assert result == {
+        "messages": [
+            f"{ROOM} | {message_line('$plan', 'budget cut [edit]', sender=mallory, minute=5)}",
+            f"{ROOM} | {message_line('$plan', 'budget is due friday [edit]', minute=4)}",
+        ],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_first", [True, False], ids=["original-first", "edit-first"])
+async def test_search_prefers_the_original_hit_over_its_edit_hit(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    *,
+    original_first: bool,
+) -> None:
+    """A page with both a message and an edit of it shows the message, with its latest edit, whatever their order."""
+    fix = edit_of("$fix", "$typo", "budget is due friday", minute=5, room_id=ROOM)
+    original = text_message("$typo", "budget is due fridya", room_id=ROOM, unsigned={"m.relations": {"m.replace": fix}})
+    hits = [original, fix]
+    homeserver.answers[SEARCH_PATH] = search_answer(*(hits if original_first else hits[::-1]))
+
+    result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
+
+    assert result == {"messages": [f"{ROOM} | {message_line('$typo', 'budget is due friday [edited]')}"]}
+
+
+def _file_event(msgtype: str, name: str, mime_type: str, size: int) -> dict[str, object]:
+    info = {"mimetype": mime_type, "size": size}
+    content = {"msgtype": msgtype, "body": name, "url": "mxc://example.com/abc", "info": info}
+    return room_event("$file", "m.room.message", content, room_id=ROOM)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("msgtype", "kind", "name", "mime_type", "data"),
+    [
+        ("m.file", "file", "notes.txt", "text/plain", b"Remember the milk"),
+        ("m.image", "image", "cat.png", "image/png", b"\x89PNG\r\n\x1a\n" + bytes(8)),
+        ("m.audio", "audio", "voice.ogg", "audio/ogg", b"OggS" + bytes(12)),
+    ],
+)
+async def test_download_registers_an_attachment_within_the_size_cap(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    msgtype: str,
+    kind: str,
+    name: str,
+    mime_type: str,
+    data: bytes,
+) -> None:
+    """A message's file is downloaded as the person and kept as an attachment of the conversation asking for it.
+
+    A file over the attachment store's cap is not kept.
+    """
+    homeserver.answers.update(
+        {f"{ROOM_PATH}/event/$file": _file_event(msgtype, name, mime_type, len(data)), MEDIA_PATH: Answer(data)},
+    )
+    storage = tmp_path / "storage"
+
+    result = await download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id="$turn")
+
+    record = load_attachment(storage, str(result["attachment_id"]))
+    assert record is not None
+    assert result == {
+        "attachment_id": record.attachment_id,
+        "name": name,
+        "mime_type": mime_type,
+        "size_bytes": len(data),
+    }
+    assert record.local_path.read_bytes() == data
+    assert (record.kind, record.room_id, record.thread_id, record.sender) == (kind, CHAT, "$turn", "@bob:example.com")
+    [download] = homeserver.requests_to(MEDIA_PATH)
+    assert download.query["user_id"] == [OWNER]
+    # The token travels only in the Authorization header.
+    assert TOKEN not in download.url
+    assert "access_token" not in download.url
+
+    monkeypatch.setattr("mindroom.matrix.media.RETAINED_MEDIA_MAX_BYTES", len(data) - 1)
+    elsewhere = tmp_path / "elsewhere"
+    with pytest.raises(MatrixRequestError) as error:
+        await download_file(client, ROOM, "$file", storage_path=elsewhere, for_room_id=CHAT, for_thread_id="$turn")
+    assert str(error.value) == NOT_FETCHED
+    assert load_attachment(elsewhere, record.attachment_id) is None
+
+
+@pytest.mark.asyncio
+async def test_download_leaves_an_existing_record_of_the_event_untouched(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+) -> None:
+    """A download keeps a record of its own for its conversation; the one the agent made on receiving it stays as it was.
+
+    Downloading it again in the same conversation gives the same record, and in another thread another one.
+    """
+    data = b"OggS" + bytes(12)
+    homeserver.answers.update(
+        {
+            f"{ROOM_PATH}/event/$file": _file_event("m.audio", "voice.ogg", "audio/ogg", len(data)),
+            MEDIA_PATH: Answer(data),
+        },
+    )
+    storage = tmp_path / "storage"
+    received = await register_audio_attachment(
+        storage,
+        event_id="$file",
+        audio_bytes=data,
+        mime_type="audio/ogg",
+        room_id=ROOM,
+        thread_id="$voice",
+        sender="@bob:example.com",
+    )
+    assert received is not None
+
+    downloaded = await download_file(
+        client,
+        ROOM,
+        "$file",
+        storage_path=storage,
+        for_room_id=CHAT,
+        for_thread_id="$turn",
+    )
+    again = await download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id="$turn")
+    unthreaded = await download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id=None)
+
+    assert load_attachment(storage, received.attachment_id) == received
+    record = load_attachment(storage, str(downloaded["attachment_id"]))
+    assert record is not None
+    assert record.attachment_id != received.attachment_id
+    assert (record.room_id, record.thread_id) == (CHAT, "$turn")
+    assert again == downloaded
+    assert unthreaded["attachment_id"] not in {downloaded["attachment_id"], received.attachment_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event", "message"),
+    [
+        (text_message("$file", "Just words"), "That message has no file."),
+        (
+            room_event("$file", "m.room.encrypted", {"algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "AwgA"}),
+            "That message is encrypted and cannot be read.",
+        ),
+    ],
+    ids=["text", "encrypted"],
+)
+async def test_download_of_an_event_without_media_is_an_error(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    event: dict[str, object],
+    message: str,
+) -> None:
+    """A message with no file that can be read says so, and nothing is downloaded."""
+    homeserver.answers[f"{ROOM_PATH}/event/$file"] = event
+
+    with pytest.raises(MatrixRequestError) as error:
+        await download_file(client, ROOM, "$file", storage_path=tmp_path, for_room_id=ROOM, for_thread_id=None)
+
+    assert str(error.value) == message
+    assert homeserver.paths() == [f"{ROOM_PATH}/event/$file"]
+
+
+@pytest.mark.asyncio
+async def test_mark_read_sends_a_private_receipt_and_clears_the_flag(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Marking read moves the read marker and a private receipt, never a public one, and clears marked-unread.
+
+    Without an event, the room's newest event is the one, and the result names it.
+    """
+    homeserver.answers.update(
+        {
+            f"{ROOM_PATH}/event/$seen": text_message("$seen", "Hi", room_id=ROOM),
+            f"{ROOM_PATH}/read_markers": {},
+            MARKED_UNREAD_PATH: {},
+            MESSAGES_PATH: {"chunk": [text_message("$newest", "Bye", minute=9)], "end": "t1"},
+        },
+    )
+
+    seen = await mark_read(client, ROOM, event_id="$seen")
+    newest = await mark_read(client, ROOM, event_id=None)
+
+    assert seen == {}
+    assert newest == {"read_up_to": "$newest"}
+    assert [(request.method, request.path, request.body) for request in homeserver.requests] == [
+        ("GET", f"{ROOM_PATH}/event/$seen", None),
+        ("POST", f"{ROOM_PATH}/read_markers", {"m.fully_read": "$seen", "m.read.private": "$seen"}),
+        ("PUT", MARKED_UNREAD_PATH, {"unread": False}),
+        ("GET", MESSAGES_PATH, None),
+        ("POST", f"{ROOM_PATH}/read_markers", {"m.fully_read": "$newest", "m.read.private": "$newest"}),
+        ("PUT", MARKED_UNREAD_PATH, {"unread": False}),
+    ]
+    newest_request = homeserver.requests[3]
+    assert (newest_request.query["dir"], newest_request.query["limit"]) == (["b"], ["1"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "said"),
+    [
+        (matrix_error(500, "M_UNKNOWN", "Internal error"), "Matrix answered 500 M_UNKNOWN: Internal error"),
+        (TimeoutError(), "The homeserver took too long to answer."),
+        (aiohttp.ServerDisconnectedError(), "The Matrix homeserver could not be reached."),
+    ],
+    ids=["refused", "timeout", "unreachable"],
+)
+async def test_mark_read_reports_when_only_the_markers_moved(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    answer: Answer | Exception,
+    said: str,
+) -> None:
+    """When the marked-unread flag cannot be cleared, the error says the read markers moved all the same.
+
+    A flag step that times out or finds no homeserver says so, never the transport's text.
+    """
+    homeserver.answers.update(
+        {
+            f"{ROOM_PATH}/event/$seen": text_message("$seen", "Hi", room_id=ROOM),
+            f"{ROOM_PATH}/read_markers": {},
+            MARKED_UNREAD_PATH: answer,
+        },
+    )
+
+    with pytest.raises(MatrixRequestError) as error:
+        await mark_read(client, ROOM, event_id="$seen")
+
+    assert str(error.value) == f"The room is read up to $seen, but clearing its unread mark was not confirmed: {said}"
+    assert f"{ROOM_PATH}/read_markers" in homeserver.paths()
+
+
+@pytest.mark.asyncio
+async def test_mark_read_of_an_event_outside_the_room_changes_nothing(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """An event the room does not hold is refused before any marker moves."""
+    homeserver.answers[f"{ROOM_PATH}/event/$elsewhere"] = matrix_error(404, "M_NOT_FOUND", "Event not found")
+
+    with pytest.raises(MatrixRequestError, match="404 M_NOT_FOUND"):
+        await mark_read(client, ROOM, event_id="$elsewhere")
+
+    assert homeserver.paths() == [f"{ROOM_PATH}/event/$elsewhere"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["mark_read", "download"])
+async def test_an_event_from_another_room_is_refused(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    action: str,
+) -> None:
+    """An event the homeserver gives from another room is refused before any marker moves or any file is fetched."""
+    elsewhere = {**_file_event("m.file", "notes.txt", "text/plain", 4), "room_id": "!other:example.com"}
+    homeserver.answers.update({f"{ROOM_PATH}/event/$file": elsewhere, MEDIA_PATH: Answer(b"note")})
+    storage = tmp_path / "storage"
+    read = (
+        mark_read(client, ROOM, event_id="$file")
+        if action == "mark_read"
+        else download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id=None)
+    )
+
+    with pytest.raises(MatrixRequestError) as error:
+        await read
+
+    assert str(error.value) == "That event is in another room."
+    assert homeserver.paths() == [f"{ROOM_PATH}/event/$file"]
+    assert not storage.exists()
