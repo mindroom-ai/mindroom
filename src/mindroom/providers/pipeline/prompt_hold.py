@@ -15,7 +15,8 @@ messages, such as a retry or a resumed run, sends the same held prompt and updat
 
 Only a conversation's own turns write its file. A run that only reads it (``ModelRequest.prompt_hold_pin``), such
 as a skill review's fork or an approval resumed after its turn, is sent what the file held at its first request
-when it continues that as it is, and its own requests otherwise: every request of the run is sent the same prompt.
+when it continues that as it is and its newest answer records a request sent the same, and its own requests
+otherwise: every request of the run is sent the same prompt, the one the run it continues was sent.
 
 The stage records on each answer the identity of its request as it was sent, so the usage a provider reported for
 it sizes only a later request sent the same prompt and updates: the file may hold another by then.
@@ -220,6 +221,12 @@ def _plan(inner: ModelProvider, request: ModelRequest, state: _State | None) -> 
     return messages, {"route": route, "system": texts, "current": texts[0], "first": first, "updates": []}
 
 
+def _identities(inner: ModelProvider, request: ModelRequest, sent: ModelRequest) -> list[str | None]:
+    """Return the identity of what precedes each message of ``request`` when ``inner`` is sent it as ``sent``."""
+    as_sent = WrappedProvider(inner, prompt_hold_stream, RequestProjection(lambda _inner, _request: sent))
+    return request_prefixes(as_sent, request)
+
+
 def held_request(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
     """Return ``request`` as ``inner`` is sent it: with the held system prompt and updates, which a reading run pins."""
     pin = request.prompt_hold_pin
@@ -227,9 +234,15 @@ def held_request(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
         return request
     state = pin[0] if pin else _read(request.prompt_hold, time.time())
     plan = _plan(inner, request, state)
+    sent = replace(request, messages=request.messages if plan is None else plan[0], prompt_hold=None)
     if pin is not None and not pin:
-        pin.append(None if plan is None else state)
-    return replace(request, messages=request.messages if plan is None else plan[0], prompt_hold=None)
+        # The run it continues may have been sent another prompt than the file holds: its newest answer tells.
+        recorded = [(message.provider_data or {}).get(REQUEST_IDENTITY_KEY) for message in request.messages]
+        newest = max((index for index, identity in enumerate(recorded) if identity is not None), default=None)
+        if plan is None or newest is None or recorded[newest] != _identities(inner, request, sent)[newest]:
+            state, sent = None, replace(request, prompt_hold=None)
+        pin.append(state)
+    return sent
 
 
 def _commit(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
@@ -266,8 +279,7 @@ async def prompt_hold_stream(inner: ModelProvider, request: ModelRequest) -> Asy
         async for event in events:
             if sent is not request and isinstance(event, TurnCompleted):
                 # The identity of the request as it was sent, which reading the hold again would not surely give.
-                as_sent = WrappedProvider(inner, prompt_hold_stream, RequestProjection(lambda _inner, _request: sent))
-                identity = (await asyncio.to_thread(request_prefixes, as_sent, request))[-1]
+                identity = (await asyncio.to_thread(_identities, inner, request, sent))[-1]
                 answered = event.message.provider_data or {}
                 if identity is not None and not answered.get(REWRITTEN_ATTEMPT_KEY):
                     event.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: identity}

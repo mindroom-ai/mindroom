@@ -735,17 +735,20 @@ async def test_a_tool_loop_keeps_its_held_prompt_unless_a_fold_rewrites_what_pre
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("compacted", [False, True])
+@pytest.mark.parametrize("case", ["held", "compacted", "paused without a hold"])
 async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_writes_it(
-    compacted: bool,
+    case: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The resume is sent the prompt and update its paused run was, so its signed reasoning follows the same prefix.
 
     So is every request of its tool loop, though the hold runs out inside it. After a compaction its messages no
-    longer match the hold, so it is sent the prompt its run stored, as on main.
+    longer match the hold, so it is sent the prompt its run stored, as on main. So is a run that paused on its own
+    prompt while its route held none, such as one with the hour-long cache off, though the route holds one again
+    when it resumes and the conversation's earlier hold still matches its messages.
     """
+    compacted, held = case == "compacted", case != "paused without a hold"
     paths, config = _usage_config(tmp_path)
     # The paused reply runs without background tool jobs, which its tool definitions show: so do the turns before it.
     config.background_tool_jobs.enabled = False
@@ -770,10 +773,11 @@ async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_wr
     await ai_response(replace(ctx, prompt="Hello"), paths, config)
     config.agents["general"].instructions = ["Answer in Dutch."]
     await ai_response(replace(ctx, prompt="Hello again"), paths, config)
+    model.capabilities = Capabilities(system_updates=held)
     paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    model.capabilities = Capabilities(system_updates=True)
     pausing = model.requests[-1]
-    assert "Answer in English." in system_text(pausing.messages)
-    assert len(_told(pausing)) == 1
+    assert ("Answer in English." in system_text(pausing.messages), len(_told(pausing))) == (held, int(held))
     if compacted:
         store = create_session_storage("general", config, paths, execution_identity=identity)
         session = store.load_session(identity.session_id)
@@ -797,7 +801,7 @@ async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_wr
     resumed, after_multiplying = model.requests[-2:]
     assert resumed.prompt_hold is None
     assert (hold.read_bytes(), hold.stat().st_mtime) == (before, expired)
-    if compacted:
+    if not held or compacted:
         for request in (resumed, after_multiplying):
             assert "Answer in Dutch." in system_text(request.messages)
             assert "Answer in English." not in system_text(request.messages)

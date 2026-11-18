@@ -136,6 +136,12 @@ class _Conversation:
     def state(self) -> dict[str, object]:
         return json.loads(self.path.read_text(encoding="utf-8"))
 
+    def answer(self) -> Message:
+        """Return the answer to the last request, which records the identity of that request as it was sent."""
+        [answer] = self.answers
+        assert isinstance(answer, TurnCompleted)
+        return answer.message
+
     async def told(self, *, change: str = _B) -> tuple[list[Message], list[Message]]:
         """Open a conversation under ``_A``, edit its prompt to ``change``, and return the second turn and its send."""
         first = [*_system(_A), _user("one")]
@@ -404,10 +410,17 @@ async def test_a_read_only_request_is_sent_the_hold_it_continues_and_never_write
     os.utime(conversation.path, (time.time() - 60,) * 2)
     before = (conversation.path.read_bytes(), conversation.path.stat().st_mtime)
     # A resumed run replays what it was sent, and a review forks it: both are sent the held prompt and its update.
-    resumed = [*_system(_B), *_replayed(second[2:]), _answer(), _user("Review this conversation.")]
+    answered = conversation.answer()
+    resumed = [*_system(_B), *_replayed([*second[2:], answered]), _user("Review this conversation.")]
     replayed = await conversation.send(resumed, read_only=True)
     assert _shape(replayed) == [*_shape(sent), "assistant", "user"]
     assert (replayed[0].content, _updates(replayed)) == (_A, _updates(sent))
+    # A run whose newest answer was sent another prompt than the hold tells goes on with its own: one paused while
+    # its route held no prompt, or one whose answer records no request.
+    as_built = request_prefixes(conversation.model, conversation.request(second))[-1]
+    for other in (replace(answered, provider_data={REQUEST_IDENTITY_KEY: as_built}), _answer()):
+        unheld = [*_system(_B), *second[2:], other, _user("Review this conversation.")]
+        assert await conversation.send(unheld, read_only=True) == unheld
     # One whose prompt the hold does not tell yet, or whose messages it does not match, is sent as it was built.
     for stale in (
         [*_system(_C), *resumed[2:]],
@@ -417,7 +430,7 @@ async def test_a_read_only_request_is_sent_the_hold_it_continues_and_never_write
         assert await conversation.send(stale, read_only=True) == stale
     assert (conversation.path.read_bytes(), conversation.path.stat().st_mtime) == before
     # The conversation's own next turn goes on from the hold it left.
-    third = [*_system(_B), *second[2:], _answer(), _user("three")]
+    third = [*_system(_B), *second[2:], answered, _user("three")]
     assert _updates(await conversation.send(third)) == _updates(sent)
 
 
@@ -493,9 +506,7 @@ async def test_a_request_is_sized_and_identified_as_it_is_sent(conversation: _Co
 
 def _recorded(conversation: _Conversation) -> object:
     """Return the request identity the last answer records."""
-    [answer] = conversation.answers
-    assert isinstance(answer, TurnCompleted)
-    return (answer.message.provider_data or {}).get(REQUEST_IDENTITY_KEY)
+    return (conversation.answer().provider_data or {}).get(REQUEST_IDENTITY_KEY)
 
 
 @pytest.mark.asyncio
@@ -522,16 +533,18 @@ async def test_an_answer_records_the_identity_of_its_request_as_it_was_sent(
     assert request_prefixes(provider, conversation.request(second))[-1] == held
 
     # A run that pinned the hold is sent it after it ran out, when a request that reads the file is sent as built.
+    resumed = [*second, replace(_answer(), provider_data={REQUEST_IDENTITY_KEY: held}), _user("three")]
     pin: list[dict[str, Any] | None] = []
-    await conversation.send(second, pin=pin)
+    await conversation.send(resumed, pin=pin)
+    resumed_as = _recorded(conversation)
     os.utime(conversation.path, (time.time() - 2 * 3600,) * 2)
-    assert _updates(await conversation.send(second, pin=pin)) == _updates(sent)
-    assert _recorded(conversation) == held
-    assert request_prefixes(provider, conversation.request(second))[-1] == as_built
+    assert _updates(await conversation.send(resumed, pin=pin)) == _updates(sent)
+    assert _recorded(conversation) == resumed_as
+    assert resumed_as != request_prefixes(provider, conversation.request(resumed))[-1]
 
     # An answer a stage inside got for another request records none: its usage is not this request's.
     model.answer_data = {REWRITTEN_ATTEMPT_KEY: True}
-    await conversation.send(second, pin=pin)
+    await conversation.send(resumed, pin=pin)
     assert _recorded(conversation) is None
 
 
@@ -541,15 +554,17 @@ async def test_every_request_of_a_run_that_only_reads_the_hold_is_sent_the_promp
 ) -> None:
     """A resumed run's tool loop keeps its prefix when the hold runs out or stands again meanwhile, and writes nothing."""
     second, sent = await conversation.told()
-    loop = [*second, _answer("Adding."), Message(role="tool", content="11", tool_call_id="call_1")]
-    later = [*loop, _answer(), _user("three")]
+    loop = [*second, conversation.answer(), Message(role="tool", content="5", tool_call_id="call_1")]
+    again = [*loop, _answer("Multiplying."), Message(role="tool", content="6", tool_call_id="call_2")]
+    later = [*again, _answer(), _user("three")]
     contents = [message.content for message in sent]
 
     pin: list[dict[str, Any] | None] = []
-    assert [message.content for message in await conversation.send(second, pin=pin)] == contents
+    resumed = await conversation.send(loop, pin=pin)
+    assert [message.content for message in resumed[: len(sent)]] == contents
     os.utime(conversation.path, (time.time() - 2 * 3600,) * 2)
     before = (conversation.path.read_bytes(), conversation.path.stat().st_mtime)
-    for messages in (loop, later):
+    for messages in (again, later):
         resumed = await conversation.send(messages, pin=pin)
         assert [message.content for message in resumed[: len(sent)]] == contents
         assert _updates(resumed) == _updates(sent)
@@ -563,11 +578,11 @@ async def test_every_request_of_a_run_that_only_reads_the_hold_is_sent_the_promp
 
     # A run whose first request found no hold to continue sends its own prompt, though the hold counts again later.
     unheld: list[dict[str, Any] | None] = []
-    assert await conversation.send(second, pin=unheld) == second
+    assert await conversation.send(loop, pin=unheld) == loop
     assert (conversation.path.read_bytes(), conversation.path.stat().st_mtime) == before
     os.utime(conversation.path)
-    assert await conversation.send(loop, pin=unheld) == loop
-    assert _updates(await conversation.send(loop, read_only=True)) == _updates(sent)
+    assert await conversation.send(again, pin=unheld) == again
+    assert _updates(await conversation.send(again, read_only=True)) == _updates(sent)
     assert conversation.path.read_bytes() == before[0]
 
 
