@@ -104,6 +104,16 @@ async def test_no_fit_is_saved_and_names_nobody(journal_store: EventJournalStore
     assert await journal_store.room_event_claims(_ROOM, ["$e1"], "responder") == {"$e1": NO_RESPONDER}
 
 
+@pytest.mark.asyncio
+async def test_a_bot_without_a_choice_of_its_own_only_reads(journal_store: EventJournalStore) -> None:
+    """A bot that would not answer by itself passes no selector: it saves nothing, and reads what another bot saved."""
+    selections = ResponderSelections(lambda: journal_store)
+    assert await selections.select(_ROOM, ["$e1"], None) == frozenset()
+    assert await journal_store.room_event_claims(_ROOM, ["$e1"], "responder") == {}
+    await selections.select(_ROOM, ["$e1"], _Chooser("alpha"))
+    assert await selections.select(_ROOM, ["$e1"], None) == {"alpha"}
+
+
 async def _record_router_answer(journal_store: EventJournalStore, source_event_id: str, response_event_id: str) -> None:
     """Record that the router answered one source with a message of its own, as the relaying router did."""
     await journal_store.turn_records(ROUTER_AGENT_NAME).write(
@@ -115,14 +125,21 @@ async def _record_router_answer(journal_store: EventJournalStore, source_event_i
 
 @pytest.mark.asyncio
 async def test_message_the_old_router_relayed_is_left_to_its_relay(journal_store: EventJournalStore) -> None:
-    """A message whose relay the old router already sent gets no second, direct answer: the relay is its delivery."""
-    await _record_router_answer(journal_store, "$e1", "$relay")
+    """A message whose relay the old router already sent gets no direct owner: the relay is its delivery.
+
+    That holds for the relayed message alone. A message batched with it that the router never relayed is answered,
+    and a choice saved for such a message never becomes the relayed one's.
+    """
+    await _record_router_answer(journal_store, "$old", "$relay")
     selections = ResponderSelections(lambda: journal_store)
-    assert await selections.select(_ROOM, ["$e0", "$e1"], _never) == frozenset()
-    assert await journal_store.room_event_claims(_ROOM, ["$e0", "$e1"], "responder") == {
-        "$e0": NO_RESPONDER,
-        "$e1": NO_RESPONDER,
-    }
+    assert await selections.select(_ROOM, ["$old"], _never) == frozenset()
+    assert await selections.select(_ROOM, ["$old", "$fresh"], _Chooser("alpha")) == {"alpha"}
+    # The other order: the fresh message has its choice before a batch brings the relayed one along.
+    await _record_router_answer(journal_store, "$old-2", "$relay-2")
+    assert await selections.select(_ROOM, ["$fresh-2"], _Chooser("beta")) == {"beta"}
+    assert await selections.select(_ROOM, ["$fresh-2", "$old-2"], _never) == {"beta"}
+    events = ["$old", "$fresh", "$old-2", "$fresh-2"]
+    assert await journal_store.room_event_claims(_ROOM, events, "responder") == {"$fresh": "alpha", "$fresh-2": "beta"}
 
 
 @pytest.mark.asyncio

@@ -2054,15 +2054,9 @@ async def test_original_the_old_router_already_relayed_gets_no_second_answer(
         origin_server_ts=1_000_001,
     )
     relay.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
-    await (
-        general.runtime.orchestrator.event_journal_store()
-        .turn_records(ROUTER_AGENT_NAME)
-        .write(
-            turn_rows.record_responded_turn,
-            TurnRecord.create([original.event_id], response_event_id=relay.event_id),
-            room_id=_ROOM_ID,
-        )
-    )
+    router_turns = general.runtime.orchestrator.event_journal_store().turn_records(ROUTER_AGENT_NAME)
+    answered = TurnRecord.create([original.event_id], response_event_id=relay.event_id)
+    await router_turns.write(turn_rows.record_responded_turn, answered, room_id=_ROOM_ID)
     selector = _select_responder(monkeypatch, "research")
 
     await research.deliver(room, original)

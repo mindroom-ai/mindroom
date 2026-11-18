@@ -1010,6 +1010,84 @@ async def test_single_candidate_saves_its_turn_for_a_candidate_that_joins_later(
     selector.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_follow_up_saved_for_an_agent_whose_reply_ended_is_still_answered(
+    config: Config,
+    process: ReadyRuntime,
+) -> None:
+    """A follow-up the thread's agent left to an agent still answering is answered by it after its reply ended.
+
+    By then that agent sees only the thread's agent in the thread and has no queued follow-up, so by itself it would
+    leave the message to the thread's agent, which already left it to this one.
+    """
+    room = _two_agent_room(config)
+    history = [
+        make_visible_message(sender=_SENDER, body="please help"),
+        make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"),
+    ]
+    context = _context(thread_id="$thread:localhost", thread_history=history)
+    selector = _selector("general")
+
+    first = await _plans(config, process, room, context, selector, names=("general",), answering="research")
+    # Research's reply has ended: it plans with no running reply and no queued follow-up.
+    later = await _plans(config, process, room, context, selector, names=("research",))
+
+    assert (first, later) == ({"general": "ignore"}, {"research": "individual"})
+    selector.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_outside_a_thread_saves_no_choice_for_it(config: Config, process: ReadyRuntime) -> None:
+    """An agent that leaves a thread to the agent answering in it only reads: it saves nothing for that agent."""
+    history = [
+        make_visible_message(sender=_SENDER, body="please help"),
+        make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"),
+    ]
+    context = _context(thread_id="$thread:localhost", thread_history=history)
+
+    plans = await _plans(config, process, _two_agent_room(config), context, _selector(), names=("research",))
+
+    assert plans == {"research": "ignore"}
+    assert await process.event_journal_store().room_event_claims(_ROOM_ID, [_EVENT_ID], "responder") == {}
+
+
+@pytest.mark.asyncio
+async def test_saved_individual_owner_stops_a_later_implicit_team(config: Config, process: ReadyRuntime) -> None:
+    """A replay that now sees a second agent in a DM forms no team for a message one agent already owns."""
+    alone = _room_with_members(_SENDER, _entity_id(config, "research").full_id)
+    with patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=True)):
+        first = await _plans(config, process, alone, _context(), _selector(), names=("research",))
+        later = await _plans(config, process, _two_agent_room(config), _context(), _selector())
+
+    # General would surface the team; research is no team owner in the larger room, but the message is saved for it.
+    assert (first, later) == ({"research": "individual"}, {"general": "ignore", "research": "individual"})
+
+
+@pytest.mark.asyncio
+async def test_implicit_team_owner_stops_a_later_individual_answer(config: Config, process: ReadyRuntime) -> None:
+    """A message a DM's team answered through one agent is not answered again by the one agent a replay still sees."""
+    alone = _room_with_members(_SENDER, _entity_id(config, "research").full_id)
+    with patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=True)):
+        first = await _plans(config, process, _two_agent_room(config), _context(), _selector())
+        later = await _plans(config, process, alone, _context(), _selector(), names=("research",))
+        replayed = await _plans(config, process, _two_agent_room(config), _context(), _selector(), names=("general",))
+
+    assert (first, later) == ({"general": "team", "research": "ignore"}, {"research": "ignore"})
+    assert replayed == {"general": "team"}
+
+
+@pytest.mark.asyncio
+async def test_mentioned_agents_team_takes_no_claim(config: Config, process: ReadyRuntime) -> None:
+    """A team the message asks for by mentioning its agents answers whatever is saved for the message."""
+    journal = process.event_journal_store()
+    await journal.claim_room_event(_ROOM_ID, _EVENT_ID, "responder", "research")
+    context = _context(mentioned=[_entity_id(config, "general"), _entity_id(config, "research")])
+
+    plans = await _plans(config, process, _two_agent_room(config), context, _selector())
+
+    assert plans == {"general": "team", "research": "ignore"}
+
+
 def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:
     """PreparedDispatch enforces that envelope and dispatch describe the same delivery."""
     target = MessageTarget.resolve(_ROOM_ID, None, _EVENT_ID)
