@@ -1356,6 +1356,28 @@ async def test_memory_search_reranks_twenty_candidates(config: Config, monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failing", [False, True])
+async def test_reranked_memory_search_above_twenty_returns_its_whole_limit(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: bool,
+) -> None:
+    """A default-reranked search for more than 20 fetches its `limit`, reranked or, when reranking fails, hybrid."""
+    config.memory.search.mode = "semantic"
+    scored = [(f"Shed note {index}", 0.9 - index / 100) for index in range(30)]
+    reranker = _StubReranker([index / 100 for index in range(30)], failing=failing)
+    _configure_reranker_settings(monkeypatch, config, {"provider": "typesafe"}, reranker)
+    index_limits = _semantic_index(monkeypatch, scored)
+
+    results = await search_agent_memories("shed", "general", config, limit=30)
+
+    memories = [memory for memory, _score in scored]
+    assert index_limits == [30]
+    assert reranker.documents == [memories]
+    assert [result["memory"] for result in results] == (memories if failing else memories[::-1])
+
+
+@pytest.mark.asyncio
 async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_enabled(
     config: Config,
     refresh_scheduler: RecordingRefreshScheduler,

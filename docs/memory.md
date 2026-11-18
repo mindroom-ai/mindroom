@@ -264,7 +264,7 @@ Writes through the `memory` tool, auto-flush, and an applied [dreaming](scheduli
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
 
 Reranking is on with `rerank: true`, and with `rerank` unset when the [`reranker`](knowledge.md#reranking) is `openai_decisions` or `typesafe`, the two that improved recall in the benchmark below; `rerank: false` turns it off, globally or in `agents.<name>.memory_search`.
-With reranking on and a reranker configured, semantic searches fetch 20 hits and the reranker orders them.
+With reranking on and a reranker configured, semantic searches fetch 20 hits, or a `search_memories` call's larger `limit`, and the reranker orders them.
 Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](knowledge.md#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
 Reranking sends those 20 memory entries and the message to the reranker, which for `cohere`, `vertex_ai`, `typesafe` and `openai_decisions` is a hosted service, and a hosted reranker adds its response time to every reply.
@@ -278,7 +278,7 @@ On three sets of real conversation turns (132 to 1,247 held-out turns each), jud
 | `typesafe` | +5.3 to +31.3 points | 1.59 to 2.36 times | 412 to 553 | 118 ms / 178 ms | $0.00023 to $0.00033 |
 | `openai_decisions` | +2.0 to +4.8 points | 1.46 to 2.22 times | 410 to 528 | 290 ms / 578 ms | $0.00060 to $0.00088 |
 
-Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking, and a second judge model gave gains of the same sign on those turns.
+Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking; a second judge model gave gains of the same sign on that set and on the largest one.
 
 **Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before; set `memory.search.rerank: false` to keep memory entries away from those providers.
 

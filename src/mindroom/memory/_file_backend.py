@@ -914,6 +914,12 @@ class FileMemoryBackend:
             else config.reranker is not None and config.reranker.provider in _RERANK_BY_DEFAULT_PROVIDERS
         )
         reranker = configured_reranker(config, self.runtime_paths) if semantic_search and reranks else None
+        # Recall chooses from a fixed 20; a reranked tool search reorders at least 20 and still returns its whole limit.
+        candidate_limit = limit
+        if recall:
+            candidate_limit = _RECALL_SEARCH_LIMIT
+        elif reranker:
+            candidate_limit = max(limit, _RECALL_SEARCH_LIMIT)
         if semantic_search:
             try:
                 results = await search_semantic_file_memories(
@@ -923,7 +929,7 @@ class FileMemoryBackend:
                     config=config,
                     runtime_paths=self.runtime_paths,
                     search_config=search_config,
-                    limit=_RECALL_SEARCH_LIMIT if recall or reranker else limit,
+                    limit=candidate_limit,
                     execution_identity=execution_identity,
                 )
             except SemanticFileMemoryIndexUnavailableError as exc:

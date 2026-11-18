@@ -228,4 +228,4 @@ A7 (gate) fails the guard on Harry all and Harry recent; with OpenAI the gate ab
 A5 (bge-reranker-v2-m3): not run (GPU-only per ruling 5; measurement only).
 Search errors (embedder HTTP 500 after 4 retries) were ~1–2% of turns, excluded from every arm alike.
 
-**Verdict:** A6t and A6o both pass every rule at threshold 0.3 on every run; A6t dominates (larger gain, ~1/3 the cost, ~2.5× faster). A7 does not replace A6.
+**Verdict:** at threshold 0.3, A6t and A6o both pass the quality rules (guard, gain, cost) on all three runs, the latency rule on DevAgent (200 held-out turns), and the second-judge rule on DevAgent and Harry all; A6t dominates (larger gain, ~1/3 the cost, ~2.5× faster). A7 does not replace A6.
