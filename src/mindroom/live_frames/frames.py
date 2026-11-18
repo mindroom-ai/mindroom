@@ -58,7 +58,7 @@ def fitted_tools(tools: tuple[dict[str, object], ...], *, bare: int) -> tuple[di
         shown = _fitted_entry(entry, bare=False)
         if index < bare:
             stripped = _fitted_entry(entry, bare=True)
-            if len(json.dumps(stripped)) < len(json.dumps(shown)):
+            if len(json.dumps(stripped, separators=(",", ":"))) < len(json.dumps(shown, separators=(",", ":"))):
                 shown = stripped
         fitted.append(shown)
     return tuple(fitted)

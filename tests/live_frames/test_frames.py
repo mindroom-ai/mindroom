@@ -130,6 +130,16 @@ def test_a_bare_entry_is_never_bigger_than_its_cut_form() -> None:
     """A minimal job handle in another key order stays as it is when its entry goes bare, so frames only shrink."""
     result = json.dumps({"job_id": "j1", "status": "waiting", "tool": "mindroom_dev"})
     entry = {"type": "tool_call_completed", "tool_name": "run_subagent", "result_preview": result}
-    sizes = [len(json.dumps(fitted_tools((entry, entry, entry), bare=bare))) for bare in range(4)]
+    sizes = [
+        len(json.dumps(fitted_tools((entry, entry, entry), bare=bare), separators=(",", ":"))) for bare in range(4)
+    ]
     assert sizes == sorted(sizes, reverse=True)
     assert fitted_tools((entry,), bare=1) == (entry,)
+
+
+def test_a_bare_entry_compares_by_compact_size() -> None:
+    """Frames go out as compact JSON, so a bare form that saves bytes there is taken even when spaced JSON ties."""
+    result = json.dumps({"job_id": "j1", "tool": "sync", "status": "running", "label": None})
+    entry = {"type": "tool_call_completed", "tool_name": "read_status", "result_preview": result}
+    (bare,) = fitted_tools((entry,), bare=1)
+    assert json.loads(bare["result_preview"]) == {"job_id": "j1", "tool": "sync", "status": "running"}
