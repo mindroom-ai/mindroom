@@ -10,6 +10,14 @@
       "id": "15a2d22c55"
     },
     {
+      "name": "an escaped surrogate pair in the title",
+      "stage": 1,
+      "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"\\ud83d\\ude00\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"name\":\"Orders\",\"data\":[120,180.5]}]}",
+      "valid": true,
+      "canonical": "{\"kind\":\"bar\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"data\":[120,180.5],\"name\":\"Orders\"}],\"title\":\"😀\",\"type\":\"chart\"}",
+      "id": "4919456644"
+    },
+    {
       "name": "axis titles",
       "stage": 1,
       "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"Orders\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"name\":\"Orders\",\"data\":[120,180.5]}],\"x\":\"Quarter\",\"y\":\"orders\"}",
@@ -178,6 +186,12 @@
       "valid": false
     },
     {
+      "name": "a lone surrogate in the title",
+      "stage": 1,
+      "json": "{\"type\":\"chart\",\"kind\":\"bar\",\"title\":\"\\ud83d\",\"labels\":[\"Q1\",\"Q2\"],\"series\":[{\"name\":\"Orders\",\"data\":[120,180.5]}]}",
+      "valid": false
+    },
+    {
       "name": "a top-level array",
       "stage": 1,
       "json": "[1]",
@@ -218,6 +232,11 @@
       "name": "an explicit null on the wire",
       "stage": 1,
       "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\",\"x\":null}"
+    },
+    {
+      "name": "a lone surrogate on the wire",
+      "stage": 1,
+      "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"\\ud83d\",\"type\":\"chart\",\"y\":\"users\"}"
     }
   ],
   "renders": [
@@ -341,6 +360,126 @@
         ]
       },
       "html": "<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n<pre><code class=\"language-mindroom-ui-ff73cd868c\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n"
+    },
+    {
+      "name": "a chart after code closed by an indented fence",
+      "stage": 1,
+      "markdown": "```python\nx = 1\n  ```\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```\n\nDone.",
+      "in_progress": false,
+      "text": "```python\nx = 1\n  ```\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```\n\nDone.",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "df4d729a5d",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<pre><code class=\"language-python\">x <span style=\"color: #666\">=</span> <span style=\"color: #666\">1</span>\n</code></pre>\n<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n<p>Done.</p>\n"
+    },
+    {
+      "name": "a chart closed by an indented fence",
+      "stage": 1,
+      "markdown": "```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n   ```\n\nDone.",
+      "in_progress": false,
+      "text": "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```\n\nDone.",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "df4d729a5d",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n<p>Done.</p>\n"
+    },
+    {
+      "name": "a chart after an indented code sample",
+      "stage": 1,
+      "markdown": "Example:\n\n    ```\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```",
+      "in_progress": false,
+      "text": "Example:\n\n    ```\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "df4d729a5d",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<p>Example:</p>\n<pre><code>```\n</code></pre>\n<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n"
+    },
+    {
+      "name": "an open chart fence after an indented code sample in progress",
+      "stage": 1,
+      "markdown": "Example:\n\n    ```\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",",
+      "in_progress": true,
+      "text": "Example:\n\n    ```",
+      "ui": null,
+      "html": "<p>Example:</p>\n<pre><code>```\n</code></pre>\n"
+    },
+    {
+      "name": "a chart after a fence its list ends without closing",
+      "stage": 1,
+      "markdown": "- item\n\n  ```python\n  x = 1\n\nBack out.\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```",
+      "in_progress": false,
+      "text": "- item\n\n  ```python\n  x = 1\n\nBack out.\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "df4d729a5d",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<ul>\n<li>\n<p>item</p>\n<pre><code class=\"language-python\">x <span style=\"color: #666\">=</span> <span style=\"color: #666\">1</span>\n</code></pre>\n</li>\n</ul>\n<p>Back out.</p>\n<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n"
+    },
+    {
+      "name": "an open chart fence after a fence its list ends without closing, in progress",
+      "stage": 1,
+      "markdown": "- item\n\n  ```python\n  x = 1\n\nBack out.\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",",
+      "in_progress": true,
+      "text": "- item\n\n  ```python\n  x = 1\n\nBack out.",
+      "ui": null,
+      "html": "<ul>\n<li>\n<p>item</p>\n<pre><code class=\"language-python\">x <span style=\"color: #666\">=</span> <span style=\"color: #666\">1</span>\n</code></pre>\n</li>\n</ul>\n<p>Back out.</p>\n"
+    },
+    {
+      "name": "a marker id named only in prose",
+      "stage": 1,
+      "markdown": "The block mindroom-ui-df4d729a5d is a marker.\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```",
+      "in_progress": false,
+      "text": "The block mindroom-ui-df4d729a5d is a marker.\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "df4d729a5d",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<p>The block mindroom-ui-df4d729a5d is a marker.</p>\n<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n"
+    },
+    {
+      "name": "a quoted marker block beside a new identical chart",
+      "stage": 1,
+      "markdown": "> ```mindroom-ui-df4d729a5d\n> Signups (line chart, users)\n>      Signups\n> Jan      120\n> Feb    180.5\n> Mar      150\n> ```\n\n```ui\n{\"type\":\"chart\",\"kind\":\"line\",\"title\":\"Signups\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"name\":\"Signups\",\"data\":[120,180.5,150]}],\"y\":\"users\"}\n```",
+      "in_progress": false,
+      "text": "> ```mindroom-ui-df4d729a5d\n> Signups (line chart, users)\n>      Signups\n> Jan      120\n> Feb    180.5\n> Mar      150\n> ```\n\n```mindroom-ui-ff73cd868c\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+      "ui": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "ff73cd868c",
+            "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+          }
+        ]
+      },
+      "html": "<blockquote>\n<pre><code class=\"language-mindroom-ui-df4d729a5d\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n</blockquote>\n<pre><code class=\"language-mindroom-ui-ff73cd868c\">Signups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n</code></pre>\n"
     },
     {
       "name": "a form entry",

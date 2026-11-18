@@ -43,7 +43,7 @@ Section 9 lists what each stage contains.
 | C5 | **Config name: `ui_widgets`** (`agents.<name>.ui_widgets`, `defaults.ui_widgets`, default `false`). | Matches the fence name `ui` and the key `io.mindroom.ui`. It gates the prompt and the transform, so an agent that was never told about widgets cannot produce one. | `widgets`, `native_widgets`, `enable_ui_widgets`. |
 | C6 | **The chart fallback table shows at most 40 rows** (first 20, a count line, last 20). | Estimated with a prototype of the writer: a 200-point, 3-series chart costs about 37 KB as a final edit with the full table and 13 KB with the cap; the edit budget is 27 KB. Without the cap the charts that most need drawing would lose their widget. Tables of 40 rows or fewer are complete. | Full table always. |
 | C7 | **On an edit, `io.mindroom.ui` is only in `m.new_content`; the shared edit builder leaves it out of the outer copy.** | Halves its cost, and holds for every edit envelope, including one wrapped late around a row prepared before its create was acknowledged. Chat reads only the selected revision's own content. | Stripping it in the size step only: the late-wrapped envelope never passes that step. |
-| C8 | **Only a fence that starts in column 0 can be a widget.** | A column-0 fence is top level in CommonMark, outside any list or quote, so replacing it in place cannot break a container. Of the 728 `ui` fences in the eval's cached replies, 725 start in column 0 and 3 are indented under a list item. | The eval's "up to 3 spaces" line scan, which takes a fence inside a list item for top level; a full Markdown parse on every live tick. |
+| C8 | **Only a fence that starts in column 0 can be a widget.** | A column-0 fence is top level in CommonMark, outside any list or quote, so replacing it in place cannot break a container. Of the 728 `ui` fences in the eval's cached replies, 725 start in column 0 and 3 are indented under a list item. | The eval's "up to 3 spaces" line scan, which takes a fence inside a list item for top level; a line scan of our own for the code blocks around a fence, which lost a widget after an indented code sample or a fence its list ended (code review round 1). |
 | C9 | **The transform runs on the text of every reply write, last, and is idempotent.** | A reply's records hold the model's raw text for streamed spans, and Stop, restart, approval-pause and multi-span writes render from those records, not from what was sent. Running the same pure function wherever a reply body becomes Matrix content covers them all without storing widgets in the lifecycle. Idempotent because its own marker blocks are inert input. | Rendering once and freezing the result: the lifecycle would need a second, display copy of every segment. |
 | C10 | **Minimal mode: a `ui` context document plus one bootstrap line** when the switch is on. | A minimal agent never sees the document list unless it asks; without the line it cannot know widgets exist. About 12 tokens, only for opted-in agents. | Document only. |
 
@@ -51,6 +51,7 @@ Section 9 lists what each stage contains.
 
 One JSON object per fenced block (backticks or tildes) that starts in column 0 and whose info string's first word is `ui`.
 A fence inside another code block, an indented or quoted fence, and an unclosed fence are not widgets.
+The code blocks are the ones the block parser of the `formatted_body` renderer finds, so a widget is found exactly where the HTML has a top-level `ui` code block; the parse runs only on text that holds a column-0 `ui` fence line (6 ms for 20 kB).
 Unknown keys are rejected everywhere; strings are never coerced to numbers; booleans are not numbers; numbers must be finite.
 An optional key may be absent or `null`; the canonical JSON never has `null`.
 Parsing never raises: malformed JSON, a number too large for a double, and a lone surrogate all mean "not a widget".
@@ -82,7 +83,7 @@ This filter steers models; it is not a confidentiality boundary.
 - Canonical JSON of a valid widget: the validated widget without absent optional keys, object keys sorted, separators `,` and `:` with no spaces, non-ASCII characters kept.
 - A whole number below 2^53 in magnitude is written without a fraction (`120`, not `120.0`); any other number in its shortest round-trip form.
 - `id` = the first 10 lowercase hex characters of SHA-256 over the UTF-8 bytes of that text.
-- If the text being rendered already holds a marker block with that id, the id is instead taken from the text followed by `#1`, then `#2`, until it is free.
+- If the text being rendered already holds a marker block with that id, at any depth (prose that only names the marker is not one), the id is instead taken from the text followed by `#1`, then `#2`, until it is free.
 - Two identical blocks authored in one text share one id and one entry; both places draw it.
 - Chat never computes an id.
 
@@ -230,7 +231,7 @@ Submit sends this event content (the Notes field was left empty):
 ### 6.1 Modules
 
 - `src/mindroom/ui_widgets/models.py`: the eval schema as strict pydantic models, the limits, and `parse_widget(json_text)`; Stage 1 has `chart` only.
-- `src/mindroom/ui_widgets/render.py`: the column-0 fence scan, canonical JSON, id, fallback writer, and `render_ui_widgets(text, *, in_progress)`, which returns the visible text and the `io.mindroom.ui` value (or `None`).
+- `src/mindroom/ui_widgets/render.py`: the column-0 `ui` fences among the renderer's fenced code blocks (`fenced_code_blocks` in `matrix/message_builder.py`), canonical JSON, id, fallback writer, and `render_ui_widgets(text, *, in_progress)`, which returns the visible text and the `io.mindroom.ui` value (or `None`).
 - The result for one block is memoized by the block's text, so a live tick does not validate and hash closed widgets again.
 - `UI_WIDGETS_CONTENT_KEY = "io.mindroom.ui"` in `constants.py`.
 - No handler for `io.mindroom.ui_response`: the answer is a normal mention turn and the agent reads its body.
@@ -488,5 +489,5 @@ Reviews: Sol (GPT-6.2 Sol), findings S1 to S6 and S-minor; Astra (GPT-6.2 Astra)
 - A3, the part asking to store display segments separately from run input in the reply records: the same guarantees come from running an idempotent transform at the write boundary, without a second copy of each segment in the lifecycle.
 - A6, the part asking to follow edits of an answer: Sol asked for the opposite, and the answer's own content is the simpler rule; an edit of the answer changes nothing.
 - A9, tightening the secret filter for a second, unnegated match: the round-2 schema is used as measured; listed in section 10.
-- A11, a real Markdown token scan for top-level fences: the column-0 rule gives the same guarantee for 725 of 728 measured fences without parsing on every live tick.
+- A11, a real Markdown token scan for top-level fences: the column-0 rule gives the same guarantee for 725 of 728 measured fences without parsing on every live tick. Reversed in part by code review round 1: column 0 still decides which fence can be a widget, but the code blocks around it now come from the renderer's block parse.
 - Scope cuts not taken: unaligned fallback columns, a plain pie, unlabelled-toggle and tick simplifications (they depart from the mockups for a few lines each), and leaving the switch out of the dashboard (one line beside `show_reasoning`).

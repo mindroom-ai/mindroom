@@ -232,6 +232,53 @@ def test_text_a_stream_already_rendered_gets_its_widgets_from_the_text_as_writte
     assert recorded_ui_widgets(BLOCK, BLOCK) is None
 
 
+@pytest.mark.parametrize(
+    "before",
+    [
+        "Example:\n\n    ```\n\n",  # an indented code sample that only looks like a fence
+        "- item\n\n  ```python\n  x = 1\n\nBack out.\n\n",  # a fence its list ends without closing
+        "```python\nx = 1\n  ```\n\n",  # a block closed by an indented fence
+    ],
+)
+def test_code_before_a_chart_ends_where_markdown_ends_it(before: str) -> None:
+    """A widget is found wherever the HTML shows a top-level `ui` code block, and hidden while it is open."""
+    assert markdown_to_html(before + _ui(CHART)).count('<pre><code class="language-ui">') == 1
+    result = render_ui_widgets(before + _ui(CHART), in_progress=False)
+    assert [entry["id"] for entry in result.content["widgets"]] == ["df4d729a5d"]
+    assert result.text == before + BLOCK
+    open_block = before + '```ui\n{"type":"chart",'
+    assert render_ui_widgets(open_block, in_progress=True).text == before.rstrip()
+    assert without_open_ui_fence(open_block) == before.rstrip()
+
+
+def test_raw_html_before_a_fence_is_read_as_the_html_renderer_reads_it() -> None:
+    """The renderer adds a line after `<hr>`, which frees one fence and lets another swallow a chart."""
+    freed = render_ui_widgets(f"<hr>\n{_ui(CHART)}", in_progress=False)
+    assert freed.text == f"<hr>\n\n{BLOCK}"
+    assert 'class="language-mindroom-ui-df4d729a5d"' in markdown_to_html(freed.text)
+    swallowed = f"<hr>\n`````\ntext\n\n{_ui(CHART)}"
+    assert "language-ui" not in markdown_to_html(swallowed)
+    assert render_ui_widgets(swallowed, in_progress=False).text is swallowed
+
+
+def test_a_chart_closed_by_an_indented_fence_is_a_widget() -> None:
+    """Markdown closes a fence indented up to three spaces."""
+    result = render_ui_widgets(f"```ui\n{CHART}\n   ```\n\nAfter.", in_progress=True)
+    assert result.text == f"{BLOCK}\n\nAfter."
+    assert len(result.content["widgets"]) == 1
+
+
+def test_only_a_marker_block_reserves_or_recovers_an_id() -> None:
+    """Prose that names a marker neither changes a widget's id nor stands for its block."""
+    prose = "The block mindroom-ui-df4d729a5d is a marker."
+    result = render_ui_widgets(f"{prose}\n\n{_ui(CHART)}", in_progress=False)
+    assert [entry["id"] for entry in result.content["widgets"]] == ["df4d729a5d"]
+    assert recorded_ui_widgets(prose, _ui(CHART)) is None
+    nested = "\n".join(f"> {line}" for line in BLOCK.split("\n"))
+    (entry,) = render_ui_widgets(f"{nested}\n\n{_ui(CHART)}", in_progress=False).content["widgets"]
+    assert entry["id"] != "df4d729a5d"
+
+
 def test_block_results_are_memoized() -> None:
     """A live tick does not validate a closed block again."""
     block = _ui(_chart(title="Memoized once"))

@@ -10,6 +10,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.message_builder import fenced_code_blocks
 from mindroom.ui_widgets.models import Chart, parse_widget
 
 if TYPE_CHECKING:
@@ -21,7 +22,6 @@ _MAX_WIDGETS = 8
 _MAX_UI_BYTES = 16_384
 _FALLBACK_MAX_ROWS = 40
 _MARKER = "mindroom-ui-"
-_FENCE = re.compile(r"^( *)(`{3,}|~{3,})(.*)$")
 # A cheap test for "this text may hold a column-0 `ui` fence"; the line scan decides.
 _UI_FENCE = re.compile(r"^(?:`{3,}|~{3,})[ \t]*ui(?:\s|$)", re.MULTILINE)
 _MARKER_ID = re.compile(_MARKER + r"([0-9a-f]{10})")
@@ -108,39 +108,41 @@ def _block(json_text: str) -> tuple[str, tuple[str, ...]] | list[str]:
     return _canonical_widget_json(widget), _fallback_lines(widget)
 
 
-def _ui_fences(lines: list[str]) -> tuple[list[tuple[int, int]], int | None]:
-    """The column-0 `ui` fences outside any other code block.
+def _ui_fences(lines: list[str]) -> tuple[list[tuple[int, int]], int | None, set[str]]:
+    """The column-0 `ui` fences outside any other block, where the markdown parser the HTML is made with finds them.
 
-    Returns the opening and closing line of each closed one, and the opening line of an open one once that line is complete.
-    Any fence, indented or not, opens a code block, so a `ui` fence inside one is never taken for a widget.
+    Returns the opening and closing line of each closed one, the opening line of an open one once that line is
+    complete, and the id of every marker block.
     """
     closed: list[tuple[int, int]] = []
-    opened: tuple[str, int, int, int] | None = None  # fence character, length, indent, opening line
-    is_ui = False
-    for index, line in enumerate(lines):
-        match = _FENCE.match(line)
-        if match is None:
+    open_at = None
+    marker_ids: set[str] = set()
+    for start, end, info, top_level in fenced_code_blocks(lines):
+        marker = _MARKER_ID.match(info.strip())
+        if marker is not None:
+            marker_ids.add(marker[1])
+        opening = lines[start]
+        if not top_level or opening[0] == " " or info.split()[:1] != ["ui"]:
             continue
-        indent, fence, info = match.groups()
-        if opened is None:
-            if fence[0] == "`" and "`" in info:
-                continue
-            opened = (fence[0], len(fence), len(indent), index)
-            is_ui = not indent and info.split()[:1] == ["ui"]
-        elif fence[0] == opened[0] and len(fence) >= opened[1] and len(indent) <= opened[2] + 3 and not info.strip():
-            if is_ui:
-                closed.append((opened[3], index))
-            opened = None
-    if opened is not None and is_ui and opened[3] < len(lines) - 1:
-        return closed, opened[3]
-    return closed, None
+        fence = opening[: len(opening) - len(opening.lstrip(opening[0]))]
+        # An open top-level fence runs to the last line, which then is not a closing fence.
+        if end - 1 > start and re.fullmatch(f" {{0,3}}{fence}{fence[0]}*[ \t]*", lines[end - 1]):
+            closed.append((start, end - 1))
+        elif start < len(lines) - 1:
+            open_at = start
+    return closed, open_at, marker_ids
+
+
+def _lines(text: str) -> list[str]:
+    """The lines of a text as the markdown parser counts them."""
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
 def without_open_ui_fence(text: str) -> str:
     """The text cut where an open column-0 `ui` fence begins; the same object when there is none."""
     if _UI_FENCE.search(text) is None:
         return text
-    lines = text.split("\n")
+    lines = _lines(text)
     open_at = _ui_fences(lines)[1]
     return text if open_at is None else "\n".join(lines[:open_at]).rstrip()
 
@@ -196,12 +198,12 @@ def _rendered(text: str, *, in_progress: bool) -> tuple[str, list[dict[str, str]
     """The text with its valid closed `ui` blocks replaced, and their entries; the same text when nothing changes."""
     if _UI_FENCE.search(text) is None:
         return text, []
-    lines = text.split("\n")
-    closed, open_at = _ui_fences(lines)
+    lines = _lines(text)
+    closed, open_at, marker_ids = _ui_fences(lines)
     cut = in_progress and open_at is not None
     if cut:
         del lines[open_at:]
-    out, found = _replace_blocks(lines, closed, set(_MARKER_ID.findall(text)), warn=not in_progress)
+    out, found = _replace_blocks(lines, closed, marker_ids, warn=not in_progress)
     if not found and not cut:
         return text, []
     rendered = "\n".join(out)
@@ -227,5 +229,6 @@ def recorded_ui_widgets(shown_text: str, recorded_text: str) -> dict[str, object
     """
     if _MARKER not in shown_text:
         return None
+    shown_ids = _ui_fences(_lines(shown_text))[2]
     entries = _rendered(recorded_text, in_progress=False)[1]
-    return _ui_value([entry for entry in entries if _MARKER + entry["id"] in shown_text])
+    return _ui_value([entry for entry in entries if entry["id"] in shown_ids])

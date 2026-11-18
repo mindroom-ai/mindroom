@@ -491,6 +491,12 @@ def _build_markdown_renderer() -> MarkdownIt:
 _MARKDOWN_RENDERER = _build_markdown_renderer()
 
 
+def _markdown_as_parsed(text: str) -> str:
+    """The markdown the renderer is given: line endings, raw HTML and its boundaries made safe to parse."""
+    escaped_text = _escape_html_block_openers(_normalize_input_line_endings(text))
+    return _normalize_supported_block_html_boundaries(escaped_text)
+
+
 def markdown_to_html(text: str) -> str:
     """Convert markdown text to HTML for Matrix formatted messages.
 
@@ -499,11 +505,32 @@ def markdown_to_html(text: str) -> str:
     Unlike the old ``markdown`` library, tables parse correctly even without a
     blank line before them.
     """
-    normalized_input = _normalize_input_line_endings(text)
-    escaped_text = _escape_html_block_openers(normalized_input)
-    normalized_text = _normalize_supported_block_html_boundaries(escaped_text)
-    html_text: str = _MARKDOWN_RENDERER.render(normalized_text)
+    html_text: str = _MARKDOWN_RENDERER.render(_markdown_as_parsed(text))
     return _sanitize_formatted_body_html(html_text)
+
+
+def fenced_code_blocks(lines: list[str]) -> list[tuple[int, int, str, bool]]:
+    """Return each fenced code block ``markdown_to_html`` makes of some lines.
+
+    Each is its first line, the line after its last, its info string, and whether it is outside every list and quote.
+    """
+    parsed = _markdown_as_parsed("\n".join(lines)).split("\n")
+    # Parsing only adds blank lines, each before a line that is not blank; count them out.
+    origin: list[int] = []
+    line = 0
+    for parsed_line in parsed:
+        origin.append(line)
+        line += parsed_line != "" or (line < len(lines) and lines[line] == "")
+    if line != len(lines):
+        return []
+    origin.append(line)
+    tokens: list[Token] = []
+    _MARKDOWN_RENDERER.block.parse("\n".join(parsed), _MARKDOWN_RENDERER, {}, tokens)
+    return [
+        (origin[token.map[0]], origin[token.map[1]], token.info, token.level == 0)
+        for token in tokens
+        if token.type == "fence" and token.map is not None
+    ]
 
 
 def opens_with_markdown_block(text: str) -> bool:
