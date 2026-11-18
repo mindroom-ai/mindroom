@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1567,23 +1568,25 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
         )
         return prompt_parts.session_preamble
 
-    first = await preamble(ConversationRef("thread", (None, None)))
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    other_thread = replace(thread, snapshot=storage_path / "snapshots" / "other-thread.json")
+    first = await preamble(thread)
     await add_agent_memory("Added fact.", "general", config)
 
-    assert await preamble(ConversationRef("thread", (None, None))) == first
+    assert await preamble(thread) == first
     assert "Added fact." not in first
-    assert "Added fact." in await preamble(ConversationRef("other-thread", (None, None)))
+    assert "Added fact." in await preamble(other_thread)
     assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] in first
     fresh = await preamble(None)
     assert "Added fact." in fresh
     assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] not in fresh
 
     (workspace / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-    assert "Curated fact." not in await preamble(ConversationRef("thread", (None, None)))
+    assert "Curated fact." not in await preamble(thread)
 
     # A prompt override applies through hot reload, so an edited header loads again.
     config.prompts["FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"] = "Edited header for `{memory_path}`."
-    assert (await preamble(ConversationRef("thread", (None, None)))).startswith("Edited header")
+    assert (await preamble(thread)).startswith("Edited header")
 
 
 @pytest.mark.asyncio

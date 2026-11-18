@@ -20,7 +20,8 @@ from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.hooks import render_transient_context
-from mindroom.memory import ConversationRef, MemoryPromptParts
+from mindroom.memory import ConversationRef, MemoryPromptParts, entrypoint_snapshot_path
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import install_model_providers, make_turn_context
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -98,13 +99,15 @@ class TestMemoryIntegration:
         assert response.text == "Test response"
 
         # Verify memory enhancement was applied
+        database = create_session_storage("general", config, runtime_paths, execution_identity=None).path
+        conversation = ConversationRef((None, None), entrypoint_snapshot_path(database, "test_session"))
         mock_build.assert_called_once_with(
             "What is 2+2?",
             "general",
             config,
             runtime_paths,
             execution_identity=None,
-            conversation=ConversationRef("test_session", (None, None)),
+            conversation=conversation,
             counter=ANY,
         )
 
@@ -224,6 +227,7 @@ class TestMemoryIntegration:
 )
 def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
     history_limit: dict[str, object],
+    tmp_path: Path,
 ) -> None:
     """Only a file-memory conversation whose system prompt can stay cached keeps a MEMORY.md copy.
 
@@ -236,9 +240,10 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         owner_id="general",
         summary=ScopeSummary(text=" Earlier work. ", updated_at=datetime.now(UTC)),
     )
+    database = tmp_path / "general" / "sessions" / "general.db"
     scope_context = ScopeSessionContext(
         scope=HistoryScope("agent", "general"),
-        storage=MagicMock(),
+        storage=MagicMock(path=database),
         session=session,
         session_id="thread",
         storage_factory=lambda: MagicMock(),
@@ -256,7 +261,10 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         memory={"backend": "file"},
     )
 
-    assert _memory_conversation(ctx, config, scope_context) == ConversationRef("thread", ("Earlier work.", None))
+    assert _memory_conversation(ctx, config, scope_context) == ConversationRef(
+        ("Earlier work.", None),
+        entrypoint_snapshot_path(database, "thread"),
+    )
     assert _memory_conversation(ctx, mem0, scope_context) is None
     assert _memory_conversation(replace(ctx, agent_mode="minimal"), config, scope_context) is None
     assert _memory_conversation(ctx, limited, scope_context) is None

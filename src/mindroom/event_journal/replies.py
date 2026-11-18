@@ -576,6 +576,16 @@ def _owner_lost(
     return tuple(applied)
 
 
+def _continued_sources(transaction: Transaction, principal_id: str) -> frozenset[str]:
+    """Return the sources still pending in the journal of the replies that have not ended, which replay continues."""
+    continued: set[str] = set()
+    for found in reply_messages.in_states(transaction, principal_id, (rl.ReplyState.ACTIVE, rl.ReplyState.PAUSED)):
+        last = reply_spans.load(transaction, principal_id, found.last_span_id)
+        assert last is not None
+        continued.update(journal.pending_among(transaction, principal_id, last.sources.pending_event_ids))
+    return frozenset(continued)
+
+
 # ---------------------------------------------------------------------------
 # Rows
 
@@ -950,6 +960,10 @@ class ReplyStore(PrincipalRows):
     async def owner_lost(self, active_generation: str, *, now_ns: int) -> tuple[AppliedTransition, ...]:
         """End what an older bot instance left running on these replies; see ``_owner_lost``."""
         return await self._write(_owner_lost, active_generation=active_generation, now_ns=now_ns)
+
+    async def continued_sources(self) -> frozenset[str]:
+        """Return the pending sources of the replies that have not ended; see ``_continued_sources``."""
+        return await self._read(_continued_sources)
 
     async def supersede_replay(self, source_event_ids: tuple[str, ...], *, now_ns: int) -> AppliedTransition | None:
         """Settle a superseded replay's sources with the reply they left; see ``_supersede_replay``."""

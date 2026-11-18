@@ -211,7 +211,6 @@ async def _entrypoint_preamble(
     backend: ResolvedMemoryBackend,
     agent_name: str,
     config: Config,
-    runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     conversation: ConversationRef | None,
     counter: TokenCounter,
@@ -236,12 +235,10 @@ async def _entrypoint_preamble(
         return preamble
     return await asyncio.to_thread(
         stable_entrypoint_preamble,
-        agent_name,
         conversation,
         entrypoint.source_path,
         body,
         preamble,
-        store=runtime_paths.storage_root / "memory_entrypoint_snapshots.json",
         now=time.time(),
     )
 
@@ -265,7 +262,6 @@ async def conversation_entrypoint_preamble(
         backend,
         agent_name,
         config,
-        runtime_paths,
         execution_identity,
         conversation,
         counter,
@@ -308,7 +304,6 @@ async def build_memory_prompt_parts(
         backend,
         agent_name,
         config,
-        runtime_paths,
         execution_identity,
         conversation,
         counter,

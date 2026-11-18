@@ -1,5 +1,6 @@
-"""`/api/github`: GitHub API requests a signed-in client makes with its user's own connected GitHub account.
+"""`/api/github`: GitHub API requests a signed-in client makes with its user's own GitHub account.
 
+The account is a personal access token the user saved here, else their GitHub App connection (Connect GitHub).
 The client names a method and a repository or GraphQL path; this route adds the user's token, sends the request to
 `api.github.com` only, and answers with GitHub's status, body, and a few headers, so the token never leaves MindRoom.
 This route's own log lines carry the method, the path's kind, and GitHub's status, never the token, the repository, or
@@ -12,17 +13,23 @@ import asyncio
 import json
 import math
 import re
-from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypeIs, override
 from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, JsonValue
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from mindroom.api import config_lifecycle
 from mindroom.api.client_sessions import presented_session
-from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.manager import (
+    CredentialsUnreadableError,
+    credential_layers,
+    get_runtime_credentials_manager,
+)
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialUnreadableError,
@@ -37,11 +44,36 @@ from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedErr
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from fastapi import Response
+
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/github")
+
+class _UnechoedValidationRoute(APIRoute):
+    """A route answering a malformed body with one fixed error.
+
+    The app's 422 body leaves out rejected values but names rejected keys, and a token sent as a key is still a token.
+    """
+
+    @override
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def route(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except RequestValidationError:
+                return _error(422, "github_request_invalid")
+
+        return route
+
+
+router = APIRouter(prefix="/api/github", route_class=_UnechoedValidationRoute)
 
 _GITHUB_API = "https://api.github.com"
 _TIMEOUT_SECONDS = 30.0
@@ -52,6 +84,8 @@ _MAX_REDIRECTS = 3
 _MAX_PATH_LENGTH = 4096
 # The stored connection could not be read or refreshed for a reason a retry may fix.
 _UNAVAILABLE = "github_connection_unavailable"
+# The saved token could not be read; only saving another or removing it helps, so a retry does not.
+_TOKEN_UNREADABLE = "github_token_unreadable"  # noqa: S105
 _PASSED_HEADERS = ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after", "x-github-request-id")
 # One RFC 3986 path character, a `%` always followed by two hex digits. This leaves out controls, spaces, `\`, `#`,
 # and anything outside ASCII, and since every segment is non-empty, `//`, so no path can name another host.
@@ -59,6 +93,17 @@ _PCHAR = r"(?:[A-Za-z0-9\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})"
 # Logs name the segment after the repository only when it reads as an API resource, such as `pulls` or `check-runs`.
 _RESOURCE = re.compile(r"[a-z][a-z_-]{0,31}")
 _PATH = re.compile(rf"(/graphql|/repos(?:/{_PCHAR}+){{2,}})(?:\?(?:{_PCHAR}|[/?])*)?")
+# The user's own personal access token, beside their GitHub App connection; never the `github` tool's shared token.
+_TOKEN_SERVICE = "github_user_token"  # noqa: S105
+# 1 to 512 visible ASCII characters, checked on every token sent to save and every saved token read.
+_TOKEN_SHAPE = re.compile(r"[!-~]{1,512}")
+# Letters, digits, and hyphens, plus the `_shortcode` an enterprise managed user's login ends with.
+_LOGIN_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}")
+_TOKEN_CHECK_TIMEOUT_SECONDS = 10.0
+# GitHub's `/user` answer is a few kilobytes; a larger one is not the answer the check expects.
+_MAX_TOKEN_CHECK_BYTES = 64 * 1024
+_DEFAULT_ACCEPT: Final = "application/vnd.github+json"
+_API_VERSION = "2022-11-28"
 
 
 class GitHubRequest(BaseModel):
@@ -73,7 +118,15 @@ class GitHubRequest(BaseModel):
         "application/vnd.github+json",
         "application/vnd.github.full+json",
         "application/vnd.github.diff",
-    ] = "application/vnd.github+json"
+    ] = _DEFAULT_ACCEPT
+
+
+class GitHubToken(BaseModel):
+    """A personal access token: 1 to 512 visible ASCII characters, so no space, control, or other character."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(pattern=rf"^{_TOKEN_SHAPE.pattern}$")
 
 
 def _path_kind(path: str) -> str | None:
@@ -158,18 +211,142 @@ async def _access_token(context: OAuthCredentialContext | None) -> str | None:
     return token if isinstance(token, str) and token else None
 
 
-@router.get("/status", response_model=None)
-async def github_status(request: Request) -> dict[str, object] | JSONResponse:
-    """Say whether the session's user has a usable GitHub connection and its login, from stored state only."""
-    context = _credential_context(request)
+def _token_store(context: OAuthCredentialContext) -> CredentialsManager:
+    """Return the user's primary-only store, the one their GitHub App connection is in, without any shared layer.
+
+    `primary_built_tool=True` is what places the service there: a store no worker can read or write.
+    """
+    return credential_layers(
+        _TOKEN_SERVICE,
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
+        primary_built_tool=True,
+    ).writable_store()
+
+
+def _read_token(context: OAuthCredentialContext) -> dict[str, str] | None:
+    """Return the user's saved `{token, login}`, None when they saved none; blocks on the filesystem.
+
+    Raises ``CredentialsUnreadableError`` for a saved document that cannot be read or holds no token and login of
+    the shapes a save checks.
+    """
+    document = _token_store(context).read_saved_credentials(_TOKEN_SERVICE)
+    if document is None:
+        return None
+    token, login = document.get("token"), document.get("login")
+    if _shaped(token, _TOKEN_SHAPE) and _shaped(login, _LOGIN_SHAPE):
+        return {"token": token, "login": login}
+    msg = f"Stored credentials for {_TOKEN_SERVICE} hold no token and login"
+    raise CredentialsUnreadableError(msg)
+
+
+def _shaped(value: object, shape: re.Pattern[str]) -> TypeIs[str]:
+    return isinstance(value, str) and shape.fullmatch(value) is not None
+
+
+async def _stored_token(context: OAuthCredentialContext | None) -> dict[str, str] | None:
+    """Return the user's saved `{token, login}`, or None when they saved none or the session names no user.
+
+    Only a missing token lets requests fall back to the GitHub App connection: an unreadable one raises
+    ``CredentialsUnreadableError``, since losing access to a token is no request to act as another account.
+    """
+    if context is None:
+        return None
+    try:
+        return await asyncio.to_thread(_read_token, context)
+    except CredentialsUnreadableError:
+        logger.warning("github_token_unreadable")
+        raise
+
+
+def _save_token(context: OAuthCredentialContext, document: dict[str, str]) -> None:
+    """Save ``document`` as the user's token, replacing even one that cannot be read; blocks on the filesystem.
+
+    The replacement is one atomic publish, so a request meets the old token or the new one, never none, which would
+    let the GitHub App connection answer, and a failed publish leaves the old document.
+    """
+    _token_store(context).save_credentials(_TOKEN_SERVICE, document, replace_unreadable=True)
+
+
+async def _status(context: OAuthCredentialContext | None) -> dict[str, object] | JSONResponse:
+    """Answer which account requests go out with: the saved token, else the GitHub App connection, else none."""
+    try:
+        saved = await _stored_token(context)
+    except CredentialsUnreadableError:
+        return _error(503, _TOKEN_UNREADABLE)
     try:
         credentials = await _usable_credentials(context)
     except OAuthProviderError:
-        return _error(503, _UNAVAILABLE)
+        if saved is None:
+            return _error(503, _UNAVAILABLE)
+        credentials = None
+    if saved is not None:
+        status: dict[str, object] = {"connected": True, "via": "token", "login": saved["login"]}
+        return status | {"app_connected": True} if credentials is not None else status
     if credentials is None:
         return {"connected": False}
     login = oauth_verified_claim(credentials, "login")
-    return {"connected": True} if login is None else {"connected": True, "login": login}
+    return {"connected": True, "via": "app"} | ({} if login is None else {"login": login})
+
+
+async def _token_login(token: str) -> str | JSONResponse:
+    """Return the login GitHub names for ``token``, or the error to answer when it refuses or fails to name one."""
+    headers = {"Authorization": f"Bearer {token}", "Accept": _DEFAULT_ACCEPT, "X-GitHub-Api-Version": _API_VERSION}
+    body = None
+    try:
+        async with (
+            asyncio.timeout(_TOKEN_CHECK_TIMEOUT_SECONDS),
+            _github_client() as client,
+            client.stream("GET", f"{_GITHUB_API}/user", headers=headers) as response,
+        ):
+            # GitHub's status alone decides a failed check, so its body is never downloaded.
+            if response.status_code == 200:
+                content = await _bounded_body(response, _MAX_TOKEN_CHECK_BYTES)
+                body = None if content is None else _answer_body(content, response.headers.get("content-type", ""))
+    except (httpx.HTTPError, TimeoutError) as exc:
+        logger.warning("github_token_check_failed", error_type=type(exc).__name__)
+        return _error(502, "github_unreachable")
+    if response.status_code in {401, 403}:
+        logger.info("github_token_rejected", status=response.status_code)
+        return _error(400, "github_token_rejected")
+    login = body.get("login") if isinstance(body, dict) else None
+    if not _shaped(login, _LOGIN_SHAPE):
+        logger.warning("github_token_check_failed", status=response.status_code)
+        return _error(502, "github_unreachable")
+    return login
+
+
+@router.get("/status", response_model=None)
+async def github_status(request: Request) -> dict[str, object] | JSONResponse:
+    """Say which GitHub account the session's user has and its login, from stored state only."""
+    return await _status(_credential_context(request))
+
+
+@router.put("/token", response_model=None)
+async def save_github_token(payload: GitHubToken, request: Request) -> dict[str, object] | JSONResponse:
+    """Check the session user's personal access token with GitHub, then save it with its login as their own."""
+    context = _credential_context(request)
+    if context is None:
+        return _error(409, "github_not_connected")
+    login = await _token_login(payload.token)
+    if isinstance(login, JSONResponse):
+        return login
+    try:
+        await asyncio.to_thread(_save_token, context, {"token": payload.token, "login": login})
+    except OSError as exc:
+        logger.warning("github_token_save_failed", error_type=type(exc).__name__)
+        return _error(503, _UNAVAILABLE)
+    logger.info("github_token_saved")
+    return {"connected": True, "via": "token", "login": login}
+
+
+@router.delete("/token", response_model=None)
+async def delete_github_token(request: Request) -> dict[str, object] | JSONResponse:
+    """Remove the session user's saved token, if any, and answer the status left, maybe the GitHub App connection."""
+    context = _credential_context(request)
+    if context is not None:
+        await asyncio.to_thread(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
+    return await _status(context)
 
 
 @router.post("/request", response_model=None)
@@ -177,21 +354,23 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
     """Send ``payload`` to GitHub as the session's user and answer with GitHub's status, body, and rate headers.
 
     Any GitHub answer is a 200 here; 409 means the user has no usable GitHub connection, so the client can fall back.
+    A saved token goes out before the GitHub App connection, and GitHub refusing it is relayed, not acted on.
     """
     context = _credential_context(request)
     kind = _path_kind(payload.path)
     if kind is None:
         return _error(400, "github_path_not_allowed")
     try:
-        token = await _access_token(context)
-    except OAuthProviderError:
-        return _error(503, _UNAVAILABLE)
+        saved = await _stored_token(context)
+        token = saved["token"] if saved is not None else await _access_token(context)
+    except (CredentialsUnreadableError, OAuthProviderError) as exc:
+        return _error(503, _TOKEN_UNREADABLE if isinstance(exc, CredentialsUnreadableError) else _UNAVAILABLE)
     if token is None:
         return _error(409, "github_not_connected")
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": payload.accept,
-        "X-GitHub-Api-Version": "2022-11-28",
+        "X-GitHub-Api-Version": _API_VERSION,
     }
     method, url = payload.method, httpx.URL(_GITHUB_API + payload.path)
     content = None if payload.body is None else json.dumps(payload.body).encode()
@@ -202,12 +381,10 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
                 async with client.stream(method, url, headers=headers | typed, content=content) as response:
                     hop = _redirect(response, method, content) if redirects < _MAX_REDIRECTS else None
                     if hop is None:
-                        body = bytearray()
-                        async for chunk in response.aiter_bytes():
-                            body += chunk
-                            if len(body) > _MAX_RESPONSE_BYTES:
-                                logger.warning("github_request_too_large", method=payload.method, path=kind)
-                                return _error(502, "github_response_too_large")
+                        body = await _bounded_body(response, _MAX_RESPONSE_BYTES)
+                        if body is None:
+                            logger.warning("github_request_too_large", method=payload.method, path=kind)
+                            return _error(502, "github_response_too_large")
                         break
                 method, url, content = hop
     except (httpx.HTTPError, TimeoutError) as exc:
@@ -216,7 +393,7 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
     logger.info("github_request", method=payload.method, path=kind, status=response.status_code, redirects=redirects)
     return {
         "status": response.status_code,
-        "body": _answer_body(bytes(body), response.headers.get("content-type", "")),
+        "body": _answer_body(body, response.headers.get("content-type", "")),
         "headers": {name: response.headers[name] for name in _PASSED_HEADERS if name in response.headers},
     }
 
@@ -238,6 +415,16 @@ def _redirect(
     if response.status_code in {307, 308} or method == "GET":
         return method, url, content
     return None
+
+
+async def _bounded_body(response: httpx.Response, limit: int) -> bytes | None:
+    """Return the streamed ``response`` body, or None as soon as it grows past ``limit`` bytes."""
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body += chunk
+        if len(body) > limit:
+            return None
+    return bytes(body)
 
 
 def _answer_body(body: bytes, content_type: str) -> JsonValue:

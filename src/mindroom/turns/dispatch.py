@@ -388,17 +388,28 @@ class TurnDispatcher:
         if thread_id is None or not first_reply_reaches_first_threshold(self.deps.runtime.config):
             return
         prompt: str | None
+        prompt_event_ids = turn.handled_turn.source_event_ids
         if turn.handled_turn.is_coalesced:
-            # A fork's first title is its parent's, which needs no prompt, so a batch holding the fork root gets it too.
-            if (
-                thread_id not in turn.handled_turn.source_event_ids
-                or fork_parent_thread_id(prepared.dispatch.context.thread_history, thread_id) is None
-            ):
+            if thread_id not in prompt_event_ids:
                 return
-            prompt = None
+            if fork_parent_thread_id(prepared.dispatch.context.thread_history, thread_id) is not None:
+                # A fork's first title is its parent's, which needs no prompt, only its root.
+                prompt = None
+                prompt_event_ids = (thread_id,)
+            elif turn.payload.raw_audio_fallback:
+                return
+            else:
+                # A batch (say attachments, then the text sent with them) is titled from
+                # each source's own prompt, without the coalescing wrapper. The voice flag
+                # covers the whole batch, so a typed text may start with its prefix.
+                source_prompts = turn.handled_turn.source_event_prompts or {}
+                prompt = "\n".join(
+                    source_prompts[event_id] for event_id in prompt_event_ids if event_id in source_prompts
+                )
         elif thread_id != turn.event.event_id or turn.payload.raw_audio_fallback:
             return
         else:
+            prompt_event_ids = (thread_id,)
             # A single-event turn has no coalescing wrapper or reply enrichment;
             # voice normalization has already replaced the audio filename with text.
             prompt = turn.event.body
@@ -411,7 +422,7 @@ class TurnDispatcher:
                 thread_id,
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
-                prompt_event_id=thread_id,
+                prompt_event_ids=prompt_event_ids,
                 prompt=prompt,
                 conversation_reader=self.deps.resolver.deps.conversation_reader,
                 entity_name=self.deps.agent_name,

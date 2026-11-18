@@ -78,12 +78,13 @@ _PROMPT_HEADER = (
     "",
     "## Progressive Discovery Workflow",
     "1. **Browse**: Review the skill summaries below to understand what's available",
-    "2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first",
+    "2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first; its result lists "
+    "the skill's references (`available_references`) and scripts (`available_scripts`)",
     "3. **Reference**: Use `get_skill_reference` to access specific documentation as needed",
     "4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them",
     "",
-    "**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when "
-    "`<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.",
+    "**IMPORTANT**: References are documentation files (NOT executable). When you do not know a skill's "
+    "filenames, call `get_skill_reference` or `get_skill_script` with only the skill name to list them.",
     "",
     "This approach ensures you only load detailed instructions when actually needed.",
     "",
@@ -208,7 +209,11 @@ class SkillsToolkit(Toolkit):
         return tuple(self._skills.values())
 
     def prompt_block(self) -> str:
-        """Return the skills section of the system prompt, or ``""`` when no skill loaded."""
+        """Return the skills section of the system prompt, or ``""`` when no skill loaded.
+
+        It names no reference or script file, which ``get_skill_instructions`` lists, so a new file in a skill
+        leaves the system prompt, and with it every open conversation's prompt cache, unchanged.
+        """
         if not self._skills:
             return ""
         lines = list(_PROMPT_HEADER)
@@ -216,11 +221,6 @@ class SkillsToolkit(Toolkit):
             lines.append("<skill>")
             lines.append(f"  <name>{skill.name}</name>")
             lines.append(f"  <description>{skill.description}</description>")
-            lines.append(
-                f"  <scripts>{', '.join(skill.scripts)}</scripts>" if skill.scripts else "  <scripts>none</scripts>",
-            )
-            if skill.references:
-                lines.append(f"  <references>{', '.join(skill.references)}</references>")
             lines.append("</skill>")
         lines.extend(("", "</skills_system>"))
         return "\n".join(lines)
