@@ -120,6 +120,10 @@ class WorkerCredentialPathError(RuntimeError):
     """Raised when a worker credential directory is not a real directory."""
 
 
+class CredentialsUnreadableError(RuntimeError):
+    """Raised when a saved credential document exists but cannot be read, for example under another key."""
+
+
 def validate_service_name(service: str) -> str:
     """Validate and normalize credential service names."""
     normalized = service.strip()
@@ -607,6 +611,18 @@ class CredentialsManager:
         normalized_service = validate_service_name(service)
         credentials_path = self._credentials_file(normalized_service)
         return self._load_credentials_file(normalized_service, credentials_path)
+
+    def read_saved_credentials(self, service: str) -> dict[str, Any] | None:
+        """Return the document saved for ``service``, None when none is, never a declared one.
+
+        Unlike ``load_credentials``, a document that exists but cannot be read raises ``CredentialsUnreadableError``.
+        """
+        normalized_service = validate_service_name(service)
+        try:
+            return self._read_saved(normalized_service, self._credentials_file(normalized_service))
+        except _UNREADABLE_CREDENTIALS_ERRORS as exc:
+            msg = f"Stored credentials for {normalized_service} could not be loaded"
+            raise CredentialsUnreadableError(msg) from exc
 
     def _read_saved(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
         """Return the document saved at ``credentials_path``, raising ``_UNREADABLE_CREDENTIALS_ERRORS`` if unreadable."""

@@ -1378,3 +1378,61 @@ def test_the_real_app_answers_a_malformed_body_without_echoing_it(
 
     assert (response.status_code, response.json()) == (422, {"error": "github_request_invalid"})
     assert "secret" not in response.text
+
+
+def damage_token(paths: RuntimePaths, user_id: str, payload: bytes) -> None:
+    """Leave ``payload`` where ``user_id``'s saved token lives, as a damaged file or one under another key would."""
+    manager = get_runtime_credentials_manager(paths).for_primary_runtime_scope(user_id, None)
+    manager.save_credentials("github_user_token", {"token": "ghp_old", "login": "old-gh"})
+    manager.get_credentials_path("github_user_token").write_bytes(payload)
+
+
+DAMAGED_TOKENS = pytest.mark.parametrize(
+    "payload",
+    [b"not json", b"MINDROOM-CREDENTIALS-V1\nsealed", b'["ghp_listed"]', b'{"token": 5, "login": "x"}', b"{}"],
+    ids=["broken", "encrypted-without-key", "not-an-object", "token-not-text", "empty-object"],
+)
+
+
+@DAMAGED_TOKENS
+def test_an_unreadable_saved_token_never_falls_back_to_the_app_connection(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    payload: bytes,
+) -> None:
+    """Losing a saved token is no request to switch accounts: status and requests answer 503 and nothing is sent."""
+    connect(paths, ALICE)
+    damage_token(paths, ALICE, payload)
+
+    status = client.get("/api/github/status", headers=session(app, ALICE))
+    response = ask(client, session(app, ALICE), method="POST", body={"title": "x"})
+
+    assert (status.status_code, status.json()) == (503, {"error": "github_connection_unavailable"})
+    assert (response.status_code, response.json()) == (503, {"error": "github_connection_unavailable"})
+    assert github.requests == []
+
+
+@DAMAGED_TOKENS
+def test_an_unreadable_saved_token_can_be_replaced_or_removed(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    payload: bytes,
+) -> None:
+    """A new token replaces an unreadable one, and removing it leaves the GitHub App connection."""
+    connect(paths, ALICE)
+    github.handler = user_answer()
+    damage_token(paths, ALICE, payload)
+
+    saved = save_token(client, session(app, ALICE))
+    ask(client, session(app, ALICE))
+    damage_token(paths, ALICE, payload)
+    removed = client.delete("/api/github/token", headers=session(app, ALICE))
+
+    assert (saved.status_code, saved.json()) == (200, {"connected": True, "via": "token", "login": "pat-gh"})
+    assert github.requests[-1].headers["authorization"] == f"Bearer {ALICE_PAT}"
+    assert (removed.status_code, removed.json()) == (200, {"connected": True, "via": "app", "login": "alice-gh"})
+    assert stored_token(paths, ALICE) is None

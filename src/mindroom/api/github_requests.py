@@ -26,10 +26,9 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from mindroom.api import config_lifecycle
 from mindroom.api.client_sessions import presented_session
 from mindroom.credentials.manager import (
-    delete_scoped_credentials,
+    CredentialsUnreadableError,
+    credential_layers,
     get_runtime_credentials_manager,
-    load_scoped_credentials,
-    save_scoped_credentials,
 )
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_lifecycle import (
@@ -49,6 +48,7 @@ if TYPE_CHECKING:
 
     from fastapi import Response
 
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
 
 logger = get_logger(__name__)
@@ -203,27 +203,66 @@ async def _access_token(context: OAuthCredentialContext | None) -> str | None:
     return token if isinstance(token, str) and token else None
 
 
-async def _stored_token(context: OAuthCredentialContext | None) -> dict[str, str] | None:
-    """Return the user's saved `{token, login}`, or None when they saved none or the session names no user.
+def _token_store(context: OAuthCredentialContext) -> CredentialsManager:
+    """Return the user's primary-only store, the one their GitHub App connection is in, without any shared layer.
 
-    It lives in the user's primary-only store, the one their GitHub App connection is in, which no worker can read.
+    `primary_built_tool=True` is what places the service there: a store no worker can read or write.
     """
-    if context is None:
-        return None
-    document = await asyncio.to_thread(
-        load_scoped_credentials,
+    return credential_layers(
         _TOKEN_SERVICE,
         credentials_manager=context.credentials_manager,
         worker_target=context.worker_target,
         primary_built_tool=True,
-    )
-    token, login = (document or {}).get("token"), (document or {}).get("login")
-    return {"token": token, "login": login} if isinstance(token, str) and token and isinstance(login, str) else None
+    ).writable_store()
+
+
+def _read_token(context: OAuthCredentialContext) -> dict[str, str] | None:
+    """Return the user's saved `{token, login}`, None when they saved none; blocks on the filesystem.
+
+    Raises ``CredentialsUnreadableError`` for a saved document that cannot be read or holds no token and login.
+    """
+    document = _token_store(context).read_saved_credentials(_TOKEN_SERVICE)
+    if document is None:
+        return None
+    token, login = document.get("token"), document.get("login")
+    if isinstance(token, str) and token and isinstance(login, str):
+        return {"token": token, "login": login}
+    msg = f"Stored credentials for {_TOKEN_SERVICE} hold no token and login"
+    raise CredentialsUnreadableError(msg)
+
+
+async def _stored_token(context: OAuthCredentialContext | None) -> dict[str, str] | None:
+    """Return the user's saved `{token, login}`, or None when they saved none or the session names no user.
+
+    Only a missing token lets requests fall back to the GitHub App connection: an unreadable one raises
+    ``CredentialsUnreadableError``, since losing access to a token is no request to act as another account.
+    """
+    if context is None:
+        return None
+    try:
+        return await asyncio.to_thread(_read_token, context)
+    except CredentialsUnreadableError:
+        logger.warning("github_token_unreadable")
+        raise
+
+
+def _save_token(context: OAuthCredentialContext, document: dict[str, str]) -> None:
+    """Save ``document`` as the user's token, replacing one that cannot be read; blocks on the filesystem."""
+    store = _token_store(context)
+    try:
+        store.read_saved_credentials(_TOKEN_SERVICE)
+    except CredentialsUnreadableError:
+        # The store refuses to overwrite a document it cannot read, and the user's new token is meant to replace it.
+        store.delete_credentials(_TOKEN_SERVICE)
+    store.save_credentials(_TOKEN_SERVICE, document)
 
 
 async def _status(context: OAuthCredentialContext | None) -> dict[str, object] | JSONResponse:
     """Answer which account requests go out with: the saved token, else the GitHub App connection, else none."""
-    saved = await _stored_token(context)
+    try:
+        saved = await _stored_token(context)
+    except CredentialsUnreadableError:
+        return _error(503, _UNAVAILABLE)
     try:
         credentials = await _usable_credentials(context)
     except OAuthProviderError:
@@ -274,14 +313,7 @@ async def save_github_token(payload: GitHubToken, request: Request) -> dict[str,
     login = await _token_login(payload.token)
     if isinstance(login, JSONResponse):
         return login
-    await asyncio.to_thread(
-        save_scoped_credentials,
-        _TOKEN_SERVICE,
-        {"token": payload.token, "login": login},
-        credentials_manager=context.credentials_manager,
-        worker_target=context.worker_target,
-        primary_built_tool=True,
-    )
+    await asyncio.to_thread(_save_token, context, {"token": payload.token, "login": login})
     logger.info("github_token_saved")
     return {"connected": True, "via": "token", "login": login}
 
@@ -291,13 +323,7 @@ async def delete_github_token(request: Request) -> dict[str, object] | JSONRespo
     """Remove the session user's saved token, if any, and answer the status left, maybe the GitHub App connection."""
     context = _credential_context(request)
     if context is not None:
-        await asyncio.to_thread(
-            delete_scoped_credentials,
-            _TOKEN_SERVICE,
-            credentials_manager=context.credentials_manager,
-            worker_target=context.worker_target,
-            primary_built_tool=True,
-        )
+        await asyncio.to_thread(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
     return await _status(context)
 
 
@@ -312,10 +338,10 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
     kind = _path_kind(payload.path)
     if kind is None:
         return _error(400, "github_path_not_allowed")
-    saved = await _stored_token(context)
     try:
+        saved = await _stored_token(context)
         token = saved["token"] if saved is not None else await _access_token(context)
-    except OAuthProviderError:
+    except (CredentialsUnreadableError, OAuthProviderError):
         return _error(503, _UNAVAILABLE)
     if token is None:
         return _error(409, "github_not_connected")
