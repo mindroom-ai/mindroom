@@ -343,7 +343,7 @@ async def _run_scope_compaction_with_lifecycle(
         phase=phase,
     )
     notice_event_id = await notify(lifecycle, "start", lambda lifecycle: lifecycle.start(start))
-    # Later notices edit the start notice, so they are sent only when it was.
+    # Later events carry back the handle start returned, so they are reported only when it returned one.
     notices = lifecycle if notice_event_id is not None else None
 
     # Progress events report the model that actually served each persisted
@@ -412,7 +412,7 @@ async def _send_notice[T](
     session_id: str,
     scope: HistoryScope,
 ) -> T | None:
-    """Send one compaction notice through ``lifecycle``, if any; notices are best-effort, so a failure is only logged."""
+    """Report one lifecycle event through ``lifecycle``, if any; best-effort, so a failure is only logged."""
     if lifecycle is None:
         return None
     delivery = send(lifecycle)

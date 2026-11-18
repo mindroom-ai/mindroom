@@ -354,7 +354,7 @@ class _LockedTurn:
     run_id: str
     streaming_cls: type[StreamingResponse]
     # The entity's response stream for one generation, given the runtime the turn delivers with, the room's live
-    # replies, its compaction notices, and what the turn writes back.
+    # replies, its compaction lifecycle, and what the turn writes back.
     stream: Callable[
         [PreparedResponseRuntime, set[str], CompactionLifecycle | None, TurnSinks],
         AsyncIterator[StreamInputChunk],

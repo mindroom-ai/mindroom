@@ -202,7 +202,7 @@ class CompactionDecision:
 
 @dataclass(frozen=True)
 class CompactionLifecycleStart:
-    """Visible lifecycle notice payload emitted before foreground compaction."""
+    """Lifecycle payload reported before foreground compaction."""
 
     mode: CompactionMode
     session_id: str
@@ -217,7 +217,7 @@ class CompactionLifecycleStart:
 
 @dataclass(frozen=True)
 class CompactionLifecycleProgress:
-    """Visible lifecycle progress payload emitted after persisted compaction chunks."""
+    """Lifecycle progress payload reported after persisted compaction chunks."""
 
     mode: CompactionMode
     session_id: str
@@ -272,7 +272,7 @@ class CompactionLifecycleProgress:
 
 @dataclass(frozen=True)
 class CompactionLifecycleFailure:
-    """Visible lifecycle notice payload emitted after failed foreground compaction."""
+    """Lifecycle payload reported after failed foreground compaction."""
 
     # The handle ``CompactionLifecycle.start`` returned: a notice's event id, or a reply-compaction entry id.
     notice_event_id: str | None
