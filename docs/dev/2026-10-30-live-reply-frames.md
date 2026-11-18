@@ -26,7 +26,8 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Every durable write of a reply that sent frames carries `io.mindroom.live_checkpoint: {sid, seq}`, the last frame it covers.
   Publisher ids start with zero-padded start milliseconds, so `(sid, seq)` orders live state across a restart.
   Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
-  Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
+  Checkpoints never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
+  Without frames (no relay, switched off, or stopped), progress edits carry the reasoning so far, fitted to an ordinary edit, so the reply keeps its thinking dropdown.
 - Frames cut each tool entry's `args_preview` and `result_preview` to 200 characters (ending in `…`), and a snapshot that still does not fit the 60,000-byte limit (encrypted size in an encrypted room) leaves out the previews of the fewest oldest entries that make it fit (oldest first, up to all of them), and `progress` is untouched.
   An entry that lost any preview carries `clipped: true`; the durable trace keeps the whole previews, which Chat shows once the reply ends.
   A result that is a background job handle (`{job_id, tool, status}`) keeps that handle, since Chat reads it for the call's status.

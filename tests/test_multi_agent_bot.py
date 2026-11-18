@@ -316,7 +316,7 @@ class TestAgentBot(AgentBotTestBase):
             before_admission: object,
             after_admission: object,
             on_decryption_failure: object,
-            schedule_trigger_sender_is_managed: object,
+            sender_is_managed: object,
         ) -> None:
             assert after_sync == bot._on_ingestion_frame_completion
             assert after_ack == bot._ingestion_admission_progress.set
@@ -324,7 +324,7 @@ class TestAgentBot(AgentBotTestBase):
             assert wait_for_delivery_projection == bot._wait_for_delivery_projection
             assert after_admission == bot._after_ingestion_admission
             assert on_decryption_failure == bot._decryption_diagnostics.schedule
-            assert schedule_trigger_sender_is_managed == bot._ingress_validator.sender_is_trusted_for_ingress_metadata
+            assert sender_is_managed == bot._ingress_validator.sender_is_trusted_for_ingress_metadata
             pump_calls.append(
                 (
                     session,

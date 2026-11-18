@@ -121,8 +121,8 @@ def test_the_prompt_block_equals_the_prompt_golden(tmp_path: Path) -> None:
     assert "execute" not in block
 
 
-def test_the_prompt_block_lists_scripts_and_references(tmp_path: Path) -> None:
-    """Each skill lists its scripts and references by name, and says ``none`` when it has no scripts."""
+def test_the_prompt_block_names_no_scripts_or_references(tmp_path: Path) -> None:
+    """A skill's files are listed by ``get_skill_instructions``, so a new file leaves the system prompt unchanged."""
     skills_root = _workspace(tmp_path) / "skills"
     tooling = _write_skill(skills_root, "tooling", "Uses scripts.")
     _write_file(tooling / "scripts" / "run.sh", "#!/bin/sh\n")
@@ -133,10 +133,8 @@ def test_the_prompt_block_lists_scripts_and_references(tmp_path: Path) -> None:
     block = _build(tmp_path).prompt_block()
 
     assert (
-        "<skill>\n  <name>plain</name>\n  <description>Has nothing else.</description>\n"
-        "  <scripts>none</scripts>\n</skill>\n"
-        "<skill>\n  <name>tooling</name>\n  <description>Uses scripts.</description>\n"
-        "  <scripts>build.py, run.sh</scripts>\n  <references>guide.md</references>\n</skill>\n\n</skills_system>"
+        "<skill>\n  <name>plain</name>\n  <description>Has nothing else.</description>\n</skill>\n"
+        "<skill>\n  <name>tooling</name>\n  <description>Uses scripts.</description>\n</skill>\n\n</skills_system>"
     ) in block
 
 

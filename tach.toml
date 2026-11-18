@@ -623,10 +623,19 @@ path = "mindroom.matrix.journal_ingress"
 depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
+    "mindroom.matrix.agent_authored",
     "mindroom.matrix.transport_progress",
 ]
 visibility = [
     "mindroom.journal_dispatch",
+]
+
+[[modules]]
+path = "mindroom.matrix.agent_authored"
+depends_on = ["mindroom.constants"]
+visibility = [
+    "mindroom.listening.service",
+    "mindroom.matrix.journal_ingress",
 ]
 
 [[modules]]
@@ -1383,6 +1392,7 @@ depends_on = [
     "mindroom.history.run_checkpoint",
     "mindroom.history.types",
     "mindroom.llm",
+    "mindroom.memory",
     "mindroom.participation_hook",
     "mindroom.skill_learning.capture",
     "mindroom.tool_jobs.execution",
@@ -2552,6 +2562,36 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.matrix_user_authority"
+depends_on = [
+    "mindroom.contacts.turns",
+    "mindroom.entity_resolution",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = ["mindroom.custom_tools.matrix_user"]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_user"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.matrix_user_authority",
+    "mindroom.custom_tools.matrix_user_reads",
+    "mindroom.matrix.user_masquerade",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_user_reads"
+depends_on = [
+    "mindroom.bounded_bytes",
+    "mindroom.constants",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.visible_body",
+]
+visibility = ["mindroom.custom_tools.matrix_user"]
+
+[[modules]]
 path = "mindroom.custom_tools.computer_announcement"
 depends_on = [
     "mindroom.custom_tools.chat_ui",
@@ -3129,6 +3169,14 @@ depends_on = [
     "mindroom.matrix.client_session",
 ]
 visibility = ["mindroom.matrix.users"]
+
+[[modules]]
+path = "mindroom.matrix.user_masquerade"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client_session",
+]
+visibility = ["mindroom.custom_tools.matrix_user"]
 
 [[modules]]
 path = "mindroom.matrix.provisioning"
@@ -4166,6 +4214,7 @@ visibility = [
     "mindroom.api.matrix_operations",
     "mindroom.bot",
     "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.matrix_user_reads",
     "mindroom.personal_room_lifecycle",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
@@ -4226,6 +4275,7 @@ visibility = [
     "mindroom.matrix.provisioning",
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.typing",
+    "mindroom.matrix.user_masquerade",
     "mindroom.matrix.users",
     "mindroom.orchestration.runtime",
 ]
@@ -4533,6 +4583,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.approval.inbound",
+    "mindroom.custom_tools.matrix_user_reads",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.message_content",
 ]
@@ -4540,6 +4591,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.message_content"
 depends_on = [
+    "mindroom.constants",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
 ]
@@ -6887,6 +6939,7 @@ expose = [
     "build_memory_prompt_parts",
     "conversation_entrypoint_preamble",
     "delete_agent_memory",
+    "entrypoint_snapshot_path",
     "entrypoint_tokens",
     "entrypoint_withholds_lines",
     "get_agent_memory",
@@ -6895,6 +6948,7 @@ expose = [
     "redact_memory_text",
     "refresh_agent_memory_search",
     "search_agent_memories",
+    "stamp_entrypoint_snapshot",
     "store_conversation_memory",
     "strip_user_turn_time_prefix",
     "update_agent_memory",
@@ -6994,6 +7048,7 @@ visibility = [
     "mindroom.matrix.typing",
     "mindroom.desktop.session",
     "mindroom.orchestration.runtime",
+    "mindroom.matrix.user_masquerade",
 ]
 
 [[interfaces]]
@@ -9496,6 +9551,7 @@ visibility = [
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.execution",
     "mindroom.delegation.execution",
+    "mindroom.skill_learning.reviewer",
 ]
 
 [[modules]]
@@ -9801,6 +9857,7 @@ depends_on = [
     "mindroom.listening.markers",
     "mindroom.listening.turn",
     "mindroom.llm",
+    "mindroom.matrix.agent_authored",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.state",
@@ -9874,6 +9931,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.skill_learning.tools",
     "mindroom.skill_learning.transcript",
+    "mindroom.tool_jobs.background_after",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_schema",
