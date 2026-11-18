@@ -576,9 +576,9 @@ _TABLES = (
     """,
     """
     CREATE TABLE IF NOT EXISTS room_event_claims (
-        -- One saved owner per room event and purpose, such as the entity
-        -- chosen to answer an unmentioned message. It has no principal: every
-        -- bot of the install reads the same row, and the first writer wins.
+        -- One saved owner per room event and purpose, such as the routing
+        -- handoff a message belongs to. It has no principal: every bot of
+        -- the install reads the same row, and the first writer wins.
         room_id TEXT NOT NULL,
         event_id TEXT NOT NULL,
         purpose TEXT NOT NULL,
@@ -602,10 +602,13 @@ _TABLES = (
         -- One turn a room's lane owner handed to a responder. The payload
         -- rebuilds the prepared turn until the recipient holds it in its own
         -- journal; it is NULL from then on, and for a turn nobody fits.
+        -- Recipient and owner are journal principals; the recipient is empty
+        -- when nobody fits.
         handoff_id TEXT PRIMARY KEY,
         room_id TEXT NOT NULL,
         source_event_ids_json TEXT NOT NULL,
         recipient TEXT NOT NULL,
+        owner TEXT NOT NULL,
         generation BIGINT NOT NULL,
         payload_json TEXT,
         created_at_ns BIGINT NOT NULL

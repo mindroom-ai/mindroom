@@ -30,7 +30,6 @@ from .models import (
     IngestionConsumer,
     IngestionConsumerBindingError,
 )
-from .routing_handoffs import RoutingHandoff  # noqa: TC001 - part of this module's runtime return types
 from .tool_jobs import SavedToolJob  # noqa: TC001 - part of this module's runtime return types
 from .views import (
     ApprovalDeliveryView,
@@ -58,6 +57,7 @@ if TYPE_CHECKING:
         RoomMembershipPosition,
     )
     from .projection import ProjectedEvent
+    from .routing_handoffs import RoutingHandoff
 
 _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT = 100
 
@@ -158,10 +158,6 @@ class PrincipalStore(
     ) -> InteractiveSelection | None:
         """Atomically transfer the oldest eligible selection to one text source."""
         return await self._write(interactive_questions.claim_text, source_event_id=source_event_id)
-
-    async def accept_routing_handoff(self, event: InboundEvent) -> None:
-        """Take a routing handoff, as the journal event its ID names, into this bot's journal; again changes nothing."""
-        await self._write(routing_handoffs.accept, event)
 
     async def deleted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
         """Return which of these events are deleted: redacted, or answering for a relayed message that was."""
@@ -280,11 +276,12 @@ class EventJournalStore:
             lambda transaction: routing_handoffs.save(transaction, handoff, owner=owner, generation=generation),
         )
 
-    async def routing_handoffs(self, room_id: str, source_event_ids: Sequence[str]) -> tuple[RoutingHandoff, ...]:
-        """Return the handoffs of these sources and the room's handoffs no recipient holds yet, oldest first."""
-        return await self.backend.read(
-            lambda transaction: routing_handoffs.for_turn(transaction, room_id, source_event_ids),
-        )
+    async def accept_routing_handoffs(self, room_id: str | None = None) -> tuple[str, ...]:
+        """Move the handoffs no recipient holds yet, of one room or of all, into their recipients' journals.
+
+        Returns those recipients' principals; a handoff moves once, so calling again returns none.
+        """
+        return await self.backend.write(lambda transaction: routing_handoffs.accept(transaction, room_id))
 
     async def generation(self, *, new_generation: str) -> str:
         """Return this database's identity, minting it the first time it is opened.

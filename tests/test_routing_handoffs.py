@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.event_journal import (
-    AdmissionResult,
+    ROUTING_HANDOFF_CLAIM,
     EventClass,
     EventKind,
     InboundEvent,
@@ -21,24 +21,34 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
 
 _ROOM = "!room:localhost"
+_OWNER = "alpha@@mindroom_alpha:localhost"
+_RECIPIENT = "beta@@mindroom_beta:localhost"
 
 
-def _handoff(handoff_id: str = "h1", sources: tuple[str, ...] = ("$e1",), recipient: str = "beta") -> RoutingHandoff:
+def _handoff(
+    handoff_id: str = "h1",
+    sources: tuple[str, ...] = ("$e1",),
+    recipient: str = _RECIPIENT,
+) -> RoutingHandoff:
     return RoutingHandoff(handoff_id, _ROOM, sources, recipient, {"events": list(sources)} if recipient else None)
 
 
-def _event(handoff: RoutingHandoff) -> InboundEvent:
-    assert handoff.payload is not None
+def _message(event_id: str) -> InboundEvent:
     return InboundEvent(
-        event_id=handoff.handoff_id,
-        room_id=handoff.room_id,
+        event_id=event_id,
+        room_id=_ROOM,
         thread_id=None,
-        kind=EventKind.ROUTED_TURN,
+        kind=EventKind.MESSAGE,
         event_class=EventClass.ACTIONABLE,
         sender="@user:localhost",
         origin_server_ts=1,
-        source=handoff.payload,
+        source={"event_id": event_id},
     )
+
+
+async def _handed_off(store: EventJournalStore, *sources: str) -> dict[str, str]:
+    """Return the handoff each of these room events belongs to."""
+    return await store.room_event_claims(_ROOM, sources, ROUTING_HANDOFF_CLAIM)
 
 
 @pytest.mark.asyncio
@@ -58,77 +68,96 @@ async def test_stale_lane_owner_cannot_save_a_handoff(journal_store: EventJourna
     current = await journal_store.hold_routing_lane(_ROOM, "beta")
     with pytest.raises(StaleLaneOwnerError):
         await journal_store.save_routing_handoff(_handoff(), owner="alpha", generation=stale)
-    assert await journal_store.routing_handoffs(_ROOM, ["$e1"]) == ()
+    assert await _handed_off(journal_store, "$e1") == {}
+    assert await journal_store.accept_routing_handoffs(_ROOM) == ()
     await journal_store.save_routing_handoff(_handoff(), owner="beta", generation=current)
-    assert await journal_store.routing_handoffs(_ROOM, ["$e1"]) == (_handoff(),)
-
-
-@pytest.mark.asyncio
-async def test_handoff_survives_reopen_and_is_found_by_any_of_its_sources(
-    journal_database: Callable[[], EventJournalStore],
-) -> None:
-    """A restart reads the saved handoff back, whichever of its sources the replayed turn holds."""
-    store = journal_database()
-    generation = await store.hold_routing_lane(_ROOM, "alpha")
-    handoff = _handoff(sources=("$e1", "$e2"))
-    await store.save_routing_handoff(handoff, owner="alpha", generation=generation)
-    await store.close()
-    reopened = journal_database()
-    assert await reopened.routing_handoffs(_ROOM, ["$e2", "$e3"]) == (handoff,)
-    assert await reopened.routing_handoffs("!other:localhost", ["$e2"]) == ()
+    assert await _handed_off(journal_store, "$e1") == {"$e1": "h1"}
 
 
 @pytest.mark.asyncio
 async def test_a_source_belongs_to_one_handoff(journal_store: EventJournalStore) -> None:
     """A second handoff naming an already handed-off source saves nothing, also for its other sources."""
-    generation = await journal_store.hold_routing_lane(_ROOM, "alpha")
-    await journal_store.save_routing_handoff(_handoff(), owner="alpha", generation=generation)
+    generation = await journal_store.hold_routing_lane(_ROOM, _OWNER)
+    await journal_store.save_routing_handoff(_handoff(), owner=_OWNER, generation=generation)
     with pytest.raises(ValueError, match="already belongs"):
-        await journal_store.save_routing_handoff(
-            _handoff("h2", ("$e0", "$e1")),
-            owner="alpha",
-            generation=generation,
-        )
-    assert await journal_store.routing_handoffs(_ROOM, ["$e0"]) == (_handoff(),)
-    await journal_store.save_routing_handoff(_handoff("h3", ("$e0",)), owner="alpha", generation=generation)
+        await journal_store.save_routing_handoff(_handoff("h2", ("$e0", "$e1")), owner=_OWNER, generation=generation)
+    assert await _handed_off(journal_store, "$e0", "$e1") == {"$e1": "h1"}
+    await journal_store.save_routing_handoff(_handoff("h3", ("$e0",)), owner=_OWNER, generation=generation)
+    assert await _handed_off(journal_store, "$e0", "$e1") == {"$e0": "h3", "$e1": "h1"}
 
 
 @pytest.mark.asyncio
-async def test_pending_handoffs_of_the_room_are_listed_until_accepted(journal_store: EventJournalStore) -> None:
-    """A successor finds a handoff no recipient holds without knowing its sources; acceptance releases the payload."""
-    generation = await journal_store.hold_routing_lane(_ROOM, "alpha")
+async def test_acceptance_moves_the_turn_from_the_owners_journal_to_the_recipients(
+    journal_store: EventJournalStore,
+) -> None:
+    """Until acceptance the lane owner's events stay pending; acceptance settles them as the recipient gets the turn."""
+    owner, recipient = journal_store.principal(_OWNER), journal_store.principal(_RECIPIENT)
+    await owner.admit(_message("$e1"))
+    generation = await journal_store.hold_routing_lane(_ROOM, _OWNER)
     handoff = _handoff()
-    await journal_store.save_routing_handoff(handoff, owner="alpha", generation=generation)
-    assert await journal_store.routing_handoffs(_ROOM, []) == (handoff,)
+    await journal_store.save_routing_handoff(handoff, owner=_OWNER, generation=generation)
+    assert await owner.is_pending("$e1")
+    assert await recipient.load_event("h1") is None
+    assert await journal_store.accept_routing_handoffs("!other:localhost") == ()
 
-    recipient = journal_store.principal("@mindroom_beta:localhost")
-    await recipient.accept_routing_handoff(_event(handoff))
-    assert await journal_store.routing_handoffs(_ROOM, []) == ()
-    accepted = RoutingHandoff("h1", _ROOM, ("$e1",), "beta", None)
-    assert await journal_store.routing_handoffs(_ROOM, ["$e1"]) == (accepted,)
+    assert await journal_store.accept_routing_handoffs(_ROOM) == (_RECIPIENT,)
+
+    assert not await owner.is_pending("$e1")
+    routed = await recipient.load_event("h1")
+    assert routed is not None
+    assert (routed.kind, routed.source, routed.sender) == (
+        EventKind.ROUTED_TURN,
+        handoff.payload,
+        "@mindroom_alpha:localhost",
+    )
     assert await recipient.is_pending("h1")
-    assert (await recipient.load_event("h1")).source == handoff.payload
 
 
 @pytest.mark.asyncio
 async def test_accepting_a_handoff_again_enqueues_nothing(journal_store: EventJournalStore) -> None:
-    """The recipient's journal holds one event per handoff ID, also once that event settled."""
-    generation = await journal_store.hold_routing_lane(_ROOM, "alpha")
-    handoff = _handoff()
-    await journal_store.save_routing_handoff(handoff, owner="alpha", generation=generation)
-    recipient = journal_store.principal("@mindroom_beta:localhost")
-    await recipient.accept_routing_handoff(_event(handoff))
+    """The recipient's journal holds one event per handoff, also once that event settled."""
+    generation = await journal_store.hold_routing_lane(_ROOM, _OWNER)
+    await journal_store.save_routing_handoff(_handoff(), owner=_OWNER, generation=generation)
+    recipient = journal_store.principal(_RECIPIENT)
+    await journal_store.accept_routing_handoffs(_ROOM)
     await recipient.settle_many(("h1",))
-    await recipient.accept_routing_handoff(_event(handoff))
+
+    assert await journal_store.accept_routing_handoffs(_ROOM) == ()
+    assert await journal_store.accept_routing_handoffs() == ()
     assert not await recipient.is_pending("h1")
-    assert await recipient.admit(_event(handoff)) is AdmissionResult.DUPLICATE
 
 
 @pytest.mark.asyncio
-async def test_no_fit_is_saved_without_a_payload(journal_store: EventJournalStore) -> None:
-    """A turn nobody fits is a handoff to nobody: saved, never pending, and found again by its sources."""
-    generation = await journal_store.hold_routing_lane(_ROOM, "alpha")
-    no_fit = _handoff(recipient="")
-    await journal_store.save_routing_handoff(no_fit, owner="alpha", generation=generation)
-    assert await journal_store.routing_handoffs(_ROOM, []) == ()
-    assert await journal_store.routing_handoffs(_ROOM, ["$e1"]) == (no_fit,)
+async def test_a_restart_accepts_every_handoff_no_recipient_holds(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """A handoff saved before a crash reaches its recipient from the row alone, in whichever room it waits."""
+    store = journal_database()
+    generation = await store.hold_routing_lane(_ROOM, _OWNER)
+    await store.save_routing_handoff(_handoff("h1", ("$e1",)), owner=_OWNER, generation=generation)
+    elsewhere = await store.hold_routing_lane("!other:localhost", _OWNER)
+    other = RoutingHandoff("h2", "!other:localhost", ("$e2",), _RECIPIENT, {"events": ["$e2"]})
+    await store.save_routing_handoff(other, owner=_OWNER, generation=elsewhere)
+    await store.close()
+
+    reopened = journal_database()
+    assert await reopened.accept_routing_handoffs() == (_RECIPIENT, _RECIPIENT)
+    recipient = reopened.principal(_RECIPIENT)
+    assert await recipient.is_pending("h1")
+    assert await recipient.is_pending("h2")
+    assert await _handed_off(reopened, "$e1") == {"$e1": "h1"}
+
+
+@pytest.mark.asyncio
+async def test_no_fit_is_saved_without_a_payload_and_settles_the_owners_events(
+    journal_store: EventJournalStore,
+) -> None:
+    """A turn nobody fits is a handoff to nobody: saved, never waiting, found again by its sources, and settled."""
+    owner = journal_store.principal(_OWNER)
+    await owner.admit(_message("$e1"))
+    generation = await journal_store.hold_routing_lane(_ROOM, _OWNER)
+    await journal_store.save_routing_handoff(_handoff(recipient=""), owner=_OWNER, generation=generation)
+
+    assert await journal_store.accept_routing_handoffs(_ROOM) == ()
+    assert await _handed_off(journal_store, "$e1") == {"$e1": "h1"}
+    assert not await owner.is_pending("$e1")
