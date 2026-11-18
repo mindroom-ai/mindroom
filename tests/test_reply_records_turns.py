@@ -7,11 +7,12 @@ import html
 import json
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from nio.crypto.attachments import decrypt_attachment
 from structlog.testing import capture_logs
 
 import mindroom.live_frames.publisher as live_publisher_module
@@ -21,6 +22,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import (
+    COMPACTIONS_CONTENT_KEY,
     SKIP_MENTIONS_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -32,6 +34,7 @@ from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, SILENT_S
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.history.interrupted_replay import render_stopped_attempt
+from mindroom.history.types import CompactionLifecycleStart
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
 from mindroom.live_frames.transport import LiveSendOutcome
 from mindroom.llm.events import ReportedCall, ToolStarted
@@ -321,7 +324,141 @@ async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: 
     assert not reply.unapplied_stop
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.CANCELLED]
     assert _sent_bodies(bot)[-1] == "Partial\n\n**[Response cancelled by user]**"
+    # A reply that compacted nothing carries no compaction list on its note.
+    assert COMPACTIONS_CONTENT_KEY not in _last_content(bot)
     assert not await bot._reply_runtime.store.is_pending("$event")
+
+
+def _last_content(bot: AgentBot) -> dict[str, object]:
+    """Return what the bot's last message write shows, following an edit into its replacement."""
+    content = bot.client.room_send.await_args_list[-1].kwargs["content"]
+    return content.get("m.new_content", content)
+
+
+@pytest.mark.parametrize("ending", ["stop", "error"])
+@pytest.mark.parametrize(("first_chunk", "phase"), [(None, "pre_turn"), ("Partial", "mid_turn")])
+async def test_a_note_that_ends_a_compacting_reply_carries_its_running_compaction(
+    tmp_path: Path,
+    ending: str,
+    first_chunk: str | None,
+    phase: str,
+) -> None:
+    """A Stop or error during a compaction ends the reply with a note whose event still lists that compaction."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    compacting = asyncio.Event()
+
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        if first_chunk is not None:
+            yield first_chunk
+            await _wait_until_sent(bot, first_chunk)
+        else:
+            # Before any progress edit: only the placeholder shows.
+            await _wait_until_sent(bot, "Thinking...")
+        assert ctx.compaction_lifecycle is not None
+        await ctx.compaction_lifecycle.start(
+            CompactionLifecycleStart(
+                mode="auto",
+                session_id="session-1",
+                scope="agent:test_agent",
+                summary_model="summary-model",
+                before_tokens=30_000,
+                history_budget_tokens=100_000,
+                runs_before=20,
+            ),
+        )
+        if ending == "error":
+            msg = "model failed"
+            raise RuntimeError(msg)
+        compacting.set()
+        await asyncio.Event().wait()
+        yield "never"
+
+    with patch_response_runner_module(
+        stream_agent_response=stream,
+        should_use_streaming=AsyncMock(return_value=True),
+        typing_indicator=_noop_typing,
+    ):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        if ending == "stop":
+            await asyncio.wait_for(compacting.wait(), timeout=5)
+            reply = await _reply(bot)
+            assert reply.event_id is not None
+            stop = await _stop(bot, reply.event_id, 7)
+            assert await asyncio.wait_for(stop, timeout=5)
+        await asyncio.wait_for(response, timeout=5)
+
+    note = _last_content(bot)
+    assert note[STREAM_STATUS_KEY] == ("cancelled" if ending == "stop" else "error")
+    # The client shows a running entry on a finished reply as interrupted.
+    [entry] = note[COMPACTIONS_CONTENT_KEY]
+    assert (entry["status"], entry["phase"]) == ("running", phase)
+
+
+async def test_a_stop_note_too_large_for_one_event_keeps_its_compactions_in_preview_and_sidecar(
+    tmp_path: Path,
+) -> None:
+    """A note whose reply outgrew one event goes to a sidecar; the preview event and the sidecar both list compactions."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    uploads: dict[str, bytes] = {}
+
+    async def upload(*, data_provider: Callable[[object, object], BinaryIO], **_kwargs: object) -> tuple[object, None]:
+        uri = f"mxc://server/sidecar{len(uploads)}"
+        uploads[uri] = data_provider(None, None).read()
+        return nio.UploadResponse(uri), None
+
+    bot.client.upload = AsyncMock(side_effect=upload)
+    compacting = asyncio.Event()
+
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "Partial " + "x" * 70_000
+        assert ctx.compaction_lifecycle is not None
+        await ctx.compaction_lifecycle.start(
+            CompactionLifecycleStart(
+                mode="auto",
+                session_id="session-1",
+                scope="agent:test_agent",
+                summary_model="summary-model",
+                before_tokens=30_000,
+                history_budget_tokens=100_000,
+                runs_before=20,
+            ),
+        )
+        compacting.set()
+        await asyncio.Event().wait()
+        yield "never"
+
+    with patch_response_runner_module(
+        stream_agent_response=stream,
+        should_use_streaming=AsyncMock(return_value=True),
+        typing_indicator=_noop_typing,
+    ):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        await asyncio.wait_for(compacting.wait(), timeout=5)
+        reply = await _reply(bot)
+        assert reply.event_id is not None
+        stop = await _stop(bot, reply.event_id, 7)
+        assert await asyncio.wait_for(stop, timeout=5)
+        await asyncio.wait_for(response, timeout=5)
+
+    edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
+    preview = edit["m.new_content"]
+    assert preview[STREAM_STATUS_KEY] == "cancelled"
+    # A terminal write is frozen safe for an encrypted room, so its sidecar is encrypted.
+    file = preview["file"]
+    payload = decrypt_attachment(
+        uploads[file["url"]],
+        file["key"]["k"],
+        file["hashes"]["sha256"],
+        file["iv"],
+    )
+    sidecar = json.loads(payload)["m.new_content"]
+    assert str(sidecar["body"]).endswith("**[Response cancelled by user]**")
+    # The preview a client shows before hydration, its edit wrapper, and the sidecar it hydrates from all list it.
+    for content in (preview, edit, sidecar):
+        [entry] = content[COMPACTIONS_CONTENT_KEY]
+        assert entry["status"] == "running"
 
 
 async def test_a_progress_edit_written_ahead_after_a_stop_commits_is_never_sent(tmp_path: Path) -> None:
