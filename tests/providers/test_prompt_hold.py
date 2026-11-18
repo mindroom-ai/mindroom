@@ -417,9 +417,17 @@ async def test_a_read_only_request_is_sent_the_hold_it_continues_and_never_write
     assert (replayed[0].content, _updates(replayed)) == (_A, _updates(sent))
     # A run whose newest answer was sent another prompt than the hold tells goes on with its own: one paused while
     # its route held no prompt, or one whose answer records no request.
+    # Nor does an earlier answer sent the hold speak for a newer one that records none, such as one whose request
+    # held an image at a URL or was answered as another request.
     as_built = request_prefixes(conversation.model, conversation.request(second))[-1]
-    for other in (replace(answered, provider_data={REQUEST_IDENTITY_KEY: as_built}), _answer()):
-        unheld = [*_system(_B), *second[2:], other, _user("Review this conversation.")]
+    unrecorded = replace(_answer(), provider_data={REWRITTEN_ATTEMPT_KEY: True})
+    for newest in (
+        [replace(answered, provider_data={REQUEST_IDENTITY_KEY: as_built})],
+        [_answer()],
+        [answered, _user("three"), _answer()],
+        [answered, _user("three"), unrecorded, Message(role="tool", content="5", tool_call_id="call_1")],
+    ):
+        unheld = [*_system(_B), *second[2:], *newest, _user("Review this conversation.")]
         assert await conversation.send(unheld, read_only=True) == unheld
     # One whose prompt the hold does not tell yet, or whose messages it does not match, is sent as it was built.
     for stale in (
@@ -555,13 +563,20 @@ async def test_every_request_of_a_run_that_only_reads_the_hold_is_sent_the_promp
     """A resumed run's tool loop keeps its prefix when the hold runs out or stands again meanwhile, and writes nothing."""
     second, sent = await conversation.told()
     loop = [*second, conversation.answer(), Message(role="tool", content="5", tool_call_id="call_1")]
-    again = [*loop, _answer("Multiplying."), Message(role="tool", content="6", tool_call_id="call_2")]
-    later = [*again, _answer(), _user("three")]
     contents = [message.content for message in sent]
 
+    # Only a request the run sends pins it: sizing or identifying one, even another one, decides nothing.
     pin: list[dict[str, Any] | None] = []
+    provider = _held(conversation.model)
+    for sized in ([*second[:2], _user("Another replay.")], loop):
+        provider.request_tokens(conversation.request(sized, pin=pin))
+        provider.context_key(conversation.request(sized, pin=pin))
+    assert pin == []
     resumed = await conversation.send(loop, pin=pin)
     assert [message.content for message in resumed[: len(sent)]] == contents
+    assert len(pin) == 1
+    again = [*loop, conversation.answer(), Message(role="tool", content="6", tool_call_id="call_2")]
+    later = [*again, _answer(), _user("three")]
     os.utime(conversation.path, (time.time() - 2 * 3600,) * 2)
     before = (conversation.path.read_bytes(), conversation.path.stat().st_mtime)
     for messages in (again, later):

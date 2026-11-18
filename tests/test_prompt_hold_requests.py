@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -20,11 +21,16 @@ from mindroom.config.models import ModelConfig
 from mindroom.history.request_size import RequestSize, RequestSizer
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks import EnrichmentItem
+from mindroom.llm.media import Image
 from mindroom.llm.messages import PROMPT_UPDATE_KEY, Message, system_text
 from mindroom.llm.provider import Capabilities, ModelRequest, complete
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY
+from mindroom.media_inputs import MediaInputs
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import compose, prompt_hold
+from mindroom.response_runner import _paused_with_committed_presentation
+from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.capture import SkillReviewCapture
@@ -43,7 +49,6 @@ from tests.test_approval_turn_continuation import (
     _approve_add,
     _CheckedModel,
     _identity,
-    _paused_turn,
     _usage_config,
 )
 
@@ -53,6 +58,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider, StreamEvent
+    from mindroom.response_turn import PausedAttempt, ResponseTurnContext
 
 _OPUS = "anthropic/claude-opus-5.5"
 _HAIKU = "anthropic/claude-haiku-5.5"
@@ -734,8 +740,44 @@ async def test_a_tool_loop_keeps_its_held_prompt_unless_a_fold_rewrites_what_pre
         assert _told(request) == []
 
 
+# A scripted route that is sent an image's URL as it is, as OpenRouter's is.
+_route = partial(Capabilities, url_media=frozenset({"image"}))
+
+
+async def _paused_adding(
+    ctx: ResponseTurnContext,
+    paths: RuntimePaths,
+    config: Config,
+    *,
+    image: bool,
+) -> PausedAttempt:
+    """Run the reply that pauses on its addition, asked with an ``image`` at a URL or without, and return the pause.
+
+    No request identity covers an image at a URL, whose content may change unseen: its answer records none.
+    """
+    media = MediaInputs(images=(Image(url="https://images.example.invalid/diagram.png"),) if image else ())
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await ai_response(replace(ctx, media=media), paths, config)
+    paused = _paused_with_committed_presentation(raised.value, show_tool_calls=False)
+    stored = create_session_storage("general", config, paths, execution_identity=ctx.execution_identity).get_run(
+        paused.run_id,
+    )
+    assert stored is not None
+    assert (REQUEST_IDENTITY_KEY in (stored.messages[-1].provider_data or {})) != image
+    return paused
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["held", "compacted", "paused without a hold"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "held",
+        "compacted",
+        "paused without a hold",
+        "paused without a hold on an image at a URL",
+        "paused on an image at a URL as the hold could not be touched",
+    ],
+)
 async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_writes_it(
     case: str,
     tmp_path: Path,
@@ -745,17 +787,19 @@ async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_wr
 
     So is every request of its tool loop, though the hold runs out inside it. After a compaction its messages no
     longer match the hold, so it is sent the prompt its run stored, as on main. So is a run that paused on its own
-    prompt while its route held none, such as one with the hour-long cache off, though the route holds one again
-    when it resumes and the conversation's earlier hold still matches its messages.
+    prompt while its route held none, such as one with the hour-long cache off, or while its hold could not be
+    stored, though the route holds one again when it resumes and the conversation's earlier hold still matches its
+    messages. The paused call alone tells: one that records no request, as after an image at a URL whose content no
+    identity covers, is not spoken for by the earlier answer that was sent the hold.
     """
-    compacted, held = case == "compacted", case != "paused without a hold"
+    compacted, held, image = case == "compacted", case in ("held", "compacted"), "image" in case
     paths, config = _usage_config(tmp_path)
     # The paused reply runs without background tool jobs, which its tool definitions show: so do the turns before it.
     config.background_tool_jobs.enabled = False
     identity = _identity("held-session")
     multiply = calls(tool_call("multiply", "call_2", a=2, b=3), metrics=usage(10, 1))
     turns = [answer("First."), answer("Second."), _add("approved", 10, 1), multiply, answer("Done.")]
-    model = _CheckedModel(turns, capabilities=Capabilities(system_updates=True))
+    model = _CheckedModel(turns, capabilities=_route(system_updates=True))
     install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
     ctx = replace(
         make_turn_context(
@@ -773,9 +817,12 @@ async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_wr
     await ai_response(replace(ctx, prompt="Hello"), paths, config)
     config.agents["general"].instructions = ["Answer in Dutch."]
     await ai_response(replace(ctx, prompt="Hello again"), paths, config)
-    model.capabilities = Capabilities(system_updates=held)
-    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
-    model.capabilities = Capabilities(system_updates=True)
+    model.capabilities = _route(system_updates=held or "touched" in case)
+    with monkeypatch.context() as pause:
+        if "touched" in case:
+            pause.setattr(prompt_hold.os, "utime", _refuse)
+        paused = await _paused_adding(replace(ctx, prompt="Add them."), paths, config, image=image)
+    model.capabilities = _route(system_updates=True)
     pausing = model.requests[-1]
     assert ("Answer in English." in system_text(pausing.messages), len(_told(pausing))) == (held, int(held))
     if compacted:

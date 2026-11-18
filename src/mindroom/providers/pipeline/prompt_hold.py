@@ -35,6 +35,7 @@ import time
 from contextlib import suppress
 from dataclasses import asdict, replace
 from difflib import SequenceMatcher
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
@@ -227,8 +228,8 @@ def _identities(inner: ModelProvider, request: ModelRequest, sent: ModelRequest)
     return request_prefixes(as_sent, request)
 
 
-def held_request(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
-    """Return ``request`` as ``inner`` is sent it: with the held system prompt and updates, which a reading run pins."""
+def held_request(inner: ModelProvider, request: ModelRequest, *, pins: bool = False) -> ModelRequest:
+    """Return ``request`` as ``inner`` is sent it: with the held system prompt and updates, which a sent run ``pins``."""
     pin = request.prompt_hold_pin
     if request.prompt_hold is None:
         return request
@@ -236,12 +237,13 @@ def held_request(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
     plan = _plan(inner, request, state)
     sent = replace(request, messages=request.messages if plan is None else plan[0], prompt_hold=None)
     if pin is not None and not pin:
-        # The run it continues may have been sent another prompt than the file holds: its newest answer tells.
-        recorded = [(message.provider_data or {}).get(REQUEST_IDENTITY_KEY) for message in request.messages]
-        newest = max((index for index, identity in enumerate(recorded) if identity is not None), default=None)
-        if plan is None or newest is None or recorded[newest] != _identities(inner, request, sent)[newest]:
+        # The run it continues may have been sent another prompt than the file holds: only its newest answer tells.
+        newest = max((at for at, message in enumerate(request.messages) if message.role == "assistant"), default=-1)
+        recorded = (request.messages[newest].provider_data or {}).get(REQUEST_IDENTITY_KEY) if plan else None
+        if recorded is None or newest < 0 or recorded != _identities(inner, request, sent)[newest]:
             state, sent = None, replace(request, prompt_hold=None)
-        pin.append(state)
+        if pins:
+            pin.append(state)
     return sent
 
 
@@ -273,7 +275,8 @@ async def prompt_hold_stream(inner: ModelProvider, request: ModelRequest) -> Asy
     """Stream ``request`` with its conversation's held system prompt, which only a request that may write it records."""
     sent = request
     if request.prompt_hold is not None:
-        sent = await asyncio.to_thread(held_request if request.prompt_hold_pin is not None else _commit, inner, request)
+        send = _commit if request.prompt_hold_pin is None else partial(held_request, pins=True)
+        sent = await asyncio.to_thread(send, inner, request)
     events = inner.stream(sent)
     async with closing_async_stream(events):
         async for event in events:
