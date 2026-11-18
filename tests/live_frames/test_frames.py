@@ -20,6 +20,7 @@ def _docs(data: dict[str, object]) -> LiveDocs:
         tools=tuple(data["tools"]),
         status=data["status"],
         activity=data["activity"],
+        ui=data.get("ui"),
     )
 
 
@@ -66,6 +67,18 @@ def test_live_delta_carries_segments_only_when_they_change() -> None:
     after = replace(before, reasoning="a\n\nb", segments=(*before.segments, {"start": 3, "after_tool": 1}))
     assert live_delta(before, after)["segments"] == [dict(segment) for segment in after.segments]
     assert after.to_json()["segments"] == [{"start": 0, "after_tool": 0}, {"start": 3, "after_tool": 1}]
+
+
+def test_live_frames_carry_ui_in_snapshot_and_delta() -> None:
+    """The widget value rides whole: present in a snapshot when there is one, set or cleared by a delta."""
+    value = {"version": 1, "widgets": [{"id": "df4d729a5d", "json": "{}"}]}
+    before = LiveDocs(md="a", reasoning="", tools=(), status="streaming", activity="")
+    after = replace(before, ui=value)
+    assert "ui" not in before.to_json()
+    assert after.to_json()["ui"] == value
+    assert live_delta(before, after) == {"ui": value}
+    assert live_delta(after, before) == {"ui": None}
+    assert live_delta(after, after) == {}
 
 
 def test_publisher_ids_order_by_start_time() -> None:

@@ -21,6 +21,7 @@ class LiveDocs:
 
     ``segments`` says where each reasoning segment begins in ``reasoning`` and how many tool calls preceded it.
     ``compactions`` holds the reply's automatic compaction entries, in start order.
+    ``ui`` is the reply's ``io.mindroom.ui`` value, None when it has no widget.
     """
 
     md: str
@@ -30,10 +31,11 @@ class LiveDocs:
     activity: str
     segments: tuple[dict[str, int], ...] = ()
     compactions: tuple[dict[str, object], ...] = ()
+    ui: dict[str, object] | None = None
 
     def to_json(self) -> dict[str, object]:
-        """Return the snapshot form of these documents."""
-        return {
+        """Return the snapshot form of these documents; ``ui`` is in it only when there is a value."""
+        snapshot: dict[str, object] = {
             "md": self.md,
             "reasoning": self.reasoning,
             "tools": list(self.tools),
@@ -42,6 +44,9 @@ class LiveDocs:
             "segments": [dict(segment) for segment in self.segments],
             "compactions": [dict(entry) for entry in self.compactions],
         }
+        if self.ui is not None:
+            snapshot["ui"] = self.ui
+        return snapshot
 
 
 def new_publisher_id() -> str:
@@ -153,6 +158,9 @@ def live_delta(before: LiveDocs, after: LiveDocs) -> dict[str, object]:
         delta["segments"] = [dict(segment) for segment in after.segments]
     if before.compactions != after.compactions:
         delta["compactions"] = [dict(entry) for entry in after.compactions]
+    if before.ui != after.ui:
+        # The value is replaced whole; null clears it.
+        delta["ui"] = after.ui
     return delta
 
 

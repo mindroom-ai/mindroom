@@ -524,6 +524,134 @@
           }
         }
       }
+    },
+    {
+      "name": "a closed ui block becomes its fallback block and sets ui",
+      "before": {
+        "md": "Signups peaked in February.",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "Signups peaked in February.\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": "",
+        "ui": {
+          "version": 1,
+          "widgets": [
+            {
+              "id": "df4d729a5d",
+              "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+            }
+          ]
+        }
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 12,
+        "delta": {
+          "md": {
+            "at": 27,
+            "del": 0,
+            "ins": "\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+            "len": 138
+          },
+          "ui": {
+            "version": 1,
+            "widgets": [
+              {
+                "id": "df4d729a5d",
+                "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "ui is cleared",
+      "before": {
+        "md": "Signups peaked in February.\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": "",
+        "ui": {
+          "version": 1,
+          "widgets": [
+            {
+              "id": "df4d729a5d",
+              "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+            }
+          ]
+        }
+      },
+      "after": {
+        "md": "Signups peaked in February.\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 13,
+        "delta": {
+          "ui": null
+        }
+      }
+    },
+    {
+      "name": "snapshot with ui",
+      "before": null,
+      "after": {
+        "md": "Signups peaked in February.\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": "",
+        "ui": {
+          "version": 1,
+          "widgets": [
+            {
+              "id": "df4d729a5d",
+              "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+            }
+          ]
+        }
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 14,
+        "snapshot": {
+          "md": "Signups peaked in February.\n\n```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```",
+          "reasoning": "",
+          "tools": [],
+          "status": "streaming",
+          "activity": "",
+          "segments": [],
+          "compactions": [],
+          "ui": {
+            "version": 1,
+            "widgets": [
+              {
+                "id": "df4d729a5d",
+                "json": "{\"kind\":\"line\",\"labels\":[\"Jan\",\"Feb\",\"Mar\"],\"series\":[{\"data\":[120,180.5,150],\"name\":\"Signups\"}],\"title\":\"Signups\",\"type\":\"chart\",\"y\":\"users\"}"
+              }
+            ]
+          }
+        }
+      }
     }
   ]
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -1052,6 +1053,55 @@ async def test_a_delta_too_big_for_the_estimate_becomes_a_fitted_snapshot_or_goe
     await publisher._send_next("$reply", docs(13))
     await publisher._send_next("$reply", docs(13))
     assert "snapshot" in frames.sent[-1]
+
+
+_UI_VALUE: dict[str, object] = {"version": 1, "widgets": [{"id": "df4d729a5d", "json": '{"type":"chart"}'}]}
+
+
+@pytest.mark.asyncio
+async def test_a_frame_too_big_with_ui_goes_out_without_it_and_restores_it(
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A widget value that does not fit is left out, frames keep running, and a frame that fits brings it back."""
+    monkeypatch.setattr(publisher_module, "_SNAPSHOT_INTERVAL_SECONDS", float("inf"))
+    publisher = LivePublisher(client=_encrypted_client(), room_id=_ROOM_ID)
+    docs = LiveDocs(md="text", reasoning="", tools=(), status="streaming", activity="", ui=_UI_VALUE)
+    monkeypatch.setattr(publisher, "_fits", lambda frame: "ui" not in frame.get("snapshot", {}))
+
+    assert await publisher._send_next("$reply", docs) is LiveSendOutcome.SENT
+    assert "ui" not in frames.sent[-1]["snapshot"]
+    assert publisher.running
+    assert publisher.last_sent.ui is None
+    # Nothing but the value that does not fit changed, so there is nothing to send.
+    assert await publisher._send_next("$reply", docs) is None
+    await publisher._send_next("$reply", replace(docs, md="text more"))
+    assert set(frames.sent[-1]["delta"]) == {"md"}
+
+    monkeypatch.setattr(publisher, "_fits", lambda _frame: True)
+    await publisher._send_next("$reply", replace(docs, md="text more"))
+    assert frames.sent[-1]["delta"] == {"ui": _UI_VALUE}
+    assert publisher.last_sent.ui == _UI_VALUE
+
+
+@pytest.mark.asyncio
+async def test_ui_is_shed_before_tool_previews(frames: _Frames, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A frame too big with its widget value loses that value, not the previews of its tool calls."""
+    publisher = LivePublisher(client=_encrypted_client(), room_id=_ROOM_ID)
+    docs = LiveDocs(
+        md="text",
+        reasoning="",
+        tools=tuple(_entry(index) for index in range(5)),
+        status="streaming",
+        activity="",
+        ui=_UI_VALUE,
+    )
+    monkeypatch.setattr(publisher, "_fits", lambda frame: "ui" not in frame.get("snapshot", {}))
+
+    await publisher._send_next("$reply", docs)
+    assert publisher.bare == 0
+    assert "ui" not in frames.sent[-1]["snapshot"]
+    assert all("args_preview" in entry for entry in frames.sent[-1]["snapshot"]["tools"])
 
 
 @pytest.mark.asyncio

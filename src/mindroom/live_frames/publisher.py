@@ -60,6 +60,12 @@ class LivePublisher:
         now = time.monotonic()
         snapshot_due = self.last_sent is None or now - self.last_snapshot_at >= _SNAPSHOT_INTERVAL_SECONDS
         shown = replace(docs, tools=fitted_tools(docs.tools, bare=self.bare))
+        if shown.ui is not None and not self._fits(
+            live_frame(reply_event_id=reply_event_id, publisher_id=self.publisher_id, seq=self.seq + 1, snapshot=shown),
+        ):
+            # Widgets are the first thing a snapshot too big sheds, before any tool preview. `last_sent` then holds
+            # no value, so the first frame that fits again restores it.
+            docs, shown = replace(docs, ui=None), replace(shown, ui=None)
         if not snapshot_due and shown == self.last_sent:
             return None
         self.seq += 1
