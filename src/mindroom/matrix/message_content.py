@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import decrypt_media_bytes, download_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
@@ -108,6 +109,26 @@ def _with_event_relation(
     return resolved_content
 
 
+def _with_event_marker(
+    resolved_content: dict[str, Any],
+    event_content: dict[str, Any],
+) -> dict[str, Any]:
+    """Return hydrated content that still says an agent wrote the event, when the event says so.
+
+    Like its relation, the agent-authored marker is a property of the event the server stored. A payload without
+    it, such as one uploaded for another event, cannot give the event back the authority its marker took away, so
+    the event's marker is put on the hydrated content, and on an edit's replacement content, which history keeps.
+    """
+    layers = (event_content, _normalized_content_dict(event_content.get("m.new_content")))
+    markers = [layer[AGENT_AUTHORED_KEY] for layer in layers if AGENT_AUTHORED_KEY in layer]
+    if markers:
+        resolved_content[AGENT_AUTHORED_KEY] = markers[0]
+        new_content = resolved_content.get("m.new_content")
+        if isinstance(new_content, dict):
+            new_content[AGENT_AUTHORED_KEY] = markers[0]
+    return resolved_content
+
+
 async def _resolve_event_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None,
@@ -117,7 +138,7 @@ async def _resolve_event_content(
     resolved_content = await _resolve_canonical_content(preview_content, client)
     if resolved_content is preview_content:
         return preview_content, False
-    return _with_event_relation(resolved_content, preview_content), True
+    return _with_event_marker(_with_event_relation(resolved_content, preview_content), preview_content), True
 
 
 async def _download_mxc_text(

@@ -11,7 +11,7 @@ from nio import crypto
 import mindroom.matrix.message_content as message_content_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
+from mindroom.constants import AGENT_AUTHORED_KEY, STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
@@ -491,6 +491,42 @@ class TestResolvedMessageExtraction:
         assert event_source["content"]["body"] == "Full text"
         assert "m.relates_to" not in event_source["content"]
         assert EventInfo.from_event(event_source).thread_id is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("marked_layer", ["message", "edit wrapper", "edit replacement"])
+    async def test_hydration_keeps_the_agent_authored_marker_the_event_carries(self, marked_layer: str) -> None:
+        """Who wrote an event is a fact of the event, so a sidecar payload without the marker cannot undo it.
+
+        Listening and history read the hydrated content, and of an edit its replacement content.
+        """
+        agent = "@mind:example.com"
+        preview = {
+            "msgtype": "m.file",
+            "body": "Preview",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            "url": "mxc://server/unmarked-sidecar",
+        }
+        payload: dict[str, object] = {"msgtype": "m.text", "body": "Full text"}
+        if marked_layer == "message":
+            content: dict[str, object] = {**preview, AGENT_AUTHORED_KEY: agent}
+        else:
+            relation = {"rel_type": "m.replace", "event_id": "$original"}
+            content = {"msgtype": "m.text", "body": "* Preview", "m.new_content": preview, "m.relates_to": relation}
+            marked = content if marked_layer == "edit wrapper" else preview
+            marked[AGENT_AUTHORED_KEY] = agent
+            payload = {"msgtype": "m.text", "body": "* Full text", "m.new_content": payload}
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadResponse, body=json.dumps(payload).encode("utf-8")),
+        )
+
+        event_source = await resolve_event_source_content({"type": "m.room.message", "content": content}, client)
+
+        resolved = event_source["content"]
+        # The text is hydrated, so this pins the marker's survival rather than a skipped download.
+        assert visible_content_from_content(resolved)["body"] == "Full text"
+        assert resolved[AGENT_AUTHORED_KEY] == agent
+        assert visible_content_from_content(resolved)[AGENT_AUTHORED_KEY] == agent
 
     def test_visible_body_from_event_source_prefers_visible_edit_content(self) -> None:
         """Visible-body extraction should use m.new_content when present."""
