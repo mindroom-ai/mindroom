@@ -839,15 +839,19 @@ class TestRoutingRegression:
         stuck_bot.client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("still_steward", [True, False])
     @patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock)
     async def test_a_steward_that_had_selected_itself_answers_again_without_selecting_anew(
         self,
         mock_suggest_responder: AsyncMock,
         tmp_path: Path,
+        *,
+        still_steward: bool,
     ) -> None:
-        """A replay of a turn its steward had begun to answer itself is answered by that steward again."""
+        """A replay of a turn its steward had begun to answer itself is answered by it again, while it is the steward."""
         _router_bot, healthy_bot, _stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
-        _make_steward(healthy_bot, room.room_id, power=101)
+        if still_steward:
+            _make_steward(healthy_bot, room.room_id, power=101)
         mock_suggest_responder.return_value = ResponderSelection("stuck")
         turn_store = healthy_bot._turn_store
         # As the steward's crashed attempt left the turn once it had selected itself: pending, with its own history.
@@ -859,7 +863,7 @@ class TestRoutingRegression:
             ),
         )
 
-        assert await _router_relay(healthy_bot, room, "$answering-itself") is True
+        assert await _router_relay(healthy_bot, room, "$answering-itself") is still_steward
 
         mock_suggest_responder.assert_not_awaited()
         healthy_bot.client.room_send.assert_not_awaited()

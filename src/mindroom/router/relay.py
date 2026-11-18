@@ -118,7 +118,7 @@ async def _earlier_attempt_outcome(deps: _RouterRelaySupport, room_id: str, even
     if earlier is None or earlier.completed or earlier.response_owner is None:
         return None
     if earlier.history_scope is not None:
-        return True
+        return await _still_steward(deps, room_id, earlier)
     sent_route = await deps.visible_responses.recovered_response_event_id(
         earlier,
         room_id=room_id,
