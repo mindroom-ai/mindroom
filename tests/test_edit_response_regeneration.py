@@ -54,6 +54,7 @@ from tests.conftest import (
     install_edit_regeneration_mock,
     install_generate_response_mock,
     install_runtime_journal_support,
+    install_send_response_mock,
     make_ingress_facts,
     make_matrix_client_mock,
     patch_response_runner_module,
@@ -2965,6 +2966,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     }
 
     # Mock voice_handler._handle_voice_message to return a transcription
+    install_send_response_mock(bot, AsyncMock(return_value="$transcript:example.com"))
     mock_generate_response = AsyncMock(return_value="$response:example.com")
     install_generate_response_mock(bot, mock_generate_response)
     with (

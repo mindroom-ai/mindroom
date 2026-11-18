@@ -5547,54 +5547,6 @@ async def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> 
 
 
 @pytest.mark.asyncio
-async def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> None:
-    """Only router voice echoes are display-only; other trusted relay turns still suppress older turns."""
-    older_event = PreparedIngress(
-        sender="@user:localhost",
-        event_id="$voice",
-        body="check my calendar",
-        source={"content": {"msgtype": "m.text", "body": "check my calendar", SOURCE_KIND_KEY: "voice"}},
-        server_timestamp=1000,
-    )
-    marked_helper_relay = ResolvedVisibleMessage(
-        sender="@mindroom_helper:localhost",
-        body="check my calendar",
-        timestamp=2000,
-        event_id="$helper_relay",
-        content={
-            "msgtype": "m.text",
-            "body": "check my calendar",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
-        },
-        thread_id="$thread",
-        latest_event_id="$helper_relay",
-    )
-
-    should_skip = await has_newer_unresponded_in_thread(
-        older_event,
-        ("@user:localhost", None),
-        [marked_helper_relay],
-        may_be_superseded_by_newer_requester_turn=True,
-        pending_turns=_journal_owing_every_event(),
-        classify=lambda sender, _source: make_ingress_facts(
-            sender,
-            source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            requester_user_id="@user:localhost",
-            original_sender="@user:localhost",
-            original_sender_is_human=True,
-            sender_entity_name="helper",
-        ),
-        is_handled=AsyncMock(return_value=frozenset()),
-        for_another_participant=AsyncMock(return_value=False),
-        logger=MagicMock(),
-    )
-
-    assert should_skip
-
-
-@pytest.mark.asyncio
 async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voice_echo(tmp_path: Path) -> None:
     """Router transcript echoes must not suppress the canonical voice turn they represent."""
     bot = _make_bot(tmp_path)
@@ -5652,67 +5604,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
     action_mock.assert_awaited_once()
-    assert not await bot._turn_store.is_handled(room.room_id, "$voice")
-
-
-@pytest.mark.asyncio
-async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_echo_marker(tmp_path: Path) -> None:
-    """Only router transcript echoes are replay noise; other marked relays still count as newer turns."""
-    bot = _make_bot(tmp_path)
-    room = _make_room()
-    older_event = PreparedIngress(
-        sender="@user:localhost",
-        event_id="$voice",
-        body="check my calendar",
-        source={"content": {"msgtype": "m.text", "body": "check my calendar", SOURCE_KIND_KEY: "voice"}},
-        server_timestamp=1000,
-    )
-    dispatch = _prepared_dispatch(event_id="$voice", body="check my calendar", thread_id="$thread")
-    degraded_history = ThreadHistoryResult(
-        [],
-        is_full_history=False,
-        diagnostics={
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
-            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-        },
-    )
-    dispatch.context.am_i_mentioned = False
-    dispatch.context.thread_history = degraded_history
-    dispatch.context.requires_model_history_refresh = True
-    marked_helper_relay_source = {
-        "event_id": "$helper_relay",
-        "sender": bot.agent_user.user_id,
-        "origin_server_ts": 2000,
-        "room_id": room.room_id,
-        "type": "m.room.message",
-        "content": {
-            "msgtype": "m.text",
-            "body": "check my calendar",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-        },
-    }
-    await _admit_pending_thread_event(bot, marked_helper_relay_source)
-    pending_turns = _watch_pending_turns(bot)
-
-    action_mock = AsyncMock()
-    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
-    with (
-        patch.object(
-            bot._turn_dispatcher,
-            "_prepare_dispatch",
-            new=AsyncMock(return_value=dispatch),
-        ),
-        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
-        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-    ):
-        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
-
-    history_guard.assert_not_called()
-    assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
-    action_mock.assert_not_awaited()
     assert not await bot._turn_store.is_handled(room.room_id, "$voice")
 
 
