@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import httpx
@@ -1691,3 +1692,43 @@ def test_a_token_store_its_path_guards_refuse_is_unreadable(
     assert (status.status_code, status.json()) == (503, {"error": "github_token_unreadable"})
     assert (response.status_code, response.json()) == (503, {"error": "github_token_unreadable"})
     assert github.requests == []
+
+
+def test_a_removal_during_a_tokens_check_waits_for_it_and_then_removes_it(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A user's `DELETE` sent while their `PUT` is checking with GitHub runs after that save, so it is not undone.
+
+    Another user's removal does not wait.
+    """
+    checking, release = threading.Event(), threading.Event()
+    answer = user_answer()
+
+    async def held_check(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            checking.set()
+            await asyncio.to_thread(release.wait, 10)
+        return answer(request)
+
+    github.handler = held_check
+    alice, bob = session(app, ALICE), session(app, BOB)
+    with ThreadPoolExecutor(3) as pool:
+        try:
+            put = pool.submit(save_token, client, alice)
+            assert checking.wait(10)
+            delete = pool.submit(client.delete, "/api/github/token", headers=alice)
+            other = pool.submit(client.delete, "/api/github/token", headers=bob)
+            assert other.result(10).json() == {"connected": False}
+            done, _pending = wait([delete], timeout=0.3)
+            assert not done
+        finally:
+            release.set()
+        saved, removed = put.result(10), delete.result(10)
+
+    assert (saved.status_code, saved.json()) == (200, {"connected": True, "via": "token", "login": "pat-gh"})
+    assert (removed.status_code, removed.json()) == (200, {"connected": False})
+    assert stored_token(paths, ALICE) is None
+    assert ALICE not in github_requests._token_locks

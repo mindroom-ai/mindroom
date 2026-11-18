@@ -80,6 +80,7 @@ When GitHub is unreachable, fails, or answers without a well-formed login or wit
 When the token cannot be written, as when its store's directory fails MindRoom's path checks, it answers 503 `{"error": "github_connection_unavailable"}`.
 In every failing case nothing is stored and an earlier token stays.
 `DELETE /api/github/token` removes the saved token, if any, and answers the status that remains, in the shape of `GET /api/github/status`.
+A user's saves and removals run one at a time, so a `DELETE` sent while a `PUT` is still checking with GitHub waits for that `PUT` and then removes its token; this holds within one MindRoom process.
 
 The plugin then calls `POST /api/github/request` with `{"method": ..., "path": ..., "body": ..., "accept": ...}`, where `method` is `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`, `path` is `/graphql` or under `/repos/<owner>/<repo>` with an optional query, `body` is optional JSON, and `accept` is `application/vnd.github+json` (the default), `application/vnd.github.full+json`, or `application/vnd.github.diff`.
 The answer is HTTP 200 with `{"status", "body", "headers"}` holding GitHub's own status, its JSON or diff text, and its `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, and `x-github-request-id` headers.

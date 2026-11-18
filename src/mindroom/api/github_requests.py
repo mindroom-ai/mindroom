@@ -13,6 +13,7 @@ import asyncio
 import json
 import math
 import re
+import weakref
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypeIs, override
 from urllib.parse import unquote
 
@@ -104,6 +105,10 @@ _TOKEN_CHECK_TIMEOUT_SECONDS = 10.0
 _MAX_TOKEN_CHECK_BYTES = 64 * 1024
 _DEFAULT_ACCEPT: Final = "application/vnd.github+json"
 _API_VERSION = "2022-11-28"
+# One lock per user with a token save or removal under way, so a removal sent during a save's GitHub check runs after
+# that save instead of being undone by it. Per process only: processes sharing one credential store do not share it.
+# A lock no request holds or waits for drops out.
+_token_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
 class GitHubRequest(BaseModel):
@@ -264,6 +269,14 @@ async def _stored_token(context: OAuthCredentialContext | None) -> dict[str, str
         raise
 
 
+def _token_lock(user_id: str) -> asyncio.Lock:
+    """Return the lock serializing ``user_id``'s token saves and removals in this process."""
+    lock = _token_locks.get(user_id)
+    if lock is None:
+        lock = _token_locks[user_id] = asyncio.Lock()
+    return lock
+
+
 def _save_token(context: OAuthCredentialContext, document: dict[str, str]) -> None:
     """Save ``document`` as the user's token, replacing even one that cannot be read; blocks on the filesystem.
 
@@ -342,15 +355,16 @@ async def save_github_token(payload: GitHubToken, request: Request) -> dict[str,
     context = _credential_context(request)
     if context is None:
         return _error(409, "github_not_connected")
-    login = await _token_login(payload.token)
-    if isinstance(login, JSONResponse):
-        return login
-    try:
-        await asyncio.to_thread(_save_token, context, {"token": payload.token, "login": login})
-    except (OSError, ValueError) as exc:
-        # A `ValueError` is the store's path guards refusing its directory; neither answer names the path.
-        logger.warning("github_token_save_failed", error_type=type(exc).__name__)
-        return _error(503, _UNAVAILABLE)
+    async with _token_lock(presented_session(request).user_id):
+        login = await _token_login(payload.token)
+        if isinstance(login, JSONResponse):
+            return login
+        try:
+            await asyncio.to_thread(_save_token, context, {"token": payload.token, "login": login})
+        except (OSError, ValueError) as exc:
+            # A `ValueError` is the store's path guards refusing its directory; neither answer names the path.
+            logger.warning("github_token_save_failed", error_type=type(exc).__name__)
+            return _error(503, _UNAVAILABLE)
     logger.info("github_token_saved")
     return {"connected": True, "via": "token", "login": login}
 
@@ -360,7 +374,9 @@ async def delete_github_token(request: Request) -> dict[str, object] | JSONRespo
     """Remove the session user's saved token, if any, and answer the status left, maybe the GitHub App connection."""
     context = _credential_context(request)
     if context is not None:
-        await asyncio.to_thread(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
+        # Waits for a save under way, which would otherwise publish its token after this removal.
+        async with _token_lock(presented_session(request).user_id):
+            await asyncio.to_thread(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
     return await _status(context)
 
 
