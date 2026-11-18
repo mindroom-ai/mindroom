@@ -490,7 +490,13 @@ async def test_single_question_request_bytes_unchanged(
         assert [hashlib.sha256(body).hexdigest() for body in seen] == [expected]
 
 
-def _batch_request(count: int = 3, text: str = "Passage.") -> JudgmentRequest:
+def _batch_request(
+    count: int = 3,
+    text: str = "Passage.",
+    *,
+    message: str = "How do I install the package?",
+    guidance: str = "",
+) -> JudgmentRequest:
     questions = tuple(
         JudgmentQuestion(
             id=f"c{index}",
@@ -500,18 +506,17 @@ def _batch_request(count: int = 3, text: str = "Passage.") -> JudgmentRequest:
         )
         for index in range(count)
     )
-    return build_batch_request(questions, "How do I install the package?", instructions="")
+    return build_batch_request(questions, message, instructions=guidance)
 
 
 def _batch_body(wire: JudgmentWire, answers: list[tuple[str, float]]) -> bytes:
     if wire is SYSTEM_ONE:
-        return json.dumps(
-            {
-                "model": _PINNED_MODEL,
-                "answers": {name: {"type": "noul", "noul": value} for name, value in answers},
-                "usage": {"input_tokens": 90, "output_tokens": 0},
-            },
-        ).encode()
+        # The answer map is written by hand, so a name given twice stays a duplicate key instead of collapsing.
+        entries = ",".join(
+            f"{json.dumps(name)}:{json.dumps({'type': 'noul', 'noul': value})}" for name, value in answers
+        )
+        usage = json.dumps({"input_tokens": 90, "output_tokens": 0})
+        return f'{{"model":{json.dumps(_PINNED_MODEL)},"answers":{{{entries}}},"usage":{usage}}}'.encode()
     return json.dumps(
         {
             "model": OPENAI_DECISIONS_MODEL,
@@ -558,6 +563,7 @@ async def test_batch_decodes_in_question_order() -> None:
 async def test_batch_missing_or_extra_answer_is_invalid_response(wire: JudgmentWire, names: list[str]) -> None:
     """A batch answer set that is not exactly the requested questions never yields scores."""
     body = _batch_body(wire, [(name, 0.5) for name in names])
+    assert body.count(b'"c0"') == names.count("c0")
     result = await _batch_client(wire, body).judge_many(_batch_request(), owner="rerank", allow_network=True)
     assert result.failure == "invalid_response"
     assert result.decision is None
@@ -581,25 +587,12 @@ async def test_judge_refuses_a_batch_request() -> None:
     assert result.failure == "invalid_request"
 
 
-def _guided_batch(count: int, text: str, guidance: str) -> JudgmentRequest:
-    questions = tuple(
-        JudgmentQuestion(
-            id=f"c{index}",
-            instructions=f"Does this passage help? {text}",
-            when_true="Relevant.",
-            when_false="Irrelevant.",
-        )
-        for index in range(count)
-    )
-    return build_batch_request(questions, "Where do I park?", instructions=guidance)
-
-
 @pytest.mark.parametrize("wire", [SYSTEM_ONE, OPENAI_DECISIONS], ids=["typesafe", "openai"])
 @pytest.mark.parametrize(
     "request_",
     [
-        _guided_batch(60, ("The garage is open late. " * 100)[:1898], ""),
-        _guided_batch(30, "Short passage.", "Judge relevance. " * 300),
+        _batch_request(60, ("The garage is open late. " * 100)[:1898], message="Where do I park?"),
+        _batch_request(30, "Short passage.", message="Where do I park?", guidance="Judge relevance. " * 300),
     ],
     ids=["just-under-canonical-cap", "repeated-guidance"],
 )

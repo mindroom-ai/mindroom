@@ -61,9 +61,9 @@ def _request(
     return build_judgment_request(question, _MESSAGES, instructions=guidance)
 
 
-def _body(answer: dict[str, Any], **root: object) -> dict[str, Any]:
+def _body(*answers: dict[str, Any], **root: object) -> dict[str, Any]:
     return {
-        "answers": [answer],
+        "answers": list(answers),
         "model": OPENAI_DECISIONS_MODEL,
         "usage": {
             "input_tokens": 52,
@@ -76,8 +76,8 @@ def _body(answer: dict[str, Any], **root: object) -> dict[str, Any]:
     }
 
 
-def _predicate(probability: object = 0.9) -> dict[str, Any]:
-    return {"type": "predicate", "name": "simple_task", "probability": probability}
+def _predicate(probability: object = 0.9, name: str = "simple_task") -> dict[str, Any]:
+    return {"type": "predicate", "name": name, "probability": probability}
 
 
 def _choice(**overrides: object) -> dict[str, Any]:
@@ -392,18 +392,10 @@ def _batch_request() -> JudgmentRequest:
     return build_batch_request(_CANDIDATES, "Where do I park?", instructions="")
 
 
-def _batch(*answers: dict[str, Any]) -> dict[str, Any]:
-    return {**_body(answers[0]), "answers": list(answers)}
-
-
-def _named(name: str, probability: float) -> dict[str, Any]:
-    return {"type": "predicate", "name": name, "probability": probability}
-
-
 async def test_batch_decodes_in_question_order() -> None:
     """Answers are matched by name, so a shuffled answer list keeps the question order."""
     seen: list[httpx.Request] = []
-    body = _batch(_named("c1", 0.5), _named("c2", 0.75), _named("c0", 0.25))
+    body = _body(_predicate(0.5, "c1"), _predicate(0.75, "c2"), _predicate(0.25, "c0"))
     result = await _client(body, seen).judge_many(_batch_request(), owner="rerank", allow_network=True)
 
     assert result.failure is None
@@ -424,7 +416,7 @@ async def test_batch_decodes_in_question_order() -> None:
 
 async def test_batch_refusal_is_none() -> None:
     """One refused question reads as None while the others keep their probabilities."""
-    body = _batch(_named("c0", 0.25), {"type": "refusal", "name": "c1"}, _named("c2", 0.75))
+    body = _body(_predicate(0.25, "c0"), {"type": "refusal", "name": "c1"}, _predicate(0.75, "c2"))
     result = await _client(body).judge_many(_batch_request(), owner="rerank", allow_network=True)
     assert result.failure is None
     assert result.decision == (0.25, None, 0.75)
@@ -437,7 +429,9 @@ async def test_batch_evaluator_logs_a_count_not_every_probability(
     """A batch's log line counts its probabilities and refusals instead of listing every one."""
     paths = test_runtime_paths(tmp_path)
     get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "stored-openai-key"})
-    response = json.dumps(_batch(_named("c0", 0.25), {"type": "refusal", "name": "c1"}, _named("c2", 0.75))).encode()
+    response = json.dumps(
+        _body(_predicate(0.25, "c0"), {"type": "refusal", "name": "c1"}, _predicate(0.75, "c2"))
+    ).encode()
 
     async def post(_self: JudgmentClient, _request_body: bytes) -> bytes:
         return response
@@ -469,7 +463,7 @@ async def test_batch_evaluator_uses_its_own_capacity(tmp_path: Path, monkeypatch
     get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "stored-openai-key"})
     both_running = asyncio.Event()
     running = 0
-    response = json.dumps(_batch(_named("c0", 0.25), _named("c1", 0.5), _named("c2", 0.75))).encode()
+    response = json.dumps(_body(_predicate(0.25, "c0"), _predicate(0.5, "c1"), _predicate(0.75, "c2"))).encode()
 
     async def post(_self: JudgmentClient, _request_body: bytes) -> bytes:
         nonlocal running
