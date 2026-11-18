@@ -16,6 +16,7 @@ from pygments.formatters.html import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
+from mindroom.constants import UI_WIDGETS_CONTENT_KEY
 from mindroom.matrix.event_info import UNQUOTED_REPLY_RELATION_KEY
 
 # Standard Matrix-safe HTML tags.
@@ -551,11 +552,14 @@ def build_thread_relation(
 
 
 def build_matrix_edit_content(event_id: str, new_content: Mapping[str, Any]) -> dict[str, Any]:
-    """Wrap replacement content in one Matrix ``m.replace`` edit envelope."""
+    """Wrap replacement content in one Matrix ``m.replace`` edit envelope.
+
+    A reply's widgets ride only in the replacement: clients read them there, and a second copy would double their size.
+    """
     replacement_content = dict(new_content)
     replacement_content.pop("m.relates_to", None)
     return {
-        **replacement_content,
+        **{key: value for key, value in replacement_content.items() if key != UI_WIDGETS_CONTENT_KEY},
         "m.new_content": replacement_content,
         "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
     }

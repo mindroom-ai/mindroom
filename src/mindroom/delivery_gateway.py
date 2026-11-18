@@ -19,7 +19,7 @@ from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import classify_cancel_source
 from mindroom.config.resolution import ui_widgets
-from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY, UI_WIDGETS_CONTENT_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
@@ -74,6 +74,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.large_messages import (
     MatrixEventTooLargeError,
     fit_reasoning_to_ordinary_event,
+    fit_ui_widgets_to_ordinary_event,
     prepare_large_message,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -130,7 +131,7 @@ from mindroom.streaming import (
     send_streaming_response,
     stream_progress_edits,
 )
-from mindroom.ui_widgets.render import without_open_ui_fence
+from mindroom.ui_widgets.render import render_ui_widgets, without_open_ui_fence
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -374,6 +375,25 @@ def _reply_row_wire_content(claimed: MatrixDelivery) -> dict[str, Any]:
     )
     envelope[DURABLE_DELIVERY_ID_KEY] = payload.get(DURABLE_DELIVERY_ID_KEY)
     return envelope
+
+
+def _fitted_as_the_edit_it_becomes(
+    client: nio.AsyncClient,
+    room_id: str,
+    payload: dict[str, Any],
+    new_text: str,
+) -> dict[str, Any]:
+    """Return a late-bound reply row's payload, without its widgets when the edit it becomes could not carry them.
+
+    ``_reply_row_wire_content`` wraps the frozen payload with no second fit, so the widgets are fitted here against
+    that edit; its target is not known yet, and every event ID has this one's length.
+    """
+    if UI_WIDGETS_CONTENT_KEY not in payload:
+        return payload
+    edit = build_edit_event_content(event_id="$" + "0" * 43, new_content=payload, new_text=new_text)
+    if fit_ui_widgets_to_ordinary_event(client, room_id, edit, room_encrypted=True) is edit:
+        return payload
+    return {key: value for key, value in payload.items() if key != UI_WIDGETS_CONTENT_KEY}
 
 
 class _DeliveryRefusedError(RuntimeError):
@@ -1012,6 +1032,10 @@ class DeliveryGateway:
                 if edits and event_id is not None
                 else content
             )
+            # Wrapped when the row is claimed, if the reply's create binds an event by then.
+            late_edit_text = (
+                new_text or str(content.get("body", "")) if not edits and stage is not DeliveryStage.INITIAL else None
+            )
             prepared = await self._prepared_for_the_wire(
                 target.room_id,
                 payload,
@@ -1019,6 +1043,7 @@ class DeliveryGateway:
                 stage=stage,
                 continuation_thread_id=target.resolved_thread_id,
                 continuation_reply_to_event_id=event_id if edits else target.reply_to_event_id,
+                late_edit_text=late_edit_text,
             )
             failure_reason = None
             if isinstance(prepared, MatrixDeliveryFailure):
@@ -1031,12 +1056,7 @@ class DeliveryGateway:
                 payload=payload,
                 result=_result_with_segment_payloads(result, prepared),
                 permanent_failure_reason=failure_reason,
-                # Wrapped when the row is claimed, if the reply's create binds an event by then.
-                new_text=(
-                    new_text or str(content.get("body", ""))
-                    if not edits and stage is not DeliveryStage.INITIAL
-                    else None
-                ),
+                new_text=late_edit_text,
             )
 
         recorded: list[ReplyRowEnqueue] = []
@@ -1544,6 +1564,23 @@ class DeliveryGateway:
                 lambda latest: rl.owed_write_refused(latest, owed, now_ns=time.time_ns()),
             )
 
+    def _with_ui_widgets(
+        self,
+        text: str,
+        extra_content: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Return a reply body with its valid ``ui`` blocks as fallback blocks, and its content with their widgets.
+
+        A reply's records hold the text as the model wrote it, and notes, pauses and multi-span bodies are rendered
+        from them, so every write of a reply runs this; an agent without ``ui_widgets`` gets both back as they are.
+        """
+        if not ui_widgets(self.deps.runtime.config, self.deps.agent_name):
+            return text, extra_content
+        rendered = render_ui_widgets(text, in_progress=False)
+        if rendered.content is None:
+            return rendered.text, extra_content
+        return rendered.text, {**(extra_content or {}), UI_WIDGETS_CONTENT_KEY: rendered.content}
+
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
         config = self.deps.runtime.config
@@ -1554,7 +1591,13 @@ class DeliveryGateway:
                 request.tool_trace,
                 request.reply_write.shown,
             )
-            request = replace(request, response_text=response_text, tool_trace=tool_trace)
+            response_text, extra_content = self._with_ui_widgets(response_text, request.extra_content)
+            request = replace(
+                request,
+                response_text=response_text,
+                tool_trace=tool_trace,
+                extra_content=extra_content,
+            )
         effective_thread_id = resolved_target.resolved_thread_id
         latest_thread_event_id = None
         if effective_thread_id is not None:
@@ -1622,7 +1665,8 @@ class DeliveryGateway:
         target = request.target
         if request.reply_write is not None:
             new_text, tool_trace = _reply_body(request.new_text, request.tool_trace, request.reply_write.shown)
-            request = replace(request, new_text=new_text, tool_trace=tool_trace)
+            new_text, extra_content = self._with_ui_widgets(new_text, request.extra_content)
+            request = replace(request, new_text=new_text, tool_trace=tool_trace, extra_content=extra_content)
         # The edit envelope discards any pre-existing relation before adding m.replace.
         content = format_message_with_mentions(
             config,
@@ -2237,8 +2281,11 @@ class DeliveryGateway:
         stage: DeliveryStage,
         continuation_thread_id: str | None = None,
         continuation_reply_to_event_id: str | None = None,
+        late_edit_text: str | None = None,
     ) -> _PreparedWirePayload | MatrixDeliveryFailure:
         """Prepare a payload for the wire, unless a frozen one already exists.
+
+        ``late_edit_text`` is the new text of a reply row that is wrapped into an edit only when it is claimed.
 
         Preparation can upload a sidecar, so it must not run for a turn whose
         row has already been attempted. That row is frozen and `enqueue`
@@ -2265,14 +2312,17 @@ class DeliveryGateway:
             return encryption_outcome
         split = self.deps.runtime.config.defaults.large_message_strategy == "split"
         payload = matrix_delivery_payload(self.deps.outbox.principal_id, turn_id, stage, content)
-        # Reasoning is fitted against what would otherwise segment the reply or move it to a sidecar; durable rows
-        # are sized for encrypted delivery, as prepare_large_message sizes them below.
+        if late_edit_text is not None:
+            payload = _fitted_as_the_edit_it_becomes(client, room_id, payload, late_edit_text)
+        # Widgets, then reasoning, are fitted against what would otherwise segment the reply or move it to a sidecar;
+        # durable rows are sized for encrypted delivery, as prepare_large_message sizes them below.
+        size_limit = first_segment_target_bytes(payload, room_encrypted=encryption_outcome) if split else None
         wire_content = fit_reasoning_to_ordinary_event(
             client,
             room_id,
-            payload,
+            fit_ui_widgets_to_ordinary_event(client, room_id, payload, room_encrypted=True, size_limit=size_limit),
             room_encrypted=True,
-            size_limit=first_segment_target_bytes(payload, room_encrypted=encryption_outcome) if split else None,
+            size_limit=size_limit,
         )
         segmented = (
             segment_matrix_content(

@@ -105,3 +105,15 @@ def test_nested_quote_list_div_keeps_inner_markdown_literal() -> None:
     assert "<div>ok</div>" in html
     assert "**bold**" in html
     assert "<strong>bold</strong>" not in html
+
+
+def test_an_edit_envelope_has_ui_only_in_new_content() -> None:
+    """Widgets ride once per edit: clients read them from the replacement, and the fallback copy leaves them out."""
+    ui = {"version": 1, "widgets": [{"id": "df4d729a5d", "json": '{"type":"chart"}'}]}
+    replacement = {"msgtype": "m.text", "body": "chart", "io.mindroom.ui": ui, "io.mindroom.stream_status": "completed"}
+
+    envelope = build_matrix_edit_content(event_id="$reply", new_content=replacement)
+
+    assert envelope["m.new_content"] == replacement
+    assert "io.mindroom.ui" not in envelope
+    assert envelope["io.mindroom.stream_status"] == "completed"

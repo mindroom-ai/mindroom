@@ -31,6 +31,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
     TOOL_TRACE_CONTENT_KEY,
+    UI_WIDGETS_CONTENT_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
@@ -305,16 +306,16 @@ def should_send_oversized_nonterminal_streaming_edit(
     if not isinstance(source_content, dict) or not _is_nonterminal_stream_content(source_content):
         return True
 
+    # Widgets are dropped from an edit they would make oversized, so only the rest of it can be.
+    edit_content = _without_content_key(edit_content, UI_WIDGETS_CONTENT_KEY)
+    source_content = edit_content["m.new_content"]
     event_size = calculate_event_size(edit_content)
     if event_size <= EDIT_MESSAGE_SIZE_LIMIT:
         return True
     if REASONING_CONTENT_KEY in source_content:
         # Reasoning is cut to fit an edit that is ordinary without it, so only the rest can make one oversized. An
         # oversized edit carries a bounded part of it, which its size paces as the upload it is.
-        without_reasoning = {key: value for key, value in edit_content.items() if key != REASONING_CONTENT_KEY}
-        without_reasoning["m.new_content"] = {
-            key: value for key, value in source_content.items() if key != REASONING_CONTENT_KEY
-        }
+        without_reasoning = _without_content_key(edit_content, REASONING_CONTENT_KEY)
         if calculate_event_size(without_reasoning) <= EDIT_MESSAGE_SIZE_LIMIT:
             return True
         reasoning = source_content[REASONING_CONTENT_KEY]
@@ -644,6 +645,58 @@ def content_fits_normal_event(content: dict[str, Any]) -> bool:
     return calculate_event_size(content) <= _NORMAL_MESSAGE_LIMIT
 
 
+def _without_content_key(content: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return the content, and the replacement an edit carries, without one key."""
+    stripped = {name: value for name, value in content.items() if name != key}
+    new_content = content.get("m.new_content")
+    if isinstance(new_content, dict):
+        stripped["m.new_content"] = {name: value for name, value in new_content.items() if name != key}
+    return stripped
+
+
+def _ordinary_event_fit(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    room_encrypted: bool,
+    size_limit: int | None,
+) -> Callable[[dict[str, Any]], bool]:
+    """Return the test for a candidate staying one ordinary event: no sidecar, no segments, deliverable as it is."""
+    limit = size_limit or (EDIT_MESSAGE_SIZE_LIMIT if is_edit_message(content) else _NORMAL_MESSAGE_LIMIT)
+    delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
+
+    def fits(candidate: dict[str, Any]) -> bool:
+        return calculate_event_size(candidate) <= limit and delivery_size(candidate) <= _MATRIX_EVENT_HARD_LIMIT
+
+    return fits
+
+
+def fit_ui_widgets_to_ordinary_event(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    room_encrypted: bool,
+    size_limit: int | None = None,
+) -> dict[str, Any]:
+    """Keep a reply's widgets from pushing it into a sidecar or segments: drop them when they would.
+
+    The reply is measured with its widgets and without its reasoning, which is fitted afterwards into what is left.
+    Without widgets the reply still shows their fallback text, so a sidecar preview and a segment never carry any.
+    ``size_limit`` is the size at which the split strategy segments a reply. Content that keeps its widgets, or has
+    none, is returned as it is.
+    """
+    new_content = content.get("m.new_content")
+    holder: dict[str, Any] = new_content if isinstance(new_content, dict) else content
+    if UI_WIDGETS_CONTENT_KEY not in holder:
+        return content
+    fits = _ordinary_event_fit(client, room_id, content, room_encrypted=room_encrypted, size_limit=size_limit)
+    if fits(_without_content_key(content, REASONING_CONTENT_KEY)):
+        return content
+    return _without_content_key(content, UI_WIDGETS_CONTENT_KEY)
+
+
 def fit_reasoning_to_ordinary_event(
     client: nio.AsyncClient,
     room_id: str,
@@ -664,15 +717,8 @@ def fit_reasoning_to_ordinary_event(
     reasoning = holder.get(REASONING_CONTENT_KEY) or content.get(REASONING_CONTENT_KEY)
     if not isinstance(reasoning, dict) or not isinstance(reasoning.get("text"), str):
         return content
-    limit = size_limit or (EDIT_MESSAGE_SIZE_LIMIT if is_edit_message(content) else _NORMAL_MESSAGE_LIMIT)
-    delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
-
-    def fits(candidate: dict[str, Any]) -> bool:
-        return calculate_event_size(candidate) <= limit and delivery_size(candidate) <= _MATRIX_EVENT_HARD_LIMIT
-
-    base = {key: value for key, value in content.items() if key != REASONING_CONTENT_KEY}
-    if isinstance(new_content, dict):
-        base["m.new_content"] = {key: value for key, value in new_content.items() if key != REASONING_CONTENT_KEY}
+    fits = _ordinary_event_fit(client, room_id, content, room_encrypted=room_encrypted, size_limit=size_limit)
+    base = _without_content_key(content, REASONING_CONTENT_KEY)
 
     def with_text(kept_text: str, marker: str = "") -> dict[str, Any]:
         fitted = dict(base)

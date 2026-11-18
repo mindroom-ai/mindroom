@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -32,15 +33,19 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_session import MindRoomAsyncClient, _MatrixTransportShutdownError
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
     _SIDECAR_UPLOAD_FALLBACK_INDICATOR,
+    EDIT_MESSAGE_SIZE_LIMIT,
     _calculate_delivery_event_size,
     _create_preview,
     _oversized_nonterminal_streaming_edit_next_allowed_at,
     calculate_event_size,
+    fit_reasoning_to_ordinary_event,
+    fit_ui_widgets_to_ordinary_event,
     is_edit_message,
     prepare_large_message,
     should_send_oversized_nonterminal_streaming_edit,
@@ -1750,3 +1755,169 @@ async def test_prepare_large_message_moves_visible_body_to_json_sidecar_edit() -
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert uploaded_payload["m.new_content"]["io.mindroom.visible_body"] == visible_body
+
+
+_UI_KEY = "io.mindroom.ui"
+
+
+def _ui_value(pad: int = 1_000, title: str = "Orders") -> dict[str, object]:
+    """Return a widget value whose one entry holds about ``pad`` bytes of JSON text."""
+    return {"version": 1, "widgets": [{"id": "df4d729a5d", "json": f'{{"title":"{title}","pad":"{"p" * pad}"}}'}]}
+
+
+def _without_ui(content: dict[str, Any]) -> dict[str, Any]:
+    stripped = {key: value for key, value in content.items() if key != _UI_KEY}
+    if isinstance(new_content := content.get("m.new_content"), dict):
+        stripped["m.new_content"] = {key: value for key, value in new_content.items() if key != _UI_KEY}
+    return stripped
+
+
+def _ui_edit(body: str, ui: dict[str, object], **extra: object) -> dict[str, Any]:
+    return build_edit_event_content(
+        event_id="$reply",
+        new_content={"msgtype": "m.text", "body": body, _UI_KEY: ui, **extra},
+        new_text=body,
+    )
+
+
+def _has_ui(content: dict[str, Any]) -> bool:
+    return _UI_KEY in content or _UI_KEY in content.get("m.new_content", {})
+
+
+def test_ui_is_dropped_when_it_alone_pushes_an_edit_over_the_budget() -> None:
+    """Widgets never turn an ordinary edit into a sidecar: the key goes and the text stays."""
+    body = "x" * 7_500
+    edit = _ui_edit(body, _ui_value(3_000))
+    assert calculate_event_size(_without_ui(edit)) <= EDIT_MESSAGE_SIZE_LIMIT < calculate_event_size(edit)
+
+    fitted = fit_ui_widgets_to_ordinary_event(
+        MagicMock(spec=nio.AsyncClient),
+        "!room:server",
+        edit,
+        room_encrypted=False,
+    )
+
+    assert not _has_ui(fitted)
+    assert fitted["m.new_content"]["body"] == body
+    assert fitted == _without_ui(edit)
+    assert calculate_event_size(fitted) <= EDIT_MESSAGE_SIZE_LIMIT
+    assert _has_ui(edit)
+
+
+def test_ui_stays_when_cutting_reasoning_makes_room() -> None:
+    """Reasoning is cut to the space the answer and its widgets leave, so it never costs a reply its widgets."""
+    client = MagicMock(spec=nio.AsyncClient)
+    reasoning = {"text": "r" * 40_000, "duration_ms": 5}
+    edit = _ui_edit("x" * 5_000, _ui_value(3_000), **{"io.mindroom.reasoning": reasoning})
+    without_reasoning = _ui_edit("x" * 5_000, _ui_value(3_000))
+    assert calculate_event_size(without_reasoning) <= EDIT_MESSAGE_SIZE_LIMIT < calculate_event_size(edit)
+
+    kept = fit_ui_widgets_to_ordinary_event(client, "!room:server", edit, room_encrypted=False)
+    assert kept is edit
+    fitted = fit_reasoning_to_ordinary_event(client, "!room:server", kept, room_encrypted=False)
+
+    assert fitted["m.new_content"][_UI_KEY] == _ui_value(3_000)
+    assert fitted["m.new_content"]["io.mindroom.reasoning"]["text"].endswith("…")
+    assert calculate_event_size(fitted) <= EDIT_MESSAGE_SIZE_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_a_reply_too_large_on_its_own_loses_ui_before_the_sidecar() -> None:
+    """A reply that needs a sidecar anyway carries no widgets, on the preview or anywhere else."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
+    content: dict[str, Any] = {"msgtype": "m.text", "body": "x" * 60_000, _UI_KEY: _ui_value()}
+    assert calculate_event_size(_without_ui(content)) > _NORMAL_MESSAGE_LIMIT
+
+    fitted = fit_ui_widgets_to_ordinary_event(client, "!room:server", content, room_encrypted=False)
+    assert not _has_ui(fitted)
+    preview = await prepare_large_message(client, "!room:server", fitted, room_encrypted=False)
+
+    assert "io.mindroom.long_text" in preview
+    assert not _has_ui(preview)
+    assert client.uploaded_data is not None
+    assert _UI_KEY.encode() not in client.uploaded_data
+
+
+def test_ui_is_dropped_at_the_split_target() -> None:
+    """Under the split strategy the budget is the first segment's, so widgets never cause a second message."""
+    client = MagicMock(spec=nio.AsyncClient)
+    content: dict[str, Any] = {"msgtype": "m.text", "body": "x" * 20_000, _UI_KEY: _ui_value(2_000)}
+    split_target = calculate_event_size(_without_ui(content)) + 100
+    assert calculate_event_size(_without_ui(content)) <= split_target < calculate_event_size(content)
+
+    assert fit_ui_widgets_to_ordinary_event(client, "!room:server", content, room_encrypted=False) is content
+    fitted = fit_ui_widgets_to_ordinary_event(
+        client,
+        "!room:server",
+        content,
+        room_encrypted=False,
+        size_limit=split_target,
+    )
+
+    assert fitted == _without_ui(content)
+
+
+@pytest.mark.parametrize("room_encrypted", [False, True])
+def test_ui_made_of_non_ascii_text_is_sized_as_sent(room_encrypted: bool) -> None:
+    """A title of 80 emoji is measured as the bytes the event sends, at the exact boundary of each limit."""
+    client = MagicMock(spec=nio.AsyncClient)
+    client.olm = None
+    client.device_id = "DEVICE"
+    ui = _ui_value(0, title="😀" * 80)
+
+    def content(body_length: int) -> dict[str, Any]:
+        return {"msgtype": "m.text", "body": "x" * body_length, _UI_KEY: ui}
+
+    def sent_size(candidate: dict[str, Any]) -> int:
+        if room_encrypted:
+            return _actual_encrypted_event_size(candidate, room_id="!room:server")
+        # The overhead `calculate_event_size` reserves for the event's own metadata.
+        return len(nio.Api.to_json(candidate).encode()) + 2_000
+
+    def estimate(candidate: dict[str, Any]) -> int:
+        return _calculate_delivery_event_size(
+            candidate,
+            room_id="!room:server",
+            room_encrypted=room_encrypted,
+            device_id="DEVICE",
+        )
+
+    limit = _MATRIX_EVENT_HARD_LIMIT if room_encrypted else _NORMAL_MESSAGE_LIMIT
+    largest_fitting = max(length for length in range(40_000, 56_000) if estimate(content(length)) <= limit)
+    fits, too_big = content(largest_fitting), content(largest_fitting + 16)
+    assert estimate(fits) <= limit < estimate(too_big)
+    assert estimate(_without_ui(too_big)) <= limit
+    assert sent_size(fits) <= estimate(fits)
+
+    assert fit_ui_widgets_to_ordinary_event(client, "!room:server", fits, room_encrypted=room_encrypted) is fits
+    fitted = fit_ui_widgets_to_ordinary_event(client, "!room:server", too_big, room_encrypted=room_encrypted)
+
+    assert fitted == _without_ui(too_big)
+    assert sent_size(fitted) <= limit
+
+
+def test_a_droppable_ui_key_does_not_throttle_a_progress_edit() -> None:
+    """A progress edit that is ordinary once its widgets are dropped is sent at the ordinary cadence."""
+    body = "x" * 7_500
+    edit = _ui_edit(body, _ui_value(3_000), **{STREAM_STATUS_KEY: STREAM_STATUS_STREAMING})
+    assert calculate_event_size(_without_ui(edit)) <= EDIT_MESSAGE_SIZE_LIMIT < calculate_event_size(edit)
+
+    for _ in range(2):
+        assert should_send_oversized_nonterminal_streaming_edit(
+            room_id="!room:server",
+            original_event_id="$reply",
+            edit_content=edit,
+        )
+    assert _oversized_nonterminal_streaming_edit_next_allowed_at == {}
+
+    oversized = _ui_edit("x" * 12_000, _ui_value(3_000), **{STREAM_STATUS_KEY: STREAM_STATUS_STREAMING})
+    assert calculate_event_size(_without_ui(oversized)) > EDIT_MESSAGE_SIZE_LIMIT
+    sent = [
+        should_send_oversized_nonterminal_streaming_edit(
+            room_id="!room:server",
+            original_event_id="$reply",
+            edit_content=oversized,
+        )
+        for _ in range(2)
+    ]
+    assert sent == [True, False]

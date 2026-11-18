@@ -21,6 +21,7 @@ from mindroom.matrix.guarded_rooms import send_refused
 from mindroom.matrix.large_messages import (
     MatrixEventTooLargeError,
     fit_reasoning_to_ordinary_event,
+    fit_ui_widgets_to_ordinary_event,
     prepare_large_message,
 )
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
@@ -283,6 +284,18 @@ async def send_room_event_result(
     return cast("nio.RoomSendResponse | nio.RoomSendError | None", response)
 
 
+def _fitted_to_ordinary_event(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    room_encrypted: bool,
+) -> dict[str, Any]:
+    """Drop the widgets, then cut the reasoning, that would make an ordinary-size event a large one."""
+    with_widgets_fitted = fit_ui_widgets_to_ordinary_event(client, room_id, content, room_encrypted=room_encrypted)
+    return fit_reasoning_to_ordinary_event(client, room_id, with_widgets_fitted, room_encrypted=room_encrypted)
+
+
 async def _prepare_matrix_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -299,8 +312,8 @@ async def _prepare_matrix_message(
 
     content_sent = content
     if not content_is_prepared:
-        # Reasoning must not push an ordinary-size message or edit into a sidecar.
-        fitted = fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=room_encrypted)
+        # Neither widgets nor reasoning may push an ordinary-size message or edit into a sidecar.
+        fitted = _fitted_to_ordinary_event(client, room_id, content, room_encrypted=room_encrypted)
         try:
             content_sent = await prepare_large_message(
                 client,
@@ -333,7 +346,7 @@ async def _prepare_matrix_message(
                     content_sent = await prepare_large_message(
                         client,
                         room_id,
-                        fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=True),
+                        _fitted_to_ordinary_event(client, room_id, content, room_encrypted=True),
                         room_encrypted=True,
                         sidecar_required=sidecar_required,
                     )

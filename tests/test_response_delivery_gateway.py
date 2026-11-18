@@ -13,7 +13,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -38,6 +38,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
     _reply_body,
+    _reply_row_wire_content,
     _segment_transaction_id,
     _take_published,
 )
@@ -64,6 +65,7 @@ from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
+    EDIT_MESSAGE_SIZE_LIMIT,
     _calculate_delivery_event_size,
     calculate_event_size,
     fit_reasoning_to_ordinary_event,
@@ -112,6 +114,13 @@ if TYPE_CHECKING:
         PrincipalStore,
     )
     from mindroom.event_journal.backend import Transaction
+
+
+_CHART = (
+    '{"type":"chart","kind":"line","title":"Signups","labels":["Jan","Feb","Mar"],'
+    '"series":[{"name":"Signups","data":[120,180.5,150]}],"y":"users"}'
+)
+_CHART_BLOCK = "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```"
 
 
 async def _empty_stream() -> AsyncIterator[str]:
@@ -2274,6 +2283,83 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             ACTING_REQUESTER_KEY: "@user:localhost",
         }
         assert ACTING_REQUESTER_KEY not in run_metadata
+
+    @pytest.mark.parametrize("ui_widgets", [True, False])
+    async def test_a_collected_reply_carries_its_widget(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        ui_widgets: bool,
+    ) -> None:
+        """A reply that was not streamed draws its chart too; without the switch, or a reply, the text is untouched."""
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.runtime.config.agents["agent"].ui_widgets = ui_widgets
+        text = f"Signups peaked.\n\n```ui\n{_CHART}\n```"
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(gateway, alice, self._final_request(text))
+            await gateway.send_text(SendTextRequest(MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True), text))
+
+        assert outcome.ending == Completed()
+        frozen = (await _turn_row(alice, DeliveryStage.FINAL)).payload
+        if ui_widgets:
+            assert frozen["body"] == f"Signups peaked.\n\n{_CHART_BLOCK}"
+            assert frozen["io.mindroom.ui"]["widgets"][0]["id"] == "df4d729a5d"
+            assert '<pre><code class="language-mindroom-ui-df4d729a5d">' in frozen["formatted_body"]
+        else:
+            assert frozen["body"] == text
+            assert "io.mindroom.ui" not in frozen
+        # A message that is no reply's write, such as a command's answer, is sent as written.
+        not_a_reply = send.await_args.args[2]
+        assert not_a_reply["body"] == text
+        assert "io.mindroom.ui" not in not_a_reply
+
+    async def test_a_row_prepared_before_its_create_is_fitted_as_the_edit_it_becomes(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A final stored before the reply has an event is wrapped into an edit when claimed, with no second fit.
+
+        So its widgets are fitted against that edit before the row is frozen, and the wrapped edit carries them
+        only in the replacement.
+        """
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.runtime.config.agents["agent"].ui_widgets = True
+        chart = f"```ui\n{_CHART}\n```"
+
+        async def frozen_row(text: str, source_event_id: str) -> MatrixDelivery:
+            request = self._final_request(text)
+            identity = _identity(source_event_id=source_event_id)
+            send = AsyncMock(return_value=DeliveredMatrixEvent(f"{source_event_id}_answer", {"body": "sent"}))
+            with patch("mindroom.delivery_gateway.send_message_outcome", send):
+                outcome = await final_in_span(gateway, alice, replace(request, identity=identity))
+            assert outcome.ending == Completed()
+            return await _turn_row(alice, DeliveryStage.FINAL, source_event_id)
+
+        def as_claimed_edit(row: MatrixDelivery) -> dict[str, Any]:
+            return _reply_row_wire_content(replace(row, edits_event_id="$create", acknowledged_event_id=None))
+
+        long_row = await frozen_row(f"{chart}\n\n{'word ' * 2_400}", "$long")
+        with_key = {
+            **long_row.payload,
+            "io.mindroom.ui": {"version": 1, "widgets": [{"id": "df4d729a5d", "json": "{}"}]},
+        }
+        assert calculate_event_size(with_key) <= 55_000
+        assert calculate_event_size(as_claimed_edit(replace(long_row, payload=with_key))) > EDIT_MESSAGE_SIZE_LIMIT
+        assert "io.mindroom.ui" not in long_row.payload
+        assert _CHART_BLOCK in long_row.payload["body"]
+
+        short_row = await frozen_row(f"{chart}\n\nShort.", "$short")
+        assert short_row.payload["io.mindroom.ui"]["widgets"][0]["id"] == "df4d729a5d"
+        envelope = as_claimed_edit(short_row)
+        assert envelope["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$create"}
+        assert envelope["m.new_content"]["io.mindroom.ui"] == short_row.payload["io.mindroom.ui"]
+        assert "io.mindroom.ui" not in envelope
+        assert calculate_event_size(envelope) <= EDIT_MESSAGE_SIZE_LIMIT
+        # A retry wraps the same row into the same bytes.
+        assert json.dumps(as_claimed_edit(short_row), sort_keys=True) == json.dumps(envelope, sort_keys=True)
 
     @pytest.mark.parametrize("ui_widgets", [True, False])
     async def test_the_recorded_progress_has_no_open_ui_fence(
