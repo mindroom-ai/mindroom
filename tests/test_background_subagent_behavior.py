@@ -1516,6 +1516,46 @@ async def test_one_stopped_job_that_fails_does_not_hold_up_the_pass(
 
 
 @pytest.mark.asyncio
+async def test_a_job_whose_replys_record_cannot_be_read_ends_as_stopped_and_the_others_recover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply record that cannot be read ends its job as a stopped reply's, and recovery goes on to the other jobs."""
+    _started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, held, answer("Never"))
+    try:
+        record = await conversation.reply(
+            calls(
+                tool_call("run_subagent", "first", task="Report", agent_name="code", background_after=0),
+                tool_call("run_subagent", "second", task="Report", agent_name="code", background_after=0),
+            ),
+            answer("Parent free"),
+        )
+        first, second = (json.loads(str(answer_of(record, call).content))["job_id"] for call in ("first", "second"))
+        while len(conversation.agents.models["code"].requests) < 2:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        await conversation.runtime.shutdown()
+
+        async def unreadable(job: BackgroundJob) -> bool:
+            if job.job_id == first:
+                msg = "journal is down"
+                raise RuntimeError(msg)
+            return False
+
+        monkeypatch.setattr(conversation, "_reply_stopped", unreadable)
+        await conversation._start_runtime()
+        with capture_logs() as logs:
+            await conversation.runtime.recover()
+        job = await conversation.job(first)
+        assert (job.status, job.result) == ("interrupted", _REPLY_STOPPED_REASON)
+        assert [job.job_id for job in conversation.runtime.awaiting_continuation()] == [second]
+        assert [log["job_id"] for log in logs if log["log_level"] == "warning"] == [first]
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
 async def test_a_continuation_that_fails_to_start_ends_its_job_interrupted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

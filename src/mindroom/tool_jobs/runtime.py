@@ -582,7 +582,12 @@ class ToolJobRuntime:
         cancelled = entry.job.status == "cancel_requested"
         entry.control.cancel(shutdown=not cancelled)
         if self._reply_stopped is not None and self._continues(entry.job):
-            entry.control.reply_stopped = await self._reply_stopped(entry.job)
+            try:
+                entry.control.reply_stopped = await self._reply_stopped(entry.job)
+            except Exception:
+                # A record that cannot be read ends its job as stopped, and the other jobs still recover.
+                logger.warning("Reply of a stopped job is unreadable", job_id=entry.job.job_id, exc_info=True)
+                entry.control.reply_stopped = True
         outcome = await self._cleanup(entry)
         settled = self._settled(entry, outcome, _stopped_outcome(cancelled=cancelled, cause="restart"))
         if self._keeps(entry, settled):
