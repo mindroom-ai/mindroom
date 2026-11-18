@@ -63,10 +63,10 @@ from mindroom.event_journal import (
     journal,
     reads,
     replacement_target,
+    room_claims,
     sqlite_backend,
     turn_rows,
 )
-from mindroom.event_journal import room_claims
 from mindroom.event_journal.approval_signals import ApprovalSignals, EndedApproval, PausedReply
 from mindroom.event_journal.identity import agent_of_principal
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
