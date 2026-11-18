@@ -550,11 +550,18 @@ def _replaced_event_id(event: dict[str, Any]) -> str | None:
 
 
 async def _newest_in_thread(client: nio.AsyncClient, room_id: str, thread_id: str) -> str:
-    """Return the newest event of a thread, which a reply that answers none of them follows; its root if it has none."""
+    """Return the newest event of a thread, which a reply that answers none of them follows; its root if it has none.
+
+    Some homeservers answer an empty thread for an event they do not know, and take a reply to it that nobody sees, so
+    the root of a thread without replies is read in the room first, as a reaction's target is.
+    """
     path = f"/rooms/{quote(room_id, safe='')}/relations/{quote(thread_id, safe='')}/m.thread"
     page = await matrix_json(client, "GET", f"{path}?{urlencode({'dir': 'b', 'limit': 1})}", version="v1")
     newest = next(iter(json_objects(page, "chunk")), {}).get("event_id")
-    return newest if isinstance(newest, str) else thread_id
+    if isinstance(newest, str):
+        return newest
+    await read_event(client, room_id, thread_id)
+    return thread_id
 
 
 def _made_dm(room_id: str, them: str, not_listed: str | None) -> str:

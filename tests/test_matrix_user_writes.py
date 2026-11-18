@@ -298,13 +298,30 @@ async def test_a_thread_without_replies_continues_from_its_root(
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """The first reply in a thread follows the thread's root."""
+    """The first reply in a thread follows the thread's root, which the room is asked for first."""
     homeserver.answers[THREAD_PATH] = {"chunk": []}
+    homeserver.answers[f"{ROOM_PATH}/event/$root"] = text_message("$root", "Plans?")
 
     await _write(config, paths, homeserver, action="send", room_id=ROOM, thread_id="$root", message="First")
 
     [content] = _sent(homeserver)
+    assert content["m.relates_to"]["rel_type"] == "m.thread"
     assert content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$root"}
+
+
+@pytest.mark.asyncio
+async def test_a_thread_whose_root_the_room_does_not_hold_is_refused(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Some homeservers answer an empty thread for an unknown event and take a reply to it, which nobody would see."""
+    homeserver.answers[THREAD_PATH] = {"chunk": []}
+
+    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, thread_id="$root", message="First")
+
+    assert result == error_result("send", "Matrix answered 404 M_NOT_FOUND: Not found")
+    assert _changes(homeserver) == []
 
 
 @pytest.mark.asyncio
