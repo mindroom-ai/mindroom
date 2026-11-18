@@ -492,3 +492,26 @@ Reviews: Sol (GPT-6.2 Sol), findings S1 to S6 and S-minor; Astra (GPT-6.2 Astra)
 - A9, tightening the secret filter for a second, unnegated match: the round-2 schema is used as measured; listed in section 10.
 - A11, a real Markdown token scan for top-level fences: the column-0 rule gives the same guarantee for 725 of 728 measured fences without parsing on every live tick. Reversed in part by code review round 1: column 0 still decides which fence can be a widget, but the code blocks around it now come from the renderer's block parse.
 - Scope cuts not taken: unaligned fallback columns, a plain pie, unlabelled-toggle and tick simplifications (they depart from the mockups for a few lines each), and leaving the switch out of the dashboard (one line beside `show_reasoning`).
+
+## Appendix B. Code review round 1, backend (2026-11-18)
+
+Findings are numbered as in the reviews of Sol (S) and Astra (A).
+
+**Fixed**
+
+- A5, S3 (a widget lost after other code): the code blocks around a column-0 `ui` fence come from the renderer's block parse, on the text the renderer parses (4, C8).
+- A11, S simplification (ids): only a marker block, at any depth, reserves or recovers an id (5.2, 6.2).
+- A1, S minor (late-bound row): the widgets stay only if the edit as it is sent, with both copies of text and reasoning, is an ordinary edit, under `split` too (6.3).
+- A7 (a create fitted as an edit): a row is late-bound only while an earlier row of its reply is unresolved, the outbox's own condition (6.3).
+- A4, S2 (approval pause): a pause records the text its reply showed; an open `ui` fence is cut from its opening line on, also when nothing follows it (5.5, 6.2).
+- A6, S minor (live frames): a delta is fitted as itself; only a snapshot sheds or restores `ui` (5.5, 6.3).
+- A9, S minor (lone surrogates): shared fixture cases for an escaped lone surrogate (invalid, block and wire) and an escaped surrogate pair (valid).
+
+**Declined**
+
+- S simplification, memoizing the default id with the parsed block: hashing at most 8 blocks of at most 16 kB costs microseconds beside the block parse of the same tick.
+
+**Not changed, as on main**
+
+- A late-bound row whose create is larger than about 30 kB passes the event limit once it is wrapped into an edit, with or without widgets; the widget fit no longer adds to it.
+
