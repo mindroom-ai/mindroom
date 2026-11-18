@@ -414,13 +414,6 @@ def test_compact_command_entries_characterize_welcome_subset() -> None:
     )
 
 
-def _synced_client() -> AsyncMock:
-    """A Matrix client whose member lookup reports an empty, already-synced room."""
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.joined_members = AsyncMock(return_value=nio.JoinedMembersResponse(members=[], room_id="!room:localhost"))
-    return client
-
-
 @pytest.mark.asyncio
 async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None:
     """The welcome quick commands should match the parser-owned compact docs."""
@@ -428,14 +421,7 @@ async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None
     runtime_paths = _test_runtime_paths(tmp_path)
     config = Config()
     persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router_oldns"})
-    welcome_message = await generate_welcome_message_for_room(
-        _synced_client(),
-        room,
-        "@alice:localhost",
-        config,
-        runtime_paths,
-        isolated_membership_index(),
-    )
+    welcome_message = generate_welcome_message_for_room(room.room_id, config, runtime_paths)
 
     quick_command_block = "\u26a1 **Quick commands:**\n" + "\n".join(WELCOME_QUICK_COMMAND_LINES)
     assert quick_command_block in welcome_message
@@ -468,14 +454,7 @@ async def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
             "ops": "mindroom_ops_oldns",
         },
     )
-    welcome_message = await generate_welcome_message_for_room(
-        _synced_client(),
-        room,
-        "@alice:localhost",
-        config,
-        runtime_paths,
-        isolated_membership_index(),
-    )
+    welcome_message = generate_welcome_message_for_room(room.room_id, config, runtime_paths)
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
     assert "\u2022 **Ops Team** (alias `ops`): Operations escalation team (Team of 1 agent)" in welcome_message
@@ -521,14 +500,7 @@ async def test_senderless_welcome_lists_configured_room_responders(tmp_path: Pat
         },
     )
 
-    welcome_message = await generate_welcome_message_for_room(
-        _synced_client(),
-        room,
-        None,
-        config,
-        runtime_paths,
-        isolated_membership_index(),
-    )
+    welcome_message = generate_welcome_message_for_room(room.room_id, config, runtime_paths)
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
     assert "\u2022 **Code** (alias `code`): Writes code" in welcome_message
@@ -863,14 +835,7 @@ async def test_welcome_lists_only_the_tools_an_agent_can_use_here(tmp_path: Path
 
     config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
     persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
-    welcome_message = await generate_welcome_message_for_room(
-        _synced_client(),
-        room,
-        None,
-        config,
-        runtime_paths,
-        isolated_membership_index(),
-    )
+    welcome_message = generate_welcome_message_for_room(room.room_id, config, runtime_paths)
 
     assert "• **Code** (alias `code`): Writes code (\U0001f527 `calculator`)" in welcome_message
     assert "broken_plugin_tool" not in welcome_message

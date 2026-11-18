@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
@@ -46,6 +45,7 @@ from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: 
 from mindroom.thread_summary.notices import send_welcome_thread_summary
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
@@ -164,14 +164,6 @@ class BotRoomLifecycle:
 
     def _logger(self) -> structlog.stdlib.BoundLogger:
         return self.deps.get_logger()
-
-    def _room_for_welcome(self, room_id: str) -> nio.MatrixRoom:
-        rooms = self._client().rooms
-        if isinstance(rooms, Mapping):
-            cached_room = rooms.get(room_id)
-            if isinstance(cached_room, nio.MatrixRoom):
-                return cached_room
-        return nio.MatrixRoom(room_id=room_id, own_user_id=self.deps.agent_user.user_id)
 
     def _should_accept_invite(self) -> bool:
         """Return whether this entity should accept one inbound room invite."""
@@ -605,20 +597,10 @@ class BotRoomLifecycle:
                 self._logger().debug("Welcome message already sent", room_id=room_id)
             return True
 
-    async def _welcome_text(self, room_id: str) -> str:
-        return await generate_welcome_message_for_room(
-            self._client(),
-            self._room_for_welcome(room_id),
-            None,
-            self._config(),
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-        )
-
     async def _deliver_welcome(self, room_id: str) -> bool:
         """Generate and deliver one welcome after its caller owns the send boundary."""
         self._logger().info("Room is empty, sending welcome message", room_id=room_id)
-        welcome_msg = await self._welcome_text(room_id)
+        welcome_msg = generate_welcome_message_for_room(room_id, self._config(), self.deps.runtime_paths)
         target = MessageTarget.resolve(
             room_id=room_id,
             thread_id=None,
@@ -657,7 +639,7 @@ class BotRoomLifecycle:
             sent = self._sent_welcomes.get(room_id)
             if sent is None or room_id not in self.deps.get_configured_rooms():
                 return
-            text = await self._welcome_text(room_id)
+            text = generate_welcome_message_for_room(room_id, self._config(), self.deps.runtime_paths)
             if text == sent.text:
                 return
             content = format_message_with_mentions(

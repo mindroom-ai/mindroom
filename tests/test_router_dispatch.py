@@ -185,7 +185,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch(
                 "mindroom.bot_room_lifecycle.generate_welcome_message_for_room",
-                new=AsyncMock(return_value="Welcome"),
+                new=MagicMock(return_value="Welcome"),
             ),
             patch("mindroom.bot_room_lifecycle.get_joined_rooms", new=AsyncMock(return_value=[])),
             patch("mindroom.bot.config_confirmation.restore_pending_changes", new=AsyncMock(return_value=0)),
