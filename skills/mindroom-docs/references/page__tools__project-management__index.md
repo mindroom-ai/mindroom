@@ -71,17 +71,19 @@ A plugin calls `GET /api/github/status` with its client session for `{"connected
 MindRoom first checks it with GitHub's `GET /user`, following no redirect and giving up after 10 seconds, and stores it with the login GitHub names.
 The answer is `{"connected": true, "via": "token", "login": "<login>"}`.
 A token that is empty, longer than 512 characters, or holds anything but visible ASCII characters answers 422 `{"error": "github_request_invalid"}`, as any malformed body of these routes does, naming nothing it was sent (a body that is not UTF-8 gets FastAPI's own 400, which echoes nothing either), and a token GitHub refuses with 401 or 403 answers 400 `{"error": "github_token_rejected"}`.
+A rate limit on the check, which is any 429 and a 403 with `x-ratelimit-remaining: 0` or a `retry-after` header, says nothing about the token and answers 502 `{"error": "github_rate_limited"}`.
 When GitHub is unreachable, fails, or answers without a well-formed login or with more than 64 KiB, it answers 502 `{"error": "github_unreachable"}`, and a session that names no user gets 409 `{"error": "github_not_connected"}`.
-When the token cannot be written it answers 503 `{"error": "github_connection_unavailable"}`.
+When the token cannot be written, as when its store's directory fails MindRoom's path checks, it answers 503 `{"error": "github_connection_unavailable"}`.
 In every failing case nothing is stored and an earlier token stays.
 `DELETE /api/github/token` removes the saved token, if any, and answers the status that remains, in the shape of `GET /api/github/status`.
+A user's saves and removals run one at a time, so a `DELETE` sent while a `PUT` is still checking with GitHub waits for that `PUT` and then removes its token; this holds within one MindRoom process.
 
 The plugin then calls `POST /api/github/request` with `{"method": ..., "path": ..., "body": ..., "accept": ...}`, where `method` is `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`, `path` is `/graphql` or under `/repos/<owner>/<repo>` with an optional query, `body` is optional JSON, and `accept` is `application/vnd.github+json` (the default), `application/vnd.github.full+json`, or `application/vnd.github.diff`.
 The answer is HTTP 200 with `{"status", "body", "headers"}` holding GitHub's own status, its JSON or diff text, and its `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, and `x-github-request-id` headers.
 GitHub refusing a saved token comes back as its own 401 in that answer, and the token stays saved until the user removes or replaces it.
 The route follows up to 3 redirects that stay on `https://api.github.com`, so a renamed or transferred repository's old name still works; any other redirect, and a 301 or 302 answer to a write, comes back as GitHub's redirect status.
 The route answers 409 `{"error": "github_not_connected"}` while the user has neither a saved token nor a usable GitHub App connection (which also needs the GitHub App client saved), 400 for any other path or one longer than 4096 characters, 503 `{"error": "github_token_unreadable"}` when the saved token could not be read, 503 `{"error": "github_connection_unavailable"}` when the App connection could not be read or refreshed and a retry may help, and 502 when GitHub is unreachable or its answer exceeds 10 MiB.
-A saved token or login that no longer has the shape a save checks counts as unreadable.
+A saved token or login that no longer has the shape a save checks counts as unreadable, as does a token store whose directory fails MindRoom's path checks.
 `GET /api/github/status` answers both 503s too, the App one only when no saved token answers for the user.
 A saved token that can no longer be read never falls back to the App connection, since that would act as another account; no retry helps, but saving a new token replaces it in one step, and removing it lets the App connection answer.
 These routes use only the user's own token or connection, never a saved `access_token` or `GITHUB_ACCESS_TOKEN`, and never log the token or what GitHub says about it.
