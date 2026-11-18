@@ -252,7 +252,7 @@ async def test_pump_counts_the_recheck_from_the_last_wake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A batch that brings nothing right after a wake waits a whole interval, however long the pump has run."""
-    monkeypatch.setattr(durable_ingestion, "_RECHECK_SECONDS", 0.3)
+    monkeypatch.setattr(durable_ingestion, "_RECHECK_SECONDS", 0.5)
     stream = uuid4()
     principal = await principal_for(journal_database(), stream)
 
@@ -260,15 +260,17 @@ async def test_pump_counts_the_recheck_from_the_last_wake(
         async def next_batch(self) -> SyncBatch | None:
             if not self.acked:
                 # The pump has been running for longer than one interval when the new event arrives.
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.6)
             return await super().next_batch()
 
     session = Late([SyncBatch(stream, 1, (message("$new"),)), SyncBatch(stream, 2, ())])
     wakes: list[int] = []
+    woken_at: list[float] = []
     rechecked = asyncio.Event()
 
     def wake() -> None:
         wakes.append(len(session.acked))
+        woken_at.append(asyncio.get_running_loop().time())
         if len(wakes) == 2:
             rechecked.set()
 
@@ -289,6 +291,7 @@ async def test_pump_counts_the_recheck_from_the_last_wake(
         pump.cancel()
         await asyncio.gather(pump, return_exceptions=True)
     assert wakes == [1, 2]
+    assert 0.45 <= woken_at[1] - woken_at[0] < 0.9
 
 
 @pytest.mark.asyncio
