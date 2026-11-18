@@ -193,7 +193,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
 
 defaults:
   tools: [scheduler]

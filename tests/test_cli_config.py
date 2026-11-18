@@ -1915,7 +1915,7 @@ class TestConfigInit:
 
         config_text = target.read_text(encoding="utf-8")
         assert "# fable:" in config_text
-        assert "#   id: anthropic.claude-fable-5-1" in config_text
+        assert "#   id: anthropic.claude-fable-5-2" in config_text
         assert "# sonnet:" in config_text
         assert "#   id: anthropic.claude-sonnet-5-5" in config_text
         assert "# haiku:" in config_text
@@ -1963,14 +1963,14 @@ class TestConfigInit:
         assert config["models"] == {
             "default": {
                 "provider": "codex",
-                "id": "gpt-6.1-sol",
+                "id": "gpt-6.2-sol",
                 "display_name": "Sol",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},
             },
             "astra": {
                 "provider": "codex",
-                "id": "gpt-6-astra",
+                "id": "gpt-6.2-astra",
                 "display_name": "Astra",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},

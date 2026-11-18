@@ -13,15 +13,18 @@ models:
     provider: openai
     id: gpt-6-astra
     pricing:
-      input: 5.0
-      output: 30.0
-      cache_read: 0.5
+      input: 10.0
+      output: 50.0
+      cache_read: 1.0
+      cache_write: 12.5
   luna:
     provider: openai
     id: gpt-6-luna
     pricing:
-      input: 0.2
-      output: 1.25
+      input: 0.1
+      output: 0.5
+      cache_read: 0.01
+      cache_write: 0.125
 
 budgets:
   monthly_limit_usd: 20
