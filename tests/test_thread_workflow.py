@@ -134,6 +134,17 @@ def test_room_thread_facts_resolves_at_the_servers_time(tmp_path: Path, set_at: 
     assert _facts(tmp_path, events) == {"$t": {"resolved_ts": _RESOLVED_AT}}
 
 
+@pytest.mark.parametrize(("pinned", "expected"), [(["$t"], {}), ([], {"$t": {"resolved_ts": _RESOLVED_AT}})])
+def test_room_thread_facts_treats_a_pinned_root_as_open(
+    tmp_path: Path,
+    pinned: list[str],
+    expected: dict[str, dict[str, Any]],
+) -> None:
+    """Pinning a resolved root reopens it, as in the client; unpinning resolves it again."""
+    pins = {"type": "m.room.pinned_events", "state_key": "", "sender": "@user:server", "content": {"pinned": pinned}}
+    assert _facts(tmp_path, [_tag("$t", "resolved", ts=_RESOLVED_AT), pins]) == expected
+
+
 def test_room_thread_facts_reads_legacy_tags_under_per_tag_events(tmp_path: Path) -> None:
     """A thread's legacy tags event counts unless a per-tag event overrides it or removes the tag."""
     snooze = _tag_record({"until": "2999-01-01T00:00:00+00:00"})

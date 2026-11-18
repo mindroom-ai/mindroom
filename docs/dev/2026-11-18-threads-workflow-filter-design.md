@@ -58,7 +58,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    The tool description says so in one sentence, so an agent asked "what needs me?" leads with the approvals and questions.
 5. **Resolved, snoozed, scheduled and background jobs come from one room-state read.**
    The read is `client.room_get_state`, once per room and call; the existing tag and task parsers read its events, and a few lines read the jobs.
-   Tags are merged as the client merges them: per-tag events over a thread's legacy `{"tags": ...}` event, `{}` removing a tag; a thread is resolved at its `resolved` tag event's server time (`origin_server_ts`), as in the client, not at the writer-supplied `set_at`.
+   Tags are merged as the client merges them: per-tag events over a thread's legacy `{"tags": ...}` event, `{}` removing a tag; a thread is resolved at its `resolved` tag event's server time (`origin_server_ts`), as in the client, not at the writer-supplied `set_at`; a root in `m.room.pinned_events` is not resolved, as the client reopens a pinned thread.
    Known limit: like the client, tag events are not checked for the writer's power level, so any member who may write them can resolve or snooze a thread.
    A scheduled task counts when a MindRoom account of this runtime wrote it, it is pending, it names an existing thread, and it is not a one-time task whose time has passed.
    A jobs event counts when its sender is its state key, a configured MindRoom bot of this runtime, and still joined (the client ignores state of an agent that left); a listed job counts only with the fields the client requires.
@@ -69,6 +69,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    This covers every agent, team and router of the MindRoom runtime the calling agent runs in, from the moment a turn starts, in encrypted rooms too, and it cannot go stale after a crash.
    It does not cover an agent that another MindRoom runtime hosts in a shared room, and a tool call outside an orchestrator sees no running reply; such a thread is then classified by its other facts.
    A background job makes the thread `working` only when one of this runtime's bots published it (decision 5); another runtime's jobs are not seen.
+   Known limit: a reply parked on another person's foreground approval still counts as a running reply, so the thread is `working` for everyone but the approver until the card is decided; MindRoom Chat shows them neither a stream nor a card.
 7. **A pending approval comes from the approval journal, not from the thread's events.**
    The journal holds every request card this runtime published, with its room, thread, approver, deadline and creation time (`ApprovalCardView`, `src/mindroom/event_journal/approval_cards.py:82`).
    A card counts when it is published, undecided, not past its deadline, its call still exists, and its approver is the requester or one of the requester's aliases.

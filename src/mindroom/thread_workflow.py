@@ -109,8 +109,19 @@ def room_thread_facts(
     """Read each thread's classifier inputs, and `resolved_ts`, from one room-state response; bad records are skipped."""
     events = [event for event in state.events if isinstance(event, dict)]
     facts: defaultdict[str, dict[str, Any]] = defaultdict(dict)
+    # As the client: a pinned root is not resolved, whatever its tag says.
+    pinned = {
+        root
+        for event in events
+        if event.get("type") == "m.room.pinned_events"
+        and event.get("state_key") == ""
+        and isinstance(content := event.get("content"), dict)
+        and isinstance(roots := content.get("pinned"), list)
+        for root in roots
+        if isinstance(root, str)
+    }
     for (thread_id, tag), (record, ts) in _lifecycle_tags(events).items():
-        if tag == RESOLVED_THREAD_TAG:
+        if tag == RESOLVED_THREAD_TAG and thread_id not in pinned:
             facts[thread_id]["resolved_ts"] = ts if isinstance(ts, int) else 0
         elif tag == SNOOZED_THREAD_TAG and (until := snooze_until(record)) is not None:
             facts[thread_id]["snoozed_until_ts"] = int(until.timestamp() * 1000)
