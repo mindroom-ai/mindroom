@@ -12,8 +12,11 @@ from urllib.parse import parse_qs, urlparse
 
 import nio
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from structlog.testing import capture_logs
 
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.room_history_reads import (
     _MAX_THREAD_ENUMERATION_PAGES,
     RoomThreadsPageError,
@@ -2323,6 +2326,33 @@ async def test_get_thread_tag_content_raises_on_other_errors() -> None:
 
     with pytest.raises(ThreadTagsError, match="boom"):
         await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+
+
+@pytest.mark.asyncio
+async def test_get_thread_tag_content_raises_on_a_server_error_body() -> None:
+    """A non-404 error body, which nio passes through as content, fails the read with its status."""
+    answers = {
+        '["$root","snoozed"]': (500, {"errcode": "M_UNKNOWN", "error": "boom"}),
+        '["$gone","snoozed"]': (404, {"errcode": "M_NOT_FOUND", "error": "Event not found."}),
+        '["$set","snoozed"]': (200, _tag_record_content()),
+    }
+
+    async def state_event(request: web.Request) -> web.Response:
+        status, body = answers[request.match_info["state_key"]]
+        return web.json_response(body, status=status)
+
+    app = web.Application()
+    app.router.add_get("/_matrix/client/{version}/rooms/{room_id}/state/{event_type}/{state_key}", state_event)
+    async with TestServer(app) as server:
+        client = MindRoomAsyncClient(str(server.make_url("")), "@bot:localhost")
+        client.access_token = "token"  # noqa: S105
+        try:
+            with pytest.raises(ThreadTagsError, match="HTTP 500"):
+                await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+            assert await get_thread_tag_content(client, "!room:localhost", "$gone", "snoozed") is None
+            assert await get_thread_tag_content(client, "!room:localhost", "$set", "snoozed") == _tag_record_content()
+        finally:
+            await client.close()
 
 
 _OVERFLOWING_UNTILS = ["9999-12-31T23:59:59-01:00", "0001-01-01T00:00:00+01:00"]
