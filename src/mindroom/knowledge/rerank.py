@@ -39,7 +39,7 @@ _VERTEX_AI_RECORDS_PER_REQUEST = 100
 #: in to Google, and cross-encoder scoring, which is serialized anyway. A step that outlasts its caller's deadline then
 #: holds up later reranking only, never the shared default executor the rest of a reply needs.
 _rerank_thread = ThreadPoolExecutor(1, thread_name_prefix="knowledge-rerank")
-#: The latest build of each reranker config, so a build still running is not started again.
+#: The latest build of each reranker config, so a build still running is awaited instead of started again.
 _builds: dict[str, Future[Reranker]] = {}
 
 
@@ -206,12 +206,11 @@ def _create_reranker(config: RerankerConfig, runtime_paths: RuntimePaths) -> Rer
 async def build_reranker(config: RerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
     """Build the configured reranker on the reranker thread.
 
-    Raises instead of starting a second build while one of the same config still runs, such as a first install.
+    At most one build of a config is in flight: a caller that finds one running, such as a first install, waits for
+    it within its own deadline. A caller that gives up never cancels the build the others wait for.
     """
     key = config.model_dump_json()
-    running = _builds.get(key)
-    if running is not None and not running.done():
-        msg = f"The {config.provider} reranker is still being built"
-        raise RuntimeError(msg)
-    build = _builds[key] = _rerank_thread.submit(_create_reranker, config, runtime_paths)
-    return await asyncio.wrap_future(build)
+    build = _builds.get(key)
+    if build is None or build.done():
+        build = _builds[key] = _rerank_thread.submit(_create_reranker, config, runtime_paths)
+    return await asyncio.shield(asyncio.wrap_future(build))

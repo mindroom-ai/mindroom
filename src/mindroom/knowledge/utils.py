@@ -355,8 +355,8 @@ class _DeferredReranker:
     """The configured reranker, built each time it scores.
 
     A slow build, such as the first install of the sentence-transformers extra, then counts against the caller's
-    deadline, and a failed build, or one still running from an earlier search, fails that scoring, which keeps the
-    search order.
+    deadline; a search that finds a build of the same config running waits for it, and a failed build fails that
+    scoring, which keeps the search order.
     """
 
     config: RerankerConfig

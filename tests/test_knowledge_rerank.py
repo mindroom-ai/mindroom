@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -441,30 +442,110 @@ async def test_a_reranker_that_cannot_be_built_keeps_the_interleaved_order(
     assert [hit.content for hit in await knowledge.asearch("q", limit=2)] == ["a", "bbb"]
 
 
+def _deferred_knowledge(tmp_path: Path, model: str) -> AgentKnowledge:
+    """One base of three hits, reranked by the configured reranker built when it scores, as searches use it."""
+    config = Config(reranker={"provider": "sentence_transformers", "model": model})
+    reranker = knowledge_utils.configured_reranker(config, test_runtime_paths(tmp_path))
+    assert reranker is not None
+    return AgentKnowledge(
+        sources=(
+            KnowledgeSource(
+                description=KnowledgeSourceDescription(base_id="base", description="d"),
+                index=_Index(["a", "bbb", "cc"]),
+            ),
+        ),
+        reranker=reranker,
+    )
+
+
 @pytest.mark.asyncio
-async def test_a_running_build_is_not_started_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """While a reranker config's build runs, another search fails fast instead of building it a second time."""
+async def test_two_concurrent_searches_are_both_reranked_with_one_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A search that finds its reranker's build running waits for that build, so both rerank and it builds once."""
     started = threading.Event()
     release = threading.Event()
     builds: list[str] = []
 
-    def stuck_build(config: KnowledgeRerankerConfig, _runtime_paths: object) -> Reranker:
+    def slow_build(config: KnowledgeRerankerConfig, _runtime_paths: object) -> Reranker:
         builds.append(config.model)
         started.set()
         release.wait(timeout=10)
         return _LengthReranker()
 
-    monkeypatch.setattr(rerank_module, "_create_reranker", stuck_build)
-    config = KnowledgeRerankerConfig(provider="sentence_transformers", model="build-once")
-    runtime_paths = test_runtime_paths(tmp_path)
-    first = asyncio.create_task(rerank_module.build_reranker(config, runtime_paths))
+    monkeypatch.setattr(rerank_module, "_create_reranker", slow_build)
+    knowledge = _deferred_knowledge(tmp_path, "build-once")
+    searches = [asyncio.create_task(knowledge.asearch("q", limit=3)) for _ in range(2)]
     try:
         assert await asyncio.to_thread(started.wait, 5)
-        with pytest.raises(RuntimeError, match="still being built"):
-            await rerank_module.build_reranker(config, runtime_paths)
+        await asyncio.sleep(0.05)
     finally:
         release.set()
 
-    assert isinstance(await first, _LengthReranker)
-    assert isinstance(await rerank_module.build_reranker(config, runtime_paths), _LengthReranker)
-    assert builds == ["build-once", "build-once"]
+    results = await asyncio.gather(*searches)
+    assert [[hit.content for hit in hits] for hits in results] == [["bbb", "cc", "a"]] * 2
+    assert builds == ["build-once"]
+
+
+class _ThreadScorer:
+    """Scores on the reranker thread, as the cross-encoder does, so a build queued behind it waits."""
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        del query
+
+        def score() -> list[float]:
+            time.sleep(0.1)
+            return [float(len(document)) for document in documents]
+
+        return await asyncio.get_running_loop().run_in_executor(rerank_module._rerank_thread, score)
+
+
+@pytest.mark.asyncio
+async def test_searches_behind_a_slow_scorer_are_all_reranked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While scoring holds the reranker thread, a queued build stays running; searches that find it wait and rerank."""
+    monkeypatch.setattr(rerank_module, "_create_reranker", lambda _config, _paths: _ThreadScorer())
+    knowledge = _deferred_knowledge(tmp_path, "slow-scorer")
+    searches = []
+    for _search in range(4):
+        searches.append(asyncio.create_task(knowledge.asearch("q", limit=3)))
+        await asyncio.sleep(0.03)
+
+    results = await asyncio.gather(*searches)
+    assert [[hit.content for hit in hits] for hits in results] == [["bbb", "cc", "a"]] * 4
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_gives_up_leaves_the_build_to_the_others(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling the search that started a still-queued build does not cancel it for a search waiting on it."""
+    builds: list[str] = []
+
+    def build(config: KnowledgeRerankerConfig, _runtime_paths: object) -> Reranker:
+        builds.append(config.model)
+        return _LengthReranker()
+
+    monkeypatch.setattr(rerank_module, "_create_reranker", build)
+    config = KnowledgeRerankerConfig(provider="sentence_transformers", model="queued")
+    runtime_paths = test_runtime_paths(tmp_path)
+    release = threading.Event()
+    blocker = rerank_module._rerank_thread.submit(release.wait, 10)
+    try:
+        first = asyncio.create_task(rerank_module.build_reranker(config, runtime_paths))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(rerank_module.build_reranker(config, runtime_paths))
+        await asyncio.sleep(0)
+        first.cancel()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+
+    assert isinstance(await second, _LengthReranker)
+    assert first.cancelled()
+    assert builds == ["queued"]
+    assert blocker.result() is True
