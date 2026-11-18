@@ -11,6 +11,7 @@ import asyncio
 import json
 import threading
 import time
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -41,6 +42,7 @@ from mindroom.delivery_gateway import (
     _reply_row_wire_content,
     _segment_transaction_id,
     _take_published,
+    _whole_reply_progress,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -83,8 +85,8 @@ from mindroom.reply_scope import current_span, initial_write
 from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.streaming import ProgressPermission, ProgressState
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.streaming import ProgressPermission, ProgressPublisher, ProgressState
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.turn_record import TurnRecord
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -4409,3 +4411,32 @@ async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path
     assert sent_content["formatted_body"] == (
         "<em>\U0001f4e6 Compacted 12 runs: 30,000 → 12,000 / 100,000 history budget</em>"
     )
+
+
+@pytest.mark.parametrize("ui_widgets", [True, False])
+async def test_whole_reply_progress_leaves_an_open_ui_block_out_of_what_it_publishes(ui_widgets: bool) -> None:
+    """A resumed reply that shows earlier spans records its progress without a `ui` block still arriving."""
+    earlier = Segment(kind="answer", text="Earlier work.", span_id="earlier")
+    handle = SimpleNamespace(
+        presentation=lambda text, trace, team_state=None: Presentation(  # noqa: ARG005
+            segments=(earlier, Segment(kind="answer", text=text, span_id="resume", tool_trace=trace)),
+        ),
+    )
+    published: dict[str, Presentation] = {}
+    sent: list[str] = []
+
+    @asynccontextmanager
+    async def progress() -> AsyncIterator[ProgressPublisher]:
+        async def publish(chunk: StructuredStreamChunk) -> None:
+            sent.append(chunk.content)
+
+        yield publish
+
+    async with _whole_reply_progress(progress(), handle, published, ui_widgets=ui_widgets) as publish_whole:
+        await publish_whole(StructuredStreamChunk(content='Reading on.\n\n```ui\n{"type":"chart",'))
+
+    (body,) = sent
+    assert list(published) == [body]
+    assert body.startswith("Earlier work.")
+    assert ("```ui" in body) is not ui_widgets
+    assert body.endswith("Reading on.") is ui_widgets
