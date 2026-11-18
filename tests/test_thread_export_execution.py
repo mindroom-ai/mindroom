@@ -17,17 +17,17 @@ import yaml
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
+from mindroom.event_journal.reads import RoomChanges
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
-from mindroom.event_journal.reads import RoomChanges
 from mindroom.thread_export import ThreadExportSource, ThreadExportTarget, export_threads_to_sources
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (
-)
-from mindroom.thread_export.execution import (
     export_threads_for_targets_for_client as _export_threads_for_targets_for_client,
 )
-from mindroom.thread_export.models import ExportedThreads
+from mindroom.thread_export.models import (
+    ExportedThreads,
+)
 from mindroom.thread_export.models import (
     ThreadExportRoom as _ThreadExportRoom,
 )

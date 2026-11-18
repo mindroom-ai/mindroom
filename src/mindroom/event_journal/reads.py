@@ -742,19 +742,19 @@ def thread_fingerprint(
     )
 
 
-# More events than this since the earlier position cost less to answer by fingerprinting every thread.
+# Past this many events since the earlier position, fingerprinting every thread costs less than placing them.
 _MAX_PLACED_EVENTS = 256
+_HYDRATION_COLUMNS = ("membership_epoch", "complete", "attempted_policy_rank", "walk_version")
 
 
 @dataclass(frozen=True, slots=True)
 class RoomChanges:
-    """Where one room's projection stands, and which of its threads changed since an earlier standing."""
+    """Where one room's projection stands, its threads' hydration rows, and which threads changed since ``since``."""
 
     # The newest receipt, and the room's membership epoch and history-recovery state and revision.
     position: tuple[int, tuple[object, ...]]
-    # Each thread's hydration row, which a walk, a recovery, or a discarded delivery writes and a rejoin deletes.
     hydrations: dict[str, tuple[object, ...]]
-    # The threads events admitted since the earlier position touched, or None when that cannot be told.
+    # None when there is no earlier position, the room's membership or recovery moved, or a change cannot be placed.
     touched: frozenset[str] | None
 
 
@@ -767,8 +767,8 @@ def room_changes(
 ) -> RoomChanges:
     """Return which of a room's threads may have changed since position ``since``, reading no thread's rows.
 
-    Admission writes visible rows with a receipt. Every other write to them also writes a hydration row, the room's
-    history recovery, or its membership epoch, so a thread none of these name still has the fingerprint it had.
+    Admission writes visible rows with a receipt, and a delivery's rows come back with its admitted echo. Any other
+    write to them also writes a hydration row, the room's history recovery, or its membership epoch.
     """
     room = transaction.fetchone(
         """
@@ -790,15 +790,7 @@ def room_changes(
     )
     return RoomChanges(
         position=position,
-        hydrations={
-            row["thread_id"]: (
-                row["membership_epoch"],
-                row["complete"],
-                row["attempted_policy_rank"],
-                row["walk_version"],
-            )
-            for row in hydrations
-        },
+        hydrations={row["thread_id"]: tuple(row[column] for column in _HYDRATION_COLUMNS) for row in hydrations},
         touched=None
         if since is None or since[1] != position[1]
         else _touched_threads(transaction, principal_id, room_id=room_id, after=since[0]),
@@ -806,15 +798,15 @@ def room_changes(
 
 
 def _touched_threads(transaction: Transaction, principal_id: str, *, room_id: str, after: int) -> frozenset[str] | None:
-    """Return every thread an event admitted after receipt ``after`` may have added, revised, or redacted a row of.
+    """Return each thread whose rows an event admitted after receipt ``after`` added, revised, or redacted.
 
-    That is the event's own thread, the thread of the row it is or revises, and, for a redaction, the thread of the
-    row it named. None when a redaction's target is in neither the projection nor the journal, so its thread is lost.
+    None when a redaction names an event this principal neither projects nor admitted, whose thread is unknown.
     """
+    # Concatenating keeps SQLite on the receipt range rather than every journal row of the principal.
     events = transaction.fetchall(
         """
-        SELECT event_id, thread_id, kind, source_json FROM journal_events
-        WHERE receipt_order > ? AND principal_id = ? AND room_id = ?
+        SELECT event_id, kind, source_json FROM journal_events
+        WHERE receipt_order > ? AND principal_id || '' = ? AND room_id = ?
         LIMIT ?
         """,
         (after, principal_id, room_id, _MAX_PLACED_EVENTS + 1),
@@ -831,19 +823,22 @@ def _touched_threads(transaction: Transaction, principal_id: str, *, room_id: st
             redacted.add(source.get("redacts") or (content.get("redacts") if isinstance(content, dict) else None))
     ids = tuple({event["event_id"] for event in events} | redacted - {None})
     marks = ", ".join("?" * len(ids))
+    # Each event's or redacted event's row, by logical ID or revision, and its admission, which keeps its own thread.
     rows = transaction.fetchall(
         f"""
         SELECT thread_id, logical_event_id, revision_event_id FROM visible_messages
-        WHERE principal_id = ? AND room_id = ? AND (logical_event_id IN ({marks}) OR revision_event_id IN ({marks}))
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id IN ({marks})
+        UNION ALL
+        SELECT thread_id, logical_event_id, revision_event_id FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND revision_event_id IN ({marks})
         UNION ALL
         SELECT thread_id, event_id, event_id FROM journal_events WHERE principal_id = ? AND event_id IN ({marks})
         """,  # noqa: S608 - placeholders are generated, values are still bound
-        (principal_id, room_id, *ids, *ids, principal_id, *ids),
+        (principal_id, room_id, *ids, principal_id, room_id, *ids, principal_id, *ids),
     )
-    placed = {row["logical_event_id"] for row in rows} | {row["revision_event_id"] for row in rows}
-    if not redacted <= placed:
+    if not redacted <= {row["logical_event_id"] for row in rows} | {row["revision_event_id"] for row in rows}:
         return None
-    # A row's logical ID is the thread it roots, if it roots one.
+    # A row's logical ID names the thread it roots, if it roots one.
     return frozenset({row["thread_id"] for row in rows} | {row["logical_event_id"] for row in rows})
 
 
