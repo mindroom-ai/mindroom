@@ -14,6 +14,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import (
+    AGENT_AUTHORED_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
     SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
@@ -62,7 +63,7 @@ from tests.test_event_journal_store import corrupt
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sized
 
-    from mindroom.event_journal import EventJournalStore, JournalEvent, PrincipalStore
+    from mindroom.event_journal import EventJournalStore, InboundEvent, JournalEvent, PrincipalStore, ProjectedEvent
 
 pytestmark = pytest.mark.asyncio
 
@@ -312,12 +313,28 @@ class TestProvenanceMapping:
         expected: EventClass,
     ) -> None:
         """Provenance decides whether work may start."""
-        assert _event_class_for(provenance, text_event("$m", "hi")) is expected
+        assert (
+            _event_class_for(
+                provenance,
+                text_event("$m", "hi"),
+                EventKind.MESSAGE,
+                sender_is_managed=lambda _sender: False,
+            )
+            is expected
+        )
 
     async def test_every_provenance_is_mapped(self) -> None:
         """A new provenance must not silently default to actionable."""
         for provenance in nio.TimelineEventProvenance:
-            assert _event_class_for(provenance, text_event("$m", "hi")) in EventClass
+            assert (
+                _event_class_for(
+                    provenance,
+                    text_event("$m", "hi"),
+                    EventKind.MESSAGE,
+                    sender_is_managed=lambda _sender: False,
+                )
+                in EventClass
+            )
 
 
 class TestEventKinds:
@@ -585,6 +602,196 @@ class TestAdmissionAdapter:
         )
         assert not isinstance(event, nio.RedactionEvent)
         assert _event_kind(event) is not EventKind.REDACTION
+
+
+MARKING_AGENT = "@mindroom_helper:example.org"
+
+
+def timeline_source(event_type: str, content: dict[str, Any], *, sender: str = ALICE) -> dict[str, Any]:
+    """Return one live timeline source, its content written as the caller gives it."""
+    return {
+        "event_id": "$marked",
+        "sender": sender,
+        "origin_server_ts": 1_000,
+        "type": event_type,
+        "content": content,
+    }
+
+
+def without_marker(source: dict[str, Any]) -> dict[str, Any]:
+    """Return the same source with the agent-authored marker removed from both content layers."""
+    content = {key: value for key, value in source["content"].items() if key != AGENT_AUTHORED_KEY}
+    if isinstance(new_content := content.get("m.new_content"), dict):
+        content["m.new_content"] = {key: value for key, value in new_content.items() if key != AGENT_AUTHORED_KEY}
+    return {**source, "content": content}
+
+
+class TestAgentAuthoredMarker:
+    """An event an agent wrote from a person's account is that person's conversation, never their instruction."""
+
+    @staticmethod
+    def _views(source: dict[str, Any]) -> tuple[InboundEvent, ProjectedEvent | None]:
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+            sender_is_managed=lambda sender: sender == MARKING_AGENT,
+        )
+        assert views is not None
+        return views
+
+    def _assert_history_as_if_unmarked(self, source: dict[str, Any], projected: ProjectedEvent | None) -> None:
+        """The marker decides whether an event is work, never what the conversation history holds."""
+        _inbound, unmarked = self._views(without_marker(source))
+        assert projected == (None if unmarked is None else replace(unmarked, content=source["content"]))
+
+    async def test_a_marked_message_from_a_person_is_conversation_and_never_work(self) -> None:
+        """The person's account sent it, but an agent wrote it, so it may not speak for that person."""
+        source = timeline_source(
+            "m.room.message",
+            {"msgtype": "m.text", "body": "approve it", AGENT_AUTHORED_KEY: MARKING_AGENT},
+        )
+
+        inbound, projected = self._views(source)
+
+        assert inbound.event_class is EventClass.CONTEXT_ONLY
+        assert projected is not None
+        self._assert_history_as_if_unmarked(source, projected)
+
+    async def test_a_marked_message_from_a_managed_sender_is_still_work(self) -> None:
+        """An agent's own account already speaks only for that agent, so the marker takes nothing from it."""
+        source = timeline_source(
+            "m.room.message",
+            {"msgtype": "m.text", "body": "approve it", AGENT_AUTHORED_KEY: MARKING_AGENT},
+            sender=MARKING_AGENT,
+        )
+
+        inbound, _projected = self._views(source)
+
+        assert inbound.event_class is EventClass.ACTIONABLE
+
+    @pytest.mark.parametrize(
+        ("event_type", "content", "kind"),
+        [
+            (
+                "m.reaction",
+                {
+                    "m.relates_to": {"rel_type": "m.annotation", "event_id": "$card", "key": "✅"},
+                    AGENT_AUTHORED_KEY: MARKING_AGENT,
+                },
+                EventKind.REACTION,
+            ),
+            (
+                "m.room.message",
+                {
+                    "msgtype": "m.file",
+                    "body": "notes.pdf",
+                    "url": "mxc://example.org/f",
+                    AGENT_AUTHORED_KEY: MARKING_AGENT,
+                },
+                EventKind.MEDIA,
+            ),
+            (
+                "m.room.message",
+                {
+                    "msgtype": "m.audio",
+                    "body": "voice.ogg",
+                    "url": "mxc://example.org/a",
+                    AGENT_AUTHORED_KEY: MARKING_AGENT,
+                },
+                EventKind.MEDIA,
+            ),
+            (
+                "io.mindroom.tool_approval_response",
+                {
+                    "status": "approved",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$card"}},
+                    AGENT_AUTHORED_KEY: MARKING_AGENT,
+                },
+                EventKind.APPROVAL,
+            ),
+            (
+                "io.mindroom.background_job_cancel",
+                {"all": True, AGENT_AUTHORED_KEY: MARKING_AGENT},
+                EventKind.JOB_CANCEL,
+            ),
+            (
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": "* approve it",
+                    "m.new_content": {"msgtype": "m.text", "body": "approve it", AGENT_AUTHORED_KEY: MARKING_AGENT},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                },
+                EventKind.MESSAGE,
+            ),
+            (
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": "* approve it",
+                    "m.new_content": {"msgtype": "m.text", "body": "approve it"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                    AGENT_AUTHORED_KEY: MARKING_AGENT,
+                },
+                EventKind.MESSAGE,
+            ),
+        ],
+        ids=[
+            "reaction",
+            "file",
+            "audio",
+            "approval-response",
+            "job-cancel",
+            "edit-marked-in-new-content",
+            "edit-marked-at-top-level",
+        ],
+    )
+    async def test_every_marked_kind_from_a_person_is_never_work(
+        self,
+        event_type: str,
+        content: dict[str, Any],
+        kind: EventKind,
+    ) -> None:
+        """No kind a person asks with can act for them, whichever content layer of an edit carries the marker."""
+        source = timeline_source(event_type, content)
+
+        inbound, projected = self._views(source)
+
+        assert inbound.kind is kind
+        assert inbound.event_class is EventClass.CONTEXT_ONLY
+        self._assert_history_as_if_unmarked(source, projected)
+
+    async def test_an_unmarked_message_from_a_person_is_work(self) -> None:
+        """The marker, not the sender, takes the authority away."""
+        inbound, _projected = self._views(
+            timeline_source("m.room.message", {"msgtype": "m.text", "body": "approve it"}),
+        )
+
+        assert inbound.event_class is EventClass.ACTIONABLE
+
+    async def test_a_marked_membership_event_from_a_person_is_still_work(self) -> None:
+        """A join is a join whoever wrote its content, so the room's membership handlers still see it."""
+        source = {
+            **timeline_source("m.room.member", {"membership": "join", AGENT_AUTHORED_KEY: MARKING_AGENT}),
+            "state_key": ALICE,
+        }
+
+        inbound, _projected = self._views(source)
+
+        assert inbound.kind is EventKind.ROOM_LIFECYCLE
+        assert inbound.event_class is EventClass.ACTIONABLE
+
+    async def test_a_marked_redaction_from_a_person_keeps_its_class(self) -> None:
+        """A deletion ends the replies it deletes whoever wrote it, so the marker leaves it as it is."""
+        source = {**timeline_source("m.room.redaction", {AGENT_AUTHORED_KEY: MARKING_AGENT}), "redacts": "$target"}
+
+        inbound, _projected = self._views(source)
+        unmarked, _unmarked_projected = self._views(without_marker(source))
+
+        assert inbound.kind is EventKind.REDACTION
+        assert inbound.event_class is unmarked.event_class
 
 
 def sidecar_event(event_id: str, preview: str, mxc: str, *, ts: int = 5_000) -> nio.Event:
@@ -959,7 +1166,15 @@ class TestStreamingProgressIsTransport:
 
         await self._admit_live(alice, placeholder)
 
-        assert _event_class_for(nio.TimelineEventProvenance.LIVE, placeholder) is EventClass.CONTEXT_ONLY
+        assert (
+            _event_class_for(
+                nio.TimelineEventProvenance.LIVE,
+                placeholder,
+                EventKind.MESSAGE,
+                sender_is_managed=lambda _sender: False,
+            )
+            is EventClass.CONTEXT_ONLY
+        )
         assert (await self._one_visible(alice)).logical_event_id == "$their_placeholder"
         assert await alice.pending() == ()
 
@@ -4265,7 +4480,7 @@ class TestAdmittedWorkReachesItsCallback:
             source=event.source,
             self_sender=BOT,
             provenance=provenance,
-            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+            sender_is_managed=lambda sender: sender == BOT,
         )
         if views is not None:
             await store.admit(*views)
@@ -4365,7 +4580,10 @@ class TestAdmittedWorkReachesItsCallback:
         event = message_event(f"$msg-{msgtype}", msgtype, extra_content=extra_content)
         kind = _event_kind(event)
         assert kind is not None, f"{msgtype} is projected by hydration, so admission must give it a kind"
-        actionable = _event_class_for(nio.TimelineEventProvenance.LIVE, event) is EventClass.ACTIONABLE
+        actionable = (
+            _event_class_for(nio.TimelineEventProvenance.LIVE, event, kind, sender_is_managed=lambda _sender: False)
+            is EventClass.ACTIONABLE
+        )
 
         assert not actionable or isinstance(event, _BINDINGS[kind].event_types), (
             f"{msgtype} is admitted as {kind.value} work that dispatch would refuse to run"
@@ -4644,7 +4862,7 @@ class TestScheduleTriggerDispatch:
             source=event.source,
             self_sender=BOT,
             provenance=nio.TimelineEventProvenance.LIVE,
-            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+            sender_is_managed=lambda sender: sender == BOT,
         )
         assert views is None
         await dispatcher.drain_once()

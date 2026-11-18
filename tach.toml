@@ -623,10 +623,19 @@ path = "mindroom.matrix.journal_ingress"
 depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
+    "mindroom.matrix.agent_authored",
     "mindroom.matrix.transport_progress",
 ]
 visibility = [
     "mindroom.journal_dispatch",
+]
+
+[[modules]]
+path = "mindroom.matrix.agent_authored"
+depends_on = ["mindroom.constants"]
+visibility = [
+    "mindroom.listening.service",
+    "mindroom.matrix.journal_ingress",
 ]
 
 [[modules]]
@@ -4540,6 +4549,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.message_content"
 depends_on = [
+    "mindroom.constants",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
 ]
@@ -9801,6 +9811,7 @@ depends_on = [
     "mindroom.listening.markers",
     "mindroom.listening.turn",
     "mindroom.llm",
+    "mindroom.matrix.agent_authored",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.state",
