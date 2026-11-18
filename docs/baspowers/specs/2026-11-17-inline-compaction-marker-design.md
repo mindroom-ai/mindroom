@@ -59,8 +59,8 @@ Client tolerance: parse defensively. Drop an entry that lacks a string `id`, a k
 
 ## Backend (mindroom)
 
-- `CompactionLifecycleStart` gains `phase: CompactionPhase = "pre_turn"`; `compact_scope_mid_turn` passes `"mid_turn"`.
-- New `history/reply_compactions.py`: `ReplyCompactions` (per-reply recorder; `bind(tool_count, changed)`, `start`, `update`, `content`) and `ReplyCompactionLifecycle` (implements `CompactionLifecycle`; `mode == "manual"` delegates to `MatrixCompactionLifecycle`, which still sends the notice; everything else records into the recorder and sends no notice).
+- The reply decides each entry's `phase` when its compaction starts: `pre_turn` while the reply has produced nothing yet (no text and no tool call, hidden, resumed and earlier-attempt ones included), else `mid_turn`. The attempt that compacts does not decide it, so a model switch's second attempt, which prepares its history after the first attempt's tool call, records `mid_turn`.
+- New `history/reply_compactions.py`: `ReplyCompactions` (per-reply recorder; `bind(progress)` takes the delivery showing the reply, a `StreamingResponse` or a `CollectedStreamPresentation`, whose `visible_tool_count()` anchors `after_tool` and whose `has_progress()` picks the phase; `unbind`, `start`, `update`, `content`) and `ReplyCompactionLifecycle` (implements `CompactionLifecycle`; `mode == "manual"` delegates to `MatrixCompactionLifecycle`, which still sends the notice; everything else records into the recorder and sends no notice).
 - `response_runner._deliver_turn` creates one recorder per reply, hands it to the lifecycle and to streamed and collected delivery; `final_extra_content()` adds the key.
 - `StreamingResponse` adds the key to every durable write (progress and final) and puts the list into `LiveDocs`, which the frame publisher sends on its next tick. A compaction change never triggers, gates or requires a durable write: entries ride on the writes the stream makes anyway (text and tool progress, checkpoints due for other reasons, the placeholder send, the terminal write).
 - Prompt cache: no impact. Content keys never enter the prompt; `COMPACTION_NOTICE_CONTENT_KEY` stays in `_NON_TURN_NOTICE_CONTENT_KEYS`, and the plural key must not make a reply look like a notice.
@@ -82,7 +82,7 @@ Card title: "Context compacted" / "Compacting context… {n} s" / "Compaction fa
 
 ## Testing
 
-Backend: unit tests for the recorder and lifecycle, streaming tests for `after_tool` anchoring (tools shown and hidden), live frames, no durable write for a compaction alone (placeholder, regeneration, approval pause), the final event, segmented first-segment-only, partial-reply context (plural key not skipped), mid-turn `phase`, and the runner test that auto sends no notice while manual still does.
+Backend: unit tests for the recorder and lifecycle, streaming tests for `after_tool` anchoring (tools shown and hidden), live frames, no durable write for a compaction alone (placeholder, regeneration, approval pause), the final event, segmented first-segment-only, partial-reply context (plural key not skipped), the phase the reply decides (nothing yet, after text, after a hidden tool call, resumed, collected), and the runner test that auto sends no notice while manual still does.
 
 Client: reader tests (valid, malformed, legacy notice), placement tests (top, after a marker, splitting a run, cog hidden, inside the Worked-for fold, two seams, seam plus thinking segment at one spot), state tests (ticking stops, interrupted on a terminal reply), live frame parse/apply, the quiet-marker fold, and an e2e spec that renders scenes 1-7 on desktop and phone (390 px), dark and light, with the card open, for the PR screenshots.
 

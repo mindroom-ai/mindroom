@@ -36,8 +36,8 @@
 
 **Files:**
 - Modify: `src/mindroom/constants.py` (new constant)
-- Modify: `src/mindroom/history/types.py` (`CompactionPhase`, `phase` on `CompactionLifecycleStart`, `start` docstring)
-- Modify: `src/mindroom/history/runtime.py` (`_run_scope_compaction_with_lifecycle(..., phase)`, call sites pass `"pre_turn"` / `"mid_turn"`)
+- Modify: `src/mindroom/history/types.py` (~~`CompactionPhase`, `phase` on `CompactionLifecycleStart`,~~ (superseded: the reply decides the phase, see the spec) `start` docstring)
+- Modify: `src/mindroom/history/runtime.py` (~~`_run_scope_compaction_with_lifecycle(..., phase)`, call sites pass `"pre_turn"` / `"mid_turn"`~~ (superseded: the reply decides the phase, see the spec))
 - Create: `src/mindroom/history/reply_compactions.py`
 - Modify: `src/mindroom/response_runner.py` (`_build_compaction_lifecycle`, `_deliver_turn`, `_deliver_collected`, `final_extra_content`, widened type hints)
 - Modify: `src/mindroom/delivery_gateway.py` (`StreamingDeliveryRequest.compactions`, pass-through to `send_streaming_response`; `send_streaming_response` gets the parameter as a no-op until Task 2)
@@ -45,8 +45,8 @@
 
 **Interfaces:**
 - Produces:
-  - `CompactionPhase = Literal["pre_turn", "mid_turn"]`
-  - `class ReplyCompactions` with `bind(*, tool_count: Callable[[], int], changed: Callable[[], None]) -> None`, `unbind() -> None`, `start(event: CompactionLifecycleStart) -> str`, `update(entry_id: str, **fields: object) -> None`, `content() -> list[dict[str, object]] | None` (deep copy; `None` when empty), `version: int` (bumped on every change).
+  - ~~`CompactionPhase = Literal["pre_turn", "mid_turn"]`~~ (superseded: the reply decides the phase, see the spec)
+  - `class ReplyCompactions` with ~~`bind(*, tool_count: Callable[[], int], changed: Callable[[], None]) -> None`~~ `bind(progress) -> None` (the reply's delivery: `visible_tool_count()`, `has_progress()`), `unbind() -> None`, `start(event: CompactionLifecycleStart) -> str`, `update(entry_id: str, **fields: object) -> None`, `content() -> list[dict[str, object]] | None` (deep copy; `None` when empty)~~, `version: int` (bumped on every change)~~ (removed in 6f751569e).
   - `class ReplyCompactionLifecycle(recorder: ReplyCompactions, notice: MatrixCompactionLifecycle)` implementing `CompactionLifecycle`.
   - `StreamingDeliveryRequest.compactions: ReplyCompactions | None = None`; `send_streaming_response(..., compactions: ReplyCompactions | None = None)`.
 
@@ -56,10 +56,10 @@
   - `test_manual_goes_to_notice_and_routes_back`: with a recording double for `MatrixCompactionLifecycle`, a `mode="manual"` start/success both reach the double and `content()` stays `None`.
   - `test_after_tool_read_once_at_start`: bound count returns 2 at start, 5 afterwards → entry keeps `after_tool == 2`.
   - `test_unbound_recorder_anchors_at_zero` and `test_changed_called_on_every_change` (start, progress, success → 3 calls) and `test_content_is_a_copy`.
-  - In `tests/test_mid_turn_compaction.py`: recorded starts carry `phase == "mid_turn"`; in `tests/test_history_prepare_lifecycle.py`: one assertion that the pre-turn start has `phase == "pre_turn"`.
+  - ~~In `tests/test_mid_turn_compaction.py`: recorded starts carry `phase == "mid_turn"`; in `tests/test_history_prepare_lifecycle.py`: one assertion that the pre-turn start has `phase == "pre_turn"`.~~ (superseded: the reply decides the phase, see the spec)
   - In `tests/test_response_runner_agent.py`: switch `test_generate_response_keeps_first_turn_follow_up_effects_in_new_thread` to `mode="manual"` (keeps the notice-routing assertion), and add `test_auto_compaction_records_on_reply_without_notice`: `_send_compaction_lifecycle_start` is not awaited and the final `$response` content has `io.mindroom.compactions[0]` with `status "success"`, `phase "pre_turn"`, `after_tool 0`.
 - [ ] **Step 2: Run them, expect failures** (import error / missing key).
-- [ ] **Step 3: Implement** ~~per wiring doc T1-T5~~ (wiring doc deleted). `start` sets `started_at = time.time_ns() // 1_000_000`, `status = "running"`, `id = uuid4().hex`, `mode = event.mode`, `phase = event.phase`. The lifecycle remembers notice-routed ids in a `set[str]`. In `_deliver_collected`, bind the recorder to the collected presentation's tool count~~ and a no-op `changed`~~ (callback removed in 6f751569e).
+- [ ] **Step 3: Implement** ~~per wiring doc T1-T5~~ (wiring doc deleted). `start` sets `started_at = time.time_ns() // 1_000_000`, `status = "running"`, `id = uuid4().hex`, `mode = event.mode`, ~~`phase = event.phase`~~ (superseded: the reply decides the phase, see the spec). ~~The lifecycle remembers notice-routed ids in a `set[str]`.~~ (Dropped in 455cf4d83: the lifecycle routes each event on its `mode`.) In `_deliver_collected`, bind the recorder to the collected presentation's tool count~~ and a no-op `changed`~~ (callback removed in 6f751569e).
 - [ ] **Step 4: Run the touched test files** plus `tests/test_response_delivery_gateway.py`, `tests/test_partial_reply_context.py`; all pass.
 - [ ] **Step 5: Commit** (`git commit --trailer "Assisted-by: ..."`).
 
