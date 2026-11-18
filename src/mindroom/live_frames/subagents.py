@@ -151,7 +151,8 @@ class _Stream:
         """Send the latest snapshot as the next frame; return the outcome, None when nothing changed.
 
         The frame is a snapshot first, after a failed send, after the caps cut the transcript, when only meta changed,
-        every 10 s, at the run's end, and when a delta would not fit; otherwise a delta from what landed last.
+        every 10 s, at the run's end, and when a delta would not fit; otherwise a delta from what landed last. Each
+        frame's meta carries the run's usage, which alone sends no frame: it goes out with the next one.
         """
         snapshot, landed = self.snapshot, self.landed
         self.dirty = False
@@ -198,7 +199,12 @@ class _Stream:
     ) -> _Frame:
         """Return the next frame of the run's stream, carrying either a whole snapshot, ``docs``, or a ``delta``."""
         frame: _Frame = {"v": FRAME_VERSION, "run": snapshot.delegation_id, "sid": self.sid, "seq": self.seq + 1}
-        frame["meta"] = _run_meta(snapshot, full=docs is not None)
+        meta = _run_meta(snapshot, full=docs is not None)
+        if snapshot.usage is not None:
+            # Not in ``_run_meta``, whose change alone sends a snapshot: each tool call changes the usage, and its
+            # frame stays the delta that adds its row.
+            meta["usage"] = dict(snapshot.usage)
+        frame["meta"] = meta
         if docs is not None:
             frame["snapshot"] = docs.to_json()
         else:

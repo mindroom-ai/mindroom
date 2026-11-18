@@ -325,6 +325,40 @@ async def test_an_unchanged_snapshot_sends_nothing_and_a_status_change_sends_a_s
 
 
 @pytest.mark.asyncio
+async def test_usage_rides_on_the_transcript_s_frames_and_alone_sends_none() -> None:
+    """Every frame's meta says what the run has used, but new usage alone sends no frame until the transcript does.
+
+    A tool call changes the count with each row it adds, so usage that made a frame a snapshot would make every
+    call's frame one.
+    """
+    room = FrameRoom()
+    used = {"input_tokens": 100, "output_tokens": 10, "tool_calls": 1}
+    snapshot = make_snapshot(items=(_text("Working"),), usage=used)
+    room.publish(snapshot)
+    await _until(lambda: len(room.sent) == 1)
+    more = {**used, "input_tokens": 150, "cost_usd": 0.25}
+    room.publish(replace(snapshot, usage=more))
+    await asyncio.sleep(0.05)
+    assert len(room.sent) == 1
+    room.publish(replace(snapshot, items=(_text("Working on it"),), usage=more))
+    await _until(lambda: len(room.sent) == 2)
+
+    assert room.sent[0]["meta"]["usage"] == used
+    assert "delta" in room.sent[1]
+    assert room.sent[1]["meta"]["usage"] == more
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_without_usage_sends_frames_without_it() -> None:
+    """A run whose usage is unknown says nothing about it, which a client shows as no stats."""
+    room = FrameRoom()
+    room.publish(make_snapshot(items=(_text("Working"),)))
+    await _until(lambda: len(room.sent) == 1)
+
+    assert "usage" not in room.sent[0]["meta"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("leading_tool", [False, True], ids=["text", "tool_first"])
 @pytest.mark.parametrize("encrypted", [False, True], ids=["plaintext", "encrypted"])
 @pytest.mark.parametrize("previews", [True, False], ids=["previews", "hidden"])

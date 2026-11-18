@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
+from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.ai_run_metadata import model_payload, prior_usage_of, turn_usage
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
     from mindroom.agent_modes import AgentMode
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
@@ -64,6 +66,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import RunMetrics
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.models import ScriptResourceProfileName
@@ -239,12 +242,8 @@ async def settle_child_response(
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
-    own_usd = run_cost_usd(
-        turn_usage(prior_usage_of(response), response.metrics),
-        model_provider=response.model_provider,
-        model_id=response.model,
-        prices=model_prices(config),
-    )
+    usage, own_usd = _own_usage(response, config)
+    _publish(child.delegation_id, lambda feed: feed.usage(usage, own_usd))
     known = [usd for usd in (own_usd, child.subagents_cost_usd) if usd is not None]
     child.cost_usd = sum(known) if known else None
     content = response.handover_content
@@ -307,6 +306,35 @@ async def finish_child_turn(
     if not child.record_locator:
         return ""
     return await finish_child_record(child, config=config, runtime_paths=runtime_paths)
+
+
+def _own_usage(record: RunRecord, config: Config) -> tuple[RunMetrics | None, float | None]:
+    """Return what the turn of ``record``'s run has used, its earlier runs included, and what that costs.
+
+    The cost is at ``config``'s prices, None when none of the usage is of a priced model, and leaves out what the
+    turn's subagents cost.
+    """
+    usage = turn_usage(prior_usage_of(record), record.metrics)
+    cost = run_cost_usd(usage, model_provider=record.model_provider, model_id=record.model, prices=model_prices(config))
+    return usage, cost
+
+
+def child_usage_hook(config: Config) -> BeforeRequestHook:
+    """Return the loop hook that publishes what a child's turn has used so far before each request of its run.
+
+    The loop has counted every request that ended by then in the run's record, so a request's usage shows once the
+    tool calls it made have ended; the last request's shows when the run settles (``settle_child_response``). The
+    hook does nothing outside a child's run, or for a run the child does not own, and a failure to publish is logged
+    and never reaches the run.
+    """
+
+    async def publish_usage(state: LoopState) -> SendRequest:
+        observation, record = _CHILD_RUN.get(), state.record
+        if observation is not None and observation.owns(record):
+            _publish(observation.child.delegation_id, lambda feed: feed.usage(*_own_usage(record, config)))
+        return SendRequest()
+
+    return publish_usage
 
 
 def _publish(delegation_id: str, update: Callable[[ActivityFeed], object]) -> None:
