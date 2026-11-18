@@ -9,6 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import google.oauth2.credentials
@@ -55,7 +56,7 @@ class _LengthReranker:
         return [float(len(document)) for document in documents]
 
 
-def _knowledge(reranker: _LengthReranker | None, *indexes: _Index) -> AgentKnowledge:
+def _knowledge(reranker: Reranker | None, *indexes: _Index) -> AgentKnowledge:
     return AgentKnowledge(
         sources=tuple(
             KnowledgeSource(description=KnowledgeSourceDescription(base_id=f"base{i}", description="d"), index=index)
@@ -63,6 +64,27 @@ def _knowledge(reranker: _LengthReranker | None, *indexes: _Index) -> AgentKnowl
         ),
         reranker=reranker,
     )
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, respond: Callable[[httpx.Request], httpx.Response]) -> None:
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        rerank_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+
+
+def _cross_encoder_reranker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    predict: Callable[[list[tuple[str, str]]], list[float]],
+) -> Reranker:
+    """Build the local reranker over a fake cross-encoder that answers with ``predict``."""
+    monkeypatch.setattr(rerank_module, "ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setitem(rerank_module._cross_encoders, "local-model", SimpleNamespace(predict=predict))
+    config = KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model")
+    return rerank_module._create_reranker(config, test_runtime_paths(tmp_path))
 
 
 @pytest.mark.asyncio
@@ -108,12 +130,7 @@ async def test_cohere_reranker_sends_cohere_requests(tmp_path: Path, monkeypatch
             json={"results": [{"index": 1, "relevance_score": 0.9}, {"index": 0, "relevance_score": 0.2}]},
         )
 
-    real_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        rerank_module.httpx,
-        "AsyncClient",
-        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
-    )
+    _serve(monkeypatch, respond)
     reranker = rerank_module._create_reranker(
         KnowledgeRerankerConfig(
             provider="cohere",
@@ -150,27 +167,12 @@ async def test_partial_cohere_response_reranks_the_returned_hits_and_puts_the_mi
             json={"results": [{"index": 2, "relevance_score": -1.5}, {"index": 1, "relevance_score": -3.0}]},
         )
 
-    real_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        rerank_module.httpx,
-        "AsyncClient",
-        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
-    )
+    _serve(monkeypatch, respond)
     reranker = rerank_module._create_reranker(
         KnowledgeRerankerConfig(provider="cohere", model="m", url="https://rerank.test/v1/rerank", api_key="k"),
         test_runtime_paths(tmp_path),
     )
-    knowledge = AgentKnowledge(
-        sources=(
-            KnowledgeSource(
-                description=KnowledgeSourceDescription(base_id="base", description="d"),
-                index=_Index(["a", "b", "c"]),
-            ),
-        ),
-        reranker=reranker,
-    )
-
-    hits = await knowledge.asearch("q", limit=3)
+    hits = await _knowledge(reranker, _Index(["a", "b", "c"])).asearch("q", limit=3)
 
     assert [hit.content for hit in hits] == ["c", "b", "a"]
 
@@ -229,12 +231,7 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
         ]
         return httpx.Response(200, json={"records": records[::-1]})
 
-    real_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        rerank_module.httpx,
-        "AsyncClient",
-        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
-    )
+    _serve(monkeypatch, respond)
     credentials = _GoogleCredentials(token=None, quota_project_id="quota")
     credentials.project_id = "key-project"  # as a service account key carries it
     credential_files: list[str] = []
@@ -297,16 +294,10 @@ async def test_cross_encoder_reranker_scores_query_document_pairs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The local reranker scores each query and document pair with the cross-encoder."""
-
-    class _Encoder:
-        def predict(self, sentences: list[tuple[str, str]]) -> list[float]:
-            return [float(len(document)) for _query, document in sentences]
-
-    monkeypatch.setattr(rerank_module, "ensure_sentence_transformers_dependencies", lambda _paths: None)
-    monkeypatch.setitem(rerank_module._cross_encoders, "local-model", _Encoder())
-    reranker = rerank_module._create_reranker(
-        KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model"),
-        test_runtime_paths(tmp_path),
+    reranker = _cross_encoder_reranker(
+        monkeypatch,
+        tmp_path,
+        lambda sentences: [float(len(document)) for _query, document in sentences],
     )
 
     assert await reranker.ascore("q", ["ab", "abc"]) == [2.0, 3.0]
@@ -318,17 +309,7 @@ async def test_local_reranking_does_not_need_the_shared_default_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Local scoring runs on its own thread, so a busy default executor does not hold up a rerank."""
-
-    class _Encoder:
-        def predict(self, sentences: list[tuple[str, str]]) -> list[float]:
-            return [1.0 for _sentence in sentences]
-
-    monkeypatch.setattr(rerank_module, "ensure_sentence_transformers_dependencies", lambda _paths: None)
-    monkeypatch.setitem(rerank_module._cross_encoders, "local-model", _Encoder())
-    reranker = rerank_module._create_reranker(
-        KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model"),
-        test_runtime_paths(tmp_path),
-    )
+    reranker = _cross_encoder_reranker(monkeypatch, tmp_path, lambda sentences: [1.0 for _sentence in sentences])
     loop = asyncio.get_running_loop()
     busy = ThreadPoolExecutor(1)
     loop.set_default_executor(busy)
@@ -340,15 +321,6 @@ async def test_local_reranking_does_not_need_the_shared_default_executor(
         release.set()
         await blocked
         busy.shutdown()
-
-
-def _serve(monkeypatch: pytest.MonkeyPatch, respond: Callable[[httpx.Request], httpx.Response]) -> None:
-    real_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        rerank_module.httpx,
-        "AsyncClient",
-        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
-    )
 
 
 def _cohere_leaving_out_the_last(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Reranker:
@@ -381,16 +353,12 @@ def _vertex_ai_leaving_out_the_last(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
 
 def _cross_encoder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Reranker:
-    class _Encoder:
-        """Answers as `CrossEncoder.predict` does for a one-label model: its default activation is a sigmoid."""
-
-        def predict(self, sentences: list[tuple[str, str]]) -> list[float]:
-            return [1 / (1 + math.exp(-logit)) for logit in (-1.4, 2.2, -9.0)[: len(sentences)]]
-
-    monkeypatch.setattr(rerank_module, "ensure_sentence_transformers_dependencies", lambda _paths: None)
-    monkeypatch.setitem(rerank_module._cross_encoders, "local-model", _Encoder())
-    config = KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model")
-    return rerank_module._create_reranker(config, test_runtime_paths(tmp_path))
+    """Answers as `CrossEncoder.predict` does for a one-label model: its default activation is a sigmoid."""
+    return _cross_encoder_reranker(
+        monkeypatch,
+        tmp_path,
+        lambda sentences: [1 / (1 + math.exp(-logit)) for logit in (-1.4, 2.2, -9.0)[: len(sentences)]],
+    )
 
 
 @pytest.mark.asyncio
@@ -426,18 +394,7 @@ async def test_a_reranker_that_cannot_be_built_keeps_the_interleaved_order(
         raise ImportError(msg)
 
     monkeypatch.setattr(rerank_module, "_create_reranker", failing_build)
-    config = Config(reranker={"provider": "sentence_transformers", "model": "local-model"})
-    reranker = knowledge_utils.configured_reranker(config, test_runtime_paths(tmp_path))
-    assert reranker is not None
-    knowledge = AgentKnowledge(
-        sources=(
-            KnowledgeSource(
-                description=KnowledgeSourceDescription(base_id="base", description="d"),
-                index=_Index(["a", "bbb", "cc"]),
-            ),
-        ),
-        reranker=reranker,
-    )
+    knowledge = _deferred_knowledge(tmp_path, "local-model")
 
     assert [hit.content for hit in await knowledge.asearch("q", limit=2)] == ["a", "bbb"]
 
@@ -447,15 +404,7 @@ def _deferred_knowledge(tmp_path: Path, model: str) -> AgentKnowledge:
     config = Config(reranker={"provider": "sentence_transformers", "model": model})
     reranker = knowledge_utils.configured_reranker(config, test_runtime_paths(tmp_path))
     assert reranker is not None
-    return AgentKnowledge(
-        sources=(
-            KnowledgeSource(
-                description=KnowledgeSourceDescription(base_id="base", description="d"),
-                index=_Index(["a", "bbb", "cc"]),
-            ),
-        ),
-        reranker=reranker,
-    )
+    return _knowledge(reranker, _Index(["a", "bbb", "cc"]))
 
 
 @pytest.mark.asyncio
