@@ -107,3 +107,18 @@ def test_fitted_tools_cut_long_previews_and_leave_the_oldest_bare() -> None:
     # An entry without previews has nothing to lose.
     bare = {"type": "tool_call_started", "tool_name": "d"}
     assert fitted_tools((bare,), bare=1) == (bare,)
+
+
+def test_a_job_handle_result_keeps_its_handle_in_frames() -> None:
+    """Chat reads a background job's status from the result, so a cut or bare entry keeps the handle."""
+    handle = {"job_id": "j" * 64, "tool": "mindroom_dev", "status": "waiting", "summary": "s" * 300}
+    entry = {"type": "tool_call_started", "tool_name": "run_subagent", "result_preview": json.dumps(handle)}
+    minimal = {"job_id": "j" * 64, "tool": "mindroom_dev", "status": "waiting"}
+
+    cut, bare = fitted_tools((entry, entry), bare=1)
+
+    assert json.loads(cut["result_preview"]) == minimal
+    assert json.loads(bare["result_preview"]) == minimal
+    assert cut["clipped"] is True
+    short = {**entry, "result_preview": json.dumps(minimal)}
+    assert fitted_tools((short,), bare=0) == (short,)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 import time
 from dataclasses import dataclass
@@ -48,18 +49,37 @@ def new_publisher_id() -> str:
 def fitted_tools(tools: tuple[dict[str, object], ...], *, bare: int) -> tuple[dict[str, object], ...]:
     """Return the tool entries a frame shows: previews cut to the frame cap, and none on the oldest ``bare`` entries.
 
-    An entry that lost any of its previews says ``clipped``, so a client can take them from the durable trace.
+    An entry that lost any of its previews says ``clipped``. A result that is a background job handle keeps the
+    handle, which clients read for the call's status.
     """
     fitted: list[dict[str, object]] = []
     for index, entry in enumerate(tools):
         previews = {key: text for key in _PREVIEW_KEYS if isinstance(text := entry.get(key), str)}
         kept = {} if index < bare else {key: _clipped(text) for key, text in previews.items()}
+        handle = _job_handle(previews.get("result_preview"))
+        if handle is not None:
+            kept["result_preview"] = handle
         if kept == previews:
             fitted.append(entry)
             continue
         others = {key: value for key, value in entry.items() if key not in previews}
         fitted.append({**others, **kept, "clipped": True})
     return tuple(fitted)
+
+
+def _job_handle(text: str | None) -> str | None:
+    """Return the ``{job_id, tool, status}`` handle a result is, as the whole result when it fits, else None."""
+    if text is None or not text.lstrip().startswith("{"):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(value, dict) or not all(isinstance(value.get(key), str) for key in ("job_id", "tool", "status")):
+        return None
+    if len(text) <= _FRAME_PREVIEW_CHARACTERS:
+        return text
+    return json.dumps({key: value[key] for key in ("job_id", "tool", "status")})
 
 
 def _clipped(text: str) -> str:
