@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal
+from functools import partial
+from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
 from agno.media import Image as AgnoImage
@@ -19,6 +20,8 @@ from mindroom.ai_runtime import (
     queued_message_signal_context,
     queued_notice_after_tool_batch,
     queued_notice_on_resume_entry,
+    reply_ended_for_follow_up,
+    told_to_pause,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -27,6 +30,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.custom_tools.job import JobTools
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.conversation import conversation_context_before_sources
@@ -35,7 +39,14 @@ from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.message_target import MessageTarget
-from mindroom.mid_turn import MidTurnGate, QueuedMessage
+from mindroom.mid_turn import (
+    MID_TURN_MODE_KEY,
+    MidTurnGate,
+    MidTurnMode,
+    MidTurnOutcome,
+    QueuedMessage,
+    mid_turn_mode,
+)
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.redaction import redact_sensitive_text
@@ -57,6 +68,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     always_owned,
+    answer_of,
     job_actor,
     job_tool,
     lookup,
@@ -69,7 +81,7 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.judgment.state import JudgmentRequest
@@ -82,6 +94,11 @@ _NOTICE = "WRAP UP NOW"
 _NOTICE_HOOKS = LoopHooks(
     after_tool_batch=(queued_notice_after_tool_batch(_NOTICE),),
     on_resume_entry=(queued_notice_on_resume_entry(_NOTICE),),
+)
+# The hooks of a run that owns its reply: a requester's Steer or a judge's "cannot wait" ends it at a completed batch.
+_STEERING_HOOKS = LoopHooks(
+    after_tool_batch=(queued_notice_after_tool_batch(_NOTICE, steering=True),),
+    on_resume_entry=(queued_notice_on_resume_entry(_NOTICE, steering=True),),
 )
 
 
@@ -107,6 +124,7 @@ async def _run_turn(
     model: ScriptedModel,
     *toolkits: AdaptedToolkit,
     persist: Callable[[RunRecord], Awaitable[None]] | None = None,
+    hooks: LoopHooks = _NOTICE_HOOKS,
 ) -> RunRecord:
     """Run one turn of "Do the task" on the owned loop with the queued-notice hooks a reply installs."""
     _, record = await collect(
@@ -114,7 +132,7 @@ async def _run_turn(
             spec(model, *toolkits),
             [Message(role="user", content="Do the task")],
             ctx=context(),
-            hooks=_NOTICE_HOOKS,
+            hooks=hooks,
             persist=persist,
             request_template=EMPTY_REQUEST,
         ),
@@ -127,18 +145,20 @@ async def _resume_turn(
     paused: RunRecord,
     *toolkits: AdaptedToolkit,
     external_results: Mapping[str, str],
+    approved: Sequence[ApprovalCall] = (),
+    hooks: LoopHooks = _NOTICE_HOOKS,
 ) -> RunRecord:
-    """Resume a paused turn with the results of its externally executed calls."""
+    """Resume a paused turn with the results of its externally executed calls and the approvals it waited for."""
     _, record = await collect(
         resume_agent(
             spec(model, *toolkits),
             paused,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
-            approved=(),
+            approved=approved,
             denied={},
             external_results=external_results,
             context=lambda run_id: context(run_id=run_id),
-            hooks=_NOTICE_HOOKS,
+            hooks=hooks,
             persist=None,
             request_template=EMPTY_REQUEST,
         ),
@@ -242,6 +262,36 @@ def test_mid_turn_follows_only_the_configured_agent(tmp_path: Path, room: str, a
         has_media=False,
     )
     assert (gate is not None) is (agent == "helper")
+
+
+@pytest.mark.parametrize(
+    ("content", "mode"),
+    [
+        pytest.param(None, MidTurnMode.AUTO, id="no-content"),
+        pytest.param("steer", MidTurnMode.AUTO, id="content-not-a-mapping"),
+        pytest.param({"body": "hi"}, MidTurnMode.AUTO, id="missing"),
+        pytest.param({MID_TURN_MODE_KEY: "STEER"}, MidTurnMode.AUTO, id="uppercase"),
+        pytest.param({MID_TURN_MODE_KEY: " steer"}, MidTurnMode.AUTO, id="padded"),
+        pytest.param({MID_TURN_MODE_KEY: "later"}, MidTurnMode.AUTO, id="unknown"),
+        pytest.param({MID_TURN_MODE_KEY: 1}, MidTurnMode.AUTO, id="integer"),
+        pytest.param({MID_TURN_MODE_KEY: ["steer"]}, MidTurnMode.AUTO, id="list"),
+        pytest.param({MID_TURN_MODE_KEY: {"mode": "steer"}}, MidTurnMode.AUTO, id="dict"),
+        pytest.param({MID_TURN_MODE_KEY: None}, MidTurnMode.AUTO, id="null"),
+        pytest.param({MID_TURN_MODE_KEY: "steer"}, MidTurnMode.STEER, id="steer"),
+        pytest.param({MID_TURN_MODE_KEY: "queue"}, MidTurnMode.QUEUE, id="queue"),
+        pytest.param({MID_TURN_MODE_KEY: "auto"}, MidTurnMode.AUTO, id="auto"),
+    ],
+)
+def test_mid_turn_mode_reads_known_values_and_rejects_malformed_content(
+    content: object,
+    mode: MidTurnMode,
+) -> None:
+    """Only an exact known value picks a mode; anything else a client sends is Auto."""
+    assert MID_TURN_MODE_KEY == "io.mindroom.mid_turn"
+    # A client can send any JSON, so the reader gets content its type does not promise.
+    assert mid_turn_mode(cast("Mapping[str, object] | None", content)) is mode
+    # The queued entry defaults to Auto, so a mode-less admission keeps today's behavior.
+    assert QueuedMessage("$event", "hi").mode is MidTurnMode.AUTO
 
 
 def test_queued_snapshot_keeps_text_until_exact_event_is_consumed() -> None:
@@ -414,16 +464,16 @@ async def test_queued_message_freezes_visible_progress_at_admission() -> None:
     state.add_waiting_human_message("$first", text="Use that file")
     first = state.pending_message_snapshot()
     gate.record_visible_response("I found the file. Now editing it.", ())
-    assert await gate.defers(first, current=lambda: True)
+    assert await gate.decide(first, current=lambda: True) is MidTurnOutcome.WAIT
     assert evidence[0] == (
         "<active_request>\nDo the task\n</active_request>\n"
         "<queued_message>\nUse that file\n</queued_message>\n"
         '<visible_response>\nI found the file.\n<tool name="read_file" input="path=a.py" output="ok"/>\n</visible_response>'
     )
-    assert await gate.defers(first, current=lambda: True)
+    assert await gate.decide(first, current=lambda: True) is MidTurnOutcome.WAIT
     assert len(evidence) == 1
     state.add_waiting_human_message("$second", text="Stop editing")
-    assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+    assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
     assert evidence[1].endswith("<visible_response>\nI found the file. Now editing it.\n</visible_response>")
     assert "completed_tools" not in evidence[0]
 
@@ -451,7 +501,7 @@ async def test_visible_progress_keeps_untraced_markers_and_multiline_tool_output
         gate.record_visible_response(text, trace)
         state = _QueuedMessageState(mid_turn_gate=gate)
         state.add_waiting_human_message("$queued", text="Thanks")
-        assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+        assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
     assert example in evidence[0]
     assert "POSTGRES_USER: app" in evidence[1]
     assert "hunter2" not in evidence[1]
@@ -473,7 +523,7 @@ async def test_unknown_or_unsafe_visible_progress_keeps_wrap_up(progress: str | 
     gate.visible_response_text = progress
     state = _QueuedMessageState(mid_turn_gate=gate)
     state.add_waiting_human_message("$queued", text="Thanks")
-    assert not await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+    assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.PAUSE
 
 
 @pytest.mark.asyncio
@@ -488,12 +538,15 @@ async def test_finish_reuses_exact_queue_but_rechecks_a_new_message() -> None:
 
     gate = MidTurnGate(active_text="Install the dependencies", evaluate=evaluate)
     first = (QueuedMessage("$one", "Thanks"),)
-    assert await gate.defers(first, current=lambda: True)
-    assert await gate.defers(first, current=lambda: True)
+    assert await gate.decide(first, current=lambda: True) is MidTurnOutcome.WAIT
+    assert await gate.decide(first, current=lambda: True) is MidTurnOutcome.WAIT
     assert len(requests) == 1
-    assert not await gate.defers(
-        (*first, QueuedMessage("$two", "Use the other version")),
-        current=lambda: True,
+    assert (
+        await gate.decide(
+            (*first, QueuedMessage("$two", "Use the other version")),
+            current=lambda: True,
+        )
+        is MidTurnOutcome.CANNOT_WAIT
     )
     assert len(requests) == 2
     evidence = requests[0]["state"]["conversation"][0]["text"]
@@ -511,7 +564,7 @@ async def test_incomplete_or_sensitive_queue_keeps_wrap_up(text: str | None) -> 
         pytest.fail("Incomplete context must not reach inference")
 
     gate = MidTurnGate(active_text="Do the original task", evaluate=evaluate)
-    assert not await gate.defers((QueuedMessage("$one", text),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$one", text),), current=lambda: True) is MidTurnOutcome.PAUSE
 
 
 @pytest.mark.asyncio
@@ -523,7 +576,8 @@ async def test_nonapproval_keeps_wrap_up(decision: bool | None) -> None:
         return decision
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    assert not await gate.defers((QueuedMessage("$one", "Please change it"),), current=lambda: True)
+    outcome = await gate.decide((QueuedMessage("$one", "Please change it"),), current=lambda: True)
+    assert outcome is (MidTurnOutcome.CANNOT_WAIT if decision is False else MidTurnOutcome.PAUSE)
 
 
 @pytest.mark.asyncio
@@ -536,9 +590,12 @@ async def test_json_credentials_are_checked_before_evidence_encoding(*, active: 
 
     credential_text = '{"password": "fake_secret_for_test"}'
     gate = MidTurnGate(active_text=credential_text if active else "Do the task", evaluate=evaluate)
-    assert not await gate.defers(
-        (QueuedMessage("$new", "Thanks" if active else credential_text),),
-        current=lambda: True,
+    assert (
+        await gate.decide(
+            (QueuedMessage("$new", "Thanks" if active else credential_text),),
+            current=lambda: True,
+        )
+        is MidTurnOutcome.PAUSE
     )
 
 
@@ -553,7 +610,7 @@ async def test_judgment_cancellation_propagates_without_caching_approval() -> No
         raise AssertionError
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    task = asyncio.create_task(gate.defers((QueuedMessage("$one", "Thanks"),), current=lambda: True))
+    task = asyncio.create_task(gate.decide((QueuedMessage("$one", "Thanks"),), current=lambda: True))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -957,7 +1014,9 @@ async def test_interrupt_probability_preserves_continuation_threshold(
     get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "synthetic"})
     gate = create_mid_turn_gate(config, paths, request_envelope(), prompt="Do the task", has_media=False)
     assert gate is not None
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True) is finish
+    assert (
+        await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
+    ) is finish
 
 
 @pytest.mark.asyncio
@@ -972,7 +1031,7 @@ async def test_mid_turn_preserves_longer_public_conversation_within_byte_budget(
         return True
 
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
     assert captured[0][:-1] == [{"role": "user", "text": message.text} for message in context]
 
 
@@ -1127,10 +1186,10 @@ async def test_earlier_attachment_annotation_does_not_block_judgment() -> None:
         evaluate=evaluate,
         conversation_context=(JudgmentMessage("assistant", f"Saved the report {annotation}"),),
     )
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
     assert len(requests) == 1
     # The same annotation in a queued message still means an attachment the judge cannot open.
-    assert not await gate.defers((QueuedMessage("$newer", annotation),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$newer", annotation),), current=lambda: True) is MidTurnOutcome.PAUSE
 
 
 def _skip_reasons(logs: list[dict]) -> list[str]:
@@ -1160,7 +1219,7 @@ async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
     queued = "Is this still running? " + "q" * 3_000
     state.add_waiting_human_message("$queued", text=queued)
     with capture_logs() as logs:
-        assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+        assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
     assert _skip_reasons(logs) == []
     conversation = requests[0]["state"]["conversation"]
     evidence = conversation[-1]["text"]
@@ -1189,7 +1248,7 @@ async def test_judge_sees_the_newest_conversation_that_fits(count: int, size: in
         return True
 
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+    assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
     assert requests[0].body is not None
     assert len(requests[0].body) <= MAX_REQUEST_BYTES
     sent = [message["text"] for message in json.loads(requests[0].body)["state"]["conversation"][:-1]]
@@ -1213,7 +1272,7 @@ async def test_credential_across_a_clip_cut_keeps_wrap_up() -> None:
         conversation_context=(JudgmentMessage("user", text),),
     )
     with capture_logs() as logs:
-        assert not await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+        assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.PAUSE
     assert _skip_reasons(logs) == ["history_unjudgeable"]
 
 
@@ -1237,7 +1296,7 @@ async def test_megabyte_texts_cost_only_what_the_judge_sees(*, reply: bool) -> N
     gate.record_visible_response(body if reply else "", ())
     state.add_waiting_human_message("$queued", text="Thanks")
     with cpu_budget(0.25):
-        assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+        assert await gate.decide(state.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
     assert len(requests) == 1
 
 
@@ -1258,7 +1317,8 @@ async def test_only_conversation_that_reaches_the_judge_is_checked_for_credentia
         evaluate=evaluate,
         conversation_context=(*newer, credential) if newest else (credential, *newer),
     )
-    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True) is not newest
+    outcome = await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+    assert outcome is (MidTurnOutcome.PAUSE if newest else MidTurnOutcome.WAIT)
     assert all(request.body is not None and b"fake_secret_for_test" not in request.body for request in requests)
 
 
@@ -1294,8 +1354,8 @@ async def test_skipped_judgment_logs_its_reason(setup: dict, reason: str) -> Non
     )
     pending = setup.get("pending", (QueuedMessage("$new", "Thanks"),))
     with capture_logs() as logs:
-        assert not await gate.defers(pending, current=lambda: True)
-        assert not await gate.defers(pending, current=lambda: True)
+        assert await gate.decide(pending, current=lambda: True) is MidTurnOutcome.PAUSE
+        assert await gate.decide(pending, current=lambda: True) is MidTurnOutcome.PAUSE
     assert _skip_reasons(logs) == [reason]
     assert "private input" not in str(logs)
 
@@ -1378,7 +1438,9 @@ async def test_an_unjudged_queue_of_other_peoples_untagged_messages_waits(
     judge = setup.get("judge", True)
     waits = queue == "others" and judge
     with capture_logs() as logs:
-        assert await gate.defers(tuple(pending), current=lambda: True, judge=judge) is waits
+        outcome = await gate.decide(tuple(pending), current=lambda: True, judge=judge)
+        # No explicit verdict is fabricated: a skipped or failed judgment never reads as one.
+        assert outcome is (MidTurnOutcome.WAIT if waits else MidTurnOutcome.PAUSE)
     skips = [log for log in logs if log["event"] == "Mid-turn judgment skipped"]
     assert [(log["reason"], log["outcome"]) for log in skips] == [(reason, "waits" if waits else "wraps_up")]
     assert "private input" not in str(logs)
@@ -1397,7 +1459,7 @@ async def test_the_judge_sees_who_sent_each_queued_message_by_role_only(requeste
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=requester)
     pending = (QueuedMessage("$mine", "Thanks", "", _REQUESTER), _between_people("$theirs"))
-    assert await gate.defers(pending, current=lambda: True)
+    assert await gate.decide(pending, current=lambda: True) is MidTurnOutcome.WAIT
     (body,) = bodies
     evidence = json.loads(body)["state"]["conversation"][0]["text"]
     if requester is None:
@@ -1420,11 +1482,138 @@ async def test_a_judged_message_from_another_person_follows_the_judge(*, verdict
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
     with capture_logs() as logs:
-        assert (
-            await gate.defers((_between_people("$stop", "Stop, that is the wrong file"),), current=lambda: True)
-            is verdict
+        assert await gate.decide((_between_people("$stop", "Stop, that is the wrong file"),), current=lambda: True) is (
+            MidTurnOutcome.WAIT if verdict else MidTurnOutcome.CANNOT_WAIT
         )
     assert _skip_reasons(logs) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "outcome"),
+    [
+        ("can_wait", MidTurnOutcome.WAIT),
+        ("cannot_wait", MidTurnOutcome.CANNOT_WAIT),
+        ("no_answer", MidTurnOutcome.PAUSE),
+        ("error", MidTurnOutcome.PAUSE),
+        ("timeout", MidTurnOutcome.PAUSE),
+        ("incomplete", MidTurnOutcome.PAUSE),
+        ("redacted", MidTurnOutcome.PAUSE),
+        ("unjudgeable", MidTurnOutcome.PAUSE),
+        ("skip", MidTurnOutcome.PAUSE),
+    ],
+)
+async def test_mid_turn_outcome_distinguishes_negative_from_no_answer_error_timeout_and_skip(
+    case: str,
+    outcome: MidTurnOutcome,
+) -> None:
+    """Only the judge's own "cannot wait" is one; a requester's message without a verdict pauses the reply."""
+    verdicts = {"can_wait": True, "cannot_wait": False, "no_answer": None}
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        if case == "error":
+            msg = "private input"
+            raise RuntimeError(msg)
+        if case == "timeout":
+            raise TimeoutError
+        if case in verdicts:
+            return verdicts[case]
+        pytest.fail("A skipped judgment must not reach inference")
+
+    text = {"incomplete": None, "redacted": "api_key=sk-" + "x" * 48}.get(case, "Stop, wrong file")
+    message = QueuedMessage("$msg", text, None if case == "unjudgeable" else "", _REQUESTER, mentions_nobody=True)
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
+    with capture_logs() as logs:
+        assert await gate.decide((message,), current=lambda: True, judge=case != "skip") is outcome
+    assert "private input" not in str(logs)
+
+
+@pytest.mark.asyncio
+async def test_explicit_outcome_survives_cache_and_only_waiting_shortcut_does_not_fabricate_it() -> None:
+    """A cached "cannot wait" stays one, while a reply only waiting on jobs releases its wait without any verdict."""
+    verdicts = [False, True]
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return verdicts.pop(0)
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER)
+    stop = (QueuedMessage("$stop", "Stop, wrong file", "", _REQUESTER),)
+    assert await gate.decide(stop, current=lambda: True) is MidTurnOutcome.CANNOT_WAIT
+    assert await gate.decide(stop, current=lambda: True) is MidTurnOutcome.CANNOT_WAIT
+    assert verdicts == [True]
+    # The release asks no judge and is no verdict, and it leaves the verdict on the same queue as it was.
+    assert await gate.decide(stop, current=lambda: True, judge=False) is MidTurnOutcome.PAUSE
+    assert await gate.decide(stop, current=lambda: True) is MidTurnOutcome.CANNOT_WAIT
+    thanks = (QueuedMessage("$thanks", "Thanks", "", _REQUESTER),)
+    assert await gate.decide(thanks, current=lambda: True) is MidTurnOutcome.WAIT
+    assert verdicts == []
+    # A queue that could wait for the work that ran then is not let wait by a reply that only waits on jobs.
+    assert await gate.decide(thanks, current=lambda: True, judge=False) is MidTurnOutcome.PAUSE
+    assert await gate.decide(thanks, current=lambda: True) is MidTurnOutcome.PAUSE
+    # Nor is a queue no judge ever read.
+    unread = (QueuedMessage("$unread", "Thanks again", "", _REQUESTER),)
+    assert await gate.decide(unread, current=lambda: True, judge=False) is MidTurnOutcome.PAUSE
+    assert await gate.decide(unread, current=lambda: True) is MidTurnOutcome.PAUSE
+
+
+@pytest.mark.asyncio
+async def test_acknowledging_a_queued_message_is_one_best_effort_attempt_per_event() -> None:
+    """A failed reaction costs no reply and is not retried, and each event is acknowledged at most once."""
+    attempts: list[str] = []
+
+    async def acknowledge(event_id: str) -> None:
+        attempts.append(event_id)
+        msg = "Matrix unavailable"
+        raise RuntimeError(msg)
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        pytest.fail("Acknowledging asks no judge")
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge)
+    with capture_logs() as logs:
+        await gate.acknowledge_queued(QueuedMessage("$queued", "Later, please"))
+        await gate.acknowledge_queued(QueuedMessage("$queued", "Later, please, edited"))
+        await gate.acknowledge_queued(QueuedMessage("$other", "Also later"))
+    assert attempts == ["$queued", "$other"]
+    assert [log["event"] for log in logs] == ["mid_turn_reaction_failed"] * 2
+
+
+@pytest.mark.asyncio
+async def test_report_stop_preserves_as_read_one_sender_and_previously_deferred_rules() -> None:
+    """A "cannot wait" publishes, only at the wrap-up, the judged messages still waiting as read, none it let wait.
+
+    A message appended during the judgment, which the judge never read, and one edited after it, are not marked.
+    """
+    published: list[tuple[QueuedMessage, ...]] = []
+    queue = _QueuedMessageState()
+
+    def on_stop(judged: tuple[QueuedMessage, ...]) -> None:
+        published.append(judged)
+        queue.mark_stopped_reply(judged)
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        if len(queue.pending_message_snapshot()) == 1:
+            return True
+        queue.add_waiting_human_message("$appended", text="and the tests", requester_id=_REQUESTER)
+        return False
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER, on_stop=on_stop)
+    queue.mid_turn_gate = gate
+    queue.add_waiting_human_message("$waited", text="Thanks", requester_id=_REQUESTER)
+    assert await gate.decide(queue.pending_message_snapshot(), current=lambda: True) is MidTurnOutcome.WAIT
+    queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_REQUESTER)
+    queue.add_waiting_human_message("$edited", text="Use the other file", requester_id=_REQUESTER)
+    judged = queue.pending_message_snapshot()
+    assert await gate.decide(judged, current=lambda: judged == queue.pending_message_snapshot()) is (
+        MidTurnOutcome.CANNOT_WAIT
+    )
+    # A decision a job wait asks for publishes nothing.
+    assert published == []
+    queue.update_waiting_human_message("$edited", text="Never mind", mentions_nobody=False)
+    gate.report_stop()
+    (stopping,) = published
+    assert {message.event_id for message in stopping} == {"$stop", "$edited"}
+    assert queue.stopped_reply_event_ids == {"$stop"}
 
 
 async def _wraps_up_after_tool_batch(queue: _QueuedMessageState) -> bool:
@@ -1719,7 +1908,7 @@ async def test_only_another_persons_untagged_waiting_message_gets_no_defer_react
         _between_people("$theirs"),
         QueuedMessage("$tagged", "Nice work", "", _OTHER),
     )
-    assert await gate.defers(pending, current=lambda: True)
+    assert await gate.decide(pending, current=lambda: True) is MidTurnOutcome.WAIT
     assert acknowledgements == (["$mine", "$tagged"] if requester is not None else ["$mine", "$theirs", "$tagged"])
 
 
@@ -2106,3 +2295,564 @@ async def test_without_mid_turn_any_newer_message_releases_a_job_wait(tmp_path: 
     finally:
         reply.job_done.set()
         await runtime.shutdown()
+
+
+def _acknowledgements(
+    *event_ids: str,
+) -> tuple[dict[str, asyncio.Event], Callable[[str], Awaitable[None]]]:
+    """Return one event per message, set once its defer reaction is attempted, and the reaction that sets them."""
+    attempted = {event_id: asyncio.Event() for event_id in event_ids}
+
+    async def acknowledge(event_id: str) -> None:
+        attempted[event_id].set()
+
+    return attempted, acknowledge
+
+
+@pytest.mark.asyncio
+async def test_queue_is_absent_from_judgment_notice_pause_and_wait_release() -> None:
+    """A Queue message is never judged, gives no notice or pause, and leaves even a reply only waiting on jobs waiting."""
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judged: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judged.append(request)
+        return False
+
+    attempted, acknowledge = _acknowledgements("$queued", "$later", "$last")
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=_REQUESTER, on_defer=acknowledge)
+    answered = Message(role="assistant", content="Working on it")
+    # An earlier message's notice is still in the request, so only the queue decides whether it tells the reply to pause.
+    queue.add_waiting_human_message("$earlier", text="Stop", requester_id=_REQUESTER)
+    messages = _resumed_messages()
+    with queued_message_signal_context(queue):
+        await queued_notice_after_tool_batch(_NOTICE)(messages, ())
+        assert told_to_pause([*messages, answered])
+        queue.consume_waiting_human_message("$earlier")
+        queue.add_waiting_human_message("$queued", text="Also do X", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+        assert not told_to_pause([*messages, answered])
+        await queued_notice_after_tool_batch(_NOTICE)(messages, ())
+        assert not _has_notice(messages)
+
+    queue.mid_turn_gate = gate
+    queue.calls.running = queue.calls.waiting = 1
+    assert queue.calls.only_waiting()
+    assert not await _wraps_up_after_tool_batch(queue)
+    with queued_message_signal_context(queue, mid_turn_gate=gate):
+        assert not _has_notice(await _ResumedRequests().send())
+    waiter = asyncio.create_task(queue.wait())
+    queue.add_waiting_human_message("$later", text="And Y", requester_id=_OTHER, mode=MidTurnMode.QUEUE)
+    await asyncio.wait_for(attempted["$later"].wait(), JOB_TEST_TIMEOUT)
+    # The wait acknowledges a message on its next look at the queue, so this one shows the last look left it waiting.
+    queue.add_waiting_human_message("$last", text="And Z", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+    await asyncio.wait_for(attempted["$last"].wait(), JOB_TEST_TIMEOUT)
+    assert not waiter.done()
+    assert judged == []
+    # An Auto message still releases a reply only waiting on jobs at once, without asking the judge.
+    queue.add_waiting_human_message("$auto", text="Thanks", requester_id=_REQUESTER)
+    await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+    assert judged == []
+    assert queue.pending_human_messages == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True], ids=["delivered", "delivery_error"])
+async def test_queue_defer_reaction_is_attempted_once(*, fails: bool) -> None:
+    """The configured defer reaction goes once onto a Queue message, however often the queue is looked at."""
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    reactions: list[tuple[str, str]] = []
+    second_attempted = asyncio.Event()
+    judged: list[JudgmentRequest] = []
+
+    async def react(reaction: str, event_id: str) -> None:
+        reactions.append((reaction, event_id))
+        if event_id == "$second":
+            second_attempted.set()
+        if fails:
+            msg = "Matrix unavailable"
+            raise RuntimeError(msg)
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judged.append(request)
+        return True
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_defer=partial(react, "⏳"),
+    )
+    queue.add_waiting_human_message("$queued", text="Also do X", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+    resumed = _ResumedRequests()
+    for _ in range(2):
+        assert not await _wraps_up_after_tool_batch(queue)
+        with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+            assert not _has_notice(await resumed.send())
+    waiter = asyncio.create_task(queue.wait())
+    queue.add_waiting_human_message("$second", text="And Y", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+    await asyncio.wait_for(second_attempted.wait(), JOB_TEST_TIMEOUT)
+    assert not await _wraps_up_after_tool_batch(queue)
+    waiter.cancel()
+    await asyncio.gather(waiter, return_exceptions=True)
+    assert reactions == [("⏳", "$queued"), ("⏳", "$second")]
+    assert judged == []
+
+
+@pytest.mark.asyncio
+async def test_requester_steer_releases_wait_during_an_unresolved_auto_judgment() -> None:
+    """The requester's Steer ends a wait at once, while the judge still weighs an earlier Auto message.
+
+    The obsolete judgment is cancelled and drained before the wait returns, so it can publish no mark afterwards.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judging, answer_judgment, judgment_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        judging.set()
+        try:
+            await answer_judgment.wait()
+        except asyncio.CancelledError:
+            judgment_cancelled.set()
+            raise
+        return False
+
+    gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    queue.mid_turn_gate = gate
+    waiter = asyncio.create_task(queue.wait())
+    queue.add_waiting_human_message("$auto", text="Stop, wrong file", requester_id=_REQUESTER)
+    await asyncio.wait_for(judging.wait(), JOB_TEST_TIMEOUT)
+    queue.add_waiting_human_message(
+        "$steer",
+        text="Use the other file",
+        requester_id=_REQUESTER,
+        mode=MidTurnMode.STEER,
+    )
+    await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+    assert not answer_judgment.is_set()
+    assert judgment_cancelled.is_set()
+    assert [task for task in asyncio.all_tasks() if "_QueuedMessageState" in task.get_coro().__qualname__] == []
+    answer_judgment.set()
+    gate.report_stop()
+    assert queue.stopped_reply_event_ids == set()
+    assert queue.requester_steer_event_ids == {"$steer"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", [False, True], ids=["cannot_wait", "can_wait"])
+async def test_a_judgment_that_absorbs_its_steer_cancellation_leaves_no_evidence(*, verdict: bool) -> None:
+    """A judgment the requester's Steer cancels commits nothing, even when its evaluator absorbs the cancellation.
+
+    An HTTP client whose own timeout fires with the cancellation can take it for that timeout and still answer.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judging, absorbed = asyncio.Event(), asyncio.Event()
+    judgments = 0
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        nonlocal judgments
+        judgments += 1
+        if judgments > 1:
+            return False
+        judging.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            absorbed.set()
+        return verdict
+
+    gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    queue.mid_turn_gate = gate
+    queue.add_waiting_human_message("$bob-auto", text="Stop, wrong file", requester_id=_OTHER)
+    waiter = asyncio.create_task(queue.wait())
+    await asyncio.wait_for(judging.wait(), JOB_TEST_TIMEOUT)
+    queue.add_waiting_human_message("$alice-steer", text="Use mine", requester_id=_REQUESTER, mode=MidTurnMode.STEER)
+    await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+    assert absorbed.is_set()
+    assert [task for task in asyncio.all_tasks() if "_QueuedMessageState" in task.get_coro().__qualname__] == []
+    gate.report_stop()
+    assert queue.stopped_reply_event_ids == set()
+    steer = QueuedHumanNoticeReservation(queue, "$alice-steer")
+    steer.release()
+    assert steer.stopped_reply
+    # The judge is asked again, and its "cannot wait" names Bob's message, which no cancelled verdict let wait.
+    assert await _wraps_up_after_tool_batch(queue)
+    assert judgments == 2
+    assert queue.stopped_reply_event_ids == {"$bob-auto"}
+
+
+@pytest.mark.asyncio
+async def test_other_requesters_steer_uses_auto_wait_policy() -> None:
+    """Another person's Steer is weighed as Auto: a judge that lets it wait leaves the wait blocked, with no bypass."""
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judged: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judged.append(request)
+        return True
+
+    attempted, acknowledge = _acknowledgements("$bob", "$later")
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_defer=acknowledge,
+        on_stop=queue.mark_stopped_reply,
+    )
+    waiter = asyncio.create_task(queue.wait())
+    queue.add_waiting_human_message("$bob", text="Stop, use mine", requester_id=_OTHER, mode=MidTurnMode.STEER)
+    bob = QueuedHumanNoticeReservation(queue, "$bob")
+    await asyncio.wait_for(attempted["$bob"].wait(), JOB_TEST_TIMEOUT)
+    # The wait acknowledges a message on its next look at the queue, so this one shows the verdict left it waiting.
+    queue.add_waiting_human_message("$later", text="Also do X", requester_id=_REQUESTER, mode=MidTurnMode.QUEUE)
+    await asyncio.wait_for(attempted["$later"].wait(), JOB_TEST_TIMEOUT)
+    assert not waiter.done()
+    assert len(judged) == 1
+    assert queue.requester_steer_snapshot() == ()
+    assert queue.requester_steer_event_ids == set()
+    queue.mid_turn_gate.report_stop()
+    assert not bob.stopped_reply
+    bob.release()
+    assert not bob.stopped_reply
+    waiter.cancel()
+    await asyncio.gather(waiter, return_exceptions=True)
+
+
+def test_binding_a_requester_latches_only_their_waiting_steers() -> None:
+    """A reply that takes the lock, like an approval resuming, makes its requester's waiting Steers direct ones."""
+    queue = _QueuedMessageState()
+    queue.add_waiting_human_message("$mine", text="Use X", requester_id=_REQUESTER, mode=MidTurnMode.STEER)
+    queue.add_waiting_human_message("$theirs", text="Use Y", requester_id=_OTHER, mode=MidTurnMode.STEER)
+    queue.add_waiting_human_message("$auto", text="Use Z", requester_id=_REQUESTER)
+    # Admitted while no reply holds the lock, a Steer is not yet anyone's direct one.
+    assert queue.requester_steer_event_ids == set()
+    assert queue.requester_steer_snapshot() == ()
+    queue.bind_active_requester(_REQUESTER)
+    assert queue.requester_steer_event_ids == {"$mine"}
+    assert [message.event_id for message in queue.requester_steer_snapshot()] == ["$mine"]
+    queue.bind_active_requester(None)
+    assert queue.requester_steer_snapshot() == ()
+    assert QueuedHumanNoticeReservation(queue, "$mine").stopped_reply
+
+
+async def _steers_after_tool_batch(queue: _QueuedMessageState) -> tuple[bool | None, list[Message]]:
+    """Run a reply-owning run's after-batch hook over ``queue``; return whether it ends the run, and the messages."""
+    messages = _resumed_messages()
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        ended = await queued_notice_after_tool_batch(_NOTICE, steering=True)(messages, ())
+    return ended, messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judge", [False, True], ids=["no_judge", "judge"])
+async def test_requester_steer_returns_batch_stop_without_notice_or_queue_consumption(*, judge: bool) -> None:
+    """The requester's Steer ends an owning run once its batch's results are recorded, unannounced and unjudged.
+
+    The run stores its tool calls and results as any finished run does, its results keep their own outcomes, and the
+    Steer stays queued with its bypass for the reply that follows.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judged: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judged.append(request)
+        return True
+
+    if judge:
+        queue.mid_turn_gate = MidTurnGate(
+            active_text="Do the task",
+            evaluate=evaluate,
+            requester_id=_REQUESTER,
+            on_stop=queue.mark_stopped_reply,
+        )
+
+    def work() -> str:
+        """Do the work."""
+        queue.add_waiting_human_message(
+            "$steer",
+            text="Also print the date",
+            requester_id=_REQUESTER,
+            mode=MidTurnMode.STEER,
+        )
+        return "Completed action"
+
+    model = ScriptedModel([calls(tool_call("work", "work")), answer("Never requested")])
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        record = await _run_turn(model, toolkit(work), hooks=_STEERING_HOOKS)
+    assert record.status == RunStatus.completed
+    assert len(model.requests) == 1
+    assert not _has_notice(record.messages or ())
+    assert answer_of(record, "work").content == "Completed action"
+    assert [tool.tool_name for tool in record.tools or ()] == ["work"]
+    assert not any(message.stop_after_tool_call for message in record.messages or ())
+    assert not any(tool.stop_after_call for tool in record.tools or ())
+    assert [message.event_id for message in queue.pending_message_snapshot()] == ["$steer"]
+    assert QueuedHumanNoticeReservation(queue, "$steer").stopped_reply
+
+    # Each hook of an owning run, after a batch and at a resume's entry, ends it for the same reason.
+    ended, messages = await _steers_after_tool_batch(queue)
+    assert ended is True
+    assert not _has_notice(messages)
+    resumed = _resumed_messages()
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        assert await queued_notice_on_resume_entry(_NOTICE, steering=True)(resumed, ()) is True
+    assert not _has_notice(resumed)
+    assert judged == []
+    assert [message.event_id for message in queue.pending_message_snapshot()] == ["$steer"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_reply_its_owner_ended_reads_the_follow_up_end_reason() -> None:
+    """The reply whose owning run ended at its batch for a waiting message, and only that reply, reads why it ended.
+
+    A delegated child's batch leaves the Steer to its owner and sets nothing; the owner's batch sets it; the next
+    reply starts without it.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+
+    def work() -> str:
+        """Do the work."""
+        queue.add_waiting_human_message(
+            "$steer",
+            text="Also print the date",
+            requester_id=_REQUESTER,
+            mode=MidTurnMode.STEER,
+        )
+        return "Completed action"
+
+    assert not reply_ended_for_follow_up()
+    with queued_message_signal_context(queue):
+        await _run_turn(ScriptedModel([calls(tool_call("work", "work")), answer("Child done")]), toolkit(work))
+        assert not reply_ended_for_follow_up()
+        await _run_turn(ScriptedModel([calls(tool_call("work", "work"))]), toolkit(work), hooks=_STEERING_HOOKS)
+        assert reply_ended_for_follow_up()
+    assert not reply_ended_for_follow_up()
+    # The Steer still waits, as it does until its own turn takes it, and the next reply's run has no batch to end.
+    with queued_message_signal_context(queue):
+        await _run_turn(ScriptedModel([answer("Next")]), hooks=_STEERING_HOOKS)
+        assert not reply_ended_for_follow_up()
+
+
+_VERDICTS: dict[str, bool | None] = {
+    "cannot_wait": False,
+    "can_wait": True,
+    "no_answer": None,
+    "another_persons_steer": True,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "ends", "notice"),
+    [
+        ("cannot_wait", True, False),
+        ("can_wait", None, False),
+        ("no_answer", None, True),
+        ("error", None, True),
+        ("timeout", None, True),
+        ("unjudgeable", None, True),
+        ("edited", None, True),
+        ("deleted", None, False),
+        ("appended", True, False),
+        ("another_persons_steer", None, False),
+    ],
+)
+async def test_only_explicit_current_negative_verdict_ends_run(case: str, ends: bool | None, *, notice: bool) -> None:
+    """Only the judge's "cannot wait" on the queue as it still waits ends an owning run, without a notice.
+
+    A verdict on a message edited or removed during the judgment is obsolete, and a message appended meanwhile does
+    not cost the judged correction its count. Without a verdict, the run gets the pause notice and no bypass.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judgments: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
+        if case == "error":
+            msg = "judgment backend unavailable"
+            raise RuntimeError(msg)
+        if case == "timeout":
+            raise TimeoutError
+        if case == "edited":
+            queue.update_waiting_human_message("$stop", text="Never mind, keep going", mentions_nobody=False)
+        elif case == "deleted":
+            queue.consume_waiting_human_message("$stop")
+        elif case == "appended":
+            queue.add_waiting_human_message("$bob", text="Lunch anyone?", requester_id=_OTHER, mentions_nobody=True)
+        return _VERDICTS.get(case, False)
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    sender, mode = (_OTHER, MidTurnMode.STEER) if case == "another_persons_steer" else (_REQUESTER, MidTurnMode.AUTO)
+    text = None if case == "unjudgeable" else "Stop, wrong file"
+    queue.add_waiting_human_message("$stop", text=text, requester_id=sender, mode=mode)
+    stop = QueuedHumanNoticeReservation(queue, "$stop")
+    ended, messages = await _steers_after_tool_batch(queue)
+    assert ended is ends
+    assert _has_notice(messages) is notice
+    assert len(judgments) == (0 if case == "unjudgeable" else 1)
+    assert stop.stopped_reply is (ends is True)
+    assert QueuedHumanNoticeReservation(queue, "$bob").stopped_reply is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause", ["delegation", "approval"])
+@pytest.mark.parametrize("reason", ["steer", "cannot_wait"])
+async def test_unresolved_batch_is_not_steered_before_resume(pause: str, reason: str) -> None:
+    """A batch waiting on a delegation's or an approval's result is not ended; its resume ends it once complete.
+
+    The owner stays paused with the message still queued, and the resumed batch ends the run before another request.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judgments: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
+        return False
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+
+    def work() -> str:
+        """Do the work."""
+        mode = MidTurnMode.STEER if reason == "steer" else MidTurnMode.AUTO
+        queue.add_waiting_human_message("$new", text="Stop, wrong file", requester_id=_REQUESTER, mode=mode)
+        return "Completed action"
+
+    def child() -> str:
+        """Hand the subtask to a child, or run once approved."""
+        return "Child result"
+
+    held = external(child) if pause == "delegation" else gated(child)
+    model = ScriptedModel([calls(tool_call("work", "work"), tool_call("child", "child")), answer("Never requested")])
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        paused = await _run_turn(model, toolkit(work), held, hooks=_STEERING_HOOKS)
+        assert paused.status == RunStatus.paused
+        assert judgments == []
+        assert [message.event_id for message in queue.pending_message_snapshot()] == ["$new"]
+        approved = [
+            ApprovalCall(
+                tool_call_id="child",
+                tool_name="child",
+                invoking_agent="code",
+                expires_at_ns=2**62,
+                toolkit_name="gated",
+                arguments_digest=approval_arguments_digest({}),
+            ),
+        ]
+        record = await _resume_turn(
+            model,
+            paused,
+            toolkit(work),
+            held,
+            external_results={"child": "Child result"} if pause == "delegation" else {},
+            approved=approved if pause == "approval" else (),
+            hooks=_STEERING_HOOKS,
+        )
+    assert record.status == RunStatus.completed
+    assert len(model.requests) == 1
+    assert answer_of(record, "child").content == "Child result"
+    assert not _has_notice(record.messages or ())
+    assert len(judgments) == (1 if reason == "cannot_wait" else 0)
+    assert [message.event_id for message in queue.pending_message_snapshot()] == ["$new"]
+    assert QueuedHumanNoticeReservation(queue, "$new").stopped_reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "ends", "judged"),
+    [("none", True, 1), ("appended", True, 1), ("edited", False, 2), ("deleted", False, 1)],
+)
+async def test_owner_ends_at_its_batch_for_a_verdict_its_child_paused_for(
+    change: str,
+    *,
+    ends: bool,
+    judged: int,
+) -> None:
+    """A "cannot wait" a delegated child got the pause notice for still ends the owning parent at its resumed batch.
+
+    The child keeps its notice and wraps up; the parent, once its batch records the child's result, ends on the same
+    cached verdict without another judgment, notice, or request, and the correction keeps its mark. A message
+    appended meanwhile leaves the verdict standing; an edit or a deletion takes it away, so the parent goes on.
+    """
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_REQUESTER)
+    judgments: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
+        # The judge says the correction cannot wait, and that its edit can.
+        return len(judgments) > 1
+
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=_REQUESTER,
+        on_stop=queue.mark_stopped_reply,
+    )
+
+    def child_work() -> str:
+        """Do the child's part."""
+        queue.add_waiting_human_message("$stop", text="Stop, wrong file", requester_id=_REQUESTER)
+        return "Child work"
+
+    def delegate() -> str:
+        """Hand the subtask to a child."""
+        return "Child result"
+
+    parent_model = ScriptedModel([calls(tool_call("delegate", "child")), answer("Parent went on")])
+    child_model = ScriptedModel([calls(tool_call("child_work", "work")), answer("Child paused")])
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        paused = await _run_turn(parent_model, external(delegate), hooks=_STEERING_HOOKS)
+        assert paused.status == RunStatus.paused
+        # The delegated child runs with the notice behavior it always had.
+        child = await _run_turn(child_model, toolkit(child_work))
+        assert child.status == RunStatus.completed
+        assert _has_notice(child_model.requests[-1].messages)
+        stop = QueuedHumanNoticeReservation(queue, "$stop")
+        assert stop.stopped_reply
+        if change == "appended":
+            queue.add_waiting_human_message("$bob", text="Lunch anyone?", requester_id=_OTHER, mentions_nobody=True)
+        elif change == "edited":
+            queue.update_waiting_human_message("$stop", text="Never mind, keep going", mentions_nobody=False)
+        elif change == "deleted":
+            queue.consume_waiting_human_message("$stop")
+        record = await _resume_turn(
+            parent_model,
+            paused,
+            external(delegate),
+            external_results={"child": "Child paused"},
+            hooks=_STEERING_HOOKS,
+        )
+    assert record.status == RunStatus.completed
+    assert answer_of(record, "child").content == "Child paused"
+    assert len(parent_model.requests) == (1 if ends else 2)
+    assert not any(_has_notice(request.messages) for request in parent_model.requests)
+    assert len(judgments) == judged
+    assert stop.stopped_reply is ends

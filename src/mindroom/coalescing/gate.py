@@ -12,9 +12,11 @@ from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from mindroom.cancellation import request_task_cancel
+from mindroom.constants import SUBMISSION_CONTENT_KEY
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, source_kind_bypasses_coalescing
 from mindroom.logging_config import get_logger
+from mindroom.mid_turn import MID_TURN_MODE_KEY
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
@@ -45,10 +47,12 @@ from .cleanup import (
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot, ReceiptLaneKey
 from .policy import (
     QueueKind,
+    SubmissionMarker,
     pending_event_is_text,
     pending_events_sent_together,
     queue_kind,
     source_or_event_allows_room_scope_batching,
+    submission_marker,
 )
 
 if TYPE_CHECKING:
@@ -72,6 +76,9 @@ _COALESCING_FLUSH_WARNING_SECONDS = 5.0
 _MAX_ROOT_PREPARATIONS = 8
 # A split reply's first segment waits at most this long for its continuations, so a lost one cannot hold the sender.
 _SPLIT_REPLY_WAIT_SECONDS = 10.0
+# A composer submission whose latest event says more is coming waits at most this long after it for the next one, in
+# place of the debounce window, so a lost final event cannot hold the sender.
+_SUBMISSION_WAIT_SECONDS = 10.0
 # How long a flush may wait on the rest of a sender's burst before the wait is
 # reported. Voice readiness legitimately takes seconds, so this is set well
 # past any real burst: reaching it means the lane is not going to settle, and
@@ -199,6 +206,8 @@ class _DebounceWaitResult:
     """Boundary discovered during one debounce wait."""
 
     quiet_deadline: float
+    # The wait ended at the submission bound with the front turn still saying more is coming.
+    submission_timed_out: bool = False
 
 
 class CoalescingGate:
@@ -212,7 +221,9 @@ class CoalescingGate:
     and flushes immediately; adaptive text waits its configured quiet period.
     A live batch ending in media waits the debounce window for more attachments or a trailing
     caption (a continuous attachment stream extends the window without
-    bound). Follow-up backlogs queued behind an active response are exempt:
+    bound). A composer submission marks its events instead: one that says
+    more is coming holds the batch up to a bound in place of the debounce
+    window, and the submission's last event completes it. Follow-up backlogs queued behind an active response are exempt:
     they flush as soon as the conversation idles, since later ingress is
     admitted under the conversation's live key and could never join the held
     backlog. Each consecutive same-requester run flushes as its own turn, so
@@ -299,9 +310,16 @@ class CoalescingGate:
                     continue
                 content = dict(new_content)
                 # The edit's new content carries no relation; the message stays where it was posted.
-                relation = event.source.get("content", {}).get("m.relates_to")
+                original_content = event.source.get("content", {})
+                relation = original_content.get("m.relates_to")
                 if relation is not None:
                     content["m.relates_to"] = relation
+                # The message keeps the mid-turn mode and composer submission it was sent with, so an edit can
+                # neither steer or queue it anew nor move it into, out of, or within a submission.
+                for kept_key in (MID_TURN_MODE_KEY, SUBMISSION_CONTENT_KEY):
+                    content.pop(kept_key, None)
+                    if kept_key in original_content:
+                        content[kept_key] = original_content[kept_key]
                 pending_event.event = replace(
                     event,
                     body=body,
@@ -649,9 +667,23 @@ class CoalescingGate:
         normal_count = CoalescingGate._front_live_run_length(gate, run_limit=run_limit)
         return normal_count < len(gate.queue)
 
-    def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, run_limit: int | None) -> bool:
-        """Return whether the claimable front run is terminated by a text-like utterance."""
+    def _front_turn_length(self, gate: _GateEntry, *, run_limit: int | None) -> int:
+        """Return how many front events the next claim takes: the live run up to its first run or addressing change."""
         count = self._front_live_run_length(gate, run_limit=run_limit)
+        return self._front_same_run_identity_length(gate, count) if count else 0
+
+    def _front_submission(self, gate: _GateEntry, *, run_limit: int | None) -> SubmissionMarker | None:
+        """Return the composer submission marker on the front turn's last event, if it carries one."""
+        count = self._front_turn_length(gate, run_limit=run_limit)
+        return submission_marker(gate.queue[count - 1].pending_event) if count else None
+
+    def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, run_limit: int | None) -> bool:
+        """Return whether the front turn is complete: another turn's event follows it, or it ends a submission or text."""
+        count = self._front_live_run_length(gate, run_limit=run_limit)
+        if self._front_turn_length(gate, run_limit=run_limit) < count:
+            return True
+        if (submission := self._front_submission(gate, run_limit=run_limit)) is not None:
+            return not submission.more
         return (
             count > 0
             and pending_event_is_text(gate.queue[count - 1].pending_event)
@@ -659,6 +691,8 @@ class CoalescingGate:
         )
 
     def _front_debounce_seconds(self, gate: _GateEntry, *, run_limit: int | None) -> float:
+        if (submission := self._front_submission(gate, run_limit=run_limit)) is not None and submission.more:
+            return _SUBMISSION_WAIT_SECONDS
         count = self._front_live_run_length(gate, run_limit=run_limit)
         if count and pending_event_is_text(gate.queue[count - 1].pending_event):
             return max(gate.queue[count - 1].pending_event.text_debounce_seconds, 0.0)
@@ -685,6 +719,8 @@ class CoalescingGate:
     def _enqueue_path(self, kind: QueueKind, pending_event: PendingEvent) -> str:
         if kind is QueueKind.BYPASS:
             return "bypass"
+        if (submission := submission_marker(pending_event)) is not None:
+            return "submission_hold" if submission.more else "submission_complete"
         if self._debounce_seconds() <= 0:
             return "zero_debounce"
         if pending_event_is_text(pending_event):
@@ -936,15 +972,18 @@ class CoalescingGate:
 
     async def _wait_for_debounce(
         self,
+        key: CoalescingKey,
         gate: _GateEntry,
         *,
         run_limit: Callable[[], int | None],
     ) -> _DebounceWaitResult:
         """Wait for the live quiet window, returning early when the batch completes.
 
-        Ordinary text completes an utterance and skips the wait. Adaptive text
-        and media keep their configured quiet windows until an immediate text
-        message completes the utterance or a barrier appears.
+        Ordinary text and the last event of a composer submission complete an
+        utterance and skip the wait. Adaptive text and media keep their
+        configured quiet windows, and an event that says its submission has more
+        to come waits the submission bound, until an immediate text message or
+        a submission's last event completes the utterance or a barrier appears.
         """
         gate.phase = _GatePhase.DEBOUNCE
         if not gate.queue:
@@ -977,7 +1016,10 @@ class CoalescingGate:
         while True:
             deadline = gate.deadline or time.monotonic()
             if not await self._wait_for_deadline(gate, deadline):
-                return _DebounceWaitResult(quiet_deadline=quiet_deadline)
+                return _DebounceWaitResult(
+                    quiet_deadline=quiet_deadline,
+                    submission_timed_out=self._submission_timed_out(key, gate, run_limit=run_limit()),
+                )
             limit = run_limit()
             debounce_seconds = self._front_debounce_seconds(gate, run_limit=limit)
             if not gate.queue or self._front_normal_run_ends_with_text(gate, run_limit=limit):
@@ -998,6 +1040,22 @@ class CoalescingGate:
                 + debounce_seconds
             )
             gate.deadline = quiet_deadline
+
+    def _submission_timed_out(self, key: CoalescingKey, gate: _GateEntry, *, run_limit: int | None) -> bool:
+        """Return and report whether a hold reached its bound with the front turn still saying more is coming."""
+        submission = self._front_submission(gate, run_limit=run_limit)
+        if submission is None or not submission.more:
+            return False
+        logger.warning(
+            "coalescing_gate_submission_timed_out",
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
+            submission_id=submission.submission_id,
+            pending_count=self._front_turn_length(gate, run_limit=run_limit),
+            wait_seconds=_SUBMISSION_WAIT_SECONDS,
+        )
+        return True
 
     async def _wait_for_front_split_reply(self, gate: _GateEntry) -> bool:
         """Wait while the split reply leading the queue misses segments, and return whether one leads it."""
@@ -1255,8 +1313,9 @@ class CoalescingGate:
     ) -> None:
         # Follow-up owners have no receipt lane; only requester-owned bursts
         # wait for same-sender lane work still resolving inside the window.
+        # A submission that reached its bound answers what was admitted, so it waits for no later lane work.
         lane_key = ReceiptLaneKey.for_coalescing_owner(key.room_id, key.owner)
-        if lane_key is not None:
+        if lane_key is not None and not debounce_result.submission_timed_out:
             admitted_lane_slot_ids = {id(queued.lane_slot) for queued in gate.queue if queued.lane_slot is not None}
             window_slots = self._lanes.undelivered_in_window(
                 lane_key,
@@ -1350,6 +1409,7 @@ class CoalescingGate:
             return
 
         debounce_result = await self._wait_for_debounce(
+            key,
             gate,
             run_limit=lambda key=key, entry=gate: self._front_run_limit(key, entry),
         )

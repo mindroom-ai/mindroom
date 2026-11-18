@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import (
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+)
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.model_selection import command_result_content_to_dict
@@ -247,6 +252,8 @@ class VisibleResponseReconciler:
             SendTextRequest(
                 target=target,
                 response_text=response_text,
+                # The answer edits this message, so clients show it working as they do a Thinking placeholder.
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
                 # It echoes the member's selected value, which may name agents.
                 skip_mentions=True,
                 reply_write=await replies.acknowledgement(

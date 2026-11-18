@@ -125,8 +125,9 @@ class CoalescingConfig(BaseModel):
         default=1000,
         ge=0,
         description=(
-            "Sliding window in milliseconds that a media-tailed live batch waits for more "
-            "attachments or a trailing caption; batches ending in text dispatch immediately"
+            "Sliding window in milliseconds that a live batch ending in unmarked media waits for more "
+            "attachments or a trailing caption; batches ending in text dispatch immediately, and events "
+            "marked as part of a composer submission wait for its last event instead"
         ),
     )
 

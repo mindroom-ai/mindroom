@@ -258,7 +258,7 @@ def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
 
 
 def test_runtime_dependency_requires_released_durable_nio() -> None:
-    """The wheel requires the release that sends and encrypts live reply frames (`room_send_ephemeral`, `room_encrypt`)."""
+    """The wheel requires the release whose Classic and Sliding sync runs send their first poll with timeout 0."""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
     requirement = Requirement(
@@ -268,25 +268,14 @@ def test_runtime_dependency_requires_released_durable_nio() -> None:
     assert requirement.name == "mindroom-nio"
     assert requirement.extras == {"e2e"}
     assert requirement.url is None
-    assert Version("0.40.0") not in requirement.specifier
-    assert Version("1.0.0") not in requirement.specifier
-    assert Version("1.0.1") not in requirement.specifier
-    assert Version("1.0.2") not in requirement.specifier
-    assert Version("1.0.3") not in requirement.specifier
-    assert Version("1.0.4") not in requirement.specifier
-    assert Version("1.0.5") not in requirement.specifier
-    assert Version("1.0.6") not in requirement.specifier
-    assert Version("1.0.7") not in requirement.specifier
-    assert Version("1.0.8") not in requirement.specifier
-    assert Version("1.0.9") not in requirement.specifier
-    assert Version("1.1.0") not in requirement.specifier
-    assert Version("1.1.1") not in requirement.specifier
-    assert Version("1.1.2") not in requirement.specifier
-    assert Version("1.1.3") not in requirement.specifier
-    assert Version("1.1.4") not in requirement.specifier
-    assert Version("1.1.5") not in requirement.specifier
-    assert Version("1.1.6") not in requirement.specifier
-    assert Version("1.2.0") not in requirement.specifier
-    assert Version("1.2.1") not in requirement.specifier
-    assert Version("1.3.0") in requirement.specifier
+    for older in (
+        "0.40.0",
+        "1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5", "1.0.6", "1.0.7", "1.0.8", "1.0.9",
+        "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6",
+        "1.2.0", "1.2.1",
+        "1.3.0",
+        "1.4.0",
+    ):  # fmt: skip
+        assert Version(older) not in requirement.specifier
+    assert Version("1.4.1") in requirement.specifier
     assert Version("2.0.0") not in requirement.specifier

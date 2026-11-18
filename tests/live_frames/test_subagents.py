@@ -69,8 +69,13 @@ def _text(text: str) -> _SubagentItem:
     return _SubagentItem(kind="text", text=text)
 
 
-def _tool(entry: ToolTraceEntry, state: Literal["running", "done", "error"], call_id: str = "call-1") -> _SubagentItem:
-    return _SubagentItem(kind="tool", tool=entry, tool_call_id=call_id, state=state)
+def _tool(
+    entry: ToolTraceEntry,
+    state: Literal["running", "done", "error"],
+    call_id: str = "call-1",
+    started_at: float | None = None,
+) -> _SubagentItem:
+    return _SubagentItem(kind="tool", tool=entry, tool_call_id=call_id, state=state, started_at=started_at)
 
 
 def _activity(*, task: str = "Write it all down.") -> _SubagentActivity:
@@ -114,7 +119,7 @@ def _scripted_runs() -> list[SubagentSnapshot]:
         thread_id="$thread:example.org",
         started_at=1762790000.1,
     )
-    checking = (_text("Looking it up. Checking the tags."), _tool(listing, "running"))
+    checking = (_text("Looking it up. Checking the tags."), _tool(listing, "running", started_at=1762790001.2))
     return [
         replace(running, items=(_text("Looking it up."),)),
         replace(running, items=(_text("Looking it up. Checking the tags."),)),
@@ -124,7 +129,7 @@ def _scripted_runs() -> list[SubagentSnapshot]:
             running,
             status="completed",
             ended_at=1762790012.5,
-            items=(checking[0], _tool(listed, "done"), _text("Version 2 is tagged.")),
+            items=(checking[0], _tool(listed, "done", started_at=1762790001.2), _text("Version 2 is tagged.")),
             result_preview="Version 2 shipped as tag v2.0.",
         ),
         make_snapshot(
@@ -198,7 +203,12 @@ def test_markers_and_tools_line_up() -> None:
     )
     read = ToolTraceEntry(type="tool_call_started", tool_name="read_file", args_preview="path=b")
     snapshot = make_snapshot(
-        items=(_text("Intro"), _tool(search, "done"), _text("Middle"), _tool(read, "running", "call-2")),
+        items=(
+            _text("Intro"),
+            _tool(search, "done", started_at=1000.0),
+            _text("Middle"),
+            _tool(read, "running", "call-2", started_at=1001.5),
+        ),
     )
 
     docs = _run_docs(snapshot, previews=True)
@@ -206,8 +216,14 @@ def test_markers_and_tools_line_up() -> None:
     assert docs.md == "Intro\n\n🔧 `web_search` [1]\n\nMiddle\n\n🔧 `read_file` [2] ⏳\n\n"
     assert tool_markers_match_trace(docs.md, [search, read])
     assert docs.tools == (
-        {"type": "tool_call_completed", "tool_name": "web_search", "args_preview": "query=a", "result_preview": "1"},
-        {"type": "tool_call_started", "tool_name": "read_file", "args_preview": "path=b"},
+        {
+            "type": "tool_call_completed",
+            "tool_name": "web_search",
+            "args_preview": "query=a",
+            "result_preview": "1",
+            "started_at": 1000.0,
+        },
+        {"type": "tool_call_started", "tool_name": "read_file", "args_preview": "path=b", "started_at": 1001.5},
     )
     assert docs.status == "streaming"
 
@@ -260,7 +276,35 @@ async def test_no_previews_when_hidden() -> None:
     assert ["snapshot" in frame for frame in room.sent] == [True, False]
     tools = [entry for frame in room.sent for entry in _frame_tools(frame)]
     assert len(tools) == 3
-    assert all(set(entry) == {"type", "tool_name"} for entry in tools)
+    assert all(set(entry) == {"type", "tool_name", "started_at"} for entry in tools)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previews", [True, False], ids=["previews", "hidden"])
+async def test_a_tool_row_says_when_its_call_started(previews: bool) -> None:
+    """Each frame's tool row carries `started_at`, in snapshots and deltas, and a call resumed after a pause keeps it."""
+    room = FrameRoom()
+    activity = _activity()
+    sleeping = ReportedCall("call-1", "run_shell_command", {"command": "sleep 9"})
+    activity.tool_started(ToolStarted(call=sleeping), now=1000.5)
+    room.publish(activity.snapshot(), previews=previews)
+    await _until(lambda: len(room.sent) == 1)
+    activity.add_text("Still waiting.")
+    activity.tool_started(ToolStarted(call=sleeping), now=2000.0)
+    activity.tool_started(ToolStarted(call=ReportedCall("call-2", "read_file", {"path": "a.txt"})), now=2000.25)
+    room.publish(activity.snapshot(), previews=previews)
+    await _until(lambda: len(room.sent) == 2)
+    activity.set_status("completed", 2001.0, result="done")
+    room.publish(activity.snapshot(), previews=previews)
+    await _until(_forgotten)
+
+    assert ["snapshot" in frame for frame in room.sent] == [True, False, True]
+    assert room.sent[1]["delta"]["tools"] == {"len": 2, "set": [[1, _frame_tools(room.sent[1])[0]]]}
+    assert [[entry["started_at"] for entry in _frame_tools(frame)] for frame in room.sent] == [
+        [1000.5],
+        [2000.25],
+        [1000.5, 2000.25],
+    ]
 
 
 @pytest.mark.asyncio
@@ -298,7 +342,7 @@ async def test_long_text_stays_under_the_cap(
     room = FrameRoom(encrypted=encrypted)
     activity = _activity()
     if leading_tool:
-        activity.tool_started(ToolStarted(call=ReportedCall("call-1", "read_file", {"path": "a.txt"})))
+        activity.tool_started(ToolStarted(call=ReportedCall("call-1", "read_file", {"path": "a.txt"})), now=1000.0)
     texts = []
     for index in range(500):
         activity.add_text(f"{index:03d} Größe 日本語 {'text ' * 20}"[:100])
@@ -332,7 +376,7 @@ async def test_frames_at_the_caps_fit_the_room(character: str, encrypted: bool) 
     activity = _activity(task=character * 1_000)
     for index in range(20):
         call = ReportedCall(f"call-{index}", "run_shell_command", {"command": character * 400}, result=character * 400)
-        activity.tool_started(ToolStarted(call=call))
+        activity.tool_started(ToolStarted(call=call), now=1000.0)
         activity.tool_completed(ToolCompleted(call=call))
     for index in range(12):
         activity.add_text(character * 500)

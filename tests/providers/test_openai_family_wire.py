@@ -17,6 +17,7 @@ import httpx
 import httpx2
 import openai
 import pytest
+from openai.types.chat import ChatCompletionChunk
 from openai.types.responses import ResponseOutputItemAddedEvent, ResponseReasoningSummaryTextDeltaEvent
 from pydantic import BaseModel
 from structlog.testing import capture_logs
@@ -28,6 +29,7 @@ from mindroom.llm.errors import (
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
+    ModelSafeguardRefusal,
     ProviderError,
     ProviderUnavailable,
     RateLimited,
@@ -51,6 +53,7 @@ from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.openai.chat_wire import ChatStream, ChatWire
 from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
@@ -249,10 +252,21 @@ async def test_chat_stream_places_calls_streamed_without_an_index_by_their_posit
 async def test_chat_finish_reason_maps_to_stop_reason(tmp_path: Path, finish_reason: str, stop: str) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "cut"}, finish_reason=finish_reason)))
 
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
+    turn = await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert turn.stop_reason == stop
     assert "finish_reason" not in (turn.message.provider_data or {})
+
+
+@pytest.mark.asyncio
+async def test_a_chat_content_filter_stop_is_a_safeguard_refusal(tmp_path: Path) -> None:
+    """OpenRouter reports Claude's refusal as ``content_filter``; the reply must say so, not read as empty."""
+    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": ""}, finish_reason="content_filter")))
+
+    with pytest.raises(ModelSafeguardRefusal):
+        await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert len(built.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -568,27 +582,148 @@ async def test_a_chat_call_id_may_arrive_after_its_name_and_arguments(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fields(tmp_path: Path) -> None:
-    """Reasoning details streamed in pieces are stored whole for replay, with the upstream OpenRouter routed to."""
-    first = [{"type": "reasoning.text", "text": "Rain is likely", "index": 0}]
-    second = [{"type": "reasoning.text", "text": " this afternoon.", "index": 0}]
+    """Reasoning details streamed in pieces are stored whole for replay, with the upstream OpenRouter routed to.
+
+    A text joins its pieces up to the one carrying its signature, as OpenRouter's unstreamed replies hold it; an
+    encrypted detail is stored as it came.
+    """
+    text = {"type": "reasoning.text", "format": "anthropic-claude-v1", "index": 0}
+    encrypted = {"type": "reasoning.encrypted", "data": "c2VhbGVk", "format": "anthropic-claude-v1", "index": 1}
     built = _Built(
         tmp_path,
         {"provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "api_key": "k"},
         _chat_reply(
-            _chunk({"reasoning": "Rain is likely", "reasoning_details": first}, provider="Anthropic"),
             _chunk(
-                {"content": "Pack a coat.", "reasoning": " this afternoon.", "reasoning_details": second},
-                finish_reason="stop",
+                {"reasoning": "Rain is likely", "reasoning_details": [{**text, "text": "Rain is likely"}]},
                 provider="Anthropic",
             ),
+            _chunk(
+                {"reasoning": " this afternoon.", "reasoning_details": [{**text, "text": " this afternoon."}]},
+                provider="Anthropic",
+            ),
+            _chunk({"reasoning_details": [{**text, "signature": "c2lnbmVk"}, encrypted]}, provider="Anthropic"),
+            _chunk({"content": "Pack a coat."}, finish_reason="stop", provider="Anthropic"),
         ),
     )
 
     turn = await _turn(built, ModelRequest(messages=[_user()]))
 
     assert turn.message.reasoning_content == "Rain is likely this afternoon."
-    assert turn.message.provider_data["reasoning_details"] == first + second
+    assert turn.message.provider_data["reasoning_details"] == [
+        {**text, "text": "Rain is likely this afternoon.", "signature": "c2lnbmVk"},
+        encrypted,
+    ]
     assert turn.message.provider_data["model_extra"] == {"provider": "Anthropic"}
+
+
+@pytest.mark.asyncio
+async def test_a_reply_v2026_11_389_stored_sends_its_reasoning_details_whole(tmp_path: Path) -> None:
+    """Reasoning details v2026.11.389 stored as their streamed pieces are sent whole, the stored pieces kept.
+
+    Pieces join within one type, index, and id up to a text's signature; encrypted details stay apart.
+    """
+    claude = {"type": "reasoning.text", "format": "anthropic-claude-v1", "index": 0}
+    summary = {"type": "reasoning.summary", "format": "openai-responses-v1", "index": 0}
+    sealed = {"type": "reasoning.encrypted", "format": "openai-responses-v1", "index": 1}
+    redacted = {"type": "reasoning.encrypted", "format": "anthropic-claude-v1", "index": 0}
+    text = {"type": "reasoning.text", "format": "unknown"}
+    stored = {
+        "Two signed thoughts.": [
+            {**claude, "text": "Rain"},
+            {**claude, "text": " is likely."},
+            {**claude, "signature": "c2lnLTE="},
+            {**claude, "text": "Pack"},
+            {**claude, "text": " a coat."},
+            {**claude, "signature": "c2lnLTI="},
+        ],
+        "A summary and its sealed reasoning.": [
+            {**summary, "summary": "**Rain**"},
+            {**summary, "summary": " ahead."},
+            {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
+            {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
+        ],
+        "Two redacted thoughts.": [{**redacted, "data": "cmVkLTE="}, {**redacted, "data": "cmVkLTI="}],
+        "Summaries of two ids.": [
+            {**summary, "id": "rs_1", "summary": "Rain"},
+            {**summary, "id": "rs_1", "summary": " ahead."},
+            {**summary, "id": "rs_2", "summary": "Sun later."},
+        ],
+        "Two indexes and types.": [
+            {**text, "index": 0, "text": "Rain"},
+            {**text, "index": 0, "text": " ahead."},
+            {**text, "index": 1, "text": "Sun"},
+            {**summary, "index": 1, "summary": "Sun later."},
+        ],
+    }
+    history = [_user()]
+    for content, pieces in stored.items():
+        reply = Message(role="assistant", content=content, provider_data={"reasoning_details": deepcopy(pieces)})
+        history += [reply, _user("And then?")]
+    built = _Built(
+        tmp_path,
+        {"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"},
+        _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+    )
+
+    await _turn(built, ModelRequest(messages=history))
+
+    sent = {message["content"]: message["reasoning_details"] for message in built.body()["messages"][1::2]}
+    assert sent == {
+        "Two signed thoughts.": [
+            {**claude, "text": "Rain is likely.", "signature": "c2lnLTE="},
+            {**claude, "text": "Pack a coat.", "signature": "c2lnLTI="},
+        ],
+        "A summary and its sealed reasoning.": [
+            {**summary, "summary": "**Rain** ahead."},
+            {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
+            {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
+        ],
+        "Two redacted thoughts.": [{**redacted, "data": "cmVkLTE="}, {**redacted, "data": "cmVkLTI="}],
+        "Summaries of two ids.": [
+            {**summary, "id": "rs_1", "summary": "Rain ahead."},
+            {**summary, "id": "rs_2", "summary": "Sun later."},
+        ],
+        "Two indexes and types.": [
+            {**text, "index": 0, "text": "Rain ahead."},
+            {**text, "index": 1, "text": "Sun"},
+            {**summary, "index": 1, "summary": "Sun later."},
+        ],
+    }
+    assert [message.provider_data["reasoning_details"] for message in history[1::2]] == list(stored.values())
+
+
+def test_chat_reasoning_carries_when_its_call_or_last_text_began() -> None:
+    """OpenRouter sends a call's reasoning in one burst at its end, so a thought starts at the call or its last text."""
+    before = time.monotonic()
+    stream = ChatStream(ChatWire(route="openrouter", system_role="system"))
+    created = time.monotonic()
+    time.sleep(0.01)
+
+    def delta(fields: dict[str, Any]) -> ReasoningDelta:
+        [event] = stream.add(ChatCompletionChunk.model_validate(_chunk(fields)["data"]))
+        assert isinstance(event, ReasoningDelta)
+        return event
+
+    # OpenRouter's reasoning chunks carry an empty ``content`` beside the reasoning.
+    first = delta({"reasoning": "Plan.", "content": ""})
+    stream.add(ChatCompletionChunk.model_validate(_chunk({"content": "Checking."})["data"]))
+    text_sent = time.monotonic()
+    time.sleep(0.01)
+    second = delta({"reasoning": "Next.", "content": ""})
+
+    assert first.started_at is not None
+    assert before <= first.started_at <= created
+    assert second.started_at is not None
+    assert created <= second.started_at <= text_sent
+
+
+def test_chat_reasoning_streamed_as_written_starts_when_it_arrives() -> None:
+    """Routes other than OpenRouter stream reasoning as the model writes it, so a thought starts at its first piece."""
+    stream = ChatStream(ChatWire(route="deepseek", system_role="system"))
+
+    [event] = stream.add(ChatCompletionChunk.model_validate(_chunk({"reasoning_content": "Plan."})["data"]))
+
+    assert event == ReasoningDelta("Plan.")
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.mid_turn import MidTurnGate
+from mindroom.mid_turn import MidTurnGate, MidTurnMode
 from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
@@ -1207,6 +1207,78 @@ async def test_a_message_waiter_whose_judgment_absorbed_its_cancellation_ends_in
         loop.set_exception_handler(None)
         proceed.set()
         answer.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_queue_does_not_release_wait_and_requester_steer_detaches_without_cancelling_job(tmp_path: Path) -> None:
+    """Queue messages leave a job wait blocked; the requester's Steer detaches it unjudged while the job runs on."""
+    runtime = await tool_job_runtime(tmp_path)
+    requester = "@alice:localhost"
+    state = _QueuedMessageState()
+    state.bind_active_requester(requester)
+    proceed = asyncio.Event()
+    attempted = {event_id: asyncio.Event() for event_id in ("$queued", "$later")}
+    judgments = 0
+    runs = 0
+
+    async def evaluate(_request: JudgmentRequest) -> bool:
+        nonlocal judgments
+        judgments += 1
+        return False
+
+    async def acknowledge(event_id: str) -> None:
+        attempted[event_id].set()
+
+    async def operation() -> BackgroundOutcome:
+        nonlocal runs
+        runs += 1
+        await proceed.wait()
+        return BackgroundOutcome("completed", "done")
+
+    state.mid_turn_gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        requester_id=requester,
+        on_defer=acknowledge,
+    )
+    try:
+        job = await start_job(
+            runtime,
+            "work",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
+        with pending_human_messages_context(state, calls=state.calls):
+            waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
+        state.add_waiting_human_message("$queued", text="Also do X", requester_id=requester, mode=MidTurnMode.QUEUE)
+        await asyncio.wait_for(attempted["$queued"].wait(), JOB_TEST_TIMEOUT)
+        # The wait acknowledges a message on its next look at the queue, so this one shows the last look kept it.
+        state.add_waiting_human_message("$later", text="And Y", requester_id=requester, mode=MidTurnMode.QUEUE)
+        await asyncio.wait_for(attempted["$later"].wait(), JOB_TEST_TIMEOUT)
+        assert not waiter.done()
+        state.add_waiting_human_message(
+            "$steer",
+            text="Use the other file",
+            requester_id=requester,
+            mode=MidTurnMode.STEER,
+        )
+        detached = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+        assert (detached.job.status, detached.claim) == ("running", None)
+        assert judgments == 0
+        assert [listed.job_id for listed in await runtime.list_jobs(owner=job_owner(), depth=0)] == [job.job_id]
+        # Every message still waits for its own turn through the ordinary gate.
+        assert [message.event_id for message in state.pending_message_snapshot()] == ["$queued", "$later", "$steer"]
+        proceed.set()
+        finished = await asyncio.wait_for(runtime.wait(job.job_id, owner=job_owner(), depth=0), JOB_TEST_TIMEOUT)
+        assert (finished.job.status, finished.job.result) == ("completed", "done")
+        assert finished.claim is not None
+        assert runs == 1
+    finally:
+        proceed.set()
         await runtime.shutdown()
 
 

@@ -95,6 +95,7 @@ from mindroom.reply_presentation import (
     note_segment,
     render,
     render_body,
+    restart_note,
     with_trailing_note,
 )
 from mindroom.reply_scope import (
@@ -107,6 +108,7 @@ from mindroom.reply_scope import (
     interrupted_end,
     owed_note_write,
     release_decision,
+    replaced_for_config_change,
     suppress_decision,
     terminal_source_decision,
     terminal_write,
@@ -1496,7 +1498,12 @@ class DeliveryGateway:
                 return None
             span = await self.deps.outbox.replies.span(reply.owed_write.span_id)
             assert span is not None, "an owed write names a span of its reply"
-            shown = _with_note(_shown_before(reply, None), note_segment(reply.owed_write.note, reply.owed_write.text))
+            owed = reply.owed_write
+            if owed.note is NoteKind.RESTART:
+                note = restart_note(config_change=replaced_for_config_change(span.bot_generation))
+            else:
+                note = note_segment(owed.note, owed.text)
+            shown = _with_note(_shown_before(reply, None), note)
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
             target = MessageTarget.resolve(room_id=reply.room_id, thread_id=reply.thread_id, reply_to_event_id=None)

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.agent_cli.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import run_delegated_child_response
+from mindroom.delegation.cost import receive_subagent_cost
 from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_turn
@@ -406,5 +407,7 @@ class DelegateTools(Toolkit):
             )
         except SubagentSessionError as error:
             return str(error)
+        # The turn that made this call receives what the settled child cost.
+        receive_subagent_cost(child.cost_usd)
         # The stable child record reference follows the child's answer.
         return f"{result.text}\n\n{result.receipt}" if result.receipt else result.text

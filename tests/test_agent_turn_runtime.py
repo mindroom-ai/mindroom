@@ -370,11 +370,17 @@ class _QueuedState:
     def __init__(self, *, pending: bool) -> None:
         self.pending = pending
 
-    def has_pending_human_messages(self) -> bool:
+    def has_interrupting_messages(self) -> bool:
         return self.pending
 
-    def pending_message_snapshot(self) -> tuple[object, ...]:
+    def interrupting_snapshot(self) -> tuple[object, ...]:
         return ("$pending",) if self.pending else ()
+
+    def queued_snapshot(self) -> tuple[object, ...]:
+        return ()
+
+    def requester_steer_snapshot(self) -> tuple[object, ...]:
+        return ()
 
 
 @pytest.mark.asyncio
@@ -1544,7 +1550,8 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
 ) -> None:
     """Without a job actor, participation decides first, the receipt joins next, and compaction sizes the result.
 
-    The rest of the hooks are wired. A reply with a job actor projects its job definitions before participation.
+    The checkpoint then saves what is sent, and saves again before a tool batch runs. The rest of the hooks are
+    wired. A reply with a job actor projects its job definitions before participation.
     """
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
     captured: dict[str, Any] = {}
@@ -1563,7 +1570,9 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
         "participation_hook",
         "approval_receipt_hook",
         "mid_turn_compaction_hook",
+        "checkpoint_hooks",
     ]
+    assert hooks.before_dispatch.__qualname__.split(".")[0] == "checkpoint_hooks"
     assert hooks.answer_tool_calls is not None
     assert hooks.rewrite_tool_calls is None
     # This agent offers no scheduler, so its calls run without the live-function binding step.
@@ -1681,6 +1690,41 @@ async def test_a_reply_posts_its_mid_turn_compaction_notices_and_seeds_no_earlie
     assert metadata is not None
     assert metadata["room_topic"] == "kept"
     assert [request["metrics"]["input_tokens"] for request in metadata[COMPACTED_REQUESTS_METADATA_KEY]] == [1_000_000]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_an_interrupted_record_leaves_out_the_calls_an_earlier_attempt_of_its_turn_folded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record of a turn cut short in a later attempt quotes no call a fold of an earlier attempt summarized.
+
+    The stored folds name the attempt that made them, so only the turn's recorder knows them once another attempt runs.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            # The first response reports a request far over the 4,000-token window, so the second request compacts.
+            calls(tool_call("touch", "call_1", label="FOLDED"), metrics=usage(1_000_000, 1)),
+            calls(_switch_now("call_2")),
+            [Await(_cancel_current_task)],
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+        context_window=4000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+
+    with pytest.raises(asyncio.CancelledError):
+        await _stream(reply)
+
+    [record] = [run for run in reply.storage.list_runs(SESSION_ID) if is_interrupted_replay_run(run)]
+    assert record.run_id != "run-1"
+    content = str(record.messages[-1].content)
+    assert "1 tool call(s) had finished" in content
+    assert "switch_thread_model" in content
+    assert "FOLDED" not in content
 
 
 @pytest.mark.asyncio

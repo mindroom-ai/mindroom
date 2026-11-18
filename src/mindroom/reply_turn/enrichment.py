@@ -15,6 +15,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.matrix.client_visible_messages import replace_visible_message
+from mindroom.matrix.thread_forks import fork_reference
 from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.teams.presentation import strip_team_display
 from mindroom.user_turn_time import prefix_user_turn_time
@@ -106,6 +107,29 @@ def matrix_message_target_item(
         key=MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
         minimal_required=True,
         text=text,
+        cache_policy="stable",
+        persist=False,
+    )
+
+
+def thread_fork_item(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    thread_id: str | None,
+    config: Config,
+) -> EnrichmentItem | None:
+    """Tell a fork's turn which thread it was forked from, whose messages its history starts with."""
+    reference = None if thread_id is None else fork_reference(thread_history, thread_id)
+    if reference is None:
+        return None
+    parent_thread_id, fork_point_event_id = reference
+    return EnrichmentItem(
+        key="thread_fork",
+        minimal_required=True,
+        text=config.render_prompt(
+            "THREAD_FORK_CONTEXT_TEMPLATE",
+            parent_thread_id=parent_thread_id,
+            fork_point_event_id=fork_point_event_id,
+        ),
         cache_policy="stable",
         persist=False,
     )
