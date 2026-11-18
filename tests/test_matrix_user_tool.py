@@ -14,15 +14,16 @@ from structlog.testing import capture_logs
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import AgentToolContext, resolve_connection_agent, resolve_connection_user
 from mindroom.attachments.storage import load_attachment
+from mindroom.config.approval import ToolApprovalConfig
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.teams.members import resolve_exact_team_members
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import (
     current_execution_identity,
     get_tool_runtime_context,
     member_tool_scope,
 )
-from tests.agent_tool_helpers import toolkit_offers
+from mindroom.tool_system.tool_function import ToolGate
+from tests.agent_tool_helpers import call_entrypoint, toolkit_offers
 from tests.matrix_user_helpers import (
     AGENT,
     OWNER,
@@ -30,6 +31,7 @@ from tests.matrix_user_helpers import (
     ROOM_NEEDED,
     SYNC_PATH,
     TOKEN,
+    WRITES_NEED_APPROVAL,
     Answer,
     FakeHomeserver,
     error_result,
@@ -43,16 +45,22 @@ from tests.matrix_user_helpers import (
     search_answer,
     sync_answer,
 )
+from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.custom_tools.matrix_user import MatrixUserTools
 
 STRANGER = "@bob:example.com"
 NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
 TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
+WRITE_TURN_NEEDED = (
+    "matrix_user_write needs a conversation with the agent, so it does not work through the MCP gateway."
+)
 # An alias, and the room the homeserver's directory says it names.
 ALIAS = "#general:example.com"
 ALIASED_ROOM = "!general:example.com"
@@ -99,6 +107,17 @@ async def test_the_owner_reads_their_rooms(config: Config, paths: RuntimePaths, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("call", "action"),
+    [
+        pytest.param(lambda toolkit: toolkit.matrix_user_read(action="rooms"), "rooms", id="read"),
+        pytest.param(
+            lambda toolkit: toolkit.matrix_user_write(action="send", room_id=ROOM, message="Hi"),
+            "send",
+            id="write",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     ("requester_id", "agent_name", "message"),
     [
         (STRANGER, AGENT, "Only the agent's owner may use matrix_user."),
@@ -110,15 +129,17 @@ async def test_a_refused_caller_gets_the_refusal_and_no_request_is_made(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
+    call: Callable[[MatrixUserTools], Awaitable[str]],
+    action: str,
     requester_id: str,
     agent_name: str,
     message: str,
 ) -> None:
-    """Anyone but the owner, or a toolkit built for another agent, is refused before any request."""
+    """Anyone but the owner, or a toolkit built for another agent, is refused before any request, to read or write."""
     with owner_turn(config, paths, requester_id), homeserver.serving_the_toolkit():
-        result = await owner_toolkit(config, paths, agent_name).matrix_user_read(action="rooms")
+        result = await call(owner_toolkit(config, paths, agent_name))
 
-    assert json.loads(result) == error_result("rooms", message)
+    assert json.loads(result) == error_result(action, message)
     assert homeserver.requests == []
 
 
@@ -382,6 +403,16 @@ async def test_an_action_that_takes_no_room_looks_none_up(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda toolkit, room: toolkit.matrix_user_read(action="messages", room_id=room), id="read"),
+        pytest.param(
+            lambda toolkit, room: toolkit.matrix_user_write(action="send", room_id=room, message="Hi"),
+            id="write",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     ("room_id", "message", "requested"),
     [
         ("planning", "No room is known as planning.", []),
@@ -397,13 +428,14 @@ async def test_an_unknown_room_reference_is_refused_before_anything_else(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
+    call: Callable[[MatrixUserTools, str], Awaitable[str]],
     room_id: str,
     message: str,
     requested: list[str],
 ) -> None:
     """A name MindRoom does not know, or an alias the homeserver cannot resolve, stops the call before its action."""
     with owner_turn(config, paths), homeserver.serving_the_toolkit():
-        result = json.loads(await owner_toolkit(config, paths).matrix_user_read(action="messages", room_id=room_id))
+        result = json.loads(await call(owner_toolkit(config, paths), room_id))
 
     assert (result["status"], result["message"]) == ("error", message)
     assert homeserver.paths() == requested
@@ -424,24 +456,152 @@ def test_the_read_function_takes_no_user_to_act_as(config: Config, paths: Runtim
     ]
 
 
-def test_the_read_function_asks_for_no_confirmation(config: Config, paths: RuntimePaths) -> None:
-    """The toolkit offers one function, the read, and asks the owner to confirm none of its calls."""
-    functions = adapt_toolkit(owner_toolkit(config, paths)).functions
+def test_a_rule_that_requires_approval_gates_the_write_function(config: Config, paths: RuntimePaths) -> None:
+    """A write asks the owner first when a `tool_approval` rule says so; a caller that cannot resume is not offered it.
 
-    assert {function.name: function.gate for function in functions} == {"matrix_user_read": None}
+    With background tool jobs, which are on by default, the approval is the first phase of the write's job.
+    """
+    config.tool_approval = ToolApprovalConfig(rules=[WRITES_NEED_APPROVAL])
+
+    functions = gated_functions(owner_toolkit(config, paths), config)
+    as_jobs = gated_functions(owner_toolkit(config, paths), config, approvals_as_jobs=True)
+    unresumable = gated_functions(owner_toolkit(config, paths), config, resumable=False)
+
+    assert {name: function.gate for name, function in functions.items()} == {
+        "matrix_user_read": None,
+        "matrix_user_write": ToolGate.POLICY,
+    }
+    assert {name: function.gate for name, function in as_jobs.items()} == {
+        "matrix_user_read": None,
+        "matrix_user_write": ToolGate.JOB,
+    }
+    assert list(unresumable) == ["matrix_user_read"]
 
 
 @pytest.mark.asyncio
-async def test_the_gateway_offers_the_read_function(
+async def test_without_a_rule_that_requires_approval_a_write_runs_at_once(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """With no rule that requires approval and the default `auto_approve`, the toolkit itself asks nobody first."""
+    assert config.tool_approval.default == "auto_approve"
+    homeserver.answers[f"/_matrix/client/v3/rooms/{ROOM}/leave"] = {}
+    functions = gated_functions(owner_toolkit(config, paths), config)
+
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        result = await call_entrypoint(functions["matrix_user_write"], action="leave", room_id=ROOM)
+
+    assert [function.gate for function in functions.values()] == [None, None]
+    assert json.loads(str(result)) == ok_result("leave", room_id=ROOM)
+    assert [request.path for request in homeserver.requests if request.method == "POST"] == [
+        f"/_matrix/client/v3/rooms/{ROOM}/leave",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"action": "send", "message": "Hi"},
+        {"action": "invite", "room_id": ROOM},
+    ],
+    ids=["send", "invite"],
+)
+async def test_the_write_function_takes_no_user_to_act_as(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    arguments: dict[str, str],
+) -> None:
+    """``user_id`` is only whom to message or invite: naming the owner, as if to act as them, is an error."""
+    function = toolkit_offers(owner_toolkit(config, paths), "matrix_user_write")
+
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        result = await owner_toolkit(config, paths).matrix_user_write(user_id=OWNER, **arguments)
+
+    assert list(function.parameters["properties"]) == [
+        "action",
+        "room_id",
+        "user_id",
+        "message",
+        "event_id",
+        "thread_id",
+        "emoji",
+        "attachment",
+        "name",
+    ]
+    assert json.loads(result) == error_result(
+        arguments["action"],
+        "user_id is whom to message or invite, never your owner.",
+    )
+    assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_write_needs_a_conversation(
     gateway_agent: AgentToolContext,
     homeserver: FakeHomeserver,
 ) -> None:
-    """An MCP client finds the read function, and listing it asks nothing of the homeserver."""
+    """Without a rule that requires approval the gateway offers the write, which answers that it needs a conversation."""
     with homeserver.serving_the_toolkit():
         found = await gateway.search_tools(gateway_agent, toolkit="matrix_user")
+        refused = await gateway.invoke_tool(
+            gateway_agent,
+            toolkit="matrix_user",
+            function="matrix_user_write",
+            arguments={"action": "leave", "room_id": ROOM},
+        )
+
+    assert "error" not in found
+    assert [result["function"] for result in found["results"]] == ["matrix_user_read", "matrix_user_write"]
+    assert "error" not in refused
+    assert json.loads(refused["result"]) == error_result("leave", WRITE_TURN_NEEDED)
+    assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_offers_no_write_a_rule_asks_approval_for(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A write that a rule asks the owner to approve on a card, which an MCP client cannot show, is not run there."""
+    config.tool_approval = ToolApprovalConfig(rules=[WRITES_NEED_APPROVAL])
+    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
+    gateway_agent = resolve_connection_agent(owner, AGENT)
+
+    with homeserver.serving_the_toolkit():
+        found = await gateway.search_tools(gateway_agent, toolkit="matrix_user")
+        refused = await gateway.invoke_tool(
+            gateway_agent,
+            toolkit="matrix_user",
+            function="matrix_user_write",
+            arguments={"action": "leave", "room_id": ROOM},
+        )
 
     assert "error" not in found
     assert [result["function"] for result in found["results"]] == ["matrix_user_read"]
+    assert refused == {
+        "error": {
+            "code": "approval_required",
+            "message": "This tool requires approval and cannot run through this gateway.",
+        },
+    }
+    assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_write_without_a_turn_is_refused(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A write belongs to a conversation with the agent, which a call without a turn does not have."""
+    with homeserver.serving_the_toolkit():
+        result = await owner_toolkit(config, paths).matrix_user_write(action="leave", room_id=ROOM)
+
+    assert json.loads(result) == error_result("leave", WRITE_TURN_NEEDED)
     assert homeserver.requests == []
 
 

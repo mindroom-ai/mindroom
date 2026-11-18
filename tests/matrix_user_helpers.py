@@ -6,6 +6,7 @@ The homeserver answers canned JSON per request path.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -13,6 +14,9 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from aiohttp import ClientResponse
+
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
 from mindroom.constants import resolve_runtime_paths
@@ -41,6 +45,8 @@ ROOM = "!room:example.com"
 TOKEN = "as-user-secret-7f3a9c"  # noqa: S105
 ROOM_NEEDED = "needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
 SYNC_PATH = "/_matrix/client/v3/sync"
+# The rule a deployment sets for a card before every write.
+WRITES_NEED_APPROVAL = ApprovalRuleConfig(match="matrix_user_write", action="require_approval")
 # The time of every room event the helpers make, plus its ``minute``.
 NOON = int(datetime(2026, 11, 16, 12, 0, tzinfo=UTC).timestamp() * 1000)
 
@@ -185,7 +191,10 @@ def matrix_error(status: int, errcode: str, error: str, **fields: object) -> Ans
 
 @dataclass(frozen=True)
 class HomeserverRequest:
-    """One request the fake homeserver received, with its path unquoted and its JSON body parsed."""
+    """One request the fake homeserver received, with its path unquoted and its JSON body parsed.
+
+    A text body that is no JSON is kept as it was sent, so a request the client should have refused is still recorded.
+    """
 
     method: str
     url: str
@@ -193,6 +202,15 @@ class HomeserverRequest:
     query: dict[str, list[str]]
     body: object
     headers: dict[str, str]
+    # The bytes of an upload, whose body is a stream rather than JSON text.
+    uploaded: bytes | None = None
+
+
+def _parsed(text: str) -> object:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 @dataclass
@@ -206,6 +224,9 @@ class _Content:
 
 @dataclass
 class _Response:
+    # The delivery helpers read an answer's status only from aiohttp's response, which this stands in for.
+    __class__ = ClientResponse
+
     status: int
     headers: dict[str, str]
     content: _Content
@@ -273,9 +294,10 @@ class FakeHomeserver:
         """Record the request and answer it, or raise the transport failure its path answers."""
         split = urlsplit(url)
         path = unquote(split.path)
-        body = json.loads(data) if isinstance(data, str) else None
+        body = _parsed(data) if isinstance(data, str) else None
+        uploaded = b"".join([chunk async for chunk in data]) if isinstance(data, AsyncIterable) else None
         query = parse_qs(split.query)
-        self.requests.append(HomeserverRequest(method, url, path, query, body, dict(headers)))
+        self.requests.append(HomeserverRequest(method, url, path, query, body, dict(headers), uploaded))
         answer = self._answer(path)
         content = answer.body if isinstance(answer.body, bytes) else json.dumps(answer.body).encode()
         return _Response(answer.status, answer.headers, _Content(content))
@@ -356,12 +378,14 @@ def owner_turn(
     paths: RuntimePaths,
     requester_id: str = OWNER,
     agent_name: str = AGENT,
+    attachment_ids: tuple[str, ...] = (),
     room_id: str = ROOM,
     **fields: object,
 ) -> AbstractContextManager[None]:
     """Enter a chat turn in ``room_id`` with ``agent_name``, Alice's personal agent unless named, that ``requester_id`` started.
 
-    The turn holds any other context ``fields``.
+    The turn holds the attachments ``attachment_ids`` name, stored in the runtime's storage, as a bot's turn does, and
+    any other context ``fields``.
     """
     context = make_test_tool_runtime_context(
         agent_name=agent_name,
@@ -372,6 +396,8 @@ def owner_turn(
         runtime_paths=paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
+        storage_path=paths.storage_root,
+        attachment_ids=attachment_ids,
         **fields,
     )
     return tool_runtime_context(context)

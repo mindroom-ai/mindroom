@@ -21,7 +21,7 @@ MindRoom requests localparts such as `mindroom_assistant`, or an agent's [`matri
 - `appservice` registers passwordless accounts inside an exclusive application-service namespace and gives each account its own device token for encryption and sync.
   First register an application service with the homeserver whose exclusive user namespace covers every account MindRoom manages, then supply that registration's `as_token`.
   Provide exactly one of `MATRIX_APPSERVICE_TOKEN` or `MATRIX_APPSERVICE_TOKEN_FILE`; setting either one without `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` stops startup.
-  The application-service token is used only to register accounts and log in new devices; the [`matrix_user`](https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user) tool reads Matrix as people with the token of a separate application service.
+  The application-service token is used only to register accounts and log in new devices; the [`matrix_user`](https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user) tool acts as people with the token of a separate application service.
   After switching an existing install to `appservice`, stored passwords are removed from `matrix_state.yaml` once each account logs in.
 
 ### Use an Existing Matrix Account

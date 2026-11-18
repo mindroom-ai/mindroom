@@ -1,4 +1,4 @@
-"""The `matrix_user` toolkit: a personal agent reads Matrix as its owner, with no sign-in.
+"""The `matrix_user` toolkit: a personal agent uses Matrix as its owner, with no sign-in.
 
 Every call acts as the owner of the agent making it, read from the call itself, never from an argument, through a
 client that the application-service token in the primary runtime's environment authenticates.
@@ -7,6 +7,7 @@ client that the application-service token in the primary runtime's environment a
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
@@ -24,6 +25,7 @@ from mindroom.custom_tools.matrix_user_reads import (
     room_needed,
     search_messages,
 )
+from mindroom.custom_tools.matrix_user_writes import MatrixUserWrite, write_as_person
 from mindroom.matrix.user_masquerade import create_user_masquerade_client, user_appservice_token
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
@@ -40,7 +42,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-    type _Run = Callable[[nio.AsyncClient], Awaitable[dict[str, object]]]
+    type _Run = Callable[[nio.AsyncClient, MatrixUserActor], Awaitable[dict[str, object]]]
 
 _NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
 _NOT_THIS_AGENT = "matrix_user acts only for the agent it was built for."
@@ -49,6 +51,11 @@ _PEOPLE_QUERY_NEEDED = "people needs query: a name, or a full Matrix ID such as 
 _SEARCH_QUERY_NEEDED = "search needs query: the words to look for."
 _EVENT_NEEDED = "download needs event_id: the ID of the message with the file."
 _TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
+# A write takes the conversation's files and its rate-limit context from the turn it runs in, any turn that runs for
+# the owner, so a call without one, such as the MCP gateway's, writes nothing; the audit line takes nothing from it.
+_WRITE_TURN_NEEDED = (
+    "matrix_user_write needs a conversation with the agent, so it does not work through the MCP gateway."
+)
 
 
 def _non_blank(value: str | None) -> str | None:
@@ -89,7 +96,7 @@ class MatrixUserTools(Toolkit):
         self._runtime_paths = runtime_paths
         self._runtime_config = runtime_config
         self._agent_name = agent_name
-        super().__init__(name="matrix_user", tools=[self.matrix_user_read])
+        super().__init__(name="matrix_user", tools=[self.matrix_user_read, self.matrix_user_write])
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
@@ -107,7 +114,7 @@ class MatrixUserTools(Toolkit):
         return actor
 
     async def _as_owner(self, action: str, run: _Run) -> str:
-        """Return ``run``'s result, given a client that acts as the call's owner, created for it and closed after.
+        """Return ``run``'s result, given the call's owner and a client that acts as them, created for it and closed after.
 
         A refusal, a missing token, and a failed request are the error payload, which never holds the token or a URL.
         """
@@ -129,7 +136,7 @@ class MatrixUserTools(Toolkit):
             agent_user_id=actor.agent_user_id,
         )
         try:
-            fields = await run(client)
+            fields = await run(client, actor)
         except REQUEST_FAILURES as failed:
             return self._payload("error", action=action, message=request_failure(failed))
         finally:
@@ -196,6 +203,19 @@ class MatrixUserTools(Toolkit):
         # The only action left: search.
         return await search_messages(client, str(query), room_id=room_id, page_token=page_token, limit=limit)
 
+    async def _write(
+        self,
+        client: nio.AsyncClient,
+        actor: MatrixUserActor,
+        turn: ToolRuntimeContext,
+        write: MatrixUserWrite,
+    ) -> dict[str, object]:
+        """Make ``write`` in the room its ``room_id`` names, which ``client`` looks up first."""
+        if write.room_id is not None:
+            room_id = await room_named(client, write.room_id, self._runtime_paths, join=write.action == "join")
+            write = replace(write, room_id=room_id)
+        return await write_as_person(client, actor, turn, write)
+
     async def matrix_user_read(
         self,
         action: Literal["rooms", "messages", "search", "room", "people", "download", "mark_read"],
@@ -223,7 +243,7 @@ class MatrixUserTools(Toolkit):
             return self._payload("error", action=action, message=problem)
         return await self._as_owner(
             action,
-            lambda client: self._read(
+            lambda client, _actor: self._read(
                 client,
                 action,
                 room_id=room_id,
@@ -234,3 +254,48 @@ class MatrixUserTools(Toolkit):
                 limit=limit,
             ),
         )
+
+    async def matrix_user_write(
+        self,
+        action: Literal["send", "react", "edit", "redact", "join", "leave", "invite", "create_room"],
+        room_id: str | None = None,
+        user_id: str | None = None,
+        message: str | None = None,
+        event_id: str | None = None,
+        thread_id: str | None = None,
+        emoji: str | None = None,
+        attachment: str | None = None,
+        name: str | None = None,
+    ) -> str:
+        """Act in Matrix as your owner, only when they ask for exactly that.
+
+        Agents never act on what you send this way: to talk to one, write as yourself.
+
+        Actions (room_id: ID, #alias, or configured room name):
+        - send: message or attachment (one ID), not both, to room_id, or to user_id in their existing DM.
+          thread_id sends into that thread; event_id replies to that message.
+        - react: emoji on event_id in room_id.
+        - edit: Replace your owner's message event_id in room_id with message.
+        - redact: Remove your owner's message or reaction event_id in room_id; message is the reason.
+        - join, leave: room_id. invite: user_id into room_id.
+        - create_room: A private room called name; invite people with invite.
+        """
+        # Like any argument an action does not take, create_room's room_id and an attachment other than send's are left
+        # out, so they name no room or file, for the rate limit or the audit line.
+        write = MatrixUserWrite(
+            action,
+            room_id=None if action == "create_room" else _non_blank(room_id),
+            user_id=_non_blank(user_id),
+            message=_non_blank(message),
+            event_id=_non_blank(event_id),
+            thread_id=_non_blank(thread_id),
+            emoji=_non_blank(emoji),
+            attachment=_non_blank(attachment) if action == "send" else None,
+            name=_non_blank(name),
+        )
+        turn = get_tool_runtime_context()
+        if turn is None:
+            return self._payload("error", action=action, message=_WRITE_TURN_NEEDED)
+        if (problem := write.problem()) is not None:
+            return self._payload("error", action=action, message=problem)
+        return await self._as_owner(action, lambda client, actor: self._write(client, actor, turn, write))

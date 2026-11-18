@@ -2578,6 +2578,7 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.custom_tools.matrix_user_authority",
     "mindroom.custom_tools.matrix_user_reads",
+    "mindroom.custom_tools.matrix_user_writes",
     "mindroom.matrix.user_masquerade",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
@@ -2590,6 +2591,17 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.visible_body",
+]
+visibility = ["mindroom.custom_tools.matrix_user", "mindroom.custom_tools.matrix_user_writes"]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_user_writes"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.matrix_helpers",
+    "mindroom.custom_tools.matrix_user_reads",
+    "mindroom.matrix.client_delivery",
 ]
 visibility = ["mindroom.custom_tools.matrix_user"]
 
@@ -2611,6 +2623,7 @@ visibility = [
     "mindroom.custom_tools.matrix_message",
     "mindroom.custom_tools.matrix_voice_message",
     "mindroom.custom_tools.matrix_room",
+    "mindroom.custom_tools.matrix_user_writes",
 ]
 
 [[modules]]
@@ -4169,6 +4182,7 @@ visibility = [
     "mindroom.interactive",
     "mindroom.stop",
     "mindroom.contacts.flow",
+    "mindroom.custom_tools.matrix_user_writes",
 ]
 
 [[modules]]
@@ -7081,6 +7095,7 @@ expose = [
     "resolve_room_encryption_outcome",
     "send_audio_message",
     "send_file_message",
+    "send_file_message_outcome",
     "send_message_outcome",
     "send_message_result",
     "send_room_event_result",

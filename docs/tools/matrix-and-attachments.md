@@ -21,7 +21,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](../configuration/models.md#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
-- [`matrix_user`] - Read Matrix as a personal agent's owner.
+- [`matrix_user`] - Read Matrix as a personal agent's owner and, when they ask, write as them.
 - [`attachments`](../attachments.md#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -30,7 +30,7 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 ## Tool Runtime Context
 
-Except [`matrix_user`], these tools work only while an agent is responding in a Matrix conversation.
+Except the reads of [`matrix_user`], these tools work only while an agent is responding in a Matrix conversation.
 Unless the call passes explicit IDs, they act on the current room and thread, except [`matrix_user`], which needs `room_id` for every action on a room.
 `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
 `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
@@ -309,8 +309,8 @@ matrix_api(
 
 ## [`matrix_user`]
 
-`matrix_user` lets a [personal agent](../personal-agents.md) read Matrix as its owner, with no sign-in: the owner's own rooms and DMs, including rooms the agent is not in.
-It acts only for the agent's owner, in any turn that runs for them, such as a chat with the agent or one of their scheduled tasks, or through the [MCP gateway](../deployment/mcp-gateway.md), and refuses, saying why, anyone else, any other agent, and a [contact conversation](../agent-contacts.md).
+`matrix_user` lets a [personal agent](../personal-agents.md) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in, and writes as the owner when they ask.
+It acts only for the agent's owner, in any turn that runs for them, such as a chat with the agent or one of their scheduled tasks, or, for reads, through the [MCP gateway](../deployment/mcp-gateway.md), and refuses, saying why, anyone else, any other agent, and a [contact conversation](../agent-contacts.md).
 
 `matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
 
@@ -325,6 +325,32 @@ It acts only for the agent's owner, in any turn that runs for them, such as a ch
 | `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
 
 Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
+
+`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachment=None, name=None)` acts as the owner in any turn that runs for them, such as a chat with the agent, one of their scheduled tasks, a hook or trigger, or a team run, but not through the MCP gateway.
+Whether a call asks the owner first is decided by the [approval rules](../tool-approval.md), as for any tool, so with no rule that requires approval and `tool_approval.default: auto_approve`, an unattended turn such as a scheduled task writes as the owner too.
+A deployment that wants a card for every write sets:
+
+```yaml
+tool_approval:
+  rules:
+    - match: matrix_user_write
+      action: require_approval
+```
+
+A `script` rule can decide per call from the arguments, for example asking for `send` and letting `react` through, and an approval the owner gives for a period, [on a card](../tool-approval.md#auto-approval-for-a-few-minutes) or with [`!auto_approve`](../tool-approval.md#auto-approve-everything), covers later calls.
+
+| Action | Does |
+|--------|------|
+| `send` | Sends one message into `room_id`, or into the owner's existing DM with `user_id`; with none, nothing is sent, and the owner can start one in their Matrix client, or the agent can make a room with `create_room`, `invite` them, and send there: the text `message`, or the file `attachment` names, an attachment ID of the conversation, so a text and a file are two calls; `thread_id` sends into that thread, and `event_id` makes `message` a reply to that message |
+| `react` | Reacts to the message `event_id` in `room_id` with `emoji`, one emoji of at most 8 characters and without spaces |
+| `edit` | Replaces the text of the owner's own text message `event_id` in `room_id` with `message`; a photo, file, or audio message cannot be edited |
+| `redact` | Deletes the owner's own message or reaction `event_id` in `room_id`, with `message` as the reason |
+| `join`, `leave` | Joins or leaves `room_id` |
+| `invite` | Invites `user_id` into `room_id` |
+| `create_room` | Creates a private room called `name` and invites nobody; `invite` adds people |
+
+What it sends shows as the owner's to everyone, but MindRoom never takes it as the owner speaking: it starts no reply, runs no command, and approves or denies nothing, so the agent talks to other agents as itself.
+Nothing is sent, reacted, or edited into an encrypted room.
 
 To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
 That token can act as every account the `users` pattern covers, administrators included.
