@@ -63,6 +63,7 @@ __all__ = (
     "OPENROUTER_OPENAI_EMBEDDING_SMALL",
     "OPENROUTER_OPENAI_LUNA",
     "OPENROUTER_OPENAI_TRANSCRIPTION",
+    "OPENROUTER_SYSTEM_UPDATE_MODELS",
     "REPLICATE_VIDEO",
     "SAAS_MODEL_PRESETS",
     "SENTENCE_TRANSFORMERS_DEFAULT",
@@ -233,6 +234,9 @@ def openai_rejects_sampling_controls(model_id: str) -> bool:
 _OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.1"
 _OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-5.5"
 _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5.5"
+# OpenRouter models proven to take a system message inside the conversation, keep it in place, and follow it over the
+# earlier system prompt (``providers/pipeline/prompt_hold.py``); a model joins once the same probes pass for it.
+OPENROUTER_SYSTEM_UPDATE_MODELS = frozenset({_OPENROUTER_CLAUDE_OPUS})
 _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-5.5"
 _OPENROUTER_GEMINI_FLASH = f"google/{_GOOGLE_GEMINI_FLASH}"
 _OPENROUTER_GEMINI_LITE = f"google/{_GOOGLE_GEMINI_LITE}"

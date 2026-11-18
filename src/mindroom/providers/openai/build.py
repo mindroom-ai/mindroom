@@ -23,6 +23,7 @@ from mindroom.model_defaults import (
     GROQ_HOST_DEFAULT,
     OPENAI_BASE_URL_DEFAULT,
     OPENROUTER_BASE_URL_DEFAULT,
+    OPENROUTER_SYSTEM_UPDATE_MODELS,
     ZAI_BASE_URL_DEFAULT,
     claude_rejects_sampling_controls,
     openai_rejects_sampling_controls,
@@ -77,6 +78,8 @@ logger = get_logger(__name__)
 _NATIVE_COMPACTION_ENDPOINTS = frozenset({OPENAI_BASE_URL_DEFAULT, CODEX_BASE_URL})
 _NATIVE_COMPACTION_MODEL_PREFIXES = ("gpt-5.3-codex", "gpt-5.4", "gpt-6")
 _NATIVE_COMPACTION_AUTHORED_KEYS = ("context_management", "previous_response_id", "background", "store")
+# Request fields that let OpenRouter answer with another model or upstream provider than the configured id names.
+_REROUTING_KEYS = ("model", "models", "route", "provider")
 # Explicit prompt-cache breakpoints exist on the public API from GPT-5.6.
 _BREAKPOINT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-|$)")
 
@@ -376,6 +379,23 @@ def _populate_azure_env(extra_kwargs: dict[str, Any], runtime: ProviderRuntime) 
         _with_env_setting(extra_kwargs, setting, AZURE_OPENAI_ENV_BY_KEY[key], runtime)
 
 
+def _sends_system_updates(route_key: str, model_id: str, base_url: str, settings: ChatSettings) -> bool:
+    """Return whether every request of this route reaches a model proven to take a system prompt update.
+
+    That was proven for the listed models behind OpenRouter's own endpoint. A request another gateway answers, or one
+    whose settings let OpenRouter pick another model or upstream provider, may send the update as the user's text.
+    """
+    request_params = settings.request_params or {}
+    bodies = (request_params, settings.extra_body or {}, request_params.get("extra_body") or {})
+    return (
+        route_key == "openrouter"
+        and model_id in OPENROUTER_SYSTEM_UPDATE_MODELS
+        and base_url.rstrip("/") == OPENROUTER_BASE_URL_DEFAULT
+        and not settings.models
+        and not any(key in body for body in bodies for key in _REROUTING_KEYS)
+    )
+
+
 def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> ChatAdapter:
     route = _CHAT_ROUTES[route_key]
     extra_kwargs = dict(model_config.extra_kwargs or {})
@@ -409,6 +429,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
         omitted_media=route.omitted_media,
         url_media=frozenset({"image"}),
         provider_default_sampling=_provider_default_sampling(identity.id),
+        system_updates=_sends_system_updates(route_key, identity.id, base_url, settings),
     )
     return ChatAdapter(
         identity=identity,

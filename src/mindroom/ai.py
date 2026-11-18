@@ -71,6 +71,7 @@ from mindroom.memory import (
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
 from mindroom.providers import registry as provider_registry
+from mindroom.providers.pipeline.prompt_hold import prompt_hold_path
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -701,6 +702,25 @@ def _memory_conversation(
     )
 
 
+def _prompt_hold(ctx: ResponseTurnContext, build: AgentBuild, scope_context: ScopeSessionContext | None) -> Path | None:
+    """Name the file that holds the system prompt of the turn's conversation, None for a turn that holds none.
+
+    Only a route proven to take a system prompt update holds one. An authored persona's prompt is its turn's own, a
+    minimal agent reads its context on demand rather than in its system prompt, and a turn that stores no run
+    (``usage_kind``) is replayed by no later turn, so none of them has a prompt to hold. The file lies beside the
+    conversation's database, so in a private agent's own state root.
+    """
+    if (
+        ctx.persona is not None
+        or ctx.agent_mode == "minimal"
+        or ctx.usage_kind is not None
+        or scope_context is None
+        or not build.spec.model.capabilities.system_updates
+    ):
+        return None
+    return prompt_hold_path(scope_context.storage.path, scope_context.session_id)
+
+
 async def _prepare_turn_memory(
     ctx: ResponseTurnContext,
     config: Config,
@@ -1016,7 +1036,10 @@ async def _prepare_agent_run_context(
         note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
     build = prepared_run.build
-    request_template = with_native_history(build.request_template, prepared_run.prepared_history.native_history)
+    request_template = replace(
+        with_native_history(build.request_template, prepared_run.prepared_history.native_history),
+        prompt_hold=_prompt_hold(ctx, build, scope_context),
+    )
     run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
     metadata = build_matrix_run_metadata(
         ctx.reply_to_event_id,

@@ -64,8 +64,9 @@ type _Stage = Callable[[ModelProvider, ModelRequest], AsyncIterator[StreamEvent]
 class RequestProjection:
     """How a stage rewrites every request before its inner provider is sent it, which its ``stream`` applies too.
 
-    ``rewrite`` keeps the request's messages one for one. ``inputs`` returns what the rewrite reads besides the request,
-    such as the media kinds a route learned its model rejects, so a request's identity changes when they do.
+    ``rewrite`` keeps the request's messages one for one, or keeps each message after the system prompt as the object
+    it is and adds messages between them. ``inputs`` returns what the rewrite reads besides the request, such as the
+    media kinds a route learned its model rejects, so a request's identity changes when they do.
     """
 
     rewrite: Callable[[ModelProvider, ModelRequest], ModelRequest]
@@ -106,8 +107,12 @@ class WrappedProvider:
         return self.inner.model_params
 
     def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
-        """Size the request the wrapped provider is sent."""
-        return self.inner.request_tokens(self._projected(request), start=start)
+        """Size the request the wrapped provider is sent, from the message that ``start`` names in ``request``."""
+        projected = self._projected(request)
+        if start and len(projected.messages) != len(request.messages):
+            answer = request.messages[start]
+            start = next(index for index, message in enumerate(projected.messages) if message is answer)
+        return self.inner.request_tokens(projected, start=start)
 
     def context_key(self, request: ModelRequest) -> str:
         """Identify the request the wrapped provider is sent, with what the projection reads besides it."""

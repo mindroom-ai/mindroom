@@ -112,6 +112,9 @@ def usage_sums_attempts(provider_data: Mapping[str, object] | None) -> bool:
 MEDIA_MSGTYPE_KEY = "mindroom_media_msgtype"
 # ``Message.provider_data`` key marking a queued-message notice MindRoom wrote, which tells the model a newer message waits.
 QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
+# ``Message.provider_data`` key marking a system prompt update, which only ``providers/pipeline/prompt_hold.py`` adds
+# to a request and no run stores; the Chat wire sends it as a system message where it stands.
+PROMPT_UPDATE_KEY = "mindroom_prompt_update"
 
 
 def is_queued_notice_message(message: Message) -> bool:
@@ -418,6 +421,7 @@ __all__ = [
     "CUT_OFF_TEXT_KEY",
     "MEDIA_MSGTYPE_KEY",
     "MODEL_PROVENANCE_KEY",
+    "PROMPT_UPDATE_KEY",
     "QUEUED_MESSAGE_NOTICE_MARKER_KEY",
     "REWRITTEN_ATTEMPT_KEY",
     "Message",
