@@ -1700,7 +1700,7 @@ class Config(BaseModel):
         return next(iter(member_modes)) if len(member_modes) == 1 else "thread"
 
     def get_room_reply_mode(self, runtime_paths: RuntimePaths, room_id: str) -> RoomReplyMode:
-        """Return one room's reply mode: its `!reply_mode` override, else its `rooms` entry, else `auto`."""
+        """Return one room's reply mode: its `reply_mode` room setting, else its `rooms` entry, else `auto`."""
         runtime_room_override = resolve_room_reply_mode_override(runtime_paths, room_id)
         if runtime_room_override is not None:
             return runtime_room_override

@@ -110,6 +110,7 @@ from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinato
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
+from .room_reply_modes import observe_room_settings_event, refresh_room_reply_mode
 from .router.duties import RouterDuties, RouterDutiesDeps
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
@@ -1087,13 +1088,21 @@ class AgentBot:
             await self._router.room_joined(room_id)
 
     async def _restore_joined_room(self, room_id: str) -> None:
-        """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime."""
+        """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime.
+
+        The router also reads the room's reply mode setting, which checks that cannot wait for it use.
+        """
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
+        if self._router is not None and self.client is not None:
+            await refresh_room_reply_mode(self.client, self.runtime_paths, room_id)
 
-    def _on_thread_tag_state(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-        """Index a live thread tag state event from sync; never raise into nio's callback loop."""
-        if event.type != THREAD_TAGS_EVENT_TYPE or "state_key" not in event.source or event.decrypted:
+    def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop."""
+        if "state_key" not in event.source or event.decrypted:
+            return
+        observe_room_settings_event(self.runtime_paths, room.room_id, event.source)
+        if event.type != THREAD_TAGS_EVENT_TYPE:
             return
         try:
             self.orchestrator.thread_snooze.observe_state_event(room.room_id, event.source)
@@ -1610,7 +1619,7 @@ class AgentBot:
                 nio.RoomSpaceChildEvent,
             )
             client.add_event_callback(
-                self._on_thread_tag_state,  # ty: ignore[invalid-argument-type]
+                self._on_room_state_event,  # ty: ignore[invalid-argument-type]
                 nio.UnknownEvent,
             )
             await self._register_call_manager_callbacks(client)
