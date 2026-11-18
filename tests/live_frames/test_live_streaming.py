@@ -562,6 +562,7 @@ async def test_compaction_before_the_participation_decision_creates_no_reply(tmp
 async def test_a_regenerations_compaction_never_blanks_the_answer_it_replaces(
     tmp_path: Path,
     live_frames: bool,
+    frames: _Frames,
 ) -> None:
     """A compaction before a regeneration's first text leaves the prior answer; its first real write carries it."""
     records, edits, recorder = _records(), _Edits(), ReplyCompactions()
@@ -578,7 +579,14 @@ async def test_a_regenerations_compaction_never_blanks_the_answer_it_replaces(
 
     assert PROGRESS_PLACEHOLDER not in [content["body"] for content in edits.contents]
     shown = [content for content in edits.contents if COMPACTIONS_CONTENT_KEY in content]
+    assert shown
     assert all(content["body"] == "New answer." for content in shown)
+    if live_frames:
+        # No frame goes out before the first text, and every later one only grows from it.
+        assert frames.sent[0]["snapshot"]["md"] == "New answer."
+        assert [live["status"] for live in _live_compactions(frames.sent)] == ["success"]
+    else:
+        assert not frames.sent
     [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
     assert entry["status"] == "success"
 
