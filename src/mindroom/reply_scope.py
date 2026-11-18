@@ -495,18 +495,20 @@ class ReplyRuntime:
         """Record that a config reload replaces this instance, for the one taking over its replies."""
         _REPLACED_FOR_CONFIG_CHANGE.add(self.generation)
 
-    async def start(self) -> None:
+    async def start(self) -> frozenset[str]:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
 
         Runs before journal replay: replay claims continue the replies whose
         sources are still pending, and the notes this owes are delivered by the
-        outbox recovery after each room syncs.
+        outbox recovery after each room syncs. Returns the sources of the
+        replies left to continue, whose answer began before this instance did.
         """
         await self.take_ownership()
         # No span a deletion ended before this start survived it; recovery delivers what their replies owe.
         await self.store.replies.take_deletion_endings()
         for applied in await self.store.replies.owner_lost(self.generation, now_ns=time.time_ns()):
             await self.run_effects(applied.post_commit)
+        return await self.store.replies.continued_sources()
 
     @asynccontextmanager
     async def span_scope(self) -> AsyncIterator[SpanSlot]:
