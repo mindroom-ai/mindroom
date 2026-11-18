@@ -428,13 +428,14 @@ class AgentReplyMembershipIndex:
         self,
         config: Config,
         runtime_paths: RuntimePaths,
-        clients: Sequence[nio.AsyncClient],
-        *,
-        pick_observer: Callable[[str, Sequence[str]], str | None],
+        observers: Callable[[], tuple[Sequence[nio.AsyncClient], Callable[[str, Sequence[str]], str | None]]],
     ) -> None:
         """Atomically replace membership state from authoritative Matrix queries, each room read by one observer.
 
-        A room keeps the observer its row names while that account is among ``clients`` and its own answer lists the
+        ``observers`` returns the observing accounts' clients and ``pick_observer``. It is asked once this refresh
+        holds the refresh lock, together with the epoch, so a refresh that waited for another one never reads
+        through an account that stopped observing meanwhile.
+        A room keeps the observer its row names while that account is among the clients and its own answer lists the
         room; else ``pick_observer(room_id, joined_user_ids)`` picks one among the accounts whose answers list it,
         None when there is none.
         """
@@ -445,6 +446,7 @@ class AgentReplyMembershipIndex:
             self.invalidate(config, reason="policy_changed_before_refresh")
         async with self._refresh_lock:
             expected_epoch = self._epoch
+            clients, pick_observer = observers()
             reread, self._reread_room_ids = self._reread_room_ids, set()
             snapshot = self._snapshot
             previous_rooms = (

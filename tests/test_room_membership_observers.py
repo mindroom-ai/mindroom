@@ -115,12 +115,16 @@ async def _refresh(
     *accounts: _Account,
     power: Mapping[str, float] | None = None,
 ) -> None:
-    await index.refresh(
-        config,
-        runtime_paths,
-        cast("list[nio.AsyncClient]", list(accounts)),
-        pick_observer=_by_power(power or {}),
-    )
+    await index.refresh(config, runtime_paths, lambda: (_clients(*accounts), _by_power(power or {})))
+
+
+def _clients(*accounts: _Account) -> list[nio.AsyncClient]:
+    return cast("list[nio.AsyncClient]", list(accounts))
+
+
+async def _reached(barrier: asyncio.Event) -> None:
+    """Wait for a test barrier, failing instead of hanging when the code under test never reaches it."""
+    await asyncio.wait_for(barrier.wait(), 5)
 
 
 def _observers(index: AgentReplyMembershipIndex) -> dict[str | None, str | None]:
@@ -380,6 +384,41 @@ async def test_observer_stop_during_refresh_voids_its_rows(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_refresh_queued_behind_another_reads_only_through_the_accounts_observing_when_it_starts(
+    tmp_path: Path,
+) -> None:
+    """A refresh that waited for another one picks its accounts once it runs, never one that stopped while it waited.
+
+    The stopped account's client still answers during its drain, so its answers would publish a row nobody observes.
+    """
+    config, runtime_paths = _config(tmp_path)
+    a = _Account(_A, {_ROOM: (_A, _B, _ALICE)}, hold=asyncio.Event())
+    b = _Account(_B, {_ROOM: (_A, _B, _ALICE)})
+    index = AgentReplyMembershipIndex()
+    membership_sync = _sync(index)
+    observing = [a, b]
+
+    def observers() -> tuple[list[nio.AsyncClient], Callable[[str, Sequence[str]], str | None]]:
+        return _clients(*observing), _by_power({_A: 50})
+
+    blocked = asyncio.create_task(index.refresh(config, runtime_paths, observers))
+    await _reached(a.reading)
+    queued = asyncio.create_task(index.refresh(config, runtime_paths, observers))
+    await asyncio.sleep(0)
+
+    observing.remove(a)
+    membership_sync.invalidate_observer(config, _A, reason="observer_stopping")
+    assert a.hold is not None
+    a.hold.set()
+    await asyncio.wait_for(asyncio.gather(blocked, queued), 5)
+
+    assert _observers(index) == {_ROOM: _B}
+    assert (a.reads, b.reads) == ([_ROOM], [_ROOM])
+    assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    assert not index.needs_refresh(config)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("source", list(DepartureSource))
 async def test_account_reporting_its_departure_during_the_refresh_that_pins_a_room_to_it_voids_the_room(
     tmp_path: Path,
@@ -502,7 +541,7 @@ async def test_two_config_keys_for_one_room_share_one_observer_and_one_read(tmp_
         return user_ids[(len(picks) - 1) % len(user_ids)]
 
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, cast("list[nio.AsyncClient]", [a, b]), pick_observer=pick_observer)
+    await index.refresh(config, runtime_paths, lambda: (_clients(a, b), pick_observer))
 
     assert picks == [_ROOM]
     assert (a.reads, b.reads) == ([_ROOM], [])
@@ -546,8 +585,7 @@ async def test_bot_before_first_sync_is_not_picked(tmp_path: Path, missing: str)
     }
     index = AgentReplyMembershipIndex()
 
-    clients, pick_observer = membership_observers(cast("Mapping[str, AgentBot]", bots))
-    await index.refresh(config, runtime_paths, clients, pick_observer=pick_observer)
+    await index.refresh(config, runtime_paths, lambda: membership_observers(cast("Mapping[str, AgentBot]", bots)))
 
     assert _observers(index) == {_ROOM: _A}
     assert b.reads == []
@@ -614,7 +652,11 @@ async def test_own_join_of_a_room_no_room_list_named_waits_for_that_accounts_rea
     assert not index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)
 
     membership_sync.pre_admit_ingestion(
-        config, runtime_paths, _own_join(previous_membership), None, observer_user_id=_A
+        config,
+        runtime_paths,
+        _own_join(previous_membership),
+        None,
+        observer_user_id=_A,
     )
 
     assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)

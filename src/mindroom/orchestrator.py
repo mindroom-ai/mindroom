@@ -1079,8 +1079,8 @@ class _MultiAgentOrchestrator:
     async def refresh_agent_reply_memberships(self) -> None:
         """Refresh room-backed reply grants, each room read through the one synced bot that observes it."""
         config = self.config
-        clients, pick_observer = membership_observers(self.agent_bots)
-        await self.agent_reply_memberships.refresh(config, self.runtime_paths, clients, pick_observer=pick_observer)
+        observers = partial(membership_observers, self.agent_bots)
+        await self.agent_reply_memberships.refresh(config, self.runtime_paths, observers)
         self.turn_recovery.schedule()
         await self.agent_reply_membership_sync.apply_grant_change()
 

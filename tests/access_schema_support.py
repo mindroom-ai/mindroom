@@ -143,8 +143,7 @@ async def refresh_memberships(
     await index.refresh(
         config,
         runtime_paths,
-        [client],
-        pick_observer=lambda _room_id, user_ids: min(user_ids, default=None),
+        lambda: ([client], lambda _room_id, user_ids: min(user_ids, default=None)),
     )
 
 
