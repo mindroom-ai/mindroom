@@ -156,9 +156,13 @@ def latest_reply_question_ts(thread_metadata: Mapping[str, Any], bot_ids: Collec
     sender = reply.get("sender") if isinstance(reply, dict) else None
     if not isinstance(reply, dict) or not isinstance(sender, str) or sender not in bot_ids:
         return None
-    edit = next((c for c in bundled_replacement_candidates(reply) if c.get("sender") == sender), None)
-    edit_content = edit.get("content") if edit is not None else None
-    shown = edit_content.get("m.new_content") if isinstance(edit_content, dict) else None
+    # A malformed edit is ignored, so the original's question and time stand.
+    edits = [c for c in bundled_replacement_candidates(reply) if c.get("sender") == sender]
+    ok = [
+        c for c in edits if isinstance(c.get("content"), dict) and isinstance(c["content"].get("m.new_content"), dict)
+    ]
+    edit = ok[0] if ok else None
+    shown = edit["content"]["m.new_content"] if edit is not None else None
     # As the client's readInteractiveQuestion: the shown content's prompt, else the original's.
     payloads = [c.get("io.mindroom.interactive") for c in (shown, reply.get("content")) if isinstance(c, dict)]
     prompt = next((payload for payload in payloads if payload is not None), None)

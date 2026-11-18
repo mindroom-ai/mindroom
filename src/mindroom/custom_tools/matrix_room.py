@@ -123,17 +123,23 @@ class MatrixRoomTools(Toolkit):
 
         async def add_current_summary(thread: dict[str, object]) -> None:
             async with reads:
-                current_summary = await current_thread_summary(
-                    context.client,
-                    cast("str", thread.get("room_id", room_id)),
-                    cast("str", thread["thread_id"]),
-                    config=context.config,
-                    runtime_paths=context.runtime_paths,
-                    conversation_reader=context.conversation_reader,
-                    entity_name=context.agent_name,
-                    membership_index=membership_index,
-                    trusted_sender_ids=trusted_sender_ids,
-                )
+                try:
+                    current_summary = await current_thread_summary(
+                        context.client,
+                        cast("str", thread.get("room_id", room_id)),
+                        cast("str", thread["thread_id"]),
+                        config=context.config,
+                        runtime_paths=context.runtime_paths,
+                        conversation_reader=context.conversation_reader,
+                        entity_name=context.agent_name,
+                        membership_index=membership_index,
+                        trusted_sender_ids=trusted_sender_ids,
+                    )
+                except Exception:
+                    if "room_id" not in thread:  # A named listing fails as it always has.
+                        raise
+                    logger.warning("matrix_room_threads_summary_unreadable", room_id=thread["room_id"], exc_info=True)
+                    return
             if current_summary is not None:
                 thread["summary"] = current_summary.summary
                 thread["summary_pinned"] = current_summary.pinned
@@ -296,11 +302,14 @@ class MatrixRoomTools(Toolkit):
         bots = context.orchestrator.agent_bots.values() if context.orchestrator is not None else ()
         replying = set[str | None]().union(*(bot.active_thread_ids_for_room(room_id) for bot in bots))
         manager = get_approval_store()
-        approvals = (
-            {}
-            if manager is None
-            else await manager.pending_approval_threads(room_id=room_id, approver_user_ids=requester_ids)
-        )
+        try:
+            approvals = (
+                {}
+                if manager is None
+                else await manager.pending_approval_threads(room_id=room_id, approver_user_ids=requester_ids)
+            )
+        except Exception as exc:
+            raise RoomThreadsPageError(response=f"Failed to read pending approvals: {exc}") from exc
         return {
             event.event_id: thread_workflow(
                 facts.get(event.event_id, {}),
@@ -342,13 +351,18 @@ class MatrixRoomTools(Toolkit):
         """Read the previews, and with `include_summaries` the summaries, of the rows to return, and list them."""
         trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
         for row, event in rows:
-            row["body_preview"] = await thread_root_body_preview(
-                event,
-                client=context.client,
-                config=context.config,
-                runtime_paths=context.runtime_paths,
-                trusted_sender_ids=trusted_sender_ids,
-            )
+            try:
+                row["body_preview"] = await thread_root_body_preview(
+                    event,
+                    client=context.client,
+                    config=context.config,
+                    runtime_paths=context.runtime_paths,
+                    trusted_sender_ids=trusted_sender_ids,
+                )
+            except Exception:
+                if "room_id" not in row:  # A named listing fails as it always has.
+                    raise
+                logger.warning("matrix_room_threads_preview_unreadable", room_id=row["room_id"], exc_info=True)
         threads_list = [row for row, _event in rows]
         if include_summaries:
             await self._add_current_summaries(
@@ -424,8 +438,8 @@ class MatrixRoomTools(Toolkit):
         identities = self._labelling_identities(context) if workflow is not None else None
         reads = asyncio.Semaphore(self._SUMMARY_READ_CONCURRENCY)
 
-        async def read_room(room_id: str) -> tuple[list[tuple[dict[str, object], nio.Event]], bool, bool]:
-            """Return a shared room's rows, whether it has older threads, and whether reading it failed."""
+        async def read_room(room_id: str) -> tuple[list[tuple[dict[str, object], nio.Event]], bool, Exception | None]:
+            """Return a shared room's rows, whether it has older threads, and why reading it failed."""
             async with reads:
                 # Privacy boundary: a room is read only once the requester is proven joined to it now.
                 try:
@@ -433,15 +447,15 @@ class MatrixRoomTools(Toolkit):
                 except (ClientError, TimeoutError):
                     shared = False
                 if not shared:
-                    return [], False, False
+                    return [], False, None
                 try:
                     roots, next_token = await get_room_threads_page(context.client, room_id, limit=limit)
                     labels = await self._thread_labels(context, room_id, roots, identities)
-                except Exception:  # One unreadable room must not hide the others.
+                except Exception as exc:  # One unreadable room must not hide the others.
                     logger.warning("matrix_room_threads_room_unreadable", room_id=room_id, exc_info=True)
-                    return [], False, True
+                    return [], False, exc
             rows = self._thread_rows(room_id, roots, labels, workflow)
-            return [({"room_id": room_id, **row}, event) for row, event in rows], next_token is not None, False
+            return [({"room_id": room_id, **row}, event) for row, event in rows], next_token is not None, None
 
         room_ids = list(context.client.rooms)
         results = await asyncio.gather(*(read_room(room_id) for room_id in room_ids))
@@ -452,7 +466,8 @@ class MatrixRoomTools(Toolkit):
                 -cast("int", row[0].get("latest_activity_ts", row[0]["timestamp"])),
             ),
         )
-        failed_room_ids = [room_id for room_id, (_rows, _more, failed) in zip(room_ids, results, strict=True) if failed]
+        failed = [(room_id, exc) for room_id, (_rows, _more, exc) in zip(room_ids, results, strict=True) if exc]
+        hints = [e.retry_after_ms for _id, e in failed if isinstance(e, RoomThreadsPageError) and e.retry_after_ms]
         return await self._threads_payload(
             context,
             rows[:limit],
@@ -460,7 +475,8 @@ class MatrixRoomTools(Toolkit):
             include_summaries=include_summaries,
             next_token=None,
             has_more=len(rows) > limit or any(more for _rows, more, _failed in results),
-            **({"failed_room_ids": sorted(failed_room_ids)} if failed_room_ids else {}),
+            **({"failed_room_ids": sorted(room_id for room_id, _exc in failed)} if failed else {}),
+            **({"retry_after_ms": max(hints)} if hints else {}),
         )
 
     async def _state(

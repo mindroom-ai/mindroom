@@ -244,7 +244,12 @@ def _edit(new_content: dict[str, object], *, sender: str = _BOT) -> dict[str, ob
         pytest.param(_reply(_PROMPT), 100, id="question in the reply"),
         pytest.param(_reply({}, edit=_edit(_PROMPT)), 200, id="question added by the newest edit"),
         pytest.param(_reply(_PROMPT, edit=_edit({})), 200, id="edit keeps the original's question"),
-        pytest.param(_reply(_PROMPT, edit={"sender": _BOT, "content": "x"}), None, id="edit without a time"),
+        pytest.param(_reply(_PROMPT, edit={"sender": _BOT, "content": "x"}), 100, id="malformed edit"),
+        pytest.param(
+            _reply(_PROMPT, edit={"sender": _BOT, "origin_server_ts": 200, "content": {"m.new_content": "x"}}),
+            100,
+            id="edit whose new content is not an object",
+        ),
         pytest.param(_reply({}, edit=_edit(_PROMPT, sender="@mallory:localhost")), None, id="someone else's edit"),
         pytest.param(_reply(_PROMPT, sender="@user:localhost"), None, id="reply from a person"),
         pytest.param(_reply(_PROMPT, sender=["@x:localhost"]), None, id="sender is not a string"),

@@ -2093,3 +2093,67 @@ async def test_threads_without_workflow_lets_a_preview_transport_error_through()
     ):
         await MatrixRoomTools().matrix_room(action="threads")
     ctx.client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_membership")
+async def test_threads_all_rooms_keeps_rows_when_one_rows_preview_or_summary_fails() -> None:
+    """A preview or summary read that fails after the cut drops only that row's preview or summary."""
+    ctx = _all_rooms_context()
+
+    async def preview(event: nio.Event, **_kwargs: object) -> str:
+        if event.event_id == "$there":
+            raise ClientError
+        return "preview"
+
+    async def summary(_client: object, _room_id: str, thread_id: str, **_kwargs: object) -> None:
+        if thread_id == "$there":
+            raise ClientError
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, new=_pages(_ONE_ROOT_EACH)),
+        patch("mindroom.custom_tools.matrix_room.thread_root_body_preview", new=AsyncMock(side_effect=preview)),
+        patch("mindroom.custom_tools.matrix_room.current_thread_summary", new=AsyncMock(side_effect=summary)),
+    ):
+        payload = json.loads(
+            await MatrixRoomTools().matrix_room(action="threads", room_id="all", include_summaries=True),
+        )
+
+    assert payload["status"] == "ok"
+    assert [(row["thread_id"], row["body_preview"]) for row in payload["threads"]] == [
+        ("$here", "preview"),
+        ("$there", ""),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_membership")
+async def test_threads_all_rooms_keeps_a_failed_rooms_retry_hint() -> None:
+    """A rate-limited room's retry hint survives in the merged listing."""
+    ctx = _all_rooms_context()
+    limited = RoomThreadsPageError(response="slow down", errcode="M_LIMIT_EXCEEDED", retry_after_ms=5000)
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, new=_pages({**_ONE_ROOT_EACH, "!shared:localhost": limited})):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", room_id="all", workflow="all"))
+
+    assert payload["failed_room_ids"] == ["!shared:localhost"]
+    assert payload["retry_after_ms"] == 5000
+
+
+@pytest.mark.asyncio
+async def test_threads_named_room_reports_an_unreadable_approval_journal() -> None:
+    """An approval journal that cannot be read gives the tool's error payload, not an exception."""
+    ctx = _workflow_context([])
+    manager = MagicMock(pending_approval_threads=AsyncMock(side_effect=RuntimeError("journal unavailable")))
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, return_value=([_thread_event("$a")], None)),
+        patch(_APPROVAL_STORE, return_value=manager),
+    ):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", workflow="all"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "threads"
+    assert "threads" not in payload
