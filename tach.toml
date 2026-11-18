@@ -6284,6 +6284,7 @@ depends_on = [
     "mindroom.turn_record",
     "mindroom.interactive",
     "mindroom.reply_turn.request",
+    "mindroom.streaming",
 ]
 visibility = ["mindroom.bot"]
 
