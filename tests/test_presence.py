@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -309,46 +308,6 @@ class TestIsUserOnline:
 
         assert result is False  # Defaults to False on error
 
-    @pytest.mark.asyncio
-    async def test_room_cache_hit_returns_without_presence_lookup(self) -> None:
-        """Room-specific cache hit should short-circuit before hitting the API."""
-        mock_client = SimpleNamespace(
-            rooms={
-                "!room:example.com": SimpleNamespace(
-                    room_id="!room:example.com",
-                    users={"@user:example.com": SimpleNamespace(presence="online", last_active_ago=0)},
-                ),
-            },
-            get_presence=AsyncMock(),
-        )
-
-        result = await is_user_online(mock_client, "@user:example.com", room_id="!room:example.com")
-
-        assert result is True
-        mock_client.get_presence.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_all_room_cache_hit_returns_without_presence_lookup(self) -> None:
-        """Global cache scan should return early when any cached room marks the user online."""
-        mock_client = SimpleNamespace(
-            rooms={
-                "!room-a:example.com": SimpleNamespace(
-                    room_id="!room-a:example.com",
-                    users={"@user:example.com": SimpleNamespace(presence="offline", last_active_ago=3600000)},
-                ),
-                "!room-b:example.com": SimpleNamespace(
-                    room_id="!room-b:example.com",
-                    users={"@user:example.com": SimpleNamespace(presence="unavailable", last_active_ago=300000)},
-                ),
-            },
-            get_presence=AsyncMock(),
-        )
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is True
-        mock_client.get_presence.assert_not_called()
-
 
 class TestShouldUseStreaming:
     """Test the should_use_streaming function."""
@@ -397,11 +356,7 @@ class TestShouldUseStreaming:
             )
 
         assert result is True
-        mock_is_online.assert_called_once_with(
-            mock_client,
-            "@user:example.com",
-            room_id="!room:example.com",
-        )
+        mock_is_online.assert_called_once_with(mock_client, "@user:example.com")
 
     @pytest.mark.asyncio
     async def test_streaming_user_offline(self) -> None:
@@ -417,8 +372,4 @@ class TestShouldUseStreaming:
             )
 
         assert result is False
-        mock_is_online.assert_called_once_with(
-            mock_client,
-            "@user:example.com",
-            room_id="!room:example.com",
-        )
+        mock_is_online.assert_called_once_with(mock_client, "@user:example.com")
