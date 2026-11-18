@@ -435,6 +435,36 @@ class TestEditFile:
         tools.edit_file("bom.txt", _one("\ufeffa", "c"))
         assert (tmp_base / "bom.txt").read_bytes() == b"\xef\xbb\xbfc\r\nb\r\n"
 
+    @pytest.mark.parametrize(
+        ("before", "old_text", "new_text", "after"),
+        [
+            ("x\na\n", "a", "\ufeffb", "x\n\ufeffb\n"),
+            ("x\n\ufeffa\na\n", "\ufeffa", "b", "x\nb\na\n"),
+            ('s="X"\n', "X", "\ufeff", 's="\ufeff"\n'),
+            ('s="\ufeffX"\n', "\ufeffX", "Y", 's="Y"\n'),
+        ],
+    )
+    def test_u_feff_away_from_byte_zero_is_text(
+        self,
+        tools: CodingTools,
+        tmp_base: Path,
+        before: str,
+        old_text: str,
+        new_text: str,
+        after: str,
+    ) -> None:
+        """A U+FEFF that is not the file's byte order mark is matched and written byte for byte, as on main."""
+        (tmp_base / "f.txt").write_bytes(before.encode())
+        assert tools.edit_file("f.txt", _one(old_text, new_text)).startswith("Applied 1 edit")
+        assert (tmp_base / "f.txt").read_bytes() == after.encode()
+
+    def test_anchor_copying_the_bom_never_edits_a_later_line(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An old_text that copies the BOM qualifies line 1, so it never silently edits another line."""
+        (tmp_base / "bom.txt").write_bytes("\ufeffalpha   \nalpha\n".encode())
+        result = tools.edit_file("bom.txt", _one("\ufeffalpha\n", "B\n"))
+        assert result.startswith("Error: old_text matches 2 places")
+        assert (tmp_base / "bom.txt").read_bytes() == "\ufeffalpha   \nalpha\n".encode()
+
     def test_fuzzy_end_stops_at_the_line_boundary(self, tools: CodingTools, tmp_base: Path) -> None:
         """A fuzzy match ending at a line boundary leaves the next line's whitespace alone."""
         (tmp_base / "ws.txt").write_text("foo   \n   \nZ")

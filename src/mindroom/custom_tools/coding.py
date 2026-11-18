@@ -488,19 +488,17 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
 def _apply_edits(content: str, edits: list[_Edit]) -> tuple[str, int, str] | str:
     """Apply every edit to ``content`` as it is, returning the new content, its replacements and their lines, or why not.
 
-    A byte order mark, in the file or copied into an edit, is kept out of matching, and the file's is kept. A file
-    whose every line ends in CRLF is edited with LF endings, which the edits may use either way, and gets its CRLF
-    back, unless an edit holds a lone CR; any other file is edited as it is.
+    A match from byte zero of a file with a byte order mark takes the mark, and its replacement keeps it, once; any
+    other U+FEFF is text. A file whose every line ends in CRLF is edited with LF endings, which the edits may use
+    either way, and gets its CRLF back, unless an edit holds a lone CR; any other file is edited as it is.
     """
     bom = "\ufeff" if content.startswith("\ufeff") else ""
-    text = content.removeprefix(bom)
-    pieces = [text, *(edit.old_text for edit in edits), *(edit.new_text for edit in edits)]
-    crlf = text.count("\n") == text.count("\r\n") > 0 and all(p.count("\r") == p.count("\r\n") for p in pieces)
-    text = text.replace("\r\n", "\n") if crlf else text
+    pieces = [content, *(edit.old_text for edit in edits), *(edit.new_text for edit in edits)]
+    crlf = content.count("\n") == content.count("\r\n") > 0 and all(p.count("\r") == p.count("\r\n") for p in pieces)
+    text = content.replace("\r\n", "\n") if crlf else content
     for edit in edits:
-        for field in ("old_text", "new_text"):
-            value = getattr(edit, field).removeprefix("\ufeff")
-            setattr(edit, field, value.replace("\r\n", "\n") if crlf else value)
+        if crlf:
+            edit.old_text, edit.new_text = edit.old_text.replace("\r\n", "\n"), edit.new_text.replace("\r\n", "\n")
     spans = _matched_spans(text, edits)
     if isinstance(spans, str):
         return spans
@@ -509,13 +507,15 @@ def _apply_edits(content: str, edits: list[_Edit]) -> tuple[str, int, str] | str
     position = shift = 0
     for match, index in spans:
         new_text = edits[index].new_text
+        if bom and match.start == 0:
+            new_text = bom + new_text.removeprefix(bom)
         parts += [text[position : match.start], new_text]
         landed.append((match.start + shift, match.start + shift + len(new_text)))
         shift += len(new_text) - (match.end - match.start)
         position = match.end
     parts.append(text[position:])
     edited = "".join(parts)
-    new_content = bom + (edited.replace("\n", "\r\n") if crlf else edited)
+    new_content = edited.replace("\n", "\r\n") if crlf else edited
     if new_content == content:
         return "the edits leave the file identical to what it was; new_text must differ from the text it replaces."
 
