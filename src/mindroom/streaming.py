@@ -698,6 +698,13 @@ class StreamingResponse:
         """Return how many tool calls the reply shows so far, where a new reasoning segment or compaction anchors."""
         return len(self.tool_trace) if self.show_tool_calls else 0
 
+    def has_progress(self) -> bool:
+        """Return whether the reply produced any text or tool call yet, a resumed attempt's included.
+
+        A hidden tool call leaves its gap in the text (``_ensure_hidden_tool_gap``).
+        """
+        return bool(self.accumulated_text or self.tool_trace)
+
     @property
     def live_active(self) -> bool:
         """Whether live frames currently carry this reply's progress, making durable edits checkpoints."""
@@ -2277,7 +2284,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         if compactions is not None:
             # A compaction anchors after the tool calls shown so far. Its entries ride on the writes the stream makes
             # anyway and on its live frames; a change alone never asks for a durable write.
-            compactions.bind(tool_count=streaming.visible_tool_count)
+            compactions.bind(streaming)
         try:
             try:
                 await _consume_stream_with_progress_supervision(

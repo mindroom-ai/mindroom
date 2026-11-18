@@ -2908,7 +2908,10 @@ class TestAgentBot(AgentBotTestBase):
         show_tool_calls: bool,
         after_tool: int,
     ) -> None:
-        """A compaction in a collected reply sits after the tool calls shown before it began, or at the top if hidden."""
+        """A compaction in a collected reply sits after the tool calls shown before it began, or at the top if hidden.
+
+        Either way the reply ran tools first, hidden ones too, so the compaction is mid-turn.
+        """
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -2945,7 +2948,6 @@ class TestAgentBot(AgentBotTestBase):
                     before_tokens=30_000,
                     history_budget_tokens=100_000,
                     runs_before=20,
-                    phase="mid_turn",
                 ),
             )
             yield "Answer after compacting"

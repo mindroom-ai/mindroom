@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import nio
@@ -28,6 +28,20 @@ from tests.history_helpers import RecordingCompactionLifecycle
 from tests.test_large_messages import _UploadClient
 
 
+@dataclass
+class _Reply:
+    """A delivery's progress, as the recorder reads it."""
+
+    tools: int = 0
+    progressed: bool = False
+
+    def visible_tool_count(self) -> int:
+        return self.tools
+
+    def has_progress(self) -> bool:
+        return self.progressed
+
+
 def _start(mode: CompactionMode = "auto") -> CompactionLifecycleStart:
     return CompactionLifecycleStart(
         mode=mode,
@@ -37,7 +51,6 @@ def _start(mode: CompactionMode = "auto") -> CompactionLifecycleStart:
         before_tokens=366_804,
         history_budget_tokens=351_792,
         runs_before=24,
-        phase="mid_turn",
     )
 
 
@@ -122,6 +135,7 @@ async def _prepare_short_answer_edit(content: list[dict[str, object]], *, room_e
 async def test_start_progress_success_updates_one_entry_in_place() -> None:
     """One compaction stays one entry, edited by id from running to success."""
     recorder = ReplyCompactions()
+    recorder.bind(_Reply(progressed=True))
     lifecycle = _lifecycle(recorder)
 
     entry_id = await lifecycle.start(_start())
@@ -302,32 +316,32 @@ async def test_two_compactions_completed_out_of_order_stay_in_start_order() -> N
     assert "after_tokens" not in content[0]
 
 
-def test_after_tool_read_once_at_start() -> None:
-    """The entry anchors at the tool count when it began, not at a later count."""
+def test_after_tool_and_phase_read_once_at_start() -> None:
+    """The entry sits where the reply stood when it began, not where the reply stands later."""
     recorder = ReplyCompactions()
-    count = 2
-    recorder.bind(tool_count=lambda: count)
+    reply = _Reply(tools=2)
+    recorder.bind(reply)
 
     entry_id = recorder.start(_start())
-    count = 5
+    reply.tools, reply.progressed = 5, True
     recorder.update(entry_id, status="success", after_tokens=6_336)
 
     content = recorder.content()
     assert content is not None
-    assert content[0]["after_tool"] == 2
+    assert (content[0]["after_tool"], content[0]["phase"]) == (2, "pre_turn")
 
 
 def test_unbound_recorder_anchors_at_zero() -> None:
     """Without a bound delivery, never bound or since unbound, an entry anchors above every tool call."""
     recorder = ReplyCompactions()
     recorder.start(_start())
-    recorder.bind(tool_count=lambda: 3)
+    recorder.bind(_Reply(tools=3, progressed=True))
     recorder.unbind()
     recorder.start(_start())
 
     content = recorder.content()
     assert content is not None
-    assert [entry["after_tool"] for entry in content] == [0, 0]
+    assert [(entry["after_tool"], entry["phase"]) for entry in content] == [(0, "pre_turn"), (0, "pre_turn")]
 
 
 def test_content_is_a_copy() -> None:

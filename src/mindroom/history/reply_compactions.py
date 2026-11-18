@@ -10,12 +10,10 @@ from __future__ import annotations
 import copy
 import json
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.history.types import (
         CompactionLifecycle,
         CompactionLifecycleFailure,
@@ -42,30 +40,47 @@ def _capped(key: str, value: object) -> object:
     return value[:limit] + "…"
 
 
+class _ReplyProgress(Protocol):
+    """What the delivery showing a reply has produced so far: a streamed reply, or a collected one."""
+
+    def visible_tool_count(self) -> int:
+        """Return how many tool calls the reply shows, where a new compaction anchors."""
+        ...
+
+    def has_progress(self) -> bool:
+        """Return whether the reply produced any text or tool call yet, hidden and resumed ones included."""
+        ...
+
+
 class ReplyCompactions:
     """The compaction entries of one reply, in start order."""
 
     def __init__(self) -> None:
         self._entries: list[dict[str, object]] = []
-        self._tool_count: Callable[[], int] | None = None
+        self._progress: _ReplyProgress | None = None
 
-    def bind(self, *, tool_count: Callable[[], int]) -> None:
-        """Attach the delivery showing the reply, whose visible tool count anchors each new compaction."""
-        self._tool_count = tool_count
+    def bind(self, progress: _ReplyProgress) -> None:
+        """Attach the delivery showing the reply, whose progress places each new compaction."""
+        self._progress = progress
 
     def unbind(self) -> None:
         """Detach the delivery, which no longer shows the reply."""
-        self._tool_count = None
+        self._progress = None
 
     def start(self, event: CompactionLifecycleStart) -> str:
-        """Record a running compaction anchored after the tools shown so far, and return its id."""
+        """Record a running compaction where the reply stands, and return its id.
+
+        The reply, not the attempt that compacts, decides the phase: a compaction before it produced anything ran
+        before replying, and any later one, as a model switch's second attempt prepares, ran inside it.
+        """
         entry_id = uuid4().hex
+        progress = self._progress
         entry: dict[str, object] = {
             "id": entry_id,
-            "phase": event.phase,
+            "phase": "mid_turn" if progress is not None and progress.has_progress() else "pre_turn",
             "mode": event.mode,
             # Read once: the compaction sits where the reply stood when it began.
-            "after_tool": self._tool_count() if self._tool_count is not None else 0,
+            "after_tool": progress.visible_tool_count() if progress is not None else 0,
             "status": "running",
             "started_at": time.time_ns() // 1_000_000,
             "summary_model": _capped("summary_model", event.summary_model),

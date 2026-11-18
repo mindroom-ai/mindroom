@@ -266,6 +266,14 @@ class CollectedStreamPresentation:
         elif self.response_text:
             self.separate_next_text = True
 
+    def visible_tool_count(self) -> int:
+        """Return how many tool calls the reply shows so far."""
+        return len(self.tool_trace) if self.show_tool_calls else 0
+
+    def has_progress(self) -> bool:
+        """Return whether the reply collected any text or tool call yet; a tracked hidden call counts."""
+        return bool(self.response_text or self.tool_trace)
+
     def show_tool_progress(self, tool_call_id: str, text: str) -> None:
         """Keep a running call's latest output for the live reply until the call completes."""
         self.tool_progress[tool_call_id] = text

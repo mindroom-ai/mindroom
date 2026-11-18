@@ -245,7 +245,6 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(
     assert outcome.summary == "merged summary"
     # A requested compaction reports itself as manual from its first notice to its outcome.
     assert (start.mode, outcome.mode) == ("manual", "manual")
-    assert start.phase == "pre_turn"
 
 
 @pytest.mark.asyncio

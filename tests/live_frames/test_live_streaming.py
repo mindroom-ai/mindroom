@@ -405,7 +405,6 @@ class _Compaction:
                 before_tokens=30_000,
                 history_budget_tokens=100_000,
                 runs_before=20,
-                phase="mid_turn",
             ),
         )
 
@@ -499,6 +498,49 @@ async def test_compaction_in_a_resumed_reply_anchors_after_the_resumed_tools(
     [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
     assert entry["after_tool"] == after_tool
     assert [live["after_tool"] for live in _live_list(frames.sent, "compactions")] == [after_tool]
+    # The stopped attempt already showed part of the reply, so the compaction sits inside it.
+    assert entry["phase"] == "mid_turn"
+
+
+def _hidden_tool_call() -> tuple[ToolStarted | ToolCompleted | float, ...]:
+    call = ReportedCall(tool_call_id="call-1", tool_name="switch_thread_model", tool_args={})
+    done = ReportedCall(tool_call_id="call-1", tool_name="switch_thread_model", tool_args={}, result="ok")
+    return (ToolStarted(call), 0.03, ToolCompleted(done), 0.03)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("frames")
+@pytest.mark.parametrize(
+    ("before", "phase"),
+    [
+        pytest.param((), "pre_turn", id="nothing-yet"),
+        pytest.param(("Partial", 0.05), "mid_turn", id="after-text"),
+        # A model switch prepares its second attempt's history after the first attempt's hidden tool call.
+        pytest.param(_hidden_tool_call(), "mid_turn", id="after-a-hidden-tool-call"),
+    ],
+)
+async def test_a_compaction_is_mid_turn_once_the_reply_produced_something(
+    tmp_path: Path,
+    before: tuple[Any, ...],
+    phase: str,
+) -> None:
+    """The reply decides the phase: before it produced anything the compaction ran before replying, else inside it."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    stream = _stream(*before, compaction.start, 0.05, compaction.succeed, 0.05, "Answer.", 0.03)
+    await _run(
+        _config(tmp_path),
+        stream,
+        records,
+        edits,
+        placeholder_event_id="$placeholder",
+        show_tool_calls=False,
+        compactions=recorder,
+    )
+
+    [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
+    assert entry["phase"] == phase
+    assert entry["after_tool"] == 0
 
 
 @pytest.mark.asyncio
