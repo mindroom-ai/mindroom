@@ -23,6 +23,7 @@ from mindroom.constants import (
     PRIOR_USAGE_RUN_METADATA_KEY,
 )
 from mindroom.history.compaction import load_summarizer
+from mindroom.history.conversation_text import own_thread_message
 from mindroom.history.storage import (
     read_scope_state,
     with_force_compaction,
@@ -40,6 +41,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import RequestOverrides
 from mindroom.llm.usage import MessageMetrics
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -903,3 +905,29 @@ def test_a_failed_tool_result_is_marked_in_the_summary_input(max_input_tokens: i
 
     assert '<message role="tool" tool_call_id="c1" tool_name="shell" error="true">\nmake: *** No rule' in summary_input
     assert '<message role="tool" tool_call_id="c2" tool_name="shell">\nyyy' in summary_input
+
+
+@pytest.mark.parametrize("max_input_tokens", [100_000, 300], ids=["whole", "excerpt"])
+def test_the_agents_own_thread_message_is_the_assistants_in_the_summary_input(max_input_tokens: int) -> None:
+    """A request shows the agent its own thread message as a tagged user message; a summary reads the agent's words."""
+    own = render_msg_tag(sender="@agent:localhost", body="mockup.png", event_id="$sent", sent_by_you=True)
+    run = _completed_run(
+        "run-own-message",
+        messages=[
+            own_thread_message(own),
+            Message(role="user", content="Did it work?"),
+            Message(role="assistant", content="y" * 4_000),
+        ],
+    )
+
+    summary_input, _included = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=max_input_tokens,
+        history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=quarter_tokens,
+    )
+
+    assert '<message role="assistant">\nmockup.png\n</message>' in summary_input
+    assert '<message role="user">\nDid it work?' in summary_input
+    assert "sent_by_you" not in summary_input

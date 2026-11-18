@@ -1642,6 +1642,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 | `MATRIX_REGISTRATION_SHARED_SECRET`, `MATRIX_REGISTRATION_SHARED_SECRET_FILE` | Synapse shared registration secret, or a file containing it, for creating managed agent accounts without pairing | _(unset)_ |
 | `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` or `appservice` authentication for accounts MindRoom creates and operates (see [Agent Users](https://docs.mindroom.chat/matrix/#agent-users)) | `password` |
 | `MATRIX_APPSERVICE_TOKEN`, `MATRIX_APPSERVICE_TOKEN_FILE` | Application-service token, or a file containing it, used when `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` | _(unset)_ |
+| `MATRIX_USER_APPSERVICE_TOKEN`, `MATRIX_USER_APPSERVICE_TOKEN_FILE` | Token of a separate application service, or a file containing it, that lets a personal agent's [`matrix_user`](https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user) tool read Matrix as its owner | _(unset)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait at startup for the homeserver to respond (`0` waits indefinitely); a certificate verification failure stops startup immediately | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Positive seconds the sync watchdog and `/api/health` keep waiting while event catch-up is still making progress; set it above the deployment's observed healthy catch-up time | `600` |
@@ -1958,7 +1959,7 @@ List these only if you trust everyone whose messages the agent hears.
 
 MindRoom holds a silent turn to a few lines of its own:
 
-- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, and `dynamic_tools`.
+- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, and `matrix_user`.
 - The turn's tool context carries `listen.tools`, so a tool that builds its own catalog from it, such as the functions a `script` may call, offers nothing outside the list.
 - No call may save its result to a file with `mindroom_output_path`, so a tool that writes no files of its own, such as `react`, cannot overwrite one.
 - A shell in a silent turn does not offer `mindroom-agent`, because no requester owns a grant for it.
@@ -7587,7 +7588,7 @@ MindRoom requests localparts such as `mindroom_assistant`, or an agent's [`matri
 - `appservice` registers passwordless accounts inside an exclusive application-service namespace and gives each account its own device token for encryption and sync.
   First register an application service with the homeserver whose exclusive user namespace covers every account MindRoom manages, then supply that registration's `as_token`.
   Provide exactly one of `MATRIX_APPSERVICE_TOKEN` or `MATRIX_APPSERVICE_TOKEN_FILE`; setting either one without `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` stops startup.
-  The application-service token is used only to register accounts and log in new devices.
+  The application-service token is used only to register accounts and log in new devices; the [`matrix_user`](https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user) tool reads Matrix as people with the token of a separate application service.
   After switching an existing install to `appservice`, stored passwords are removed from `matrix_state.yaml` once each account logs in.
 
 ### Use an Existing Matrix Account
@@ -8424,7 +8425,7 @@ Rules, tools, the judge, the message policy, and `defaults.max_consecutive_agent
 | `remote_agents` | list of Matrix IDs | `[]` | Exact or wildcard Matrix IDs of agents of other MindRoom deployments that this agent may ask and be asked by; `[]` keeps contacts within this deployment (see [Contacts With Other Deployments](#contacts-with-other-deployments)) |
 
 `tools` names the agent's own toolkits, never function names.
-It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, or `dynamic_tools`, which fail validation with `contacts.tools may not include <tool>`.
+It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, or `matrix_user`, which fail validation with `contacts.tools may not include <tool>`.
 Tools that need the room they run in, such as `scheduler`, `todo`, `attachments`, `script`, and the other `matrix_*` and `thread_*` tools, are never offered in contact turns even when listed; `matrix_message` is the only one a contact turn gets.
 Changes to `contacts` apply from the agent's next turn without a restart.
 
@@ -8814,7 +8815,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Google Scholar, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, snoozing, moves, summaries, stopping other agents' replies, model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, snoozing, moves, summaries, stopping other agents' replies, model overrides, low-level Matrix API access, a personal agent reading Matrix as its owner, and attachment-aware workflows.
 - [Matrix Message Tool](https://docs.mindroom.chat/tools/matrix-message/) - Send, read, edit, and react to messages with `matrix_message`.
 - [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](https://docs.mindroom.chat/canvases/) in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
@@ -12881,6 +12882,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
+- [`matrix_user`] - Read Matrix as a personal agent's owner.
 - [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -12889,12 +12891,12 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 ## Tool Runtime Context
 
-These tools work only while an agent is responding in a Matrix conversation.
-Unless the call passes explicit IDs, they act on the current room and thread.
+Except [`matrix_user`], these tools work only while an agent is responding in a Matrix conversation.
+Unless the call passes explicit IDs, they act on the current room and thread, except [`matrix_user`], which needs `room_id` for every action on a room.
 `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
 `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
 `room_id` takes a room ID, alias, or configured room name; `matrix_api` takes only a room ID.
-Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
+Except [`matrix_user`], tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
 Attachment IDs (`att_*`) are limited to the current conversation and IDs registered earlier in the same tool run; see [Attachments](https://docs.mindroom.chat/attachments/#attachment-ids).
 
@@ -13164,6 +13166,50 @@ matrix_api(
     keys=["content.body"],
     event_context={"before_limit": 1, "after_limit": 1, "include_profile": True},
 )
+```
+
+## [`matrix_user`]
+
+`matrix_user` lets a [personal agent](https://docs.mindroom.chat/personal-agents/) read Matrix as its owner, with no sign-in: the owner's own rooms and DMs, including rooms the agent is not in.
+It acts only for the agent's owner, in any turn that runs for them, such as a chat with the agent or one of their scheduled tasks, or through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
+
+`matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
+
+| Action | Returns |
+|--------|---------|
+| `rooms` | The owner's rooms, one line each: unread rooms first, with their unread and mention counts and whether the owner marked them unread, then invitations with who sent them, then the rest by name; a DM without a name shows the other person; `query` keeps rooms whose name contains it, and `limit` (default 20, at most 200) caps the lines, with `left_out` counting the rest |
+| `messages` | The newest messages of the room `room_id` names, oldest first, one line each with its latest edit applied and its file, reactions, and thread replies noted, and texts over 2000 characters cut; `limit` defaults to 30 (at most 100) and counts reactions and edits too, so a page can show fewer lines, and `page_token`, the previous result's `next_page_token`, continues into older messages; with `thread_id`, that thread's root and newest replies; with `event_id`, that message and up to half of `limit` messages on each side |
+| `search` | Messages containing `query` in all the owner's rooms, or only in `room_id`, newest first, each line starting with its room; `limit` defaults to 10 (at most 50), and `page_token` continues |
+| `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
+| `people` | With a full Matrix ID as `query`, that person's profile; otherwise people the user directory finds, `limit` defaulting to 10 (at most 50) |
+| `download` | The file, at most 64 MiB, of the message `event_id` in `room_id`, as an `attachment_id` the agent's other tools accept in the current conversation, so not through the MCP gateway |
+| `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
+
+Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
+
+To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
+That token can act as every account the `users` pattern covers, administrators included.
+Without it, the toolkit answers `matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN.`
+
+```yaml
+# The homeserver's registration file; MindRoom needs only as_token.
+id: mindroom-user
+url: null
+as_token: <a long random secret>
+hs_token: <another long random secret>
+sender_localpart: mindroom-user
+namespaces:
+  users:
+    - exclusive: false
+      regex: "@.*:example.com"
+```
+
+```yaml
+personal_agents:
+  mind:
+    agent:
+      tools:
+        - matrix_user
 ```
 
 ## Related Matrix Runtime Features
@@ -13835,19 +13881,22 @@ A plugin calls `GET /api/github/status` with its client session for `{"connected
 MindRoom first checks it with GitHub's `GET /user`, following no redirect and giving up after 10 seconds, and stores it with the login GitHub names.
 The answer is `{"connected": true, "via": "token", "login": "<login>"}`.
 A token that is empty, longer than 512 characters, or holds anything but visible ASCII characters answers 422 `{"error": "github_request_invalid"}`, as any malformed body of these routes does, naming nothing it was sent (a body that is not UTF-8 gets FastAPI's own 400, which echoes nothing either), and a token GitHub refuses with 401 or 403 answers 400 `{"error": "github_token_rejected"}`.
+A rate limit on the check, which is any 429 and a 403 with `x-ratelimit-remaining: 0` or a `retry-after` header, says nothing about the token and answers 502 `{"error": "github_rate_limited"}`.
 When GitHub is unreachable, fails, or answers without a well-formed login or with more than 64 KiB, it answers 502 `{"error": "github_unreachable"}`, and a session that names no user gets 409 `{"error": "github_not_connected"}`.
 When the token cannot be written it answers 503 `{"error": "github_connection_unavailable"}`.
 In every failing case nothing is stored and an earlier token stays.
-`DELETE /api/github/token` removes the saved token, if any, and answers the status that remains, in the shape of `GET /api/github/status`.
+`DELETE /api/github/token` removes the saved token, if any, and answers the status that remains, in the shape of `GET /api/github/status`, or 503 `{"error": "github_connection_unavailable"}` when the token cannot be removed.
+A user's saves and removals run one at a time, so a `DELETE` sent while a `PUT` is still checking with GitHub waits for that `PUT` and then removes its token; this holds within one MindRoom process.
 
 The plugin then calls `POST /api/github/request` with `{"method": ..., "path": ..., "body": ..., "accept": ...}`, where `method` is `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`, `path` is `/graphql` or under `/repos/<owner>/<repo>` with an optional query, `body` is optional JSON, and `accept` is `application/vnd.github+json` (the default), `application/vnd.github.full+json`, or `application/vnd.github.diff`.
 The answer is HTTP 200 with `{"status", "body", "headers"}` holding GitHub's own status, its JSON or diff text, and its `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, and `x-github-request-id` headers.
 GitHub refusing a saved token comes back as its own 401 in that answer, and the token stays saved until the user removes or replaces it.
 The route follows up to 3 redirects that stay on `https://api.github.com`, so a renamed or transferred repository's old name still works; any other redirect, and a 301 or 302 answer to a write, comes back as GitHub's redirect status.
 The route answers 409 `{"error": "github_not_connected"}` while the user has neither a saved token nor a usable GitHub App connection (which also needs the GitHub App client saved), 400 for any other path or one longer than 4096 characters, 503 `{"error": "github_token_unreadable"}` when the saved token could not be read, 503 `{"error": "github_connection_unavailable"}` when the App connection could not be read or refreshed and a retry may help, and 502 when GitHub is unreachable or its answer exceeds 10 MiB.
-A saved token or login that no longer has the shape a save checks counts as unreadable.
+A saved token the store cannot read or decrypt, or whose token or login no longer has the shape a save checks, counts as unreadable.
+A store path that is not a plain file or directory, such as a link or a FIFO, reads as no token saved.
 `GET /api/github/status` answers both 503s too, the App one only when no saved token answers for the user.
-A saved token that can no longer be read never falls back to the App connection, since that would act as another account; no retry helps, but saving a new token replaces it in one step, and removing it lets the App connection answer.
+A saved token that is unreadable never falls back to the App connection, since that would act as another account; no retry helps, but saving a new token replaces it in one step, and removing it lets the App connection answer.
 These routes use only the user's own token or connection, never a saved `access_token` or `GITHUB_ACCESS_TOKEN`, and never log the token or what GitHub says about it.
 The GitHub App connection reaches only repositories where the GitHub App is installed, with the App's permissions: merging, updating, and deleting pull request branches need Pull requests read and write, Contents read and write, Checks read, and Metadata read.
 
@@ -17701,6 +17750,8 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
 Neither Docker nor Kubernetes backend settings reach a dedicated worker's startup manifest; Kubernetes passes only its storage-subpath prefix, which the runner needs.
 Credentials the primary's environment declares (provider keys, `GITHUB_TOKEN`, credential seeds) are read only by the primary, under the credentials saved in its store, and never stored; every runner establishes runner mode at startup and never reads them, and a worker receives one only as a granted mirror copy or in a per-call credential lease.
+`MATRIX_USER_APPSERVICE_TOKEN` can act as any person in its application service's namespace, administrators included, which is every account of the homeserver when the namespace covers them all.
+Only the primary reads it, from its own environment or from the file `MATRIX_USER_APPSERVICE_TOKEN_FILE` names there: it is in no worker's or tool request's environment, never stored, and never in a tool result, and the `matrix_user` toolkit, which runs only in the primary, uses it only as the owner of the personal agent making the call.
 OAuth app client configurations (`*_oauth_client`) live in the primary's own store for every worker scope, so a worker's store never supplies one.
 A secret tool setting the primary reads from its `.env` configures only the toolkit the primary builds; a worker-routed call rebuilds the toolkit from its leased saved settings and the worker's own environment.
 A Docker dedicated worker's environment includes the non-secret startup names it receives from the primary's environment and `.env`, so the tool settings among them, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`, also configure the toolkit it rebuilds.
@@ -18046,6 +18097,9 @@ Do not report or "fix" these; they are deliberate.
   Other members can send the same event type only under other state keys, so a client trusts only the list a MindRoom router on the viewer's homeserver sent under its own user ID; see [Room Accounts List](https://docs.mindroom.chat/architecture/matrix/#room-accounts-list).
 - Scheduled tasks, including their prompts, and thread tags, including the topic tags agents add automatically, are stored as unencrypted room state, so the homeserver and every room member can read them even in an encrypted room.
 - A `!config set` change awaiting confirmation is stored as unencrypted room state with its config path, requester, and new value, so the homeserver and every room member can read them even in an encrypted room; a new value that display redaction would mask, or that room state cannot hold, such as a decimal number, stays only in the running process.
+- `matrix_user_read` has no approval gate of its own, so it runs unasked unless a tool approval rule covers it, and it works in any turn that runs for a personal agent's owner: their schedules, hooks, and triggers, their other agents acting for them, team runs they started, and voice calls.
+  Restricting it by where a turn came from was considered and rejected, because a refused turn that schedules a task or starts a background job would come back as an allowed one.
+  A file it downloads becomes an attachment of the conversation it was asked in.
 - The `job` function never asks for approval, even under `tool_approval.default: require_approval`, because it only reads and cancels the caller's own jobs, each of which passed its own approval.
 - `config_manager`'s `manage_config(operation="inspect")` and `manage_agent(operation="validate")` calls never ask for approval, even under a matching rule or `tool_approval.default: require_approval`, because they only read configuration.
 - Inviting an agent to a shared directory makes it readable to every requester of that agent.

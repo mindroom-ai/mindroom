@@ -1618,8 +1618,12 @@ async def test_repeat_after_lost_refresh_response_releases_lock_before_waiting_c
     repeat_seconds: float,
     expected_grants: int,
 ) -> None:
-    """Scaled 1:10: a full read timeout plus the repeat must still let a same-credential lock waiter succeed."""
-    scale = 0.1
+    """Scaled 1:5: a full read timeout plus the repeat must still let a same-credential lock waiter succeed.
+
+    At 1:5 the waiter has 1 second to spare after the grant deadline; 1:10 left half a second, which a busy CI runner
+    could spend.
+    """
+    scale = 0.2
     monkeypatch.setattr(
         credential_store,
         "_LOCK_WAIT_TIMEOUT_SECONDS",

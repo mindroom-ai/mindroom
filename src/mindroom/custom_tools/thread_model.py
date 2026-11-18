@@ -121,12 +121,16 @@ class ThreadModelTools(Toolkit):
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
-        if model_name not in context.config.models:
+        # The turn runs on its own config while live reloads move on: a model removed since must not be saved for
+        # later turns, and this turn cannot continue on one added since.
+        current = context.current_config
+        switchable = context.config.models.keys() & current.models.keys()
+        if model_name not in switchable:
             return self._payload(
                 "error",
                 action="switch",
                 message=f"Unknown model '{model_name}'.",
-                available_models=sorted(context.config.models),
+                available_models=sorted(switchable),
             )
         set_thread_model_override(
             context.runtime_paths,
@@ -135,8 +139,11 @@ class ThreadModelTools(Toolkit):
             entity_names=self._addressable_entities(context),
             config=context.config,
         )
+        # A switch reads the config it takes effect in: the turn's own for the current response, the current one for
+        # later turns.
+        config = context.config if when == "after-toolcall" else current
         budgeted_model_name = resolve_turn_model(
-            context.config,
+            config,
             context.runtime_paths,
             ModelScope(entity=context.agent_name, explicit=model_name),
             # Only a switch for the current response chooses a reply model now.
@@ -180,7 +187,7 @@ class ThreadModelTools(Toolkit):
             )
         else:
             note = "The new model applies from the next message in this thread."
-        model = context.config.models[model_name]
+        model = config.models[model_name]
         return self._payload(
             "ok",
             action="switch",
