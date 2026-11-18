@@ -267,8 +267,34 @@ def test_reasoning_alone_does_not_make_a_streaming_edit_oversized() -> None:
         )
 
 
-def test_reasoning_does_not_lengthen_the_oversized_edit_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An answer too big for an edit waits as long with reasoning as without, so reasoning never holds back text."""
+@pytest.mark.asyncio
+async def test_an_oversized_progress_edit_uploads_bounded_reasoning() -> None:
+    """A progress edit too big for an event uploads a bounded part of its reasoning, once, in the new content."""
+    client = MockClient()
+    content = {"body": "a" * 40000, "msgtype": "m.notice", STREAM_STATUS_KEY: STREAM_STATUS_STREAMING}
+    reasoning = {"text": "r" * 256_000, "duration_ms": 1200}
+
+    await edit_message_result(
+        client,
+        "!room:server",
+        "$original",
+        content,
+        "a" * 40000,
+        extra_content={REASONING_CONTENT_KEY: reasoning},
+    )
+
+    uploaded = client.uploads[0].read()
+    # The answer's copies and 16,000 characters of reasoning, not 256,000 twice.
+    assert len(uploaded) < 200_000
+    payload = json.loads(uploaded)
+    kept = payload["m.new_content"][REASONING_CONTENT_KEY]["text"]
+    assert kept.endswith("…")
+    assert len(kept) <= 16_001
+    assert REASONING_CONTENT_KEY not in payload
+
+
+def test_long_reasoning_adds_little_to_the_oversized_edit_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reasoning barely lengthens an oversized answer's wait, so it does not hold back answer text."""
     clock = [1000.0]
     monkeypatch.setattr("mindroom.matrix.large_messages.monotonic", lambda: clock[0])
 
@@ -298,7 +324,8 @@ def test_reasoning_does_not_lengthen_the_oversized_edit_cooldown(monkeypatch: py
         )
 
     wait = next(seconds for seconds in range(1, 600) if allowed_after(seconds, f"$plain{seconds}", None))
-    assert allowed_after(wait, "$reasoning", {"text": "r" * 256_000, "duration_ms": 1})
+    # The sidecar carries a bounded part of the reasoning, so it adds a few seconds at most.
+    assert allowed_after(wait + 5, "$reasoning", {"text": "r" * 256_000, "duration_ms": 1})
 
 
 @pytest.mark.asyncio

@@ -48,6 +48,8 @@ logger = get_logger(__name__)
 # Conservative limits accounting for Matrix overhead
 _NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_SIZE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
+# The most reasoning a progress edit carries when it goes out as a sidecar; its terminal update carries all of it.
+_PROGRESS_SIDECAR_REASONING_CHARACTERS = 16_000
 _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation and preview metadata.
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
@@ -307,15 +309,20 @@ def should_send_oversized_nonterminal_streaming_edit(
     if event_size <= EDIT_MESSAGE_SIZE_LIMIT:
         return True
     if REASONING_CONTENT_KEY in source_content:
-        # Reasoning is cut to fit an edit that is ordinary without it, so only the rest can make one oversized, and
-        # only the rest paces oversized edits: reasoning must not hold back answer text.
+        # Reasoning is cut to fit an edit that is ordinary without it, so only the rest can make one oversized. An
+        # oversized edit carries a bounded part of it, which its size paces as the upload it is.
         without_reasoning = {key: value for key, value in edit_content.items() if key != REASONING_CONTENT_KEY}
         without_reasoning["m.new_content"] = {
             key: value for key, value in source_content.items() if key != REASONING_CONTENT_KEY
         }
-        event_size = calculate_event_size(without_reasoning)
-        if event_size <= EDIT_MESSAGE_SIZE_LIMIT:
+        if calculate_event_size(without_reasoning) <= EDIT_MESSAGE_SIZE_LIMIT:
             return True
+        reasoning = source_content[REASONING_CONTENT_KEY]
+        text = reasoning.get("text") if isinstance(reasoning, dict) else None
+        if isinstance(text, str) and len(text) > _PROGRESS_SIDECAR_REASONING_CHARACTERS:
+            reasoning = {**reasoning, "text": f"{text[:_PROGRESS_SIDECAR_REASONING_CHARACTERS]}…"}
+        without_reasoning["m.new_content"][REASONING_CONTENT_KEY] = reasoning
+        event_size = calculate_event_size(without_reasoning)
 
     key = (room_id, original_event_id)
     now = monotonic()
@@ -660,8 +667,6 @@ def fit_reasoning_to_ordinary_event(
     base = {key: value for key, value in content.items() if key != REASONING_CONTENT_KEY}
     if isinstance(new_content, dict):
         base["m.new_content"] = {key: value for key, value in new_content.items() if key != REASONING_CONTENT_KEY}
-    if not fits(base):
-        return content
 
     def with_text(kept_text: str, marker: str = "") -> dict[str, Any]:
         fitted = dict(base)
@@ -676,6 +681,13 @@ def fit_reasoning_to_ordinary_event(
         return fitted
 
     full_text = reasoning["text"]
+    if not fits(base):
+        # A progress edit that goes out as a sidecar keeps a bounded part of the reasoning, so each one stays within
+        # its upload budget; the terminal update keeps all of it.
+        if not _is_nonterminal_stream_content(holder):
+            return content
+        bounded = len(full_text) > _PROGRESS_SIDECAR_REASONING_CHARACTERS
+        return with_text(full_text[:_PROGRESS_SIDECAR_REASONING_CHARACTERS], "…" if bounded else "")
     if fits(with_text(full_text)):
         return with_text(full_text)
     kept = _largest_fitting_limit(len(full_text), lambda length: fits(with_text(full_text[:length], "…")))
