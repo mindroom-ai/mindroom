@@ -1191,14 +1191,14 @@ async def test_a_fresh_attempt_after_an_approved_run_sends_its_resume_s_system_e
 
 
 @pytest.mark.asyncio
-async def test_a_resume_after_a_long_pause_keeps_its_conversation_s_memory_copy(
+async def test_a_resume_leaves_its_conversation_s_memory_copy_s_idle_time_alone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A run approved after its conversation's cache went cold sends the MEMORY.md copy it paused with again.
+    """A resumed run sends the system prompt it paused with, which may hold a MEMORY.md copy a later turn replaced.
 
-    Its request rewrites the cache with that copy, so it restarts the copy's idle time, and the next reply keeps the
-    copy instead of rewriting the cache once more.
+    Its requests therefore warm no cache of the copy the conversation keeps now, and touch no copy file: the reply
+    after it loads MEMORY.md again once that copy's own cache is gone.
     """
     paths, config = _usage_config(tmp_path)
     config.memory.backend = "file"
@@ -1206,24 +1206,33 @@ async def test_a_resume_after_a_long_pause_keeps_its_conversation_s_memory_copy(
     memory.parent.mkdir(parents=True, exist_ok=True)
     memory.write_text("# Memory\nFact one.\n", encoding="utf-8")
     identity = _identity("memory-session")
-    model = _CheckedModel([_add("approved", 10, 1), answer("Done."), answer("Later.")])
+    model = _CheckedModel([_add("approved", 10, 1), answer("Between."), answer("Done."), answer("Later.")])
     install_model_providers(monkeypatch, {"default": model})
-    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
-    [snapshot] = paths.storage_root.rglob("memory_entrypoint_snapshots/*.json")
-    paused_at = time.time() - 62 * 60
-    os.utime(snapshot, (paused_at, paused_at))
-    memory.write_text("# Memory\nFact one.\nFact two.\n", encoding="utf-8")
 
-    result = await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+    async def system_prompt_of_turn(prompt: str) -> str:
+        ctx = make_turn_context("general", session_id=identity.session_id, requester_id=identity.requester_id)
+        await ai_response(replace(ctx, prompt=prompt, execution_identity=identity), paths, config)
+        return system_text(model.requests[-1].messages)
+
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    # A turn while the run waits for its approval replaces the copy the paused run sent: an edited line loads at once.
+    memory.write_text("# Memory\nFact one, corrected.\n", encoding="utf-8")
+    replaced = await system_prompt_of_turn("Meanwhile?")
+    assert "Fact one, corrected." in replaced
+    [snapshot] = paths.storage_root.rglob("memory_entrypoint_snapshots/*.json")
+    cold = time.time() - 62 * 60
+    os.utime(snapshot, (cold, cold))
+    memory.write_text("# Memory\nFact one, corrected.\nFact two.\n", encoding="utf-8")
+
+    stamped: list[Path] = []
+    with monkeypatch.context() as resuming:
+        resuming.setattr("mindroom.loop_hooks.stamp_entrypoint_snapshot", lambda path, *, now: stamped.append(path))  # noqa: ARG005
+        result = await _approve_add(tmp_path, config, paths, identity, paused, "approved")
 
     assert isinstance(result, CompletedApprovalRun)
-    assert snapshot.stat().st_mtime == pytest.approx(time.time(), abs=60)
-    ctx = make_turn_context("general", session_id=identity.session_id, requester_id=identity.requester_id)
-    await ai_response(replace(ctx, prompt="And now?", execution_identity=identity), paths, config)
-    first, resumed, later = (system_text(request.messages) for request in model.requests)
-    assert "Fact one." in first
-    assert resumed == first
-    assert later == first
+    assert stamped == []
+    assert snapshot.stat().st_mtime == cold
+    assert "Fact two." in await system_prompt_of_turn("And now?")
 
 
 @pytest.mark.asyncio

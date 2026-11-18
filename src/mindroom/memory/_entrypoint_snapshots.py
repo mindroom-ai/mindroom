@@ -6,7 +6,7 @@ lines (a file over a preload cap drops its oldest kept entry for each new one, s
 until it idles past the cache lifetime or its history is compacted; the conversation already shows the agent
 its own memory writes as tool calls. Each conversation's copy is a file in its agent's state root, so a restart keeps
 it and one requester's private memory stays out of another's; the file's modification time is the last model request
-that sent the copy. A missing or unreadable file starts the conversation from MEMORY.md again.
+of a turn that took the copy from it. A missing or unreadable file starts the conversation from MEMORY.md again.
 """
 
 from __future__ import annotations
@@ -25,9 +25,7 @@ from mindroom.yaml_io import write_text_atomic
 if TYPE_CHECKING:
     from pathlib import Path
 
-# The key in the metadata of a run whose requests send the conversation's copy, so restart its idle time.
-SENDS_ENTRYPOINT_SNAPSHOT_KEY = "sends_memory_entrypoint_snapshot"
-# A copy is deleted long after it stops being reused, so a run paused for an approval finds its own on resume.
+# A copy no turn reuses any more is deleted once it has been idle this long.
 _PRUNE_IDLE_SECONDS = 24 * 3600
 
 
@@ -55,10 +53,10 @@ def entrypoint_snapshot_path(database: Path, session_id: str) -> Path:
 
 
 def stamp_entrypoint_snapshot(path: Path, *, now: float) -> None:
-    """Record a model request at ``now`` that sent the copy ``path`` keeps, which warms its conversation's cache.
+    """Record a model request at ``now`` of a turn that took the copy ``path`` keeps, which warms its cache.
 
-    A request that sent another preamble, such as a scheduled turn's, must not: it would keep a copy whose cache
-    is gone from loading the file again.
+    A request that sent another preamble must not, such as a scheduled turn's or a resumed run's, whose copy a
+    later turn may have replaced: it would keep a copy whose cache is gone from loading the file again.
     """
     with suppress(OSError):
         os.utime(path, (now, now))

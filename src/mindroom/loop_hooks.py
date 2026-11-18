@@ -31,7 +31,7 @@ from mindroom.history.run_checkpoint import checkpoint_hooks
 from mindroom.history.types import HistoryScope
 from mindroom.llm.provider import DeferredTools
 from mindroom.llm.tool_search import resolve_call_tool_calls
-from mindroom.memory import SENDS_ENTRYPOINT_SNAPSHOT_KEY, entrypoint_snapshot_path, stamp_entrypoint_snapshot
+from mindroom.memory import stamp_entrypoint_snapshot
 from mindroom.participation_hook import participation_hook
 from mindroom.skill_learning.capture import capture_final_request
 from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_hook
@@ -39,6 +39,7 @@ from mindroom.tool_jobs.notices import job_notice_hook
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import AnswerToolCalls, BeforeRequestHook, LoopState
@@ -65,7 +66,9 @@ class HookTurn:
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
     ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
     member lack. ``checkpoints`` is off for a run that saves no checkpoint: a voice call's, and an approved run's
-    resume, whose paused row is what settles it when it is cut short.
+    resume, whose paused row is what settles it when it is cut short. ``memory_copy`` is the file of the MEMORY.md
+    copy this turn's system prompt holds (``memory._entrypoint_snapshots``), None for a turn that sends none and for
+    a resume, which may send a copy the file no longer holds.
     """
 
     config: Config
@@ -77,6 +80,7 @@ class HookTurn:
     lifecycle: CompactionLifecycle | None = None
     turn_recorder: TurnRecorder | None = None
     checkpoints: bool = True
+    memory_copy: Path | None = None
 
 
 def agent_loop_hooks(
@@ -93,9 +97,9 @@ def agent_loop_hooks(
     The run compacts as its build's agent, and a top-level agent hears of its ended jobs. ``queued_notices`` is off
     for a team member, whose leader owns the turn's notices; ``steering`` is on for a run that owns its reply, which a
     completed batch then ends for a steering message, and off for a delegated child, whose owner it leaves that to.
-    ``skill_review_capture`` records the run's final request. Every request of a stored run that sends its
-    conversation's MEMORY.md copy, as the run's metadata says and a resume's keeps saying, restarts the idle time
-    after which the conversation loads the file again (``memory._entrypoint_snapshots``).
+    ``skill_review_capture`` records the run's final request. Every request of a run whose turn sends its
+    conversation's MEMORY.md copy (``turn.memory_copy``) restarts the idle time after which the conversation loads
+    the file again.
     """
     jobs = build.tool_jobs
     agent_name = build.spec.id
@@ -115,14 +119,13 @@ def agent_loop_hooks(
         steering=steering,
         skill_review_capture=skill_review_capture,
     )
-    if turn.storage is None or turn.storage.store is None:
+    memory_copy = turn.memory_copy
+    if memory_copy is None:
         return hooks
-    snapshot = entrypoint_snapshot_path(turn.storage.store.path, turn.storage.session.session_id)
 
-    async def stamp_request(state: LoopState) -> SendRequest:
+    async def stamp_request(_state: LoopState) -> SendRequest:
         """Stamp the conversation's prompt cache as read now; last, so only for a request that is sent."""
-        if (state.record.metadata or {}).get(SENDS_ENTRYPOINT_SNAPSHOT_KEY):
-            await asyncio.to_thread(stamp_entrypoint_snapshot, snapshot, now=time.time())
+        await asyncio.to_thread(stamp_entrypoint_snapshot, memory_copy, now=time.time())
         return SendRequest()
 
     return replace(hooks, before_request=(*hooks.before_request, stamp_request))

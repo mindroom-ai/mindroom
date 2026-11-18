@@ -1,7 +1,6 @@
 """Memory management for MindRoom agents and teams."""
 
 from mindroom.memory._entrypoint_snapshots import (
-    SENDS_ENTRYPOINT_SNAPSHOT_KEY,
     ConversationRef,
     entrypoint_snapshot_path,
     stamp_entrypoint_snapshot,
@@ -32,7 +31,6 @@ from mindroom.memory.functions import (
 )
 
 __all__ = [
-    "SENDS_ENTRYPOINT_SNAPSHOT_KEY",
     "ConversationRef",
     "MemoryAutoFlushService",
     "MemoryPromptParts",

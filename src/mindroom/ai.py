@@ -61,7 +61,6 @@ from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import (
-    SENDS_ENTRYPOINT_SNAPSHOT_KEY,
     ConversationRef,
     MemoryPromptParts,
     build_memory_prompt_parts,
@@ -121,6 +120,7 @@ from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+    from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
@@ -208,7 +208,7 @@ class _PreparedAgentRun:
     are the stored history the request replays under the resolved plan, and ``turn`` is the new input around the
     prompt.
     ``cli_context`` holds the context documents a minimal turn's Bash reads through `mindroom-agent`.
-    ``sends_memory_copy`` says the system messages hold the MEMORY.md copy the conversation keeps.
+    ``memory_copy`` is the file of the MEMORY.md copy the system messages hold, None when they hold none.
     """
 
     build: AgentBuild
@@ -223,7 +223,7 @@ class _PreparedAgentRun:
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
     cli_context: Mapping[str, str]
-    sends_memory_copy: bool
+    memory_copy: Path | None
 
     @property
     def prompt_text(self) -> str:
@@ -512,6 +512,7 @@ def _agent_loop_hooks(
             turn_recorder=run_context.turn_recorder,
             # A voice call's turn, and a contact's, finishes its calls inside the turn and is never replayed.
             checkpoints=not ctx.inline_tools,
+            memory_copy=prepared.memory_copy,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
@@ -974,7 +975,7 @@ async def _prepare_agent_and_prompt(
         prepared_history=prepared_execution.prepared_history,
         runtime_model_name=runtime_model.model_name,
         cli_context=cli_context,
-        sends_memory_copy=memory_conversation is not None,
+        memory_copy=memory_conversation.snapshot if memory_conversation is not None else None,
     )
 
 
@@ -1028,10 +1029,6 @@ async def _prepare_agent_run_context(
     )
     if ctx.agent_mode == "minimal":
         metadata = dict(metadata or {}) | {"agent_mode": "minimal"}
-    # Set for this attempt alone: an attempt that continues another's turn starts from that one's metadata.
-    metadata.pop(SENDS_ENTRYPOINT_SNAPSHOT_KEY, None)
-    if prepared_run.sends_memory_copy:
-        metadata[SENDS_ENTRYPOINT_SNAPSHOT_KEY] = True
 
     return _AgentRunContext(
         turn=ctx,

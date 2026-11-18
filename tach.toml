@@ -6882,7 +6882,6 @@ from = ["mindroom.config.memory"]
 expose = [
     "ConversationRef",
     "MemoryAutoFlushService",
-    "SENDS_ENTRYPOINT_SNAPSHOT_KEY",
     "MemoryPromptParts",
     "add_agent_memory",
     "append_agent_daily_memory",

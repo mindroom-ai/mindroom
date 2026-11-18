@@ -99,13 +99,12 @@ def test_snapshots_are_kept_per_state_root_conversation_and_file() -> None:
     assert "secret" not in "".join(path.read_text(encoding="utf-8") for path in _snapshot().parent.iterdir())
 
 
-def test_a_copy_outlives_its_reuse_long_enough_for_a_paused_run_to_resume() -> None:
-    """A copy idle for hours is not reused but stays for the run that paused with it; a day-old one is deleted."""
-    _preamble("a", session="paused", now=0)
+def test_copies_idle_for_a_day_are_deleted() -> None:
+    """A copy idle past the cache lifetime is not reused, and its file is deleted once it has been idle for a day."""
+    _preamble("a", session="old", now=0)
     _preamble("a", session="other", now=2 * HOUR)
-    assert _snapshot("paused").exists()
-    snapshots.stamp_entrypoint_snapshot(_snapshot("paused"), now=2 * HOUR)
-    assert _preamble("a\nb", session="paused", now=2 * HOUR + 60) == "preamble of 'a'"
+    assert _snapshot("old").exists()
+    assert _preamble("a\nb", session="old", now=2 * HOUR) == "preamble of 'a\\nb'"
     _preamble("a", session="new", now=30 * HOUR)
     assert list(_snapshot().parent.glob("*.json")) == [_snapshot("new")]
 
