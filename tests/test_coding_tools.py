@@ -509,7 +509,10 @@ class TestEditFile:
     def test_null_edits_with_flat_fields_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
         """Only a call that leaves edits out uses the flat fields; an explicit null with them is refused."""
         result = validated_entrypoint(tools.edit_file)(
-            path="hello.py", edits=None, old_text="print('hello')", new_text="x",
+            path="hello.py",
+            edits=None,
+            old_text="print('hello')",
+            new_text="x",
         )
         assert result.startswith("Error: edit_file takes path and edits, not new_text, old_text.")
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
