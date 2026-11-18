@@ -161,10 +161,14 @@ async def write_room_reply_mode(
 ) -> bool:
     """Set the room's reply mode setting, or clear it given None, as ``client``; return whether the room took it.
 
-    The room's acknowledgement is the newest the runtime knows, but unconfirmed: another change may follow it.
+    The room's acknowledgement is the newest the runtime knows, unconfirmed, unless something arrived while the write
+    was pending: then which is newer is unknown, so reads started before the acknowledgement change nothing and the
+    room is read again.
     """
     import nio  # noqa: PLC0415 - config reads the copy above without loading the Matrix client
 
+    key = _key(runtime_paths, room_id)
+    started = next(_order)
     content = {} if mode is None else {"value": mode}
     try:
         async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
@@ -175,7 +179,12 @@ async def write_room_reply_mode(
     if not isinstance(response, nio.RoomPutStateResponse):
         logger.warning("room_reply_mode_write_failed", room_id=room_id, error=str(response))
         return False
-    _take(_key(runtime_paths, room_id), mode, next(_order), confirmed=False)
+    known = _known.get(key)
+    if known is None or known.order < started:
+        _take(key, mode, next(_order), confirmed=False)
+    else:
+        _known[key] = known._replace(order=next(_order), confirmed_at=_UNCONFIRMED)
+        await refresh_room_reply_mode(client, runtime_paths, room_id, force=True)
     return True
 
 

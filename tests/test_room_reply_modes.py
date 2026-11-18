@@ -324,6 +324,15 @@ async def _started(coroutine: Awaitable[object]) -> asyncio.Task[object]:
     return task
 
 
+async def _release_when_sent(homeserver: _GatedHomeserver, index: int) -> None:
+    for _ in range(20):
+        if len(homeserver.gates) > index:
+            homeserver.gates[index].set()
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(index)
+
+
 async def _released(homeserver: _GatedHomeserver, index: int, task: asyncio.Task[object]) -> object:
     homeserver.gates[index].set()
     return await task
@@ -342,13 +351,37 @@ async def test_a_read_that_started_before_a_write_took_effect_confirms_nothing(t
     observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "auto"}))
     read = await _started(refresh_room_reply_mode(client, runtime_paths, ROOM_ID, force=True))
     homeserver.set("mentions")  # Now it has.
-    assert await _released(homeserver, 0, write)
+    homeserver.gates[0].set()
+    await _release_when_sent(homeserver, 2)  # The read the acknowledgement starts, since the event came in meanwhile.
+    assert await write
     assert (await _released(homeserver, 1, read)).mode == "auto"
 
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
-    homeserver.gates.clear()
-    next_read = await _started(refresh_room_reply_mode(client, runtime_paths, ROOM_ID))
-    assert (await _released(homeserver, 0, next_read)) == ReplyModeRead(ok=True, mode="mentions")
+    reads = client.room_get_state_event.await_count
+    assert await refresh_room_reply_mode(client, runtime_paths, ROOM_ID) == ReplyModeRead(ok=True, mode="mentions")
+    assert client.room_get_state_event.await_count == reads
+
+
+@pytest.mark.asyncio
+async def test_a_late_acknowledgement_does_not_undo_a_change_read_since(tmp_path: Path) -> None:
+    """A write the room took long ago is acknowledged after a newer change was read: the room is read again."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    homeserver = _GatedHomeserver()
+    client = homeserver.client()
+
+    write = await _started(write_room_reply_mode(client, runtime_paths, ROOM_ID, "auto"))
+    homeserver.set("mentions")  # An admin's newer change, after the write took effect.
+    observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "mentions"}))
+    read = await _started(refresh_room_reply_mode(client, runtime_paths, ROOM_ID, force=True))
+    assert (await _released(homeserver, 1, read)).mode == "mentions"
+
+    homeserver.gates[0].set()
+    await _release_when_sent(homeserver, 2)  # The read the late acknowledgement starts.
+    assert await write
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+    reads = client.room_get_state_event.await_count
+    assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).mode == "mentions"
+    assert client.room_get_state_event.await_count == reads
 
 
 @pytest.mark.asyncio
