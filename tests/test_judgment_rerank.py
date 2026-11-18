@@ -91,12 +91,8 @@ async def test_one_request_for_all_candidates() -> None:
 @pytest.mark.asyncio
 async def test_scores_follow_document_order() -> None:
     """Scores line up with the documents even when the provider answers in another order."""
-
-    def shuffled(names: list[str]) -> list[dict[str, Any]]:
-        probabilities = {"c0": 0.1, "c1": 0.7, "c2": 0.4}
-        return [{"type": "predicate", "name": name, "probability": probabilities[name]} for name in reversed(names)]
-
-    scores = await _reranker(shuffled, []).ascore("query", ["a", "b", "c"])
+    shuffled = _reranker(lambda names: _answers({"c0": 0.1, "c1": 0.7, "c2": 0.4})(names)[::-1], [])
+    scores = await shuffled.ascore("query", ["a", "b", "c"])
     assert scores == [0.1, 0.7, 0.4]
 
 
@@ -135,60 +131,46 @@ _CLIP_EDGES = [990, 2_024]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("in_query", [False, True])
 @pytest.mark.parametrize("offset", _CLIP_EDGES)
-async def test_secret_across_a_clip_edge_of_a_candidate_never_leaves(offset: int) -> None:
-    """A credential cut by the clip window is redacted before clipping, and the candidate is still judged."""
+async def test_secret_across_a_clip_edge_never_leaves(offset: int, in_query: bool) -> None:
+    """A credential cut by the clip window of a candidate or the query is redacted before clipping, and still judged."""
     seen: list[httpx.Request] = []
-    scores = await _reranker(_answers({"c0": 0.7}), seen).ascore("query", [_straddling(offset)])
+    text = _straddling(offset)
+    query, documents = (text, ["a"]) if in_query else ("query", [text])
+    scores = await _reranker(_answers({"c0": 0.7}), seen).ascore(query, documents)
 
     assert _secret_fragments(seen[0].content.decode()) == []
     assert scores == [0.7]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("offset", _CLIP_EDGES)
-async def test_secret_across_a_clip_edge_of_the_query_never_leaves(offset: int) -> None:
-    """A credential cut by the clip window of the query is redacted before clipping."""
-    seen: list[httpx.Request] = []
-    scores = await _reranker(_answers({"c0": 0.7}), seen).ascore(_straddling(offset), ["a"])
+async def test_candidates_past_the_byte_cap_score_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The most leading candidates one posted body holds are judged, found in few builds; the rest score 0.0.
 
-    assert _secret_fragments(seen[0].content.decode()) == []
-    assert scores == [0.7]
+    The query is sized so that one more candidate still fits the canonical request but not the posted wire body.
+    """
+    built: list[tuple[list[JudgmentQuestion], str]] = []
 
+    def recording_build(questions: Sequence[JudgmentQuestion], message: str, *, instructions: str) -> JudgmentRequest:
+        built.append((list(questions), message))
+        return build_batch_request(questions, message, instructions=instructions)
 
-@pytest.mark.asyncio
-async def test_candidates_past_the_byte_cap_score_zero() -> None:
-    """Leading candidates that fit one request are judged; the rest score 0.0 and keep their order."""
+    monkeypatch.setattr(judgment_rerank, "build_batch_request", recording_build)
     seen: list[httpx.Request] = []
     reranker = _reranker(lambda names: _answers(dict.fromkeys(names, 0.9))(names), seen)
-    documents = [f"passage {index} " + "lorem ipsum dolor sit amet " * 80 for index in range(100)]
-    scores = await reranker.ascore("query", documents)
+    documents = [f"passage {index} " + "lorem ipsum dolor sit amet " * 80 for index in range(200)]
+    scores = await reranker.ascore("query " + "q" * 1000, documents)
 
     judged = len(json.loads(seen[0].content)["questions"])
     assert 0 < judged < len(documents)
     assert len(seen[0].content) <= 128_000
     assert scores == [0.9] * judged + [0.0] * (len(documents) - judged)
-
-
-@pytest.mark.asyncio
-async def test_packing_keeps_the_most_candidates_that_fit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The request holds the most leading candidates that fit, found without rebuilding it once per dropped one."""
-    builds: list[int] = []
-
-    def counting_build(questions: Sequence[JudgmentQuestion], message: str, *, instructions: str) -> JudgmentRequest:
-        builds.append(len(questions))
-        return build_batch_request(questions, message, instructions=instructions)
-
-    monkeypatch.setattr(judgment_rerank, "build_batch_request", counting_build)
-    seen: list[httpx.Request] = []
-    reranker = _reranker(lambda names: _answers(dict.fromkeys(names, 0.9))(names), seen)
-    documents = [f"passage {index} " + "lorem ipsum dolor sit amet " * 80 for index in range(200)]
-    await reranker.ascore("query", documents)
-
-    judged = len(json.loads(seen[0].content)["questions"])
-    one_more = [judgment_rerank._candidate_question(index, document) for index, document in enumerate(documents)]
-    assert not reranker.batch.fits(build_batch_request(one_more[: judged + 1], "query", instructions=""))
-    assert len(builds) <= 10
+    [(questions, message), *_] = built
+    one_more = build_batch_request(questions[: judged + 1], message, instructions="")
+    assert one_more.complete
+    assert not reranker.batch.fits(one_more)
+    assert len(built) <= 10
 
 
 @pytest.mark.asyncio
@@ -241,8 +223,7 @@ async def test_gate_caps_every_score() -> None:
     assert scores == [0.2, 0.1]
 
 
-@pytest.mark.asyncio
-async def test_missing_credential_builds_no_reranker(tmp_path: Path) -> None:
+def test_missing_credential_builds_no_reranker(tmp_path: Path) -> None:
     """Without an API key neither judgment provider builds a reranker, and a configured one fails to build."""
     paths = test_runtime_paths(tmp_path)
     assert create_judgment_reranker(TypeSafeJudgmentConfig(provider="typesafe"), paths) is None
