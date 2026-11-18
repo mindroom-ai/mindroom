@@ -4785,7 +4785,12 @@ class TestRouteDispatch:
     """A route runs as the mention its responder answers, in reply to the person's own event."""
 
     @staticmethod
-    async def _delivered(store: PrincipalStore, event: nio.Event) -> list[nio.Event]:
+    async def _delivered(
+        store: PrincipalStore,
+        event: nio.Event,
+        *,
+        kind: EventKind = EventKind.ROUTE,
+    ) -> list[nio.Event]:
         """Admit one event as sync does and return what reached the message callback."""
         handled: list[nio.Event] = []
 
@@ -4804,11 +4809,11 @@ class TestRouteDispatch:
                 if event.decrypted
                 else None
             ),
-            sender_is_managed=lambda sender: sender == BOT,
+            sender_is_managed=lambda sender: sender.startswith("@mindroom_"),
         )
         if views is not None:
-            assert views[0].kind is EventKind.ROUTE
-            assert views[1] is None
+            assert views[0].kind is kind
+            assert (views[1] is None) is (kind is EventKind.ROUTE)
             await store.admit(*views)
         await dispatcher.drain_once()
         assert not await store.is_pending(event.event_id)
@@ -4859,6 +4864,22 @@ class TestRouteDispatch:
         }
         # What makes the message a route is outside its content, where only this dispatch writes.
         assert delivered.source[ROUTE_EVENT_TYPE] == ["$earlier", "$question"]
+
+    async def test_a_message_that_carries_the_mark_of_a_route_reaches_its_callback_without_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only the dispatch of a route event marks a message as a route: a managed account's own mark is dropped."""
+        event = text_event("$message", "an ordinary message")
+        event.sender = event.source["sender"] = "@mindroom_other:example.org"
+        event.source[ROUTE_EVENT_TYPE] = ["$question"]
+        event.source["content"][ROUTE_EVENT_TYPE] = {"entity": BOT, "event_ids": ["$question"]}
+
+        [delivered] = await self._delivered(alice, event, kind=EventKind.MESSAGE)
+
+        assert delivered.body == "an ordinary message"
+        assert ROUTE_EVENT_TYPE not in delivered.source
+        assert ROUTE_EVENT_TYPE not in delivered.source["content"]
 
     async def test_a_route_outside_a_thread_carries_the_prompt_its_scheduled_task_relays(
         self,

@@ -328,6 +328,11 @@ def parse_journal_event(stored: JournalEvent) -> nio.Event:
     """Rebuild one typed nio event from its stored replay payload."""
     source = dict(stored.source)
     security_metadata = source.pop(_SECURITY_METADATA_KEY, None)
+    # What marks a message as a route is written only by the dispatch of a route event, so no stored event keeps a
+    # mark of its own: not beside its content, and not in the content of anything but a route.
+    source.pop(ROUTE_EVENT_TYPE, None)
+    if stored.kind is not EventKind.ROUTE and isinstance(content := source.get("content"), dict):
+        source["content"] = {key: value for key, value in content.items() if key != ROUTE_EVENT_TYPE}
     event = parse_matrix_media_event_source(source) if stored.kind is EventKind.MEDIA else nio.Event.parse_event(source)
     if not isinstance(event, nio.Event) or event.event_id != stored.event_id:
         msg = f"Journal event {stored.event_id!r} does not replay as itself"
