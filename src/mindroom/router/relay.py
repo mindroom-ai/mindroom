@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.attachments.ids import merge_attachment_ids
@@ -14,6 +15,7 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_KEY,
     ROUTE_EVENT_TYPE,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
+    ROUTE_VOICE_TRANSCRIPTS_LIMIT,
     SOURCE_KIND_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
@@ -230,7 +232,8 @@ async def _voice_transcripts(deps: _RouterRelaySupport, event_ids: list[str]) ->
         if (voice := await deps.turn_store.prepared_voice_for_source(event_id)) is not None
         and VOICE_RAW_AUDIO_FALLBACK_KEY not in voice.to_content()
     }
-    return {ROUTE_VOICE_TRANSCRIPTS_KEY: transcripts} if transcripts else {}
+    carried = transcripts and len(json.dumps(transcripts)) <= ROUTE_VOICE_TRANSCRIPTS_LIMIT
+    return {ROUTE_VOICE_TRANSCRIPTS_KEY: transcripts} if carried else {}
 
 
 async def execute_router_relay(  # noqa: PLR0911

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from dataclasses import dataclass, field, fields, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -2978,18 +2979,23 @@ async def test_agent_echo_is_not_a_turn_for_other_bots(config: Config, tmp_path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("spoken", ["who can review the new PR?", "a long recording " * 3_500], ids=["short", "long"])
 async def test_voice_message_is_routed_on_its_transcript(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    spoken: str,
 ) -> None:
-    """A steward selects a voice message's responder from its transcript and posts nothing itself."""
+    """A steward selects a voice message's responder from its transcript and posts nothing itself.
+
+    Its route carries the transcript for the responder to post, unless that would make the route a large event.
+    """
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     event = _thread_upload_event("m.audio", event_id="$voice:localhost", origin_server_ts=1_000_000)
     content = {
         **event.source["content"],
         "msgtype": "m.text",
-        "body": "who can review the new PR?",
+        "body": spoken,
         constants.SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
         constants.ORIGINAL_SENDER_KEY: _SENDER,
         constants.VOICE_TRANSCRIPT_KEY: True,
@@ -3013,9 +3019,11 @@ async def test_voice_message_is_routed_on_its_transcript(
     await harness.ingress.handle_media_event(room, event)
     await harness.gate.drain_all()
 
-    assert select.await_args.args[0] == "who can review the new PR?"
+    assert select.await_args.args[0] == spoken
     [route] = harness.gateway.routes
-    assert route[constants.ROUTE_VOICE_TRANSCRIPTS_KEY] == {event.event_id: "who can review the new PR?"}
+    carried = {event.event_id: spoken} if len(spoken) < constants.ROUTE_VOICE_TRANSCRIPTS_LIMIT else None
+    assert route.get(constants.ROUTE_VOICE_TRANSCRIPTS_KEY) == carried
+    assert len(json.dumps(route)) < 20_000
     assert harness.gateway.sent == []
 
 

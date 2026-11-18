@@ -22,6 +22,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
+    ROUTE_EVENT_TYPE,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
@@ -36,6 +37,7 @@ from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
     _SIDECAR_UPLOAD_FALLBACK_INDICATOR,
+    MatrixEventTooLargeError,
     _calculate_delivery_event_size,
     _create_preview,
     _oversized_nonterminal_streaming_edit_next_allowed_at,
@@ -410,6 +412,22 @@ def test__create_preview() -> None:
     assert len(preview.encode("utf-8")) <= 500
     # Should break at paragraph boundary
     assert preview.count("\n\n") >= 1 or "[Message continues in attached file]" in preview
+
+
+@pytest.mark.asyncio
+async def test_an_event_without_text_is_sent_as_it_is_or_refused() -> None:
+    """A hidden route in a thread has no body a sidecar could carry: it fits the event limit, or it is too large."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
+    route = {ROUTE_EVENT_TYPE: {"entity": "@agent:server", "event_ids": ["$voice"]}}
+
+    over_the_text_limit = {**route, SOURCE_KIND_KEY: "x" * (_NORMAL_MESSAGE_LIMIT + 1_000)}
+    assert await prepare_large_message(client, "!room:server", over_the_text_limit, room_encrypted=False) is (
+        over_the_text_limit
+    )
+
+    over_the_event_limit = {**route, SOURCE_KIND_KEY: "x" * _MATRIX_EVENT_HARD_LIMIT}
+    with pytest.raises(MatrixEventTooLargeError):
+        await prepare_large_message(client, "!room:server", over_the_event_limit, room_encrypted=False)
 
 
 @pytest.mark.asyncio

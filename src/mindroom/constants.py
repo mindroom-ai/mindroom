@@ -1040,6 +1040,8 @@ SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
 ROUTE_EVENT_TYPE = "io.mindroom.route"
 # In a route's content: the steward's transcript of each voice message it routes, by event ID.
 ROUTE_VOICE_TRANSCRIPTS_KEY = "io.mindroom.voice_transcripts"
+# The route stays a small event: transcripts over this many encoded bytes are left to the responder's own checkpoint.
+ROUTE_VOICE_TRANSCRIPTS_LIMIT = 16 * 1024
 # Room state holding one scheduled task, keyed by its task ID.
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report marker, not a credential.
