@@ -3,10 +3,10 @@
 The preamble is part of the system prompt, so a changed preamble makes the provider re-read the whole
 conversation after it. A conversation therefore keeps the preamble it last sent while its inlined copy only gains
 lines (a file over a preload cap drops its oldest kept entry for each new one, so its copy loads again),
-until it idles past its model's cache lifetime or its history is compacted; the conversation already shows the agent
+until it idles past the cache lifetime or its history is compacted; the conversation already shows the agent
 its own memory writes as tool calls. Each conversation's copy is a file in its agent's state root, so a restart keeps
-it and one requester's private memory stays out of another's; the file's modification time is the conversation's last
-model request. A missing or unreadable file starts the conversation from MEMORY.md again.
+it and one requester's private memory stays out of another's; the file's modification time is the last model request
+that sent the copy. A missing or unreadable file starts the conversation from MEMORY.md again.
 """
 
 from __future__ import annotations
@@ -25,10 +25,10 @@ from mindroom.yaml_io import write_text_atomic
 if TYPE_CHECKING:
     from pathlib import Path
 
-_SHORT_CACHE_SECONDS = 300
-# A provider can keep a cache slightly longer than it promises, and a request is stamped before it is sent.
-# Keeping a copy for a cache that is gone costs nothing; loading the file again under a live cache rewrites it.
-_MARGIN_SECONDS = 120
+# The key in the metadata of a run whose requests send the conversation's copy, so restart its idle time.
+SENDS_ENTRYPOINT_SNAPSHOT_KEY = "sends_memory_entrypoint_snapshot"
+# A copy is deleted long after it stops being reused, so a run paused for an approval finds its own on resume.
+_PRUNE_IDLE_SECONDS = 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -37,18 +37,11 @@ class ConversationRef:
 
     ``compaction`` holds the conversation's text summary and newest native checkpoint; a change means a compaction
     rewrote the replayed history. ``snapshot`` is the file that keeps the conversation's copy
-    (``entrypoint_snapshot_path``), and ``cache_ttl`` how long its model's provider keeps a prompt cache that no
-    request reads (``prompt_cache_ttl_seconds``).
+    (``entrypoint_snapshot_path``).
     """
 
     compaction: tuple[str | None, str | None]
     snapshot: Path
-    cache_ttl: float
-
-
-def prompt_cache_ttl_seconds(*, extended_cache_time: bool) -> int:
-    """Return how long a provider keeps a prompt cache that no request reads."""
-    return PROMPT_CACHE_IDLE_SECONDS if extended_cache_time else _SHORT_CACHE_SECONDS
 
 
 def entrypoint_snapshot_path(database: Path, session_id: str) -> Path:
@@ -62,7 +55,11 @@ def entrypoint_snapshot_path(database: Path, session_id: str) -> Path:
 
 
 def stamp_entrypoint_snapshot(path: Path, *, now: float) -> None:
-    """Record a model request at ``now`` of the conversation whose copy ``path`` keeps, which warms its cache."""
+    """Record a model request at ``now`` that sent the copy ``path`` keeps, which warms its conversation's cache.
+
+    A request that sent another preamble, such as a scheduled turn's, must not: it would keep a copy whose cache
+    is gone from loading the file again.
+    """
     with suppress(OSError):
         os.utime(path, (now, now))
 
@@ -80,7 +77,7 @@ def _kept_preamble(conversation: ConversationRef, source_path: Path, fresh_body:
     except (OSError, ValueError, TypeError):
         return None
     reusable = (
-        idle < conversation.cache_ttl + _MARGIN_SECONDS
+        idle < PROMPT_CACHE_IDLE_SECONDS
         and source == str(source_path)
         and (summary, checkpoint) == conversation.compaction
         and _only_added_lines(str(body), fresh_body)
@@ -111,7 +108,7 @@ def stable_entrypoint_preamble(
     try:
         with advisory_file_lock(path.parent / ".lock"):
             for other in path.parent.glob("*.json"):
-                if now - other.stat().st_mtime >= PROMPT_CACHE_IDLE_SECONDS + _MARGIN_SECONDS:
+                if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:
                     other.unlink()
             if (kept := _kept_preamble(conversation, source_path, fresh_body, now)) is None:
                 row = [str(source_path), fresh_preamble, fresh_body, *conversation.compaction]

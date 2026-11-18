@@ -1,9 +1,9 @@
 """Memory management for MindRoom agents and teams."""
 
 from mindroom.memory._entrypoint_snapshots import (
+    SENDS_ENTRYPOINT_SNAPSHOT_KEY,
     ConversationRef,
     entrypoint_snapshot_path,
-    prompt_cache_ttl_seconds,
     stamp_entrypoint_snapshot,
 )
 from mindroom.memory._file_backend import (
@@ -32,6 +32,7 @@ from mindroom.memory.functions import (
 )
 
 __all__ = [
+    "SENDS_ENTRYPOINT_SNAPSHOT_KEY",
     "ConversationRef",
     "MemoryAutoFlushService",
     "MemoryPromptParts",
@@ -47,7 +48,6 @@ __all__ = [
     "entrypoint_withholds_lines",
     "get_agent_memory",
     "list_all_agent_memories",
-    "prompt_cache_ttl_seconds",
     "read_scope_memory_files",
     "redact_memory_text",
     "refresh_agent_memory_search",

@@ -1568,7 +1568,7 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
         )
         return prompt_parts.session_preamble
 
-    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json", 3600)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
     other_thread = replace(thread, snapshot=storage_path / "snapshots" / "other-thread.json")
     first = await preamble(thread)
     await add_agent_memory("Added fact.", "general", config)

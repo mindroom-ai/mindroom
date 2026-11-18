@@ -117,8 +117,8 @@ Skills without `metadata.openclaw` are always eligible.
 Agents see the name and description of each available skill in the system prompt and load details with these tools:
 
 - `get_skill_instructions(skill_name)` loads the full instructions for a skill and lists its references and scripts
-- `get_skill_reference(skill_name, reference_path)` reads a reference document
-- `get_skill_script(skill_name, script_path)` reads a script
+- `get_skill_reference(skill_name, reference_path)` reads a reference document, and lists the skill's references when called without a path
+- `get_skill_script(skill_name, script_path)` reads a script, and lists the skill's scripts when called without a path
 
 `get_skill_script` never runs a script, whichever skill it comes from.
 Agents with a shell tool run scripts with it, where their shell commands run.

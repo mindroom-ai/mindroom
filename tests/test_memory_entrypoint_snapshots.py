@@ -6,12 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.memory import ConversationRef, entrypoint_snapshot_path, prompt_cache_ttl_seconds
+from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS as HOUR
+from mindroom.memory import ConversationRef, entrypoint_snapshot_path
 from mindroom.memory import _entrypoint_snapshots as snapshots
 
 MEMORY = Path("/workspace/MEMORY.md")
-HOUR = prompt_cache_ttl_seconds(extended_cache_time=True)
-MARGIN = snapshots._MARGIN_SECONDS
 
 
 @pytest.fixture(autouse=True)
@@ -32,11 +31,10 @@ def _preamble(
     path: Path = MEMORY,
     now: float = 0.0,
     root: str = "agent",
-    ttl: float = HOUR,
 ) -> str:
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text."""
     return snapshots.stable_entrypoint_preamble(
-        ConversationRef((summary, None), _snapshot(session, root), ttl),
+        ConversationRef((summary, None), _snapshot(session, root)),
         path,
         text,
         f"preamble of {text!r}",
@@ -66,29 +64,18 @@ def test_empty_copy_loads_the_file_once_it_gains_lines() -> None:
     assert _preamble("header\na") == "preamble of 'header\\na'"
 
 
-@pytest.mark.parametrize(
-    ("extended_cache_time", "lifetime"),
-    [(True, 3600), (False, 300)],
-    ids=["one-hour-cache", "five-minute-cache"],
-)
-def test_idle_conversation_loads_the_file_again(extended_cache_time: bool, lifetime: int) -> None:
-    """Once its model's cache has gone cold, a fresh file costs nothing, so the conversation catches up.
-
-    The copy is kept a margin longer than the cache: keeping it for a cold cache costs nothing, and loading the
-    file under a warm one rewrites the conversation.
-    """
-    ttl = prompt_cache_ttl_seconds(extended_cache_time=extended_cache_time)
-    assert ttl == lifetime
-    _preamble("a", now=0, ttl=ttl)
-    assert _preamble("a\nb", now=lifetime + MARGIN - 1, ttl=ttl) == "preamble of 'a'"
-    assert _preamble("a\nb\nc", now=2 * (lifetime + MARGIN) - 1, ttl=ttl) == "preamble of 'a\\nb\\nc'"
+def test_idle_conversation_loads_the_file_again() -> None:
+    """Once the cache has gone cold, a fresh file costs nothing, so the conversation catches up."""
+    _preamble("a", now=0)
+    assert _preamble("a\nb", now=HOUR) == "preamble of 'a\\nb'"
+    assert _preamble("a\nb\nc", now=HOUR + 100) == "preamble of 'a\\nb'"
 
 
-def test_every_model_request_starts_the_idle_time_again() -> None:
+def test_a_request_that_sent_the_copy_starts_its_idle_time_again() -> None:
     """A long turn reads the cache on each request, so its conversation stays warm past the turn's start."""
     _preamble("a", now=0)
     snapshots.stamp_entrypoint_snapshot(_snapshot(), now=3000)
-    assert _preamble("a\nb", now=3000 + HOUR) == "preamble of 'a'"
+    assert _preamble("a\nb", now=3000 + HOUR - 1) == "preamble of 'a'"
     # A request of a conversation that keeps no copy has nothing to stamp.
     snapshots.stamp_entrypoint_snapshot(_snapshot("unknown"), now=0)
     assert not _snapshot("unknown").exists()
@@ -112,10 +99,14 @@ def test_snapshots_are_kept_per_state_root_conversation_and_file() -> None:
     assert "secret" not in "".join(path.read_text(encoding="utf-8") for path in _snapshot().parent.iterdir())
 
 
-def test_idle_snapshots_are_dropped() -> None:
-    """Copies of idle conversations are released, so the store stays as small as the active conversations."""
-    _preamble("a", session="old", now=0)
-    _preamble("a", session="new", now=HOUR + MARGIN)
+def test_a_copy_outlives_its_reuse_long_enough_for_a_paused_run_to_resume() -> None:
+    """A copy idle for hours is not reused but stays for the run that paused with it; a day-old one is deleted."""
+    _preamble("a", session="paused", now=0)
+    _preamble("a", session="other", now=2 * HOUR)
+    assert _snapshot("paused").exists()
+    snapshots.stamp_entrypoint_snapshot(_snapshot("paused"), now=2 * HOUR)
+    assert _preamble("a\nb", session="paused", now=2 * HOUR + 60) == "preamble of 'a'"
+    _preamble("a", session="new", now=30 * HOUR)
     assert list(_snapshot().parent.glob("*.json")) == [_snapshot("new")]
 
 

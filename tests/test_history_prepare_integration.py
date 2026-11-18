@@ -25,6 +25,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY
+from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.execution_preparation import _PreparedExecutionContext, render_prepared_messages_text
 from mindroom.history.conversation_text import utterances
 from mindroom.history.request_messages import TurnMessages
@@ -42,7 +43,7 @@ from mindroom.llm.media import File
 from mindroom.llm.messages import Message, stable_serialize, system_text
 from mindroom.llm.runs import RunStatus
 from mindroom.media_inputs import MediaInputs
-from mindroom.memory import MemoryPromptParts, entrypoint_snapshot_path
+from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -1012,52 +1013,88 @@ async def test_a_new_skill_file_leaves_the_system_prompt_unchanged(tmp_path: Pat
     assert await system_prompt_of_turn("Second prompt") == first
 
 
+@dataclass
+class _MemoryConversation:
+    """One conversation of the test agent with file memory, whose MEMORY.md the system prompt inlines."""
+
+    config: Config
+    runtime_paths: RuntimePaths
+    provider: _Provider
+    memory_path: Path
+
+    @classmethod
+    def start(cls, tmp_path: Path, provider: _Provider) -> _MemoryConversation:
+        config, runtime_paths = _make_config(tmp_path)
+        config.memory.backend = "file"
+        memory_path = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "MEMORY.md"
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        memory_path.write_text("# Memory\nFact one.\n", encoding="utf-8")
+        return cls(config, runtime_paths, provider, memory_path)
+
+    @property
+    def snapshot(self) -> Path:
+        [snapshot] = self.runtime_paths.storage_root.rglob("memory_entrypoint_snapshots/*.json")
+        return snapshot
+
+    async def system_prompt_of_turn(self, prompt: str, **turn: object) -> str:
+        ctx = replace(make_turn_context("test_agent", session_id="session-1"), prompt=prompt, **turn)
+        await ai_response(ctx, self.runtime_paths, self.config)
+        return system_text(self.provider.model.requests[-1].messages)
+
+    def add_after_idling(self, fact: str, idle_seconds: float) -> None:
+        """Add ``fact`` to MEMORY.md and move the last request that sent the copy ``idle_seconds`` into the past."""
+        with self.memory_path.open("a", encoding="utf-8") as memory_file:
+            memory_file.write(f"{fact}\n")
+        os.utime(self.snapshot, (time.time() - idle_seconds,) * 2)
+
+
 @pytest.mark.asyncio
-async def test_memory_md_stays_while_its_models_cache_is_warm_and_reloads_once_it_is_gone(
+async def test_memory_md_stays_while_the_cache_may_be_warm_and_reloads_once_it_is_gone(
     tmp_path: Path,
     provider: _Provider,
 ) -> None:
-    """A conversation idle past its model's cache lifetime rewrites its cache anyway, so MEMORY.md loads again.
+    """A conversation idle past the cache lifetime rewrites its cache anyway, so MEMORY.md loads again.
 
-    The copy and the time of the last request are a file in the agent's state root, so a restart changes neither.
+    The copy and the time of the last request that sent it are a file in the agent's state root, so a restart
+    changes neither, and each such request restarts the idle time.
     """
-    config, runtime_paths = _make_config(tmp_path)
-    config.memory.backend = "file"
-    memory_path = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "MEMORY.md"
-    memory_path.parent.mkdir(parents=True, exist_ok=True)
-    memory_path.write_text("# Memory\nFact one.\n", encoding="utf-8")
-    provider.model.turns += [answer("ok") for _ in range(3)]
-
-    async def system_prompt_after(idle_seconds: float, fact: str) -> str:
-        """Add ``fact`` to MEMORY.md, let the conversation idle, and return the next turn's system prompt."""
-        with memory_path.open("a", encoding="utf-8") as memory_file:
-            memory_file.write(f"{fact}\n")
-        [snapshot] = runtime_paths.storage_root.rglob("memory_entrypoint_snapshots/*.json")
-        os.utime(snapshot, (time.time() - idle_seconds,) * 2)
-        await ai_response(
-            replace(make_turn_context("test_agent", session_id="session-1"), prompt="Next prompt"),
-            runtime_paths,
-            config,
-        )
-        return system_text(provider.model.requests[-1].messages)
-
-    await ai_response(
-        replace(make_turn_context("test_agent", session_id="session-1"), prompt="First prompt"),
-        runtime_paths,
-        config,
-    )
-    first = system_text(provider.model.requests[-1].messages)
+    conversation = _MemoryConversation.start(tmp_path, provider)
+    first = await conversation.system_prompt_of_turn("First prompt")
     assert "Fact one." in first
+    assert conversation.snapshot.stat().st_mtime == pytest.approx(time.time(), abs=60)
 
-    # The scripted model keeps a cache for five minutes: within them the copy stays, after them the file loads.
-    assert await system_prompt_after(200, "Fact two.") == first
-    cold = await system_prompt_after(500, "Fact three.")
-    assert "Fact three." in cold
+    conversation.add_after_idling("Fact two.", 3000)
+    assert await conversation.system_prompt_of_turn("Second prompt") == first
+    assert conversation.snapshot.stat().st_mtime == pytest.approx(time.time(), abs=60)
 
-    # A model with the extended cache keeps its copy for an hour.
-    provider.model.model_params["extended_cache_time"] = True
-    assert await system_prompt_after(500, "Fact four.") == cold
-    assert "Fact five." in await system_prompt_after(4000, "Fact five.")
+    conversation.add_after_idling("Fact three.", 4000)
+    assert "Fact three." in await conversation.system_prompt_of_turn("Third prompt")
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_sends_another_preamble_leaves_the_copy_s_idle_time_alone(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """A scheduled turn with its own history budget sends the current MEMORY.md, so it warms no cache of the copy.
+
+    Had its request restarted the idle time, the next reply would keep a copy whose cache is long gone.
+    """
+    conversation = _MemoryConversation.start(tmp_path, provider)
+    first = await conversation.system_prompt_of_turn("First prompt")
+
+    conversation.add_after_idling("Fact two.", 4000)
+    idle_since = conversation.snapshot.stat().st_mtime
+    scheduled = await conversation.system_prompt_of_turn(
+        "Scheduled prompt",
+        scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"),
+    )
+    assert "Fact two." in scheduled
+    assert conversation.snapshot.stat().st_mtime == idle_since
+
+    after = await conversation.system_prompt_of_turn("Second prompt")
+    assert "Fact two." in after
+    assert after != first
 
 
 @pytest.mark.asyncio
@@ -1105,23 +1142,13 @@ async def test_two_requesters_private_instances_keep_their_memory_copies_apart(
 
 
 @pytest.mark.asyncio
-async def test_every_model_request_restarts_the_conversations_idle_time(
-    tmp_path: Path,
-    provider: _Provider,
-) -> None:
-    """The idle time follows the provider's cache, which every request of the conversation renews."""
-    stamped: list[Path] = []
+async def test_an_agent_that_keeps_no_memory_copy_stamps_nothing(tmp_path: Path, provider: _Provider) -> None:
+    """Only a run whose requests send a kept MEMORY.md copy touches a copy file before its requests."""
+    with patch("mindroom.loop_hooks.stamp_entrypoint_snapshot") as stamp:
+        await _three_turns(tmp_path, provider)
 
-    def stamp(path: Path, *, now: float) -> None:
-        assert now == pytest.approx(time.time(), abs=60)
-        stamped.append(path)
-
-    with patch("mindroom.loop_hooks.stamp_entrypoint_snapshot", new=stamp):
-        _requests, config, runtime_paths = await _three_turns(tmp_path, provider)
-
-    database = create_session_storage("test_agent", config, runtime_paths, execution_identity=None).path
-    assert stamped == [entrypoint_snapshot_path(database, "session-1")] * len(provider.model.requests)
-    assert len(stamped) == 3
+    assert len(provider.model.requests) == 3
+    stamp.assert_not_called()
 
 
 _SESSION_PREAMBLE = "[File memory entrypoint (agent)]\nStable MEMORY.md"

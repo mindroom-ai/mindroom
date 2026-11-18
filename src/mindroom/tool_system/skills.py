@@ -83,8 +83,8 @@ _PROMPT_HEADER = (
     "3. **Reference**: Use `get_skill_reference` to access specific documentation as needed",
     "4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them",
     "",
-    "**IMPORTANT**: References are documentation files (NOT executable). Only call `get_skill_reference` and "
-    "`get_skill_script` with a filename that `get_skill_instructions` listed for the skill.",
+    "**IMPORTANT**: References are documentation files (NOT executable). When you do not know a skill's "
+    "filenames, call `get_skill_reference` or `get_skill_script` with only the skill name to list them.",
     "",
     "This approach ensures you only load detailed instructions when actually needed.",
     "",

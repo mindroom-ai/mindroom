@@ -16,6 +16,7 @@ a Matrix reaction, or a job acknowledgement that failed.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -30,7 +31,7 @@ from mindroom.history.run_checkpoint import checkpoint_hooks
 from mindroom.history.types import HistoryScope
 from mindroom.llm.provider import DeferredTools
 from mindroom.llm.tool_search import resolve_call_tool_calls
-from mindroom.memory import entrypoint_snapshot_path, stamp_entrypoint_snapshot
+from mindroom.memory import SENDS_ENTRYPOINT_SNAPSHOT_KEY, entrypoint_snapshot_path, stamp_entrypoint_snapshot
 from mindroom.participation_hook import participation_hook
 from mindroom.skill_learning.capture import capture_final_request
 from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_hook
@@ -92,8 +93,9 @@ def agent_loop_hooks(
     The run compacts as its build's agent, and a top-level agent hears of its ended jobs. ``queued_notices`` is off
     for a team member, whose leader owns the turn's notices; ``steering`` is on for a run that owns its reply, which a
     completed batch then ends for a steering message, and off for a delegated child, whose owner it leaves that to.
-    ``skill_review_capture`` records the run's final request. Every request a stored run sends, a resume's included,
-    restarts the idle time after which its conversation loads MEMORY.md again (``memory._entrypoint_snapshots``).
+    ``skill_review_capture`` records the run's final request. Every request of a stored run that sends its
+    conversation's MEMORY.md copy, as the run's metadata says and a resume's keeps saying, restarts the idle time
+    after which the conversation loads the file again (``memory._entrypoint_snapshots``).
     """
     jobs = build.tool_jobs
     agent_name = build.spec.id
@@ -117,9 +119,10 @@ def agent_loop_hooks(
         return hooks
     snapshot = entrypoint_snapshot_path(turn.storage.store.path, turn.storage.session.session_id)
 
-    async def stamp_request(_state: LoopState) -> SendRequest:
+    async def stamp_request(state: LoopState) -> SendRequest:
         """Stamp the conversation's prompt cache as read now; last, so only for a request that is sent."""
-        stamp_entrypoint_snapshot(snapshot, now=time.time())
+        if (state.record.metadata or {}).get(SENDS_ENTRYPOINT_SNAPSHOT_KEY):
+            await asyncio.to_thread(stamp_entrypoint_snapshot, snapshot, now=time.time())
         return SendRequest()
 
     return replace(hooks, before_request=(*hooks.before_request, stamp_request))

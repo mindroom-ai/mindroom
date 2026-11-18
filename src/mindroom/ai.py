@@ -61,12 +61,12 @@ from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import (
+    SENDS_ENTRYPOINT_SNAPSHOT_KEY,
     ConversationRef,
     MemoryPromptParts,
     build_memory_prompt_parts,
     conversation_entrypoint_preamble,
     entrypoint_snapshot_path,
-    prompt_cache_ttl_seconds,
     strip_user_turn_time_prefix,
 )
 from mindroom.metadata_merge import deep_merge_metadata
@@ -208,6 +208,7 @@ class _PreparedAgentRun:
     are the stored history the request replays under the resolved plan, and ``turn`` is the new input around the
     prompt.
     ``cli_context`` holds the context documents a minimal turn's Bash reads through `mindroom-agent`.
+    ``sends_memory_copy`` says the system messages hold the MEMORY.md copy the conversation keeps.
     """
 
     build: AgentBuild
@@ -222,6 +223,7 @@ class _PreparedAgentRun:
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
     cli_context: Mapping[str, str]
+    sends_memory_copy: bool
 
     @property
     def prompt_text(self) -> str:
@@ -668,7 +670,6 @@ def _memory_conversation(
     ctx: ResponseTurnContext,
     config: Config,
     scope_context: ScopeSessionContext | None,
-    model: ModelProvider,
 ) -> ConversationRef | None:
     """Name the conversation whose cached system prompt the turn's inlined MEMORY.md should keep unchanged.
 
@@ -677,8 +678,7 @@ def _memory_conversation(
     system prompt every turn and can drop the agent's own memory writes, so none of them has a cache to keep.
     Without automatic compaction, fitting a long conversation into the context window is such a limit. Nor has a turn
     that stores no run (``usage_kind``), as its later turns replay none of its memory writes.
-    The copy lies beside the conversation's database, so in a private agent's own state root, and is kept for
-    as long as ``model`` keeps a prompt cache.
+    The copy lies beside the conversation's database, so in a private agent's own state root.
     """
     if (
         ctx.persona is not None
@@ -697,7 +697,6 @@ def _memory_conversation(
     return ConversationRef(
         compaction,
         entrypoint_snapshot_path(scope_context.storage.path, scope_context.session_id),
-        prompt_cache_ttl_seconds(extended_cache_time=bool(model.model_params.get("extended_cache_time"))),
     )
 
 
@@ -736,7 +735,7 @@ async def _system_messages_after_compaction(
     That compaction already changes the request after the system prompt, so reloading here costs nothing, while
     waiting for the next turn would make it miss the cache on the whole compacted history.
     """
-    compacted = _memory_conversation(ctx, config, scope_context, build.spec.model)
+    compacted = _memory_conversation(ctx, config, scope_context)
     if compacted is None or compacted == conversation:
         return system_messages
     fresh = await conversation_entrypoint_preamble(
@@ -832,7 +831,7 @@ async def _prepare_agent_and_prompt(
         return runtime_model, build
 
     memory_backend = agent_memory_backend(config, agent_name)
-    memory_conversation = _memory_conversation(ctx, config, scope_context, provider)
+    memory_conversation = _memory_conversation(ctx, config, scope_context)
     parallel_branches = memory_backend == "mem0"
     serial_reason: str | None = None
     if memory_backend == "file":
@@ -975,6 +974,7 @@ async def _prepare_agent_and_prompt(
         prepared_history=prepared_execution.prepared_history,
         runtime_model_name=runtime_model.model_name,
         cli_context=cli_context,
+        sends_memory_copy=memory_conversation is not None,
     )
 
 
@@ -1028,6 +1028,10 @@ async def _prepare_agent_run_context(
     )
     if ctx.agent_mode == "minimal":
         metadata = dict(metadata or {}) | {"agent_mode": "minimal"}
+    # Set for this attempt alone: an attempt that continues another's turn starts from that one's metadata.
+    metadata.pop(SENDS_ENTRYPOINT_SNAPSHOT_KEY, None)
+    if prepared_run.sends_memory_copy:
+        metadata[SENDS_ENTRYPOINT_SNAPSHOT_KEY] = True
 
     return _AgentRunContext(
         turn=ctx,

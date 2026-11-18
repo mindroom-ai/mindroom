@@ -98,9 +98,9 @@ class TestMemoryIntegration:
         # Verify response
         assert response.text == "Test response"
 
-        # Verify memory enhancement was applied; the scripted model keeps a prompt cache for five minutes.
+        # Verify memory enhancement was applied
         database = create_session_storage("general", config, runtime_paths, execution_identity=None).path
-        conversation = ConversationRef((None, None), entrypoint_snapshot_path(database, "test_session"), 300)
+        conversation = ConversationRef((None, None), entrypoint_snapshot_path(database, "test_session"))
         mock_build.assert_called_once_with(
             "What is 2+2?",
             "general",
@@ -241,7 +241,6 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         summary=ScopeSummary(text=" Earlier work. ", updated_at=datetime.now(UTC)),
     )
     database = tmp_path / "general" / "sessions" / "general.db"
-    model = ScriptedModel([], model_params={"extended_cache_time": True})
     scope_context = ScopeSessionContext(
         scope=HistoryScope("agent", "general"),
         storage=MagicMock(path=database),
@@ -262,19 +261,17 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         memory={"backend": "file"},
     )
 
-    assert _memory_conversation(ctx, config, scope_context, model) == ConversationRef(
+    assert _memory_conversation(ctx, config, scope_context) == ConversationRef(
         ("Earlier work.", None),
         entrypoint_snapshot_path(database, "thread"),
-        3600,
     )
-    assert _memory_conversation(ctx, config, scope_context, ScriptedModel([])).cache_ttl == 300
-    assert _memory_conversation(ctx, mem0, scope_context, model) is None
-    assert _memory_conversation(replace(ctx, agent_mode="minimal"), config, scope_context, model) is None
-    assert _memory_conversation(ctx, limited, scope_context, model) is None
+    assert _memory_conversation(ctx, mem0, scope_context) is None
+    assert _memory_conversation(replace(ctx, agent_mode="minimal"), config, scope_context) is None
+    assert _memory_conversation(ctx, limited, scope_context) is None
     scheduled = replace(ctx, scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"))
-    assert _memory_conversation(scheduled, config, scope_context, model) is None
+    assert _memory_conversation(scheduled, config, scope_context) is None
     persona = replace(ctx, persona=inline_persona("You are a reviewer.", None, None, None))
-    assert _memory_conversation(persona, config, scope_context, model) is None
+    assert _memory_conversation(persona, config, scope_context) is None
     # Compaction nobody configured never runs on its own, so a long conversation drops its oldest runs instead.
     unauthored = Config(
         agents={"general": AgentConfig(display_name="General")},
@@ -282,4 +279,4 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         models={"default": ModelConfig(provider="openai", id="test-model")},
         memory={"backend": "file"},
     )
-    assert _memory_conversation(ctx, unauthored, scope_context, model) is None
+    assert _memory_conversation(ctx, unauthored, scope_context) is None
