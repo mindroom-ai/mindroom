@@ -290,7 +290,10 @@ def _participation_for_request(
     """Own one participation decision from locked preparation through delivery."""
     if request.participation is None:
         return None
-    gate = ParticipationGate(instructions=request.participation.instructions)
+    gate = ParticipationGate(
+        instructions=request.participation.instructions,
+        on_approved=request.on_participation_approved,
+    )
     if request.existing_event_id is not None:
         gate.approve_existing_response()
     else:

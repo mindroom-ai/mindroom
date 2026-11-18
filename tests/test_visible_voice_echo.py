@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTE_EVENT_TYPE,
@@ -310,6 +311,35 @@ async def test_other_bot_replies_after_the_grace_when_the_owner_never_posts(
     assert time.monotonic() - started >= 0.2
     assert other.gateway.sent == []
     assert len(other.runner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_adaptive_agent_posts_the_transcript_only_once_it_decides_to_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent that still decides whether to answer claims and posts nothing, so the agent that answers posts."""
+    config = _config(tmp_path)
+    room = _room_with_members(config, "general", "research")
+    harness = _build_harness(config, tmp_path)
+    event, normalized = _voice_event(config)
+    _transcribes(monkeypatch, normalized)
+    adaptive = ResponseAction(kind="individual", participation=ParticipationConfig())
+    plan = DispatchPlan(kind="respond", response_action=adaptive)
+    monkeypatch.setattr(harness.policy, "plan_turn", AsyncMock(return_value=plan))
+
+    await _deliver(harness, room, event)
+
+    [request] = harness.runner.requests
+    assert harness.gateway.sent == []
+    answering = _build_harness(config, tmp_path, agent_name="research")
+    _answers(answering, monkeypatch)
+    await _deliver(answering, room, event)
+    assert [sent.response_text for sent in answering.gateway.sent] == [_TRANSCRIPT]
+    # Had the adaptive agent decided to answer too, the one transcript would stand.
+    assert request.on_participation_approved is not None
+    await request.on_participation_approved()
+    assert harness.gateway.sent == []
 
 
 @pytest.mark.asyncio

@@ -64,7 +64,7 @@ from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     import nio
     import structlog
@@ -560,8 +560,14 @@ class TurnDispatcher:
         if pending_turn is None or await visible_responses.settle_deleted_sources(pending_turn, room_id=room.room_id):
             return
         handled_turn = pending_turn.record
-        if response_history_scope is not None and prepared.turn.payload.voice_transcript:
-            await self._publish_voice_transcripts(prepared, handled_turn)
+        publish_voice = (
+            partial(self._publish_voice_transcripts, prepared, handled_turn)
+            if response_history_scope is not None and prepared.turn.payload.voice_transcript
+            else None
+        )
+        # An adaptive agent's plan only invites it to decide: it posts once its participation approves the reply.
+        if publish_voice is not None and response_action.participation is None:
+            await publish_voice()
 
         # The inbox handoff is complete once the runner takes the conversation's
         # response lock; the response itself keeps running on a runner-owned task.
@@ -577,6 +583,7 @@ class TurnDispatcher:
                 handled_turn=handled_turn,
                 matrix_run_metadata=self.deps.turn_store.build_run_metadata(handled_turn),
                 on_lifecycle_lock_acquired=response_started.set,
+                on_participation_approved=publish_voice,
                 reconcile_visible_response=pending_turn.resumes_response,
             ),
             name=f"inbox_response:{prepared.turn.event.event_id}",
@@ -937,6 +944,7 @@ class TurnDispatcher:
         handled_turn: TurnRecord,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
+        on_participation_approved: Callable[[], Awaitable[None]] | None = None,
         reconcile_visible_response: bool = False,
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
@@ -1034,6 +1042,7 @@ class TurnDispatcher:
                 scheduled_history_budget=dispatch.scheduled_history_budget,
                 scheduled_model=dispatch.scheduled_model,
                 participation=action.participation,
+                on_participation_approved=on_participation_approved,
                 payload_preparation=payload_preparation,
                 current_timestamp_ms=current_timestamp_ms,
                 current_prompt_is_structured=dispatch.current_prompt_is_structured,

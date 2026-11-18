@@ -67,6 +67,8 @@ class ResponseRequest:
     response_envelope: MessageEnvelope
     sources: ResponseSources
     participation: ParticipationConfig | None = None
+    # Runs once ``participation`` approves this reply, before it shows anything.
+    on_participation_approved: Callable[[], Awaitable[None]] | None = None
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     # The event this response was dispatched to write over: the answer an edit

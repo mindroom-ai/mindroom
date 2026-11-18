@@ -212,6 +212,7 @@ from mindroom.turns.ingress import TurnIngress
 from mindroom.turns.interactive_selection import InteractiveSelections
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
+from mindroom.voice import visible_voice_echo
 from mindroom.voice.ingress import VoiceIngress
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backends import static_runner as static_runner_module
@@ -4258,6 +4259,14 @@ def _reset_approval_manager_runtime() -> Generator[None]:
     approval_manager_module._MANAGER = None
     yield
     approval_manager_module._MANAGER = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_voice_transcript_locks() -> Generator[None]:
+    """Keep the per-voice-message transcript locks, and their loop bindings, per test."""
+    visible_voice_echo._posting.clear()
+    yield
+    visible_voice_echo._posting.clear()
 
 
 @pytest.fixture(autouse=True)
