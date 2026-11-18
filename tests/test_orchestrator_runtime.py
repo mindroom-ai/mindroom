@@ -5840,7 +5840,7 @@ async def test_shutdown_ends_the_grant_refresh_in_flight(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["published", "read_failed", "voided"])
+@pytest.mark.parametrize("outcome", ["published", "read_failed", "superseded", "voided"])
 async def test_grant_refresh_follow_up_runs_only_after_a_publication(tmp_path: Path, outcome: str) -> None:
     """A voided refresh changed no grant: only the invite retry that room setup relies on still runs."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())

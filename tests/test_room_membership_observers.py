@@ -711,38 +711,57 @@ async def test_one_failed_joined_rooms_keeps_discovery_unknown(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("loser", ["open", "armed"])
-async def test_invalidations_during_every_held_read_get_one_retry_then_the_backoff(tmp_path: Path, loser: str) -> None:
+@pytest.mark.parametrize("other", ["open_loses_history", "armed_loses_history", "armed_opens"])
+async def test_what_another_account_does_during_a_held_read_decides_the_retry(tmp_path: Path, other: str) -> None:
     """An open account whose sync keeps losing history voids each attempt; the coordinator retries once, then waits.
 
     The same loss from an account that never opened voids nothing: the healthy account's row publishes.
+    An account that opens during the read supersedes it: its rooms are read at once, with no further sync frame.
     """
     config, runtime_paths = _config(tmp_path)
     a = _Account(_A, {_ROOM: (_A, _ALICE)})
+    b = _Account(_B, {_OTHER: (_B, _ALICE)})
     index = AgentReplyMembershipIndex()
     membership_sync = _sync(index)
     outcomes: list[object] = []
     loss = _ingestion_admission(IngestionRecordDisposition.HISTORY_LOSS, room_id=_OTHER)
 
-    async def refresh() -> object:
-        a.hold, a.reading = asyncio.Event(), asyncio.Event()
+    def observers() -> tuple[list[nio.AsyncClient], Callable[[str, Sequence[str]], str | None], bool]:
         # While B's loop is only armed, B runs without observing, so the room lists are not complete.
-        observers = (_clients(a), _by_power({}), loser == "open")
-        attempt = asyncio.create_task(index.refresh(config, runtime_paths, lambda: observers))
-        await _reached(a.reading)
-        membership_sync.pre_admit_ingestion(config, runtime_paths, loss, None, observer_user_id=_B)
-        a.hold.set()
+        b_open = membership_sync.observer_is_open(_B)
+        return _clients(a, *([b] if b_open else [])), _by_power({}), b_open
+
+    async def refresh() -> object:
+        # A's row is kept after it published once, so only an attempt that reads A can be held.
+        held = other != "armed_opens" or not outcomes
+        a.hold, a.reading = (asyncio.Event() if held else None), asyncio.Event()
+        attempt = asyncio.create_task(index.refresh(config, runtime_paths, observers))
+        if a.hold is not None:
+            await _reached(a.reading)
+            if other == "armed_opens":
+                # B's first settled frame: it opens and asks for a refresh, which starts nothing while one runs.
+                membership_sync.observer_frame_settled(_B)
+                membership_sync.request_refresh(config, refresh)
+            else:
+                membership_sync.pre_admit_ingestion(config, runtime_paths, loss, None, observer_user_id=_B)
+            a.hold.set()
         outcomes.append(await asyncio.wait_for(attempt, 5))
         return outcomes[-1]
 
     index.invalidate(config, reason="initial_config")
-    _enter(membership_sync, config, loser, _B)
+    _enter(membership_sync, config, "open" if other == "open_loses_history" else "armed", _B)
     await asyncio.wait_for(membership_sync.refresh_for_access_check(config, refresh), 5)
 
-    if loser == "armed":
+    if other == "armed_loses_history":
         assert outcomes == ["read_failed"]
         assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
         assert not index.knows_joined_rooms()
+        return
+    if other == "armed_opens":
+        assert outcomes == ["superseded", "published"]
+        assert _observers(index) == {_ROOM: _A, _OTHER: _B}
+        assert index.knows_joined_rooms()
+        assert membership_sync._refresh_retry_at == 0.0
         return
     assert outcomes == ["voided", "voided"]
     assert membership_sync._refresh_retry_at > 0.0

@@ -59,6 +59,8 @@ class AgentReplyMembershipSync:
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         self._refresh_task: asyncio.Task[None] | None = None
+        # Whether a grant loss, an own join or a newly open account asked for a refresh since the last attempt began.
+        self._refresh_requested = False
         # Each account's receive loop: absent while closed, False once armed by its start, True once open.
         self._observer_open: dict[str, bool] = {}
         self._live_transition_lock = asyncio.Lock()
@@ -147,6 +149,7 @@ class AgentReplyMembershipSync:
 
         This never starts a call. An own join and an account that opened only ask for the rebuild: they revoke nothing.
         """
+        self._refresh_requested = True
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         for bot in self._bots() if revoke else ():
@@ -209,10 +212,16 @@ class AgentReplyMembershipSync:
         return self._refresh_task
 
     async def _refresh(self, config: Config, refresh: Callable[[], Awaitable[object]]) -> None:
-        """Refresh, once more at once when an invalidation voided the attempt; what is still unanswered backs off."""
-        if await refresh() in ("voided", "superseded"):
-            await refresh()
-        if not self._memberships.needs_refresh(config):
+        """Refresh, and once more at once when the attempt was voided or superseded or new work arrived while it ran.
+
+        Only a failed read backs off, or a refresh that this one retry left voided or superseded again.
+        """
+        for _ in range(2):
+            self._refresh_requested = False
+            outcome = await refresh()
+            if outcome not in ("voided", "superseded") and not self._refresh_requested:
+                break
+        if outcome == "published" or not self._memberships.needs_refresh(config):
             self._refresh_attempt = 0
             self._refresh_retry_at = 0.0
             return

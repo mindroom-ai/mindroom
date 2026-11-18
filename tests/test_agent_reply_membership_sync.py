@@ -456,17 +456,33 @@ async def test_sync_frames_request_one_refresh_without_waiting_for_it() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("outcomes", "backs_off"),
+    ("outcomes", "arrivals", "backs_off"),
     [
-        (["published"], False),
-        (["read_failed"], True),
-        (["voided", "published"], False),
-        (["voided", "read_failed"], True),
-        (["voided", "voided"], True),
+        (["published"], (), False),
+        (["read_failed"], (), True),
+        (["voided", "published"], (), False),
+        (["voided", "read_failed"], (), True),
+        (["voided", "voided"], (), True),
+        (["superseded", "published"], (), False),
+        (["superseded", "superseded"], (), True),
+        # Work that arrives while an attempt runs its follow-up is served by the one retry, whatever that outcome.
+        (["published", "published"], (0,), False),
+        (["read_failed", "published"], (0,), False),
+        (["published", "read_failed"], (0,), True),
+        # Work that arrives during the retry too is past the budget, but a publication never sets a failure backoff.
+        (["published", "published"], (0, 1), False),
     ],
 )
-async def test_refresh_outcome_decides_the_retry(outcomes: list[str], *, backs_off: bool) -> None:
-    """A voided refresh gets one retry at once; a failed read and a second void wait for the backoff."""
+async def test_refresh_outcome_decides_the_retry(
+    outcomes: list[str],
+    arrivals: tuple[int, ...],
+    *,
+    backs_off: bool,
+) -> None:
+    """A voided or superseded refresh, or one new work arrived during, gets one retry at once.
+
+    Only a failed read, or a refresh voided or superseded again on that retry, waits for the backoff.
+    """
     config = Config()
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     memberships.needs_refresh.return_value = True
@@ -474,8 +490,12 @@ async def test_refresh_outcome_decides_the_retry(outcomes: list[str], *, backs_o
     attempts: list[str] = []
 
     async def refresh() -> str:
-        attempts.append(outcomes[len(attempts)])
-        memberships.needs_refresh.return_value = attempts[-1] != "published"
+        attempt = len(attempts)
+        attempts.append(outcomes[attempt])
+        memberships.needs_refresh.return_value = attempts[-1] != "published" or attempt in arrivals
+        if attempt in arrivals:
+            # The index answered, and a grant loss arrives while the runtime's follow-up still runs.
+            membership_sync.invalidate(config, reason="uncertain_sync_response")
         return attempts[-1]
 
     membership_sync.request_refresh(config, refresh)
@@ -485,9 +505,10 @@ async def test_refresh_outcome_decides_the_retry(outcomes: list[str], *, backs_o
 
     assert attempts == outcomes
     assert (membership_sync._refresh_retry_at > 0.0) is backs_off
-    # During the backoff a sync frame starts nothing; without one, grants that need nothing start nothing either.
-    membership_sync.request_refresh(config, refresh)
-    assert membership_sync._refresh_task is task
+    if backs_off or not memberships.needs_refresh.return_value:
+        # During the backoff a sync frame starts nothing; without one, grants that need nothing start nothing either.
+        membership_sync.request_refresh(config, refresh)
+        assert membership_sync._refresh_task is task
 
 
 @pytest.mark.asyncio
