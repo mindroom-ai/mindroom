@@ -557,7 +557,7 @@ async def test_batch_decodes_in_question_order() -> None:
 @pytest.mark.parametrize("wire", [SYSTEM_ONE, OPENAI_DECISIONS], ids=["typesafe", "openai"])
 @pytest.mark.parametrize(
     "names",
-    [["c0", "c2"], ["c0", "c1", "c2", "c3"], ["c0", "c0", "c2"], ["c0", "c1", "other"]],
+    [["c0", "c2"], ["c0", "c1", "c2", "c3"], ["c0", "c0", "c1", "c2"], ["c0", "c1", "other"]],
     ids=["missing", "extra", "duplicate", "unknown"],
 )
 async def test_batch_missing_or_extra_answer_is_invalid_response(wire: JudgmentWire, names: list[str]) -> None:
