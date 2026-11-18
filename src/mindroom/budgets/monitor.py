@@ -24,6 +24,7 @@ from mindroom.background_tasks import SupervisedLoop
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
+from mindroom.config.models import split_model_reference
 from mindroom.constants import resolve_session_state_root
 from mindroom.logging_config import get_logger
 from mindroom.providers.identity import model_identity
@@ -112,8 +113,10 @@ def budget_model(
     budgets = config.budgets
     if budgets is None or requester_id is None:
         return model_name
+    # A fallback that names no level is that model at any level, so a reference to one keeps the level it names.
     # Unpriced models add no tracked spend, so swapping them could only raise cost.
-    if model_name == budgets.fallback_model or not _is_priced(config, model_name):
+    is_fallback = budgets.fallback_model in (model_name, split_model_reference(model_name)[0])
+    if is_fallback or not _is_priced(config, model_name):
         return model_name
     canonical_requester_id = budget_user_id(requester_id, config, runtime_paths)
     if canonical_requester_id is None:

@@ -31,6 +31,7 @@ from mindroom.providers.openai.build import build_provider as build_openai_provi
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.pipeline.wrapped import WrappedProvider
+from mindroom.providers.reasoning import apply_reasoning_level
 from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 
@@ -69,7 +70,7 @@ _SETTINGS_KEYS = {
 
 
 def configured_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelConfig:
-    """Return the model configured as ``model_name``, with the key the dashboard saved for it applied.
+    """Return the model configured as ``model_name``, with its reasoning level and the dashboard's key applied.
 
     A key written as ``${NAME}`` becomes that runtime env variable's value, and stays as written when it is unset.
     """
@@ -78,7 +79,7 @@ def configured_model(config: Config, runtime_paths: RuntimePaths, model_name: st
         msg = f"Unknown model: {model_name}. Available models: {available}"
         raise ValueError(msg)
     model_config = model_with_dashboard_key(model_name, config.models[model_name], runtime_paths)
-    return resolve_api_key_reference(model_config, runtime_paths)
+    return resolve_api_key_reference(apply_reasoning_level(model_config), runtime_paths)
 
 
 def _build_adapter(
@@ -215,4 +216,8 @@ def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -
         allowed = CLAUDE_ACCEPTED_KEYS[cast("ClaudeRouteKind", provider)]
     else:
         allowed = _SETTINGS_KEYS[provider]
-    reject_unsupported_extra_kwargs(model_config.extra_kwargs, allowed, provider=model_config.provider)
+    extra_kwargs = dict(model_config.extra_kwargs or {})
+    # Each level writes the route's reasoning key, which the route must accept too.
+    for level in model_config.reasoning.levels if model_config.reasoning else ():
+        extra_kwargs.update(apply_reasoning_level(model_config.at_level(level)).extra_kwargs or {})
+    reject_unsupported_extra_kwargs(extra_kwargs, allowed, provider=model_config.provider)

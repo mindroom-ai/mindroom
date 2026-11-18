@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -60,7 +62,7 @@ from mindroom.tool_system.events import (
 )
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import current_execution_identity
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
 from tests.conftest import (
@@ -1186,6 +1188,51 @@ async def test_a_fresh_attempt_after_an_approved_run_sends_its_resume_s_system_e
     assert result.response_text.endswith("Done.")
     *_, fresh = model.requests
     assert instruction.text in system_text(fresh.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_resume_leaves_its_conversation_s_memory_copy_s_idle_time_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed run sends the system prompt it paused with, which may hold a MEMORY.md copy a later turn replaced.
+
+    Its requests therefore warm no cache of the copy the conversation keeps now, and touch no copy file: the reply
+    after it loads MEMORY.md again once that copy's own cache is gone.
+    """
+    paths, config = _usage_config(tmp_path)
+    config.memory.backend = "file"
+    memory = agent_workspace_root_path(paths.storage_root, "general") / "MEMORY.md"
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text("# Memory\nFact one.\n", encoding="utf-8")
+    identity = _identity("memory-session")
+    model = _CheckedModel([_add("approved", 10, 1), answer("Between."), answer("Done."), answer("Later.")])
+    install_model_providers(monkeypatch, {"default": model})
+
+    async def system_prompt_of_turn(prompt: str) -> str:
+        ctx = make_turn_context("general", session_id=identity.session_id, requester_id=identity.requester_id)
+        await ai_response(replace(ctx, prompt=prompt, execution_identity=identity), paths, config)
+        return system_text(model.requests[-1].messages)
+
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    # A turn while the run waits for its approval replaces the copy the paused run sent: an edited line loads at once.
+    memory.write_text("# Memory\nFact one, corrected.\n", encoding="utf-8")
+    replaced = await system_prompt_of_turn("Meanwhile?")
+    assert "Fact one, corrected." in replaced
+    [snapshot] = paths.storage_root.rglob("memory_entrypoint_snapshots/*.json")
+    cold = time.time() - 62 * 60
+    os.utime(snapshot, (cold, cold))
+    memory.write_text("# Memory\nFact one, corrected.\nFact two.\n", encoding="utf-8")
+
+    stamped: list[Path] = []
+    with monkeypatch.context() as resuming:
+        resuming.setattr("mindroom.loop_hooks.stamp_entrypoint_snapshot", lambda path, *, now: stamped.append(path))  # noqa: ARG005
+        result = await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert stamped == []
+    assert snapshot.stat().st_mtime == cold
+    assert "Fact two." in await system_prompt_of_turn("And now?")
 
 
 @pytest.mark.asyncio

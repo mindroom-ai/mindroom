@@ -87,6 +87,8 @@ class SummaryModel:
     model: ModelProvider
     name: str
     input_budget_tokens: int
+    # A model at its ``off`` reasoning level keeps the thinking switch the level sends, which summaries otherwise omit.
+    keeps_thinking_setting: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,24 @@ class Summarizer:
 def _load_compaction_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
     """Build the compaction model's provider with dedicated history-preparation timing."""
     return provider_registry.build_model_provider(config, runtime_paths, model_name)
+
+
+def _summary_model(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+    input_budget_tokens: int,
+) -> SummaryModel:
+    model = _load_compaction_model(config, runtime_paths, model_name)
+    # Loading the model already rejected a name the config lacks, so only a stand-in loader gets past it with one.
+    model_config = config.models.get(model_name)
+    reasoning = model_config.reasoning if model_config is not None else None
+    return SummaryModel(
+        model=model,
+        name=model_name,
+        input_budget_tokens=input_budget_tokens,
+        keeps_thinking_setting=reasoning is not None and reasoning.default == "off",
+    )
 
 
 def _compaction_fallback_is_distinct(
@@ -157,10 +177,11 @@ def load_summarizer(
 ) -> Summarizer:
     """Load the summary model and, when distinct and loadable, its safeguard fallback."""
     assert execution_plan.summary_input_budget_tokens is not None
-    summary_model = SummaryModel(
-        model=_load_compaction_model(config, runtime_paths, execution_plan.compaction_model_name),
-        name=execution_plan.compaction_model_name,
-        input_budget_tokens=execution_plan.summary_input_budget_tokens,
+    summary_model = _summary_model(
+        config,
+        runtime_paths,
+        execution_plan.compaction_model_name,
+        execution_plan.summary_input_budget_tokens,
     )
     fallback_model_name = execution_plan.compaction_fallback_model_name
     fallback_summary_input_budget = execution_plan.compaction_fallback_summary_input_budget_tokens
@@ -178,11 +199,7 @@ def load_summarizer(
         # fails (missing SDK, credentials, client setup), compaction still
         # runs on the healthy primary instead of aborting before any call.
         try:
-            fallback_model = SummaryModel(
-                model=_load_compaction_model(config, runtime_paths, fallback_model_name),
-                name=fallback_model_name,
-                input_budget_tokens=fallback_summary_input_budget,
-            )
+            fallback_model = _summary_model(config, runtime_paths, fallback_model_name, fallback_summary_input_budget)
         except Exception:
             logger.warning(
                 "Compaction fallback model failed to load; continuing without a fallback",
@@ -823,6 +840,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 summary_input=summary_input,
                 summary_prompt=summarizer.prompt,
                 timeout_seconds=summarizer.timeout_seconds,
+                keep_thinking_setting=summary_model.keeps_thinking_setting,
                 on_usage=(
                     partial(summarizer.on_usage, summary_model.model.identity)
                     if summarizer.on_usage is not None

@@ -66,6 +66,7 @@ from mindroom.config.models import (
     DebugConfig,
     DefaultsConfig,
     ModelConfig,
+    ModelTable,
     RouterConfig,
     ToolConfigEntry,
 )
@@ -420,7 +421,12 @@ class Config(BaseModel):
         default_factory=ExternalTriggerPolicyConfig,
         description="Global policy for tool-managed signed external triggers",
     )
-    models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
+    # Validating the default turns it into a ``ModelTable`` too, so an omitted ``models`` still reads references.
+    models: dict[str, ModelConfig] = Field(
+        default_factory=dict,
+        validate_default=True,
+        description="Model configurations",
+    )
     tool_approval: ToolApprovalConfig = Field(
         default_factory=ToolApprovalConfig,
         description="Tool-approval rules for agent-initiated tool calls",
@@ -486,14 +492,17 @@ class Config(BaseModel):
 
     @field_validator("models")
     @classmethod
-    def validate_model_names(cls, models: dict[str, ModelConfig]) -> dict[str, ModelConfig]:
-        """Reject an empty model name, or one with a character its dashboard key ``model:<name>`` cannot carry."""
+    def validate_model_names(cls, models: dict[str, ModelConfig]) -> ModelTable:
+        """Reject an empty model name, or one with a character its dashboard key ``model:<name>`` cannot carry.
+
+        The names cannot carry ``@``, so the returned table reads ``name@level`` as the model at that level.
+        """
         invalid = sorted(name for name in models if not SERVICE_NAME_PATTERN.fullmatch(name))
         if invalid:
             keys = ", ".join(f"models.{name}" for name in invalid)
             msg = f"Model names can only include {SERVICE_NAME_CHARACTERS}; rename {keys} and update every reference"
             raise ValueError(msg)
-        return models
+        return ModelTable(models)
 
     @model_validator(mode="after")
     def validate_budgets(self) -> Config:

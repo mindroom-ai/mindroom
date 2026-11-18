@@ -174,7 +174,12 @@ _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
 _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS = 60 * 60
 
 
+# Agents never read presence from sync; `is_user_online` asks the homeserver.
+# Delivered presence would end an extra long poll every cycle, as each room
+# member's sync refreshes its presence. Tuwunel ignores `types` in a presence
+# filter, so this one lists no senders.
 _SYNC_FILTER: dict[str, object] = {
+    "presence": {"senders": []},
     "room": {"timeline": {"limit": constants.CLASSIC_SYNC_TIMELINE_LIMIT}},
 }
 

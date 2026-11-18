@@ -17784,6 +17784,111 @@
       }
     ]
   },
+  "matrix_user": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "matrix_user_read",
+        "description": "Read Matrix as your owner: their own rooms and DMs, including those you are not in.\nActions (room_id: ID, #alias, or configured room name):\n- rooms: Their rooms and invitations, unread first (limit: default 20). query keeps rooms whose name contains it.\n- messages: room_id's newest messages (limit: default 30); page_token continues into older ones.\n  With thread_id: that thread's root and newest replies. With event_id: that message and those around it.\n- search: Messages containing query, in all their rooms or in room_id; page_token continues.\n- room: room_id's name, topic, encryption, whether it is a DM, and up to limit members.\n- people: query is a full Matrix ID for that profile, or a name to search the user directory.\n- download: The file of message event_id in room_id, as an attachment ID for your other tools.\n- mark_read: Mark room_id read for them, up to event_id or its newest message.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "rooms",
+                "messages",
+                "search",
+                "room",
+                "people",
+                "download",
+                "mark_read"
+              ]
+            },
+            "room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "event_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "page_token": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
   "matrix_voice_message": {
     "instructions": null,
     "guidance": null,
@@ -23824,7 +23929,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+              "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -23981,7 +24086,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
+              "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Use an empty string to restore\nnormal agent, room, and thread model selection."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27494,7 +27599,7 @@
           "properties": {
             "model_name": {
               "type": "string",
-              "description": "Configured model name from the `models:` section of\nconfig.yaml (for example \"default\" or \"opus\")."
+              "description": "Configured model name from the `models:` section of\nconfig.yaml (for example \"default\" or \"opus\"), or `name@level`\nfor one of the reasoning levels `list_models` shows (for example \"sol@high\")."
             },
             "when": {
               "type": "string",

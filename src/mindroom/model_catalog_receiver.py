@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, TypeIs, cast
 
 import nio
 
+from mindroom.config.models import split_model_reference
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import (
@@ -109,6 +110,14 @@ def _parse(event: object) -> _Request | None:
     )
 
 
+def _model_choice(field: str, reference: str | None) -> dict[str, object]:
+    """Report a model reference as its catalog key in ``field``, with its level as ``reasoning`` when it names one."""
+    if reference is None:
+        return {field: None}
+    model_name, level = split_model_reference(reference)
+    return {field: model_name} if level is None else {field: model_name, "reasoning": level}
+
+
 def _drop(
     event: nio.AuthenticatedToDeviceEvent,
     request: _Request | None,
@@ -196,20 +205,19 @@ class _Receiver:
         thread_overrides = resolve_thread_model_override(self.paths, request.thread_id, config=config).active
         # One reported override must govern every entity in the picker, never only some of them.
         shared_overrides = {thread_overrides.get(name) for name in scope.entity_names}
+        override = shared_overrides.pop() if len(shared_overrides) == 1 else None
+        inherited = {
+            name: resolve_turn_model(
+                config,
+                self.paths,
+                ModelScope(entity=name, room_id=request.room_id),
+                None,
+            ).model_name
+            for name in scope.entity_names
+        }
         return {
-            "override": shared_overrides.pop() if len(shared_overrides) == 1 else None,
-            "inherited": [
-                {
-                    "entity": name,
-                    "model": resolve_turn_model(
-                        config,
-                        self.paths,
-                        ModelScope(entity=name, room_id=request.room_id),
-                        None,
-                    ).model_name,
-                }
-                for name in scope.entity_names
-            ],
+            **_model_choice("override", override),
+            "inherited": [{"entity": name, **_model_choice("model", model)} for name, model in inherited.items()],
         }
 
     async def _respond(

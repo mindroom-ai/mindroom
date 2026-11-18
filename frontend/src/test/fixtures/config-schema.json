@@ -4141,6 +4141,18 @@
           ],
           "default": null,
           "description": "Provider prices in USD per million tokens, used to measure spend against budgets"
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasoningConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reasoning levels this model offers; its provider's reasoning key in extra_kwargs then follows the level"
         }
       },
       "required": [
@@ -4744,6 +4756,50 @@
         "voice"
       ],
       "title": "RealtimeCallProfile",
+      "type": "object"
+    },
+    "ReasoningConfig": {
+      "additionalProperties": false,
+      "description": "The reasoning levels one model offers and the level its plain name runs at.",
+      "properties": {
+        "levels": {
+          "description": "Levels clients offer for this model, in order; `name@level` runs the model at one of them",
+          "items": {
+            "enum": [
+              "off",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Levels",
+          "type": "array"
+        },
+        "default": {
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "type": "string",
+          "description": "Level the plain model name runs at; one of levels",
+          "title": "Default"
+        }
+      },
+      "required": [
+        "levels",
+        "default"
+      ],
+      "title": "ReasoningConfig",
       "type": "object"
     },
     "ResponderAccessConfig": {

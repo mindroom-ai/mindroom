@@ -21,8 +21,11 @@ from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.config.personal_agents import PersonalAgentInstance
+from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
@@ -968,6 +971,29 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
         False,
     ),
     "own_removal": (_remove_helper, False),
+    # Model entries shape model requests and prompts, never a toolkit or its permissions.
+    "model_added": (lambda config: config.models.__setitem__("extra", ModelConfig(provider="openai", id="x")), True),
+    "model_removed": (lambda config: config.models.pop("spare"), True),
+    "model_renamed": (lambda config: config.models.__setitem__("renamed", config.models.pop("spare")), True),
+    "model_display_name": (lambda config: setattr(config.models["default"], "display_name", "Fast"), True),
+    "model_pricing": (
+        lambda config: setattr(config.models["default"], "pricing", ModelPricing(input=1, output=2)),
+        True,
+    ),
+    "default_tools": (lambda config: setattr(config.defaults, "tools", ["calculator"]), False),
+    "default_worker_routing": (lambda config: setattr(config.defaults, "worker_scope", "user"), False),
+    "approval_rule": (
+        lambda config: setattr(
+            config.tool_approval,
+            "rules",
+            [ApprovalRuleConfig(match="action", action="require_approval")],
+        ),
+        False,
+    ),
+    "mcp_server": (
+        lambda config: config.mcp_servers.__setitem__("demo", MCPServerConfig(transport="stdio", command="npx")),
+        False,
+    ),
 }
 
 
@@ -988,6 +1014,10 @@ async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_un
         agents={
             "helper": AgentConfig(display_name="Helper", tools=["shell"], instructions=["Be brief."]),
             "other": AgentConfig(display_name="Other", instructions=["Be thorough."]),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="default-id"),
+            "spare": ModelConfig(provider="openai", id="spare-id"),
         },
     )
     current = config.model_copy(deep=True)

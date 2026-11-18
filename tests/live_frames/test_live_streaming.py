@@ -15,8 +15,9 @@ import mindroom.streaming as streaming_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, StreamingConfig
+from mindroom.live_frames.frames import LIVE_EVENT_TYPE, LiveDocs, fitted_tools
 from mindroom.live_frames.publisher import LivePublisher
-from mindroom.live_frames.transport import LiveSendOutcome
+from mindroom.live_frames.transport import LiveSendOutcome, frame_fits
 from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
@@ -140,10 +141,11 @@ async def _run(
     *,
     placeholder_event_id: str | None = None,
     show_tool_calls: bool = True,
+    client: nio.AsyncClient | None = None,
 ) -> None:
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
         await send_streaming_response(
-            make_matrix_client_mock(user_id="@mindroom_code:localhost"),
+            client or make_matrix_client_mock(user_id="@mindroom_code:localhost"),
             MessageTarget.resolve(_ROOM_ID, None, "$question"),
             config,
             runtime_paths_for(config),
@@ -202,6 +204,9 @@ async def test_reasoning_streams_live_and_the_final_event_keeps_it(tmp_path: Pat
     ]
     assert any(shown)
     assert all("io.mindroom.reasoning" not in content for content in edits.contents)
+    assert all(
+        "io.mindroom.reasoning" not in (write.content or {}) for write in records.writes if write.kind != "terminal"
+    )
 
 
 def _reasoning_segment_stream() -> AsyncIterator[Any]:
@@ -506,6 +511,156 @@ async def test_hidden_tool_calls_show_no_output(tmp_path: Path, frames: _Frames)
     assert all(state == [] for state in _tool_states(frames.sent))
 
 
+def _encrypted_client() -> nio.AsyncClient:
+    client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+    client.rooms[_ROOM_ID].encrypted = True
+    return client
+
+
+def _busy_calls(count: int) -> list[float | ToolStarted | ToolCompleted]:
+    """``count`` completed calls, each with long arguments and a long result."""
+    chunks: list[float | ToolStarted | ToolCompleted] = []
+    for index in range(count):
+        args = {f"arg{key}": f"{index}-{key}-" + "a" * 300 for key in range(4)}
+        call = ReportedCall(tool_call_id=f"call-{index}", tool_name="run_shell_command", tool_args=args)
+        done = ReportedCall(
+            tool_call_id=f"call-{index}",
+            tool_name="run_shell_command",
+            tool_args=args,
+            result=f"{index}: " + "r" * 2000,
+        )
+        chunks += [ToolStarted(call), 0.001, ToolCompleted(done)]
+    return chunks
+
+
+@pytest.mark.asyncio
+async def test_a_tool_heavy_turn_keeps_its_frames_within_the_size_limit(
+    tmp_path: Path,
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hundreds of calls with long previews cut the previews in frames instead of stopping them; writes keep them whole."""
+    monkeypatch.setattr(publisher_module, "_SNAPSHOT_INTERVAL_SECONDS", 0.1)
+    client = _encrypted_client()
+    records, edits = _records(), _Edits()
+    stream = _stream("Working", *_busy_calls(200), 0.05, " done", 0.05)
+    await _run(_config(tmp_path), stream, records, edits, client=client)
+
+    assert all(frame_fits(client, _ROOM_ID, frame, event_type=LIVE_EVENT_TYPE) for frame in frames.sent)
+    assert sum("snapshot" in frame for frame in frames.sent) > 2
+    shown = _tool_states(frames.sent)[-1]
+    assert len(shown) == 200
+    # The oldest calls lost their previews and the newest kept them cut; every changed entry says so.
+    assert "result_preview" not in shown[0]
+    assert shown[-1]["result_preview"].endswith("…")
+    assert len(shown[-1]["result_preview"]) == 200
+    assert all(entry["clipped"] is True for entry in shown)
+    written = [*edits.contents, _terminal(records)]
+    for content in written:
+        events = content["io.mindroom.tool_trace"]["events"]
+        assert all("clipped" not in event and len(event["result_preview"]) > 200 for event in events)
+    assert len(_terminal(records)["io.mindroom.tool_trace"]["events"]) == 200
+
+
+def _entry(index: int) -> dict[str, object]:
+    return {
+        "type": "tool_call_completed",
+        "tool_name": "run_shell_command",
+        "args_preview": f"{index} " + "a" * 1200,
+        "result_preview": f"{index} " + "r" * 500,
+        "tool_call_id": f"call-{index}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_frames_drop_the_oldest_previews_only_at_a_snapshot(
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deltas keep the fit of the last snapshot, so each carries only its new call; a snapshot fits again."""
+    monkeypatch.setattr(publisher_module, "_SNAPSHOT_INTERVAL_SECONDS", float("inf"))
+    client = _encrypted_client()
+    publisher = LivePublisher(client=client, room_id=_ROOM_ID)
+
+    def docs(count: int) -> LiveDocs:
+        return LiveDocs(
+            md="text",
+            reasoning="",
+            tools=tuple(_entry(index) for index in range(count)),
+            status="streaming",
+            activity="",
+        )
+
+    await publisher._send_next("$reply", docs(60))
+    assert publisher.bare == 0
+    for count in range(61, 160):
+        await publisher._send_next("$reply", docs(count))
+        assert [index for index, _ in frames.sent[-1]["delta"]["tools"]["set"]] == [count - 1]
+    assert publisher.bare == 0
+
+    publisher.last_snapshot_at = float("-inf")
+    await publisher._send_next("$reply", docs(160))
+    snapshot = frames.sent[-1]["snapshot"]["tools"]
+    assert publisher.bare > 0
+    assert frame_fits(client, _ROOM_ID, frames.sent[-1], event_type=LIVE_EVENT_TYPE)
+    # The fewest previews dropped: keeping one more would not fit.
+    one_more = {**frames.sent[-1], "snapshot": {**frames.sent[-1]["snapshot"]}}
+    one_more["snapshot"]["tools"] = list(fitted_tools(docs(160).tools, bare=publisher.bare - 1))
+    assert not frame_fits(client, _ROOM_ID, one_more, event_type=LIVE_EVENT_TYPE)
+    assert [("args_preview" in entry) for entry in snapshot] == [False] * publisher.bare + [True] * (
+        160 - publisher.bare
+    )
+
+    bare = publisher.bare
+    await publisher._send_next("$reply", docs(161))
+    assert [index for index, _ in frames.sent[-1]["delta"]["tools"]["set"]] == [160]
+    assert publisher.bare == bare
+
+
+@pytest.mark.asyncio
+async def test_a_delta_too_big_for_the_estimate_becomes_a_fitted_snapshot_or_goes_out_as_is(
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized delta is replaced by a snapshot that fits; when none fits, the delta goes out and the fit stays."""
+    monkeypatch.setattr(publisher_module, "_SNAPSHOT_INTERVAL_SECONDS", float("inf"))
+    publisher = LivePublisher(client=_encrypted_client(), room_id=_ROOM_ID)
+
+    def docs(count: int) -> LiveDocs:
+        return LiveDocs(
+            md="text",
+            reasoning="",
+            tools=tuple(_entry(index) for index in range(count)),
+            status="streaming",
+            activity="",
+        )
+
+    await publisher._send_next("$reply", docs(10))
+    # Deltas look too big; snapshots fit once the oldest five lost their previews.
+    monkeypatch.setattr(
+        publisher,
+        "_fits",
+        lambda frame: "snapshot" in frame and "args_preview" not in frame["snapshot"]["tools"][4],
+    )
+    await publisher._send_next("$reply", docs(11))
+    assert "snapshot" in frames.sent[-1]
+    assert frames.sent[-1]["seq"] == 1
+    assert publisher.bare == 5
+
+    # Nothing fits: the delta goes out as it is, and the fit is not widened by the failed search.
+    monkeypatch.setattr(publisher, "_fits", lambda _frame: False)
+    await publisher._send_next("$reply", docs(12))
+    assert [index for index, _ in frames.sent[-1]["delta"]["tools"]["set"]] == [11]
+    assert publisher.bare == 5
+
+    # A failed send makes the next frame a snapshot.
+    monkeypatch.setattr(publisher, "_fits", lambda _frame: True)
+    frames.outcomes = [LiveSendOutcome.RETRY]
+    await publisher._send_next("$reply", docs(13))
+    await publisher._send_next("$reply", docs(13))
+    assert "snapshot" in frames.sent[-1]
+
+
 @pytest.mark.asyncio
 async def test_reasoning_before_the_answer_streams_over_the_placeholder(tmp_path: Path, frames: _Frames) -> None:
     """A model that thinks before it answers shows its reasoning live over the reply's Thinking placeholder."""
@@ -593,6 +748,51 @@ async def test_stopped_frames_catch_up_at_once(tmp_path: Path, frames: _Frames) 
     assert len(frames.sent) == 2
     assert edits.contents[0]["body"].startswith("Hello world")
     assert edits.contents[0]["io.mindroom.live_checkpoint"] == {"sid": frames.sent[0]["sid"], "seq": 1}
+
+
+@pytest.mark.asyncio
+async def test_progress_edits_carry_reasoning_once_frames_stop(tmp_path: Path, frames: _Frames) -> None:
+    """Frames that stop for good leave reasoning to the progress edits, so the reply keeps showing it."""
+    frames.outcomes = [LiveSendOutcome.SENT, LiveSendOutcome.STOP]
+    records, edits = _records(), _Edits()
+    stream = _stream("Hello", 0.05, ReasoningDelta("Checking the cache"), 0.1, " world", 0.1, " again", 0.05)
+    await _run(_config(tmp_path), stream, records, edits)
+
+    assert len(frames.sent) == 2
+    assert edits.contents
+    reasoning = edits.contents[-1]["io.mindroom.reasoning"]
+    assert reasoning["text"] == "Checking the cache"
+    assert reasoning["duration_ms"] >= 0
+    assert reasoning["segments"][0]["start"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reasoning_alone_reaches_a_placeholder_once_frames_stop(tmp_path: Path, frames: _Frames) -> None:
+    """Before any answer text, stopped frames still hand the reasoning to the placeholder, and it keeps growing there."""
+    frames.outcomes = [LiveSendOutcome.STOP]
+    records, edits = _records(), _Edits()
+    config = _config(tmp_path, min_update_interval=0.01, interval_ramp_seconds=60)
+    stream = _stream(ReasoningDelta("Checking"), 0.2, ReasoningDelta(" the cache"), 0.2, "Answer", 0.02)
+    await _run(config, stream, records, edits, placeholder_event_id="$placeholder")
+
+    shown = [content["io.mindroom.reasoning"]["text"] for content in edits.contents if "Answer" not in content["body"]]
+    assert shown[0] == "Checking"
+    assert shown[-1] == "Checking the cache"
+
+
+@pytest.mark.asyncio
+async def test_without_frames_progress_edits_carry_reasoning_but_the_first_send_does_not(tmp_path: Path) -> None:
+    """With frames switched off, edits carry the reasoning so far; the create leaves it to them."""
+    records, edits = _records(), _Edits()
+    stream = _stream(ReasoningDelta("Checking the cache"), 0.05, "Hello", 0.1, " world", 0.1, " again", 0.1)
+    config = _config(tmp_path, live_frames=False, min_update_interval=0.01, interval_ramp_seconds=60)
+    await _run(config, stream, records, edits)
+
+    (create,) = [write for write in records.writes if write.kind == "create"]
+    assert create.content is not None
+    assert "io.mindroom.reasoning" not in create.content
+    assert edits.contents
+    assert all(content["io.mindroom.reasoning"]["text"] == "Checking the cache" for content in edits.contents)
 
 
 @pytest.mark.asyncio

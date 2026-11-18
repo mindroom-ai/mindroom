@@ -20,7 +20,7 @@ from mindroom.commands.parsing import CommandType, command_parser, get_command_h
 from mindroom.config.agent import AgentConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ModelPricing
+from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, FORK_CONTENT_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.llm.runs import RunStatus
@@ -31,6 +31,7 @@ from mindroom.thread_models import (
     _store_path,
     clear_thread_model_override,
     copy_thread_model_override,
+    resolve_thread_model_override,
     set_thread_model_override,
 )
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -470,6 +471,32 @@ def test_resolve_turn_model_ignores_stale_thread_override(tmp_path: Path) -> Non
     )
 
     assert runtime_model.model_name == "default"
+
+
+def test_resolve_turn_model_ignores_a_thread_override_at_a_level_the_model_no_longer_lists(tmp_path: Path) -> None:
+    """A stored ``name@level`` whose level was removed is stale like a removed model; a listed one applies."""
+    config = _config_with_models(tmp_path)
+    config.models["default"] = config.models["default"].model_copy(
+        update={"reasoning": ReasoningConfig(levels=["low", "high"], default="low")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    scope = ModelScope(entity="test_agent", room_id=ROOM_ID, thread_id=THREAD_ID)
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="default@high",
+        entity_names=("test_agent",),
+        config=config,
+    )
+    assert resolve_turn_model(config, runtime_paths, scope, None).model_name == "default@high"
+
+    config.models["default"] = config.models["default"].model_copy(
+        update={"reasoning": ReasoningConfig(levels=["low"], default="low")},
+    )
+
+    assert resolve_turn_model(config, runtime_paths, scope, None).model_name == "default"
+    override = resolve_thread_model_override(runtime_paths, THREAD_ID, config=config)
+    assert override.stale == {"test_agent": "default@high"}
 
 
 def test_resolve_turn_model_without_thread_id_keeps_authored_model(tmp_path: Path) -> None:
@@ -984,6 +1011,54 @@ async def test_thread_model_tool_rejects_unknown_model(tmp_path: Path) -> None:
     assert payload["status"] == "error"
     assert payload["available_models"] == ["default", "large"]
     assert _stored_model(context.runtime_paths, THREAD_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_thread_model_tool_rejects_a_model_removed_since_the_turn_started(tmp_path: Path) -> None:
+    """A model a live reload removed is refused, and the thread keeps the selection it had."""
+    context = _make_tool_context(tmp_path)
+    current = context.config.model_copy(deep=True)
+    del current.models["large"]
+    tool = ThreadModelTools()
+
+    with tool_runtime_context(context):
+        await tool.switch_thread_model("default")
+    with tool_runtime_context(replace(context, config_provider=lambda: current)):
+        payload = json.loads(await tool.switch_thread_model("large"))
+
+    assert payload["status"] == "error"
+    assert payload["available_models"] == ["default"]
+    assert _stored_model(context.runtime_paths, THREAD_ID) == "default"
+
+
+@pytest.mark.asyncio
+async def test_a_next_turn_switch_reports_the_model_later_turns_will_run(tmp_path: Path) -> None:
+    """A live reload that points a name at another model shows in what the switch confirms."""
+    context = _make_tool_context(tmp_path)
+    current = context.config.model_copy(deep=True)
+    current.models["large"].id = "larger-model"
+
+    with tool_runtime_context(replace(context, config_provider=lambda: current)):
+        payload = json.loads(await ThreadModelTools().switch_thread_model("large"))
+
+    assert payload["status"] == "ok"
+    assert payload["model_id"] == "larger-model"
+
+
+@pytest.mark.asyncio
+async def test_a_next_turn_switch_measures_the_budget_as_later_turns_will(tmp_path: Path) -> None:
+    """A live reload that prices a model shows in whether the switch promises it to a requester over budget."""
+    context = _make_tool_context(tmp_path)
+    context.config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
+    context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
+    current = context.config.model_copy(deep=True)
+    current.models["large"].pricing = ModelPricing(input=5, output=30)
+
+    with tool_runtime_context(replace(context, config_provider=lambda: current)):
+        payload = json.loads(await ThreadModelTools().switch_thread_model("large"))
+
+    assert payload["model"] == "large"
+    assert "`cheap`" in payload["note"]
 
 
 @pytest.mark.asyncio

@@ -327,6 +327,9 @@ Logged each time an agent's or team's reply fails and the user gets an error mes
 | `agent` | Agent or team name |
 | `error_type` | Class name of the error that ended the reply |
 | `error` | The error's repr, with credentials redacted |
+| `error_code` | MindRoom's code for a provider error that its type alone does not tell apart, such as `quota_exhausted` or `missing_api_key`, otherwise `null` |
+| `status_code` | HTTP status of a provider error, `401` for a credential failure MindRoom found before sending a request, or `null` when there is none or the error is not a provider error |
+| `provider` | Provider name of the model route for a provider error, otherwise `null` |
 
 These `error_type` values are stable; any other value is the class name of an unexpected error and can change:
 
@@ -338,6 +341,14 @@ These `error_type` values are stable; any other value is the class name of an un
 - `ModelSafeguardRefusal`: the model's safeguards refused the request.
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
 - `ProviderError`: any other provider rejection, such as an HTTP `403`, an HTTP `402`, an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit, or a Z.ai account with no balance or an expired plan or package.
+
+These `error_code` values are stable:
+
+- `quota_exhausted`: the provider refused the request over the account's billing, such as no credit left, a spend or usage limit reached, an expired plan, or any HTTP `402` (`error_type` `ProviderError`). MindRoom does not retry it. OpenRouter also sends a `402` while it settles earlier requests against a low balance, which a wait can let through.
+- `missing_api_key`: the model route has no credential set up (`error_type` `AuthenticationFailed`).
+
+An `AuthenticationFailed` with `error_code` `null` is any other credential failure: a key the provider rejected, such as a revoked key, a key whose environment variable is unset, or a missing or expired CLI login.
+Alert on `quota_exhausted` and on `AuthenticationFailed`: they usually last until someone changes the account, the key, or the login.
 
 Count it grouped by `error_type` and alert when one value is far more frequent than usual.
 `RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.
