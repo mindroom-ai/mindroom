@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
 
 MAX_REQUEST_BYTES = 16_000
-# The posted wire body's limit: about 60 candidates clipped to 2,000 characters, under TypeSafe's 64k-token context.
+# The posted wire body's limit: about 50 candidates clipped to 2,000 characters, under TypeSafe's 64k-token context.
 MAX_BATCH_REQUEST_BYTES = 128_000
 # OpenAI Decisions accepts at most 400 questions per request.
 _MAX_BATCH_QUESTIONS = 400

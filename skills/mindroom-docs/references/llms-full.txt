@@ -3760,6 +3760,7 @@ Per-turn recall then adds, in the reranker's order, up to five hits that score a
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
 Per-turn recall sends 20 memory entries and the message to the reranker, and a `search_memories` call sends 20 or, when larger, up to its `limit`; for `cohere`, `vertex_ai`, `typesafe` and `openai_decisions` the reranker is a hosted service, which adds its response time to every reply.
 So with an `openai_decisions` or `typesafe` reranker, every reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false`.
+With `rerank: true` and a `cohere` or `vertex_ai` reranker, memory entries and the message go to that service unredacted; only the judgment rerankers redact.
 
 On three sets of real conversation turns (132 to 1,247 held-out turns each), judged by a language model for whether recall added a relevant memory, reranked recall at threshold `0.3` compared with recall without a reranker as follows.
 
@@ -4204,7 +4205,7 @@ reranker:
 
 One request asks, for every candidate, whether it helps reply to the query, and a candidate's score is the probability of yes.
 The query and each candidate are sent clipped to their first and last 1,000 characters, with credential-like values redacted, and candidate text is marked as data, never instructions.
-A request holds up to 128,000 bytes, about 60 clipped candidates; the candidates after those, and any the backend refuses to judge, score 0, so they keep their merged order behind the judged ones and never pass a recall `threshold`.
+A request holds up to 128,000 bytes, about 50 clipped candidates; the candidates after those, and any the backend refuses to judge, score 0, so they keep their merged order behind the judged ones and never pass a recall `threshold`.
 A failed request, or a missing API key, fails reranking as described above.
 At most eight rerank requests run at once, under a limit of their own, so reranking and other judgments never wait for each other.
 Their default `threshold` is `0.3`, the value a [recall benchmark](https://docs.mindroom.chat/memory/#searching-file-memory) picked, rather than the `0.8` their other judgment uses keep; as the reranker they rerank file memory by default, sending about 20 redacted memory entries per reply to the provider, until `memory.search.rerank: false`.

@@ -269,6 +269,7 @@ Per-turn recall then adds, in the reranker's order, up to five hits that score a
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
 Per-turn recall sends 20 memory entries and the message to the reranker, and a `search_memories` call sends 20 or, when larger, up to its `limit`; for `cohere`, `vertex_ai`, `typesafe` and `openai_decisions` the reranker is a hosted service, which adds its response time to every reply.
 So with an `openai_decisions` or `typesafe` reranker, every reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false`.
+With `rerank: true` and a `cohere` or `vertex_ai` reranker, memory entries and the message go to that service unredacted; only the judgment rerankers redact.
 
 On three sets of real conversation turns (132 to 1,247 held-out turns each), judged by a language model for whether recall added a relevant memory, reranked recall at threshold `0.3` compared with recall without a reranker as follows.
 

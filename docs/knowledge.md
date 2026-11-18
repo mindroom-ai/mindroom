@@ -302,7 +302,7 @@ reranker:
 
 One request asks, for every candidate, whether it helps reply to the query, and a candidate's score is the probability of yes.
 The query and each candidate are sent clipped to their first and last 1,000 characters, with credential-like values redacted, and candidate text is marked as data, never instructions.
-A request holds up to 128,000 bytes, about 60 clipped candidates; the candidates after those, and any the backend refuses to judge, score 0, so they keep their merged order behind the judged ones and never pass a recall `threshold`.
+A request holds up to 128,000 bytes, about 50 clipped candidates; the candidates after those, and any the backend refuses to judge, score 0, so they keep their merged order behind the judged ones and never pass a recall `threshold`.
 A failed request, or a missing API key, fails reranking as described above.
 At most eight rerank requests run at once, under a limit of their own, so reranking and other judgments never wait for each other.
 Their default `threshold` is `0.3`, the value a [recall benchmark](memory.md#searching-file-memory) picked, rather than the `0.8` their other judgment uses keep; as the reranker they rerank file memory by default, sending about 20 redacted memory entries per reply to the provider, until `memory.search.rerank: false`.
