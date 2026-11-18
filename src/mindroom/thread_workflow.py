@@ -118,7 +118,7 @@ def thread_workflow(
     approval_ts: int | None = None,
     question_ts: int | None = None,
 ) -> dict[str, object]:
-    """Label one thread from its `room_thread_facts` entry; an approval or question older than the resolve is answered."""
+    """Label one thread from its `room_thread_facts` entry; a request older than the resolve counts as answered."""
     resolved_ts = facts.get("resolved_ts")
     runs = facts.get("runs", [])
 

@@ -436,6 +436,76 @@ class MatrixRoomTools(Toolkit):
             has_more=next_token is not None,
         )
 
+    async def _all_rooms_threads(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        limit: int,
+        page_token: str | None,
+        include_summaries: bool,
+        workflow: str | None,
+    ) -> str:
+        """List one page of threads of every room the requester shares with the agent, waiting rows first."""
+        message = self._check_rate_limit(context, context.room_id)
+        if message is None and (page_token or "").strip():
+            message = "page_token cannot be used with room_id='all'; name one room to page through it."
+        if message is not None:
+            return self._payload("error", action="threads", room_id="all", message=message)
+        trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
+        reads = asyncio.Semaphore(self._SUMMARY_READ_CONCURRENCY)
+        failed_room_ids: list[str] = []
+        more = False
+
+        async def read_room(room_id: str) -> list[dict[str, object]]:
+            nonlocal more
+            async with reads:
+                try:
+                    # Privacy boundary: a room the requester is not joined to is never read.
+                    if not await room_access_allowed(context, room_id, contact_room_ok=True):
+                        return []
+                    rows, next_token = await self._room_threads(
+                        context,
+                        room_id=room_id,
+                        limit=limit,
+                        page_token=None,
+                        workflow=workflow,
+                        trusted_sender_ids=trusted_sender_ids,
+                    )
+                except (RoomThreadsPageError, ClientError, TimeoutError):
+                    failed_room_ids.append(room_id)
+                    return []
+            more = more or next_token is not None
+            return [{"room_id": room_id, **row} for row in rows]
+
+        room_rows = await asyncio.gather(*(read_room(room_id) for room_id in list(context.client.rooms)))
+        rows = sorted(
+            (row for rows in room_rows for row in rows),
+            key=lambda row: (
+                row.get("why") not in ("approval", "question"),
+                -cast("int", row.get("latest_activity_ts", row["timestamp"])),
+            ),
+        )
+        threads_list = rows[:limit]
+        if include_summaries:
+            for room_id in dict.fromkeys(row["room_id"] for row in threads_list):
+                await self._add_current_summaries(
+                    context,
+                    room_id=cast("str", room_id),
+                    threads=[row for row in threads_list if row["room_id"] == room_id],
+                    trusted_sender_ids=trusted_sender_ids,
+                )
+        failed = {"failed_room_ids": sorted(failed_room_ids)} if failed_room_ids else {}
+        return self._payload(
+            "ok",
+            action="threads",
+            room_id="all",
+            count=len(threads_list),
+            threads=threads_list,
+            next_token=None,
+            has_more=more or len(rows) > limit,
+            **failed,
+        )
+
     async def _state(
         self,
         context: ToolRuntimeContext,
@@ -549,9 +619,12 @@ class MatrixRoomTools(Toolkit):
           summary_pinned (true when the thread's title is pinned, so automatic summaries leave it alone); both are omitted
           when the thread's full history is unavailable. This reads every listed thread, so pass it only when needed.
           Use page_token from a previous response's next_token to paginate.
-          workflow labels each row and keeps one group (all: every row): workflow is needs_you, working, later or done;
-          needs_you rows have why (approval or question: waits on the requester, so lead with these; your_turn: open and idle);
+          workflow labels rows (workflow: needs_you, working, later, done) and keeps one group, or every row with all.
+          needs_you rows have why: approval or question (waits on the requester; lead with these) or your_turn (idle).
           later rows have back_at (ms) when known. A filtered page can hold fewer rows than limit.
+          Approximate: questions show only in unencrypted rooms; other runtimes' approvals and replies are unseen.
+          room_id="all" (threads only) covers every room the requester shares with you; rows carry room_id.
+          It reads one page per room, so name a room and use page_token to go further.
         - state: Read room state. If event_type is given, return that specific state event.
           If omitted, return a summary of all state events (m.room.member events are elided).
 
@@ -561,6 +634,14 @@ class MatrixRoomTools(Toolkit):
             return context
 
         context = replace(context, config=context.current_config, config_provider=None)
+        if action == "threads" and (room_id or "").strip() == "all":
+            return await self._all_rooms_threads(
+                context,
+                limit=self._thread_limit(limit),
+                page_token=page_token,
+                include_summaries=include_summaries,
+                workflow=workflow,
+            )
         resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", action=action, message=room_error)
