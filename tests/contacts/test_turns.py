@@ -509,8 +509,19 @@ async def _dispatch_plan(
         agent_name=agent_name,
         origin=origin,
     )
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "Are you free on Friday?", "msgtype": "m.text"},
+            "event_id": EVENT_ID,
+            "sender": sender,
+            "origin_server_ts": 1,
+            "room_id": room_id,
+            "type": "m.room.message",
+        },
+    )
     return await _policy(config, paths, agent_name).plan_turn(
         room,
+        event,
         PreparedDispatch(
             requester_user_id=owner,
             context=context,

@@ -70,8 +70,6 @@ class EventKind(StrEnum):
     JOB_FOLLOW_UP = "job_follow_up"
     # A person asks from their client to cancel background jobs.
     JOB_CANCEL = "job_cancel"
-    # A runtime source, not a Matrix event: a turn the room's routing lane handed to this bot to answer.
-    ROUTED_TURN = "routed_turn"
 
 
 # Kinds whose work outlives its callback, because the callback only starts a

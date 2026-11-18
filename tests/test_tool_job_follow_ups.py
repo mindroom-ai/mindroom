@@ -779,10 +779,10 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
         await runtime.shutdown()
 
 
-@pytest.mark.parametrize("source", ["$source", "job-follow-up:!room:localhost:abc:0", "routed:$source"])
-async def test_a_resumed_approval_replies_only_to_a_matrix_event(source: str) -> None:
-    """A follow-up or a routed handoff is a runtime source, so its reply after an approval replies to no event."""
-    follow_up = source.startswith("job-follow-up:")
+@pytest.mark.parametrize("follow_up", [False, True])
+async def test_a_follow_ups_resumed_approval_replies_to_no_event(*, follow_up: bool) -> None:
+    """A follow-up is a runtime source, not a Matrix event, so its reply after an approval replies to nothing."""
+    source = "job-follow-up:!room:localhost:abc:0" if follow_up else "$source"
     key = ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False)
     origin = (
         follow_up_envelope(key, follow_up_id=source, sender_id="@mindroom_general:localhost", prompt="").origin
@@ -791,5 +791,5 @@ async def test_a_resumed_approval_replies_only_to_a_matrix_event(source: str) ->
     )
     continuation = approval_continuation(origin=origin, sources=ResponseSources((source,), (source,)))
     assert continuation_target(continuation, reply_to_event_id=source).reply_to_event_id == (
-        source if source == "$source" else None
+        None if follow_up else source
     )

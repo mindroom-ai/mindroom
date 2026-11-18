@@ -8,11 +8,14 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.router.relay import execute_router_relay
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -28,6 +31,7 @@ from tests.response_runner_helpers import streamed_answer
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _make_client_mock,
+    _matrix_room,
     _runtime_bound_config,
     seed_hydrated_conversation,
 )
@@ -411,6 +415,102 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert content["m.relates_to"]["rel_type"] == "m.thread"
         assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply_plain:localhost"
+
+    @pytest.mark.asyncio
+    async def test_router_routing_reply_to_thread_message_uses_existing_thread_root(self, tmp_path: Path) -> None:
+        """Router routing should resolve plain replies back to the real thread root."""
+        agent_user = AgentMatrixUser(
+            user_id="@mindroom_router:localhost",
+            password=TEST_PASSWORD,
+            display_name="Router",
+            agent_name="router",
+        )
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        config.defaults.enable_streaming = False
+
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            rooms=["!test:localhost"],
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        wrap_extracted_collaborators(bot)
+
+        bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
+
+        room = _matrix_room(name="Test Room")
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "Can someone help with this?",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+                },
+                "event_id": "$plain_reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Earlier message in thread",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                    },
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567889,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+
+        with (
+            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="general")),
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                AsyncMock(
+                    return_value=DeliveredMatrixEvent(
+                        event_id="$router_response:localhost",
+                        content_sent={"body": "router relay"},
+                    ),
+                ),
+            ) as mock_send,
+        ):
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
+                room,
+                event,
+                thread_history=[],
+                thread_id="$thread_root:localhost",
+                requester_user_id="@user:localhost",
+            )
+
+        mock_send.assert_awaited_once()
+        bot.client.room_get_event.assert_not_called()
+        content = mock_send.call_args.args[2]
+        assert content["m.relates_to"]["rel_type"] == "m.thread"
+        assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
+        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$plain_reply:localhost"
 
     @pytest.mark.asyncio
     async def test_message_with_multiple_relations_handled_correctly(self, bot: AgentBot) -> None:

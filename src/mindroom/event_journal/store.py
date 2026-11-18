@@ -19,8 +19,6 @@ from . import (
     journal,
     reads,
     replies,
-    room_claims,
-    routing_handoffs,
     tool_jobs,
     turn_rows,
 )
@@ -41,7 +39,7 @@ from .views import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
@@ -57,7 +55,6 @@ if TYPE_CHECKING:
         RoomMembershipPosition,
     )
     from .projection import ProjectedEvent
-    from .routing_handoffs import RoutingHandoff
 
 _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT = 100
 
@@ -250,38 +247,6 @@ class EventJournalStore:
         return await self.backend.write(
             lambda transaction: replies.end_entity_replies(transaction, ends, now_ns=now_ns),
         )
-
-    async def claim_room_event(self, room_id: str, event_id: str, purpose: str, owner: str) -> str:
-        """Save ``owner`` for one room event's purpose unless one is saved; return the saved owner (first writer wins).
-
-        Shared across principals: the claim says which bot does a once-per-event job, so every bot must read one row.
-        """
-        return await self.backend.write(
-            lambda transaction: room_claims.claim(transaction, room_id, event_id, purpose, owner),
-        )
-
-    async def room_event_claims(self, room_id: str, event_ids: Sequence[str], purpose: str) -> dict[str, str]:
-        """Return the saved owner of each of these room events that has one for ``purpose``."""
-        return await self.backend.read(
-            lambda transaction: room_claims.claims(transaction, room_id, event_ids, purpose),
-        )
-
-    async def hold_routing_lane(self, room_id: str, owner: str) -> int:
-        """Make ``owner`` the room's routing-lane owner; return the lane's generation, which grows with each change."""
-        return await self.backend.write(lambda transaction: routing_handoffs.hold_lane(transaction, room_id, owner))
-
-    async def save_routing_handoff(self, handoff: RoutingHandoff, *, owner: str, generation: int) -> None:
-        """Save one handoff as the lane's owner at ``generation``; ``StaleLaneOwnerError`` once another bot took it."""
-        await self.backend.write(
-            lambda transaction: routing_handoffs.save(transaction, handoff, owner=owner, generation=generation),
-        )
-
-    async def accept_routing_handoffs(self, room_id: str | None = None) -> tuple[str, ...]:
-        """Move the handoffs no recipient holds yet, of one room or of all, into their recipients' journals.
-
-        Returns those recipients' principals; a handoff moves once, so calling again returns none.
-        """
-        return await self.backend.write(lambda transaction: routing_handoffs.accept(transaction, room_id))
 
     async def generation(self, *, new_generation: str) -> str:
         """Return this database's identity, minting it the first time it is opened.

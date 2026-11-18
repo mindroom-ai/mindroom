@@ -440,8 +440,7 @@ async def test_a_runtime_refuses_a_journal_another_runtime_holds(tmp_path: Path)
 async def test_binding_the_journal_loads_its_paused_replies_before_any_bot_follows_them(tmp_path: Path) -> None:
     """The runtime that holds the journal loads its approval signals as it binds, before it creates a bot.
 
-    It also follows every ended approval from then on, so each paused turn ends as its approval does, and moves every
-    routed turn a crash left between two bots on to the bot chosen for it.
+    It also follows every ended approval from then on, so each paused turn ends as its approval does.
     """
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
@@ -450,7 +449,6 @@ async def test_binding_the_journal_loads_its_paused_replies_before_any_bot_follo
     journal = MagicMock()
     journal.hold_exclusively = AsyncMock(return_value=True)
     journal.load_approval_signals = AsyncMock()
-    journal.accept_routing_handoffs = AsyncMock()
 
     with (
         patch.object(orchestrator, "event_journal_store", return_value=journal),
@@ -459,7 +457,6 @@ async def test_binding_the_journal_loads_its_paused_replies_before_any_bot_follo
         await orchestrator._bind_event_journal()
 
     journal.load_approval_signals.assert_awaited_once_with()
-    journal.accept_routing_handoffs.assert_awaited_once_with()
     journal.approval_signals.follow_ended_approvals.assert_called_once_with(orchestrator._end_paused_turn)
     assert orchestrator.agent_bots == {}
 

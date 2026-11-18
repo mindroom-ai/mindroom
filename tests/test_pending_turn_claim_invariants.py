@@ -26,6 +26,7 @@ from mindroom.coalescing.gate import IngressAdmissionClosedError
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, ClaimRefused, TurnClaim
@@ -35,6 +36,7 @@ from tests.test_turns_focused import (
     _SENDER,
     _THREAD_ROOT,
     _build_harness,
+    _entity_user_id,
     _image_event,
     _replace_harness_deps,
     _room_with_members,
@@ -309,6 +311,39 @@ async def test_command_control_input_releases_ingress_claim_exactly_once(
     assert harness.gate_batches == []
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
     assert ledger.kinds() == ["claim", "retire", "merge", "release"]
+    _assert_claims_released_exactly_once(ledger)
+    await _assert_no_live_claim(harness.turn_store, event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_router_pre_ingress_skip_releases_claim(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A router turn consumed before shared ingress work releases its claim.
+
+    When the router skips a message routed to another agent, the turn is
+    consumed after the claim but before normalization; the finally guard in
+    the message handler must release the claim exactly once.
+    """
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    ledger = _install_claim_ledger(monkeypatch, harness.turn_store)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    event = _mention_text_event(
+        "@research investigate this",
+        _entity_user_id(config, "research"),
+        event_id="$router-skip-claim:localhost",
+    )
+    resolve_spy = _FailingNormalizer()
+    _install_normalizer(harness, resolve_spy)
+
+    outcome = await harness.ingress.handle_text_event(room, event)
+
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    assert resolve_spy.calls == 0, "the router skip must happen before normalization"
+    assert harness.gate_batches == []
+    assert ledger.kinds() == ["claim", "release"]
     _assert_claims_released_exactly_once(ledger)
     await _assert_no_live_claim(harness.turn_store, event.event_id)
 

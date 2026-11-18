@@ -1456,8 +1456,6 @@ class _MultiAgentOrchestrator:
             msg = "Another MindRoom runtime is already using this event journal"
             raise PermanentStartupError(msg)
         self._journal_held = True
-        # A routed turn a crash left between its lane owner and its responder moves on before any bot replays.
-        await store.accept_routing_handoffs()
         # Every bot follows the paused replies of its principal from these on.
         await store.load_approval_signals()
         # Each paused turn ends as its approval does: the approval's end is the one place every paused turn ends.

@@ -120,6 +120,41 @@ def _mock_event_with_team_mention(team_user_id: str, body: str = "@team please h
 
 
 @pytest.mark.asyncio
+async def test_router_does_not_route_when_preformed_team_is_mentioned(config_with_team: Config, tmp_path: Path) -> None:
+    """Router must not route if the message mentions a predefined team."""
+    config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
+    runtime_paths = runtime_paths_for(config_with_team)
+    ids = entity_ids(config_with_team, runtime_paths)
+    # Router bot setup
+    # Use config-derived IDs to match domain in this environment
+    router_user = AgentMatrixUser(
+        agent_name="router",
+        user_id=ids["router"].full_id,
+        display_name="Router",
+        password="p",  # noqa: S106
+    )
+    router = make_test_agent_bot(router_user, config_with_team, runtime_paths)
+    router.client = _make_matrix_client_mock()
+    install_runtime_journal_support(router)
+
+    # Room has router + team + two agents and the human user
+    team_user_id = ids["t1"].full_id
+    a1_id = ids["a1"].full_id
+    a2_id = ids["a2"].full_id
+    room = _mock_room("!room:localhost", [router_user.user_id, team_user_id, a1_id, a2_id, "@user:localhost"])
+
+    # Event mentions the team
+    event = _mock_event_with_team_mention(team_user_id)
+
+    # Also patch suggest_responder_for_message to detect accidental routing
+    with patch("mindroom.router.relay.suggest_responder_for_message", new=AsyncMock(return_value="a1")):
+        await router._on_message(room, event)
+
+    # Router must not send any message (i.e., must not route)
+    router.client.room_send.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Config, tmp_path: Path) -> None:
     """The team's bot should respond with team response when the team is mentioned."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)

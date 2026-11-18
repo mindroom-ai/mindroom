@@ -1,0 +1,1130 @@
+"""Router-specific dispatch behavior: welcomes, media routing, and dispatch parity."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import nio
+import pytest
+
+from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
+from mindroom.authorization import ResponderCandidatePermissions
+from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SOURCE_KIND_KEY,
+)
+from mindroom.conversation_resolver import MessageContext
+from mindroom.delivery_gateway import SendTextRequest
+from mindroom.dispatch_handoff import prepare_media_ingress
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
+from mindroom.router.relay import _send_router_relay_after_readiness_recheck, execute_router_relay
+from mindroom.teams.formation import TeamResolution
+from mindroom.thread_utils import AgentResponseDecision
+from mindroom.turn_record import TurnRecord
+from mindroom.turns.dispatch import TurnDispatcher
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import (
+    AgentBotTestBase,
+    _attachment_record_stub,
+    _room_send_response,
+    _runtime_bound_config,
+    _wrap_extracted_collaborators,
+    make_mock_agent_user,
+    make_test_agent_bot,
+)
+from tests.conftest import (
+    TEST_PASSWORD,
+    drain_coalescing,
+    install_generate_response_mock,
+    install_runtime_journal_support,
+    install_send_response_mock,
+    make_matrix_client_mock,
+    runtime_paths_for,
+)
+from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import ready_runtime
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+@pytest.fixture
+def mock_agent_user() -> AgentMatrixUser:
+    """Mock agent user for testing."""
+    return make_mock_agent_user()
+
+
+class TestAgentBot(AgentBotTestBase):
+    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+
+    @pytest.mark.asyncio
+    async def test_router_routes_image_messages_in_multi_agent_rooms(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router should call _handle_ai_routing for images in multi-responder rooms."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        room.users = {
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
+        }
+
+        event = nio.RoomMessageImage.from_dict(
+            {
+                "event_id": "$img_route",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.image",
+                    "body": "photo.jpg",
+                    "url": "mxc://localhost/test_image",
+                    "info": {"mimetype": "image/jpeg"},
+                },
+            },
+        )
+
+        with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
+            patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+            patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
+        ):
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
+            await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
+
+        mock_relay.assert_called_once_with(
+            bot._turn_dispatcher.deps,
+            room,
+            event,
+            (),
+            "$img_route",
+            message="[Attached image]",
+            requester_user_id="@user:localhost",
+            extra_content={"com.mindroom.original_sender": "@user:localhost"},
+            media_events=None,
+            handled_turn=None,
+            scheduled_prompt=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_router_joined_room_startup_sends_welcome_after_join(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Startup room joins should cache the room locally before sending a welcome."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_runtime_journal_support(bot)
+        bot.rooms = ["!welcome:localhost"]
+        bot.client = AsyncMock()
+        bot.client.user_id = agent_user.user_id
+        bot.client.rooms = {}
+        bot.client.join = AsyncMock(return_value=nio.JoinResponse("!welcome:localhost"))
+        bot.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(
+                room_id="!welcome:localhost",
+                chunk=[],
+                start="",
+                end=None,
+            ),
+        )
+
+        async def fake_send_response(*, target: MessageTarget, **_: object) -> str:
+            assert target.room_id in bot.client.rooms
+            return "$welcome"
+
+        send_response = AsyncMock(side_effect=fake_send_response)
+        install_send_response_mock(bot, send_response)
+        with (
+            patch(
+                "mindroom.bot_room_lifecycle.generate_welcome_message_for_room",
+                new=AsyncMock(return_value="Welcome"),
+            ),
+            patch("mindroom.bot_room_lifecycle.get_joined_rooms", new=AsyncMock(return_value=[])),
+            patch("mindroom.bot.config_confirmation.restore_pending_changes", new=AsyncMock(return_value=0)),
+        ):
+            await bot.join_configured_rooms()
+
+        assert "!welcome:localhost" in bot.client.rooms
+        bot.client.join.assert_awaited_once_with("!welcome:localhost")
+        send_response.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_router_routes_file_messages_with_sender_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router should pass sender metadata when routing file messages."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        room.users = {
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
+        }
+
+        event = nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$file_route",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://localhost/test_file",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        )
+        local_media_path = tmp_path / "incoming_media" / "file_route.pdf"
+        local_media_path.parent.mkdir(parents=True, exist_ok=True)
+        local_media_path.write_bytes(b"%PDF")
+        attachment_record = register_local_attachment(
+            tmp_path,
+            local_media_path,
+            kind="file",
+            attachment_id=_attachment_id_for_event("$file_route"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+            room_id=room.room_id,
+            thread_id=None,
+            source_event_id="$file_route",
+            sender="@user:localhost",
+        )
+        assert attachment_record is not None
+
+        with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
+            patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+            patch(
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
+                new_callable=AsyncMock,
+                return_value=attachment_record,
+            ) as mock_register_file,
+        ):
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
+            await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
+
+        mock_relay.assert_called_once()
+        mock_register_file.assert_not_awaited()
+        call_kwargs = mock_relay.call_args.kwargs
+        assert call_kwargs["message"] == "[Attached file]"
+        assert call_kwargs["requester_user_id"] == "@user:localhost"
+        assert call_kwargs["extra_content"] == {ORIGINAL_SENDER_KEY: "@user:localhost"}
+
+    @pytest.mark.parametrize("caption_in_upload_thread", [True, False])
+    @pytest.mark.asyncio
+    async def test_router_leaves_an_upload_to_the_agent_its_caption_names(
+        self,
+        tmp_path: Path,
+        caption_in_upload_thread: bool,
+    ) -> None:
+        """An upload whose caption names an agent must not also be routed elsewhere."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = self._config_for_storage(tmp_path)
+        # A top-level caption joins its upload only when sent within the debounce window of it.
+        config.defaults.coalescing.debounce_ms = 1000
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
+        bot.logger = MagicMock()
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        for user_id in (
+            "@mindroom_router:localhost",
+            "@mindroom_general:localhost",
+            "@mindroom_calculator:localhost",
+            "@user:localhost",
+        ):
+            room.add_member(user_id, None, None)
+        room.members_synced = True
+
+        upload = nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$upload",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://localhost/test_file",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        )
+        caption_content: dict[str, object] = {
+            "msgtype": "m.text",
+            "body": "@mindroom_general:localhost review this",
+            "m.mentions": {"user_ids": ["@mindroom_general:localhost"]},
+        }
+        if caption_in_upload_thread:
+            caption_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$upload"}
+        caption = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$caption",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "content": caption_content,
+            },
+        )
+        root_response = nio.RoomGetEventResponse()
+        root_response.event = upload
+        bot.client.room_get_event.return_value = root_response
+        plans: list[tuple[str, str | None, tuple[str, ...]]] = []
+
+        async def record_plan(_dispatcher: object, _room: object, prepared: object, plan: object, **_: object) -> None:
+            plans.append((plan.kind, plan.ignore_reason, tuple(prepared.handled_turn.source_event_ids)))
+
+        with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+            patch.object(TurnDispatcher, "_apply_turn_plan", new=record_plan),
+        ):
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
+            await bot._on_media_message(room, upload)
+            await bot._on_message(room, caption)
+            await drain_coalescing(bot)
+
+        assert plans == [("ignore", "router", ("$upload", "$caption"))]
+        mock_relay.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_router_routing_registers_file_with_effective_thread_scope(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router should register routed file attachments using the outgoing thread scope."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        rooms=["!test:localhost"],
+                        thread_mode="room",
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        send_response = AsyncMock(return_value="$route")
+        install_send_response_mock(bot, send_response)
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        event = nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$file_route",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://localhost/test_file",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        )
+        media_path = tmp_path / "incoming_media" / "file_route.pdf"
+        media_path.parent.mkdir(parents=True, exist_ok=True)
+        media_path.write_bytes(b"%PDF")
+        attachment_record = register_local_attachment(
+            tmp_path,
+            media_path,
+            kind="file",
+            attachment_id=_attachment_id_for_event("$file_route"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+            room_id=room.room_id,
+            thread_id=None,
+            source_event_id="$file_route",
+            sender="@user:localhost",
+        )
+        assert attachment_record is not None
+
+        with (
+            patch(
+                "mindroom.router.relay.suggest_responder_for_message",
+                new_callable=AsyncMock,
+                return_value="general",
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
+                new_callable=AsyncMock,
+                return_value=attachment_record,
+            ) as mock_register_file,
+        ):
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
+                room=room,
+                event=event,
+                thread_history=[],
+                thread_id=None,
+                message="[Attached file]",
+                requester_user_id="@user:localhost",
+                extra_content={ORIGINAL_SENDER_KEY: "@user:localhost"},
+            )
+
+        mock_register_file.assert_awaited_once()
+        assert mock_register_file.await_args.kwargs["thread_id"] is None
+        sent_extra_content = send_response.await_args.kwargs["extra_content"]
+        assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_router_routing_registers_image_with_effective_thread_scope(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router should register routed image attachments using outgoing thread scope."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        rooms=["!test:localhost"],
+                        thread_mode="room",
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        ids = entity_ids(config, runtime_paths)
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        event = nio.RoomMessageImage.from_dict(
+            {
+                "event_id": "$image_route",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.image",
+                    "body": "photo.jpg",
+                    "url": "mxc://localhost/test_image",
+                    "info": {"mimetype": "image/jpeg"},
+                },
+            },
+        )
+
+        attachment_record = MagicMock()
+        attachment_record.attachment_id = _attachment_id_for_event("$image_route")
+        normalizer = MagicMock()
+        normalizer.register_routed_attachment = AsyncMock(return_value=attachment_record.attachment_id)
+        turn_policy = MagicMock()
+        turn_policy.responder_candidates_for_room = AsyncMock(return_value=[ids["general"]])
+        ingress = MagicMock()
+        ingress.managed_entity_name_for_sender.side_effect = lambda sender: (
+            "general" if sender == ids["general"].full_id else None
+        )
+        ingress.sender_is_trusted_for_ingress_metadata.return_value = False
+        resolver = MagicMock()
+        resolver.build_message_target.return_value = MessageTarget.resolve(room.room_id, None, event.event_id)
+        source_turn = TurnRecord.create([event.event_id])
+        visible_responses = MagicMock()
+        visible_responses.prepare_visible_delivery_turn = AsyncMock(return_value=(source_turn, None))
+        turn_store = MagicMock()
+        turn_store.record_placeholder = AsyncMock()
+        turn_store.finalized_visible_echoes = AsyncMock(return_value=())
+        turn_store.record_responded_turn = AsyncMock()
+        delivery_gateway = MagicMock()
+        delivery_gateway.send_text = AsyncMock(return_value="$route")
+
+        await execute_router_relay(
+            SimpleNamespace(
+                runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths)),
+                runtime_paths=runtime_paths,
+                logger=MagicMock(),
+                agent_name="router",
+                turn_policy=turn_policy,
+                ingress=ingress,
+                resolver=resolver,
+                turn_store=turn_store,
+                visible_responses=visible_responses,
+                delivery_gateway=delivery_gateway,
+                normalizer=normalizer,
+            ),
+            room=room,
+            event=prepare_media_ingress(event),
+            thread_history=[],
+            thread_id=None,
+            message="[Attached image]",
+            requester_user_id="@user:localhost",
+            extra_content={ORIGINAL_SENDER_KEY: "@user:localhost"},
+        )
+
+        normalizer.register_routed_attachment.assert_awaited_once()
+        assert normalizer.register_routed_attachment.await_args.kwargs["thread_id"] is None
+        delivery_request = delivery_gateway.send_text.await_args.args[0]
+        sent_extra_content = delivery_request.extra_content
+        assert sent_extra_content is not None
+        assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_multi_agent_file_event_registers_attachment_once(self, tmp_path: Path) -> None:
+        """A file event in a multi-responder room should register exactly one attachment."""
+        config = _runtime_bound_config(
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+                        "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
+            ),
+            tmp_path,
+        )
+        router_bot = make_test_agent_bot(
+            AgentMatrixUser(
+                agent_name="router",
+                user_id="@mindroom_router:localhost",
+                display_name="Router",
+                password=TEST_PASSWORD,
+                access_token="mock_test_token",  # noqa: S106
+            ),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        general_bot = make_test_agent_bot(
+            AgentMatrixUser(
+                agent_name="general",
+                user_id="@mindroom_general:localhost",
+                display_name="General",
+                password=TEST_PASSWORD,
+                access_token="mock_test_token",  # noqa: S106
+            ),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+        router_bot.client = AsyncMock()
+        general_bot.client = AsyncMock()
+        router_send_response = AsyncMock(return_value="$route")
+        install_send_response_mock(router_bot, router_send_response)
+        general_generate_response = AsyncMock()
+        install_generate_response_mock(general_bot, general_generate_response)
+
+        router_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        general_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+        room_users = {
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
+        }
+        router_room.users = room_users
+        general_room.users = room_users
+
+        file_event = nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$file_once",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://localhost/file_once",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        )
+
+        media_path = tmp_path / "incoming_media" / "file_once.pdf"
+        media_path.parent.mkdir(parents=True, exist_ok=True)
+        media_path.write_bytes(b"%PDF")
+        attachment_record = register_local_attachment(
+            tmp_path,
+            media_path,
+            kind="file",
+            attachment_id=_attachment_id_for_event("$file_once"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+            room_id=router_room.room_id,
+            thread_id=None,
+            source_event_id="$file_once",
+            sender="@user:localhost",
+        )
+        assert attachment_record is not None
+
+        with (
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+            patch(
+                "mindroom.turn_policy.decide_team_formation",
+                new_callable=MagicMock,
+                return_value=TeamResolution.none(),
+            ),
+            patch(
+                "mindroom.router.relay.suggest_responder_for_message",
+                new_callable=AsyncMock,
+                return_value="general",
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
+                new_callable=AsyncMock,
+                return_value=attachment_record,
+            ) as mock_register,
+        ):
+            await router_bot._on_media_message(router_room, file_event)
+            await general_bot._on_media_message(general_room, file_event)
+            await drain_coalescing(router_bot, general_bot)
+
+        mock_register.assert_awaited_once()
+        assert mock_register.await_args.kwargs["room_id"] == "!test:localhost"
+        assert mock_register.await_args.kwargs["thread_id"] == "$file_once"
+        general_generate_response.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_router_dispatch_parity_text_and_image_route_under_same_conditions(self, tmp_path: Path) -> None:
+        """Router should route both text and image when the decision context is equivalent."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = _runtime_bound_config(
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.members_synced = True
+        room.canonical_alias = None
+        room.users = {
+            "@mindroom_router:localhost": MagicMock(),
+            "@mindroom_calculator:localhost": MagicMock(),
+            "@mindroom_general:localhost": MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+
+        text_event = self._make_handler_event("message", sender="@user:localhost", event_id="$route_text")
+        text_event.body = "help me"
+        text_event.source = {"content": {"body": "help me"}}
+
+        image_event = self._make_handler_event("image", sender="@user:localhost", event_id="$route_img")
+        image_event.body = "image.jpg"
+        image_event.source = {"content": {"body": "image.jpg"}}
+
+        with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
+            patch(
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                return_value=ResponderCandidatePermissions(
+                    [
+                        entity_ids(config, runtime_paths_for(config))["calculator"],
+                        entity_ids(config, runtime_paths_for(config))["general"],
+                    ],
+                    [],
+                ),
+            ),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+            patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
+        ):
+            await bot._on_message(room, text_event)
+            await drain_coalescing(bot)
+            await bot._on_media_message(room, image_event)
+            await drain_coalescing(bot)
+
+        assert mock_relay.await_count == 2
+        first_call = mock_relay.await_args_list[0].kwargs
+        second_call = mock_relay.await_args_list[1].kwargs
+        assert first_call["requester_user_id"] == "@user:localhost"
+        assert first_call["message"] is None
+        assert second_call["requester_user_id"] == "@user:localhost"
+        assert second_call["message"] == "[Attached image]"
+
+    @pytest.mark.asyncio
+    async def test_router_relays_scheduled_history_limit_to_selected_agent(self, tmp_path: Path) -> None:
+        """A scheduled fire routed by the router carries its history cap through the handoff."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = _runtime_bound_config(
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.members_synced = True
+        room.canonical_alias = None
+        room.users = {
+            "@mindroom_router:localhost": MagicMock(),
+            "@mindroom_calculator:localhost": MagicMock(),
+            "@mindroom_general:localhost": MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+        event = self._make_handler_event(
+            "message",
+            sender="@mindroom_router:localhost",
+            event_id="$scheduled_route_text",
+        )
+        event.body = "⏰ [Automated Task]\nhelp me"
+        event.source = {
+            "content": {
+                "body": event.body,
+                SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                SCHEDULED_HISTORY_LIMIT_KEY: 4,
+            },
+        }
+
+        with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
+            patch(
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                return_value=ResponderCandidatePermissions(
+                    [
+                        entity_ids(config, runtime_paths_for(config))["calculator"],
+                        entity_ids(config, runtime_paths_for(config))["general"],
+                    ],
+                    [],
+                ),
+            ),
+            patch(
+                "mindroom.router.relay.suggest_responder_for_message",
+                new_callable=AsyncMock,
+                return_value="general",
+            ),
+        ):
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
+
+        mock_relay.assert_awaited_once()
+        call = mock_relay.await_args.kwargs
+        assert call["requester_user_id"] == "@user:localhost"
+        assert call["extra_content"] == {
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SCHEDULED_HISTORY_LIMIT_KEY: 4,
+        }
+        assert call["scheduled_prompt"] == event.body
+
+    @pytest.mark.asyncio
+    async def test_scheduled_router_handoff_carries_the_task_in_its_body(self, tmp_path: Path) -> None:
+        """The selected responder must receive the scheduled task as its current prompt."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = _runtime_bound_config(
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        send_response = AsyncMock(return_value="$handoff")
+        install_send_response_mock(bot, send_response)
+        bot._turn_policy.responder_candidates_for_room = AsyncMock(
+            return_value=[entity_ids(config, runtime_paths_for(config))["general"]],
+        )
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$scheduled",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "⏰ [Automated Task]\nPoll the queue"},
+            },
+        )
+
+        await execute_router_relay(
+            bot._turn_dispatcher.deps,
+            room=room,
+            event=event,
+            thread_history=[],
+            requester_user_id="@user:localhost",
+            scheduled_prompt=event.body,
+        )
+
+        call = send_response.await_args.kwargs
+        assert call["response_text"] == "@general ⏰ [Automated Task]\nPoll the queue"
+        assert call["target"].reply_to_event_id == "$scheduled"
+
+    @pytest.mark.asyncio
+    async def test_router_delivery_without_event_raises_for_durable_retry(self, tmp_path: Path) -> None:
+        """A route without a Matrix event must return the source to durable retry."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = _runtime_bound_config(
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        install_send_response_mock(bot, AsyncMock(return_value=None))
+        bot._turn_policy.responder_candidates_for_room = AsyncMock(
+            return_value=[entity_ids(config, runtime_paths_for(config))["general"]],
+        )
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=agent_user.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$route-failed",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "Route this"},
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="Failed to route to entity 'general'"):
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
+                room=room,
+                event=event,
+                thread_history=[],
+                requester_user_id="@user:localhost",
+            )
+
+        assert not await bot._turn_store.is_handled(room.room_id, event.event_id)
+
+    @pytest.mark.asyncio
+    async def test_router_dispatch_parity_text_and_image_skip_under_same_conditions(self, tmp_path: Path) -> None:
+        """Router should skip routing both text and image in single-agent-visible rooms."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = _runtime_bound_config(
+            with_current_room_member_access(
+                Config(
+                    agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.members_synced = True
+        room.canonical_alias = None
+        room.users = {
+            "@mindroom_router:localhost": MagicMock(),
+            "@mindroom_calculator:localhost": MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+
+        text_event = self._make_handler_event("message", sender="@user:localhost", event_id="$skip_text")
+        image_event = self._make_handler_event("image", sender="@user:localhost", event_id="$skip_img")
+
+        with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
+            patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
+            patch(
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                return_value=ResponderCandidatePermissions(
+                    [entity_ids(config, runtime_paths_for(config))["calculator"]],
+                    [],
+                ),
+            ),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+            patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
+        ):
+            await bot._on_message(room, text_event)
+            await drain_coalescing(bot)
+            await bot._on_media_message(room, image_event)
+            await drain_coalescing(bot)
+
+        mock_relay.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_router_replies_with_guidance_when_only_router_is_mentioned(self, tmp_path: Path) -> None:
+        """Mentioning only the router should explain that users must tag routable entities."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.client.room_send.return_value = _room_send_response("$router_guidance")
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.members_synced = True
+        room.canonical_alias = None
+        room.encrypted = False
+        room.users = {
+            "@mindroom_router:localhost": MagicMock(),
+            "@mindroom_calculator:localhost": MagicMock(),
+            "@mindroom_general:localhost": MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+        bot.client.rooms = {room.room_id: room}
+
+        event = self._make_handler_event("message", sender="@user:localhost", event_id="$router_only")
+        event.body = "@mindroom_router:localhost help me"
+        event.source = {
+            "content": {
+                "body": event.body,
+                "m.mentions": {"user_ids": ["@mindroom_router:localhost"]},
+            },
+        }
+
+        with (
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+        ):
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
+
+        bot.client.room_send.assert_awaited_once()
+        content = bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"].startswith("🧭")
+        assert "router is not a conversational AI agent" in content["body"]
+        assert "mention a specific agent or team" in content["body"]
+        assert "one human and one agent or team are already talking in a thread" in content["body"]
+        assert "eligible ad-hoc team of participating individual agents" in content["body"]
+        assert "In multi-human threads, explicitly tag who should answer" in content["body"]
+        assert "adaptive participation, but teams do not form automatically" in content["body"]
+        assert "automatic routing can still choose an agent or team" in content["body"]
+
+    @pytest.mark.asyncio
+    async def test_agent_receives_images_from_thread_root_after_routing(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """After router routes an image, the selected agent should resolve it via attachments."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+
+        generate_response = AsyncMock(return_value="$response")
+        install_generate_response_mock(bot, generate_response)
+
+        # Simulate the routing mention event in a thread rooted at the image
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
+
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$img_root",
+                thread_history=ThreadHistoryResult([], is_full_history=True),
+                mentioned_agents=[mock_agent_user.matrix_id],
+                has_non_agent_mentions=False,
+            ),
+        )
+
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$router_mention",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "@calculator could you help with this?",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$img_root"},
+                },
+            },
+        )
+
+        with (
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+            patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
+            patch(
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                return_value=ResponderCandidatePermissions([], []),
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+                new_callable=AsyncMock,
+                return_value=["att_img_root"],
+            ) as mock_resolve_attachment_ids,
+            patch(
+                "mindroom.inbound_turn_normalizer.resolve_scoped_attachments",
+                return_value=[_attachment_record_stub("att_img_root")],
+            ),
+            patch(
+                "mindroom.turn_policy.decide_team_formation",
+                new_callable=MagicMock,
+                return_value=TeamResolution.none(),
+            ),
+            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
+        ):
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
+
+        mock_resolve_attachment_ids.assert_awaited_once()
+        generate_response.assert_awaited_once()
+        call_kwargs = generate_response.call_args.kwargs
+        # The root image is a thread-history attachment now, so it is pinned to
+        # its history message instead of riding the current-turn media inputs.
+        assert list(call_kwargs["media"].images) == []
+        assert call_kwargs["attachment_ids"] == ["att_img_root"]
+        assert call_kwargs["model_prompt"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_relay_that_selected_no_agent_sends_its_reply_unchanged() -> None:
+    """With no agent selected there is no readiness to recheck, so the router's reply goes out as built."""
+    orchestrator = MagicMock()
+    delivery_gateway = MagicMock()
+    delivery_gateway.send_text = AsyncMock(return_value="$relay")
+    request = SendTextRequest(
+        target=MessageTarget.resolve("!room:localhost", None, "$event"),
+        response_text="No agent fits this request.",
+        extra_content={ORIGINAL_SENDER_KEY: "@alice:localhost"},
+    )
+
+    delivery = await _send_router_relay_after_readiness_recheck(
+        orchestrator=orchestrator,
+        delivery_gateway=delivery_gateway,
+        selected_entity=None,
+        suggested_entity=None,
+        delivery_request=request,
+    )
+
+    delivery_gateway.send_text.assert_awaited_once_with(request)
+    orchestrator.entity_first_sync_complete.assert_not_called()
+    assert delivery.event_id == "$relay"

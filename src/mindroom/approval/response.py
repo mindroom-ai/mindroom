@@ -26,6 +26,7 @@ from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import tool_markers_match_trace
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -115,8 +116,8 @@ def continuation_target(
     reply_to_event_id: str | None = None,
 ) -> MessageTarget:
     """Return the canonical Matrix conversation target for one continuation."""
-    if reply_to_event_id is not None and not reply_to_event_id.startswith("$"):
-        # A follow-up or a routed handoff is a runtime source, not a Matrix event to reply to.
+    if continuation.origin.intent is TurnIntent.JOB_FOLLOW_UP and reply_to_event_id in continuation.source_event_ids:
+        # A follow-up is a runtime source, not a Matrix event to reply to.
         reply_to_event_id = None
     return MessageTarget(
         room_id=continuation.room_id,

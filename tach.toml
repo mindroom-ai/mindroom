@@ -571,7 +571,6 @@ visibility = [
     "mindroom.tool_jobs.runtime",
     "mindroom.turn_store",
     "mindroom.turns.ingress",
-    "mindroom.turns.routing_lane",
     "mindroom.voice.visible_voice_echo",
 ]
 
@@ -6295,24 +6294,12 @@ depends_on = [
     "mindroom.timestamp_formatting",
     "mindroom.turn_policy",
     "mindroom.turn_record",
-    "mindroom.turn_store",
-    "mindroom.turns.routing_lane",
     "mindroom.reply_turn.request",
 ]
 visibility = [
     "mindroom.bot",
     "mindroom.edit_regenerator",
 ]
-
-[[modules]]
-path = "mindroom.turns.routing_lane"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.entity_resolution",
-    "mindroom.event_journal",
-    "mindroom.turn_record",
-]
-visibility = ["mindroom.turns.dispatch"]
 
 [[modules]]
 path = "mindroom.dispatch_replay_guard"
@@ -6350,7 +6337,6 @@ depends_on = [
     "mindroom.responder_availability",
     "mindroom.runtime_protocols",
     "mindroom.teams",
-    "mindroom.routing",
 ]
 
 [[modules]]

@@ -526,7 +526,6 @@ class AgentBot:
                 turn_has_live_claim=lambda event_id: self._turn_store.has_live_turn_claim(event_id),
                 replies_ended=self._replies_ended,
                 on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
-                on_routed_turn=lambda room, event: self._turn_dispatcher.dispatch_routed_turn(room, event),
             ),
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
@@ -758,7 +757,6 @@ class AgentBot:
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
                 selections=self._interactive_selections,
-                timestamp_formatter=format_local_timestamp,
             ),
         )
         self._coalescing_gate = CoalescingGate(
@@ -1015,10 +1013,6 @@ class AgentBot:
         await self.journal_principal().admit(
             follow_up_event(key, follow_up_id, sender_id=self.matrix_id.full_id, now_ms=now_ms),
         )
-        self._journal_dispatcher.wake()
-
-    def routed_turn_accepted(self) -> None:
-        """Wake the journal worker for a turn the room's routing lane put in this bot's journal."""
         self._journal_dispatcher.wake()
 
     def _build_reply_turn_owners(self, deps: ReplyTurnDeps) -> None:

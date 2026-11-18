@@ -20,7 +20,6 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
-from mindroom.routing import suggest_responder_for_message
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.teams.formation import (
     TeamIntent,
@@ -36,24 +35,28 @@ from mindroom.thread_utils import (
     AgentResponseDecision,
     check_agent_mentioned,
     decide_agent_response,
-    filter_thread_agents_for_sender,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
+    is_router_only_agent_mention,
+    thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     import nio
     import structlog
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.authorization import ResponderCandidatePermissions
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.config.participation import ParticipationConfig
     from mindroom.conversation_resolver import MessageContext
+    from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
     from mindroom.hooks import MessageEnvelope
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
 
@@ -94,10 +97,29 @@ class PreparedDispatch:
 class DispatchPlan:
     """Pure policy output for one normalized inbound turn."""
 
-    # ``route``: this bot owns the room's routing lane and hands the turn to the responder it selects.
     kind: Literal["ignore", "route", "respond"]
     response_action: ResponseAction | None = None
+    router_message: str | None = None
+    extra_content: dict[str, Any] | None = None
+    media_events: list[MediaDispatchEvent] | None = None
+    router_event: DispatchEvent | None = None
     ignore_reason: Literal["router"] | None = None
+
+
+_ROUTER_ONLY_MENTION_GUIDANCE = (
+    "🧭 Rules of engagement: mention a specific agent or team when you want that entity to answer, or mention "
+    "multiple agents when you want an ad-hoc collaboration. If one human and one agent or team are already talking "
+    "in a thread, you can keep going without an explicit tag. Explicit tags select who answers next; an untagged "
+    "single-human thread may also continue an eligible ad-hoc team of participating individual agents. "
+    "In multi-human threads, explicitly tag who should answer; eligible existing individual agents may opt into "
+    "adaptive participation, but teams do not form automatically. {new_message} The router is not a conversational "
+    "AI agent you can tag directly."
+)
+# What the guidance says about a new message that mentions no one, by the room's reply mode.
+_NEW_UNTAGGED_MESSAGE_GUIDANCE: dict[RoomReplyMode, str] = {
+    "auto": "In a new untagged message, automatic routing can still choose an agent or team when appropriate.",
+    "mentions": "In this room, a new message gets an answer only when it mentions an agent or team.",
+}
 
 
 @dataclass(frozen=True)
@@ -492,38 +514,166 @@ class TurnPolicy:
             materializable_agent_names=availability.materializable_agent_names,
         )
 
+    def _router_mention(
+        self,
+        mentioned_agents: list[MatrixID],
+        *,
+        has_non_agent_mentions: bool,
+    ) -> Literal["router_only", "addressed_elsewhere"] | None:
+        """Classify a message's mentions for the router: a question to the router itself, someone else's turn, or none."""
+        if is_router_only_agent_mention(
+            mentioned_agents,
+            has_non_agent_mentions=has_non_agent_mentions,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        ):
+            return "router_only"
+        if mentioned_agents or has_non_agent_mentions:
+            return "addressed_elsewhere"
+        return None
+
+    def _thread_defers_to_named_responders(
+        self,
+        thread_history: Sequence[ResolvedVisibleMessage],
+        *,
+        sender_id: str,
+        available_responders: list[MatrixID],
+    ) -> bool:
+        """Return whether a thread's history leaves this sender's next message to the responders it names."""
+        return thread_requires_explicit_agent_targeting(
+            thread_history,
+            sender_id=sender_id,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            membership_index=self.deps.agent_reply_memberships,
+            available_responders_in_room=available_responders,
+        )
+
+    def router_mention_skips(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool | None:
+        """Return whether the router may drop a message before shared ingress work by its mentions alone.
+
+        True for a message addressed to someone else, False for a question to the router itself, and None when the
+        mentions do not decide it. The same mention rule decides the router's dispatch plan.
+        """
+        mentioned_agents, _am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+            source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+        mention = self._router_mention(mentioned_agents, has_non_agent_mentions=has_non_agent_mentions)
+        return None if mention is None else mention == "addressed_elsewhere"
+
+    async def router_thread_skips(
+        self,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+        thread_history: Sequence[ResolvedVisibleMessage],
+    ) -> bool:
+        """Return whether the router may drop an unmentioned thread message whose thread names its responders.
+
+        The same thread rule decides the router's dispatch plan, which runs it on complete planning history.
+        """
+        return self._thread_defers_to_named_responders(
+            thread_history,
+            sender_id=requester_user_id,
+            available_responders=await self.responder_candidates_for_room(room, requester_user_id),
+        )
+
+    async def _plan_router_dispatch(  # noqa: PLR0911
+        self,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        dispatch: PreparedDispatch,
+        *,
+        message: str | None = None,
+        extra_content: dict[str, Any] | None = None,
+        media_events: list[MediaDispatchEvent] | None = None,
+        router_event: DispatchEvent | None = None,
+    ) -> DispatchPlan | None:
+        """Return one router-specific dispatch plan when this entity is the router."""
+        if self.deps.agent_name != ROUTER_AGENT_NAME:
+            return None
+
+        context = dispatch.context
+        requester_user_id = dispatch.requester_user_id
+        mention = self._router_mention(context.mentioned_agents, has_non_agent_mentions=context.has_non_agent_mentions)
+        ignore = DispatchPlan(kind="ignore", ignore_reason="router")
+        if mention == "addressed_elsewhere":
+            return ignore
+        if mention is None and context.planning_thread_history_unavailable:
+            self.deps.logger.info("Skipping routing: thread policy history unavailable")
+            return ignore
+        if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+            return ignore
+        if mention == "router_only":
+            reply_mode = self.deps.runtime.config.get_room_reply_mode(self.deps.runtime_paths, room.room_id)
+            guidance = _ROUTER_ONLY_MENTION_GUIDANCE.format(new_message=_NEW_UNTAGGED_MESSAGE_GUIDANCE[reply_mode])
+            return DispatchPlan(
+                kind="respond",
+                response_action=ResponseAction(kind="reject", rejection_message=guidance),
+            )
+        available_responders = await self.responder_candidates_for_room(room, requester_user_id)
+        if context.is_thread and self._thread_defers_to_named_responders(
+            context.planning_thread_history,
+            sender_id=requester_user_id,
+            available_responders=available_responders,
+        ):
+            self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
+            return ignore
+        if len(available_responders) == 1:
+            self.deps.logger.info("Skipping routing: only one responder candidate")
+            return ignore
+        return DispatchPlan(
+            kind="route",
+            router_message=message,
+            extra_content=extra_content,
+            media_events=media_events,
+            router_event=router_event or event,
+        )
+
     @timed("dispatch_action_resolution")
     async def plan_turn(
         self,
         room: nio.MatrixRoom,
+        event: PreparedIngress,
         dispatch: PreparedDispatch,
         *,
         has_active_response_for_target: Callable[[MessageTarget], bool],
+        extra_content: dict[str, Any] | None = None,
+        media_events: list[MediaDispatchEvent] | None = None,
+        router_event: DispatchEvent | None = None,
     ) -> DispatchPlan:
-        """Return the explicit policy plan for one prepared inbound turn.
-
-        A bot answers by its own rules first. A turn they leave unanswered is routed by the room's lane owner alone,
-        so every other bot ignores it.
-        """
-        # The router answers nothing; until the answering agent posts the voice transcript, it still echoes it.
-        is_router = self.deps.agent_name == ROUTER_AGENT_NAME
-        ignore = DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
+        """Return the explicit policy plan for one prepared inbound turn."""
         if self._reply_mode_awaits_mention(dispatch, has_active_response_for_target=has_active_response_for_target):
             if dispatch.context.planning_thread_history_unavailable:
-                # Say when an unread thread, not the message, decided it.
+                # As the router's own skip below does, say when an unread thread, not the message, decided it.
                 self.deps.logger.info("Skipping response: reply mode needs a mention; thread history unavailable")
             else:
                 self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
-            return ignore
-        if not is_router:
-            action = await self._resolve_response_action(
-                dispatch,
-                room,
-                has_active_response_for_target=has_active_response_for_target,
-            )
-            if action.kind != "skip":
-                return DispatchPlan(kind="respond", response_action=action)
-        return replace(ignore, kind="route") if await self._routes(room, dispatch) else ignore
+            is_router = self.deps.agent_name == ROUTER_AGENT_NAME
+            return DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
+        router_plan = await self._plan_router_dispatch(
+            room,
+            event,
+            dispatch,
+            message=event.body if media_events else None,
+            extra_content=extra_content,
+            media_events=media_events,
+            router_event=router_event,
+        )
+        if router_plan is not None:
+            return router_plan
+
+        action = await self._resolve_response_action(
+            dispatch,
+            room,
+            has_active_response_for_target=has_active_response_for_target,
+        )
+        if action.kind == "skip":
+            return DispatchPlan(kind="ignore")
+        return DispatchPlan(kind="respond", response_action=action)
 
     def _reply_mode_awaits_mention(
         self,
@@ -795,76 +945,6 @@ class TurnPolicy:
         ):
             return rejection
         return ResponseAction(kind="individual" if agent_response_decision.should_respond else "skip")
-
-    async def _routes(self, room: nio.MatrixRoom, dispatch: PreparedDispatch) -> bool:
-        """Return whether this bot, as the room's lane owner, hands this turn to a responder it selects.
-
-        Only a turn that names nobody and that no candidate answers by itself: the thread, if any, names no responder
-        and holds one person, and several candidates may answer the requester.
-        """
-        config, runtime_paths = self.deps.runtime.config, self.deps.runtime_paths
-        context, requester_user_id = dispatch.context, dispatch.requester_user_id
-        if context.am_i_mentioned or context.mentioned_agents or context.has_non_agent_mentions:
-            return False
-        steward = self.deps.runtime.orchestrator.room_steward(room.room_id)
-        if steward is None or steward.agent_name != self.deps.agent_name:
-            return False
-        if context.planning_thread_history_unavailable:
-            self.deps.logger.info("Skipping routing: thread policy history unavailable")
-            return False
-        # `router.access`, when set, stays an extra restriction on who may have a message routed.
-        if config.router.access is not None and not is_sender_allowed_for_agent_reply_in_room(
-            requester_user_id,
-            ROUTER_AGENT_NAME,
-            config,
-            room.room_id,
-            runtime_paths,
-            self.deps.agent_reply_memberships,
-            require_resolved_membership=True,
-        ):
-            return False
-        candidates = await self.responder_candidates_for_room(room, requester_user_id)
-        if context.is_thread and (
-            filter_thread_agents_for_sender(
-                get_agents_in_thread(context.planning_thread_history, config, runtime_paths),
-                requester_user_id,
-                config,
-                runtime_paths,
-                self.deps.agent_reply_memberships,
-                available_responders_in_room=candidates,
-            )
-            or has_multiple_non_agent_users_in_thread(
-                context.planning_thread_history,
-                config,
-                runtime_paths,
-                current_sender_id=requester_user_id,
-            )
-        ):
-            self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
-            return False
-        return len(candidates) > 1
-
-    async def select_responder(self, room: nio.MatrixRoom, dispatch: PreparedDispatch) -> str | None:
-        """Return the entity selected to answer a turn this bot routes; None when nobody fits."""
-        config, runtime_paths = self.deps.runtime.config, self.deps.runtime_paths
-        candidates = await self.responder_candidates_for_room(room, dispatch.requester_user_id)
-        self.deps.logger.info("Selecting a responder", event_id=dispatch.envelope.source_event_id)
-        selection = await suggest_responder_for_message(
-            dispatch.envelope.body,
-            candidates,
-            config,
-            runtime_paths,
-            dispatch.context.planning_thread_history,
-            room_id=room.room_id,
-            thread_id=dispatch.target.resolved_thread_id,
-        )
-        if selection is not None:
-            return selection.entity_name
-        # A failed selection must not leave the person without an answer.
-        fallback = self._select_response_owner(candidates)
-        assert fallback is not None
-        registry = entity_identity_registry(config, runtime_paths)
-        return registry.current_entity_name_for_user_id(fallback.full_id, include_router=False)
 
     def _unlisted_room_mention_rejection(
         self,

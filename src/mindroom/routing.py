@@ -126,13 +126,12 @@ async def suggest_responder_for_message(
     *,
     room_id: str,
     thread_id: str | None,
-) -> ResponderSelection | None:
+) -> str | None:
     """Use AI to suggest which configured responder should answer a message.
 
     Matrix-aware wrapper around suggest_responder() that converts MatrixID
     objects to plain responder names and resolves sender identities in
-    thread context. Returns what suggest_responder() returns: an accepted
-    selection (``entity_name=None`` means no fit), or None if routing fails.
+    thread context.
     """
     registry = entity_identity_registry(config, runtime_paths)
     entity_names = [
@@ -149,7 +148,7 @@ async def suggest_responder_for_message(
             for msg in thread_context
         ]
 
-    return await suggest_responder(
+    selection = await suggest_responder(
         message,
         entity_names,
         config,
@@ -158,6 +157,8 @@ async def suggest_responder_for_message(
         room_id=room_id,
         thread_id=thread_id,
     )
+
+    return selection.entity_name if selection is not None else None
 
 
 __all__ = [

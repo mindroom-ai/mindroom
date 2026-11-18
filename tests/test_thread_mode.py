@@ -32,6 +32,7 @@ from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.router.relay import execute_router_relay
 from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.turn_record import TurnRecord
@@ -414,6 +415,115 @@ class TestConfigThreadModeResolution:
             ),
         )
         assert _entity_thread_mode(config, ROUTER_AGENT_NAME, room_id="!team-room:localhost") == "room"
+
+
+class TestRouterHandoffThreadMode:
+    """Test router handoff replies follow the suggested entity's thread mode."""
+
+    @pytest.fixture
+    def router_user(self) -> AgentMatrixUser:
+        """Create a mock router user."""
+        return AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            password=TEST_PASSWORD,
+            display_name="Router",
+            user_id="@mindroom_router:localhost",
+        )
+
+    @staticmethod
+    def _routing_event() -> MagicMock:
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.sender = "@user:localhost"
+        event.body = "Help me"
+        event.event_id = "$user_event"
+        event.server_timestamp = 1000
+        event.source = {
+            "event_id": "$user_event",
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+            "content": {"body": "Help me", "msgtype": "m.text"},
+        }
+        return event
+
+    @pytest.mark.asyncio
+    async def test_router_handoff_uses_suggested_room_mode(
+        self,
+        room_mode_config: Config,
+        router_user: AgentMatrixUser,
+    ) -> None:
+        """Router should send handoff in-room when the suggested agent is room-mode."""
+        bot = _agent_bot(config=room_mode_config, agent_user=router_user)
+        bot.client = AsyncMock()
+        captured_content: dict[str, object] = {}
+
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
+            captured_content.clear()
+            captured_content.update(content)
+            return delivered_matrix_event("$reply", content)
+
+        room = _matrix_room("!room:localhost")
+
+        # Mixed agent modes keep the router itself in thread mode.
+        assert _entity_thread_mode(bot.config, ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
+
+        with (
+            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="assistant")),
+            patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
+            patch(
+                "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
+                new_callable=AsyncMock,
+            ) as mock_get_latest,
+        ):
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
+                room,
+                self._routing_event(),
+                [],
+                "$thread_root",
+                requester_user_id="@user:localhost",
+            )
+        mock_get_latest.assert_not_called()
+        assert captured_content["m.relates_to"] == {"io.mindroom.in_reply_to": {"event_id": "$user_event"}}
+
+    @pytest.mark.asyncio
+    async def test_router_handoff_uses_suggested_thread_mode(
+        self,
+        room_mode_config: Config,
+        router_user: AgentMatrixUser,
+    ) -> None:
+        """Router should keep thread replies when the suggested agent is thread-mode."""
+        bot = _agent_bot(config=room_mode_config, agent_user=router_user)
+        bot.client = AsyncMock()
+        captured_content: dict[str, object] = {}
+
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
+            captured_content.clear()
+            captured_content.update(content)
+            return delivered_matrix_event("$reply", content)
+
+        room = _matrix_room("!room:localhost")
+
+        with (
+            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="coder")),
+            patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
+            patch(
+                "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
+                new_callable=AsyncMock,
+                return_value="$latest",
+            ) as mock_get_latest,
+        ):
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
+                room,
+                self._routing_event(),
+                [],
+                "$thread_root",
+                requester_user_id="@user:localhost",
+            )
+        mock_get_latest.assert_awaited_once()
+        assert "m.relates_to" in captured_content
+        assert isinstance(captured_content["m.relates_to"], dict)
+        assert captured_content["m.relates_to"].get("rel_type") == "m.thread"
 
 
 class TestCreateSessionIdWithNoneThread:
@@ -1313,6 +1423,55 @@ class TestExtractedModuleLoggerRebinding:
 
         original_logger.info.assert_any_call("Mentioned", event_id="$event123", room_id="!room:localhost")
         rebound_logger.info.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_inbound_turn_normalizer_uses_rebound_bot_logger(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Normalizer logging should keep the logger captured in its deps."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user)
+        bot.client = AsyncMock()
+        original_logger = MagicMock()
+        rebound_logger = MagicMock()
+        _install_static_logger_deps(bot, original_logger)
+        bot.logger = original_logger
+        bot.logger = rebound_logger
+
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$img123"
+        event.sender = "@user:localhost"
+        event.body = "photo.png"
+        event.source = {"content": {"body": "photo.png", "msgtype": "m.image"}}
+
+        with patch(
+            "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            attachment_id = await bot._inbound_turn_normalizer.register_routed_attachment(
+                room_id="!room:localhost",
+                thread_id=None,
+                event=event,
+            )
+
+        assert attachment_id is None
+        original_logger.error.assert_called_once_with(
+            "Failed to register routed media attachment",
+            event_id="$img123",
+        )
+        rebound_logger.error.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_inherits_known_thread_for_plain_reply_target(

@@ -8,6 +8,7 @@ import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import MagicMock, patch
 
 import nio
 import pytest
@@ -21,9 +22,13 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.llm.errors import ProviderError
 from mindroom.matrix.identity import MatrixID
-from mindroom.routing_judgment import ResponderSelection
+from mindroom.matrix.users import AgentMatrixUser
+from mindroom.router.relay import execute_router_relay
 from mindroom.tool_system.registry import builtin_tool_registry
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    TEST_PASSWORD,
     bind_runtime_paths,
     install_model_providers,
     make_visible_message,
@@ -50,7 +55,7 @@ async def suggest_responder_for_message(
     agents: list[MatrixID],
     config: Config,
     thread_history: Sequence[ResolvedVisibleMessage] = (),
-) -> ResponderSelection | None:
+) -> str | None:
     """Run routing for a message in a room's main timeline with the test config's bound runtime context."""
     return await mindroom.routing.suggest_responder_for_message(
         message,
@@ -224,7 +229,7 @@ class TestAIRouting:
         ]
         result = await suggest_responder_for_message("What is 2 + 2?", agents, config)
 
-        assert result == ResponderSelection("calculator")
+        assert result == "calculator"
         assert "calculator" in _routing_prompt(model)
         assert "general" in _routing_prompt(model)
 
@@ -254,7 +259,7 @@ class TestAIRouting:
         ]
         result = await suggest_responder_for_message("Hello", agents, config)
 
-        assert result == ResponderSelection("general")
+        assert result == "general"
         assert _routing_prompt(model).startswith("CUSTOM ROUTER")
         assert "Message=Hello" in _routing_prompt(model)
 
@@ -291,7 +296,7 @@ class TestAIRouting:
             thread_context,
         )
 
-        assert result == ResponderSelection("finance")
+        assert result == "finance"
         # Check that context was included in prompt
         prompt = _routing_prompt(model)
         assert "taxes" in prompt
@@ -346,6 +351,48 @@ class TestAIRouting:
 
         assert result is None
         assert len(failing.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_only_router_agent_routes(self) -> None:
+        """Test that only the router agent handles routing."""
+        # Create general agent (not router)
+        agent = AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="GeneralAgent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
+
+        bot = make_test_agent_bot(agent, config=config)
+
+        mock_room = MagicMock()
+        mock_room.users = MagicMock()
+        mock_room.users.keys.return_value = [
+            "@mindroom_calculator:localhost",
+            "@mindroom_general:localhost",
+            "@user:localhost",
+        ]
+
+        mock_event = MagicMock()
+        mock_event.body = "Test message"
+
+        with patch("mindroom.router.relay.suggest_responder_for_message") as mock_suggest:
+            # Should raise AssertionError since general is not the router agent
+            with pytest.raises(AssertionError):
+                await execute_router_relay(
+                    bot._turn_dispatcher.deps,
+                    mock_room,
+                    mock_event,
+                    [],
+                    None,
+                    requester_user_id="@user:localhost",
+                )
+
+            # Should not call routing since it failed the assertion
+            mock_suggest.assert_not_called()
 
 
 class TestThreadUtils:

@@ -94,7 +94,7 @@ from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_sources import Owned, SourceFate
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
@@ -129,7 +129,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.response_payload_preparation import DispatchPayloadInputs
     from mindroom.response_turn import ResponseTurnContext
 
 
@@ -393,7 +392,7 @@ def _respond_dispatch_plan(action: object | None = None) -> DispatchPlan:
     """Return a plan that continues into the response executor path."""
     return DispatchPlan(
         kind="respond",
-        response_action=action or ResponseAction(kind="individual"),
+        response_action=action or MagicMock(kind="individual"),
     )
 
 
@@ -5179,6 +5178,7 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
 
     async def plan_turn(
         _room: object,
+        _event: object,
         prepared_dispatch: PreparedDispatch,
         **_kwargs: object,
     ) -> DispatchPlan:
@@ -6837,6 +6837,7 @@ async def _capture_gate_dispatches(
     room: nio.MatrixRoom,
     enqueued: Sequence[tuple[nio.Event | PreparedIngress, str, str | None, dict[str, object]]],
     *,
+    captured_plan_extra_content: list[object] | None = None,
     captured_context_event_ids: list[str] | None = None,
 ) -> tuple[list[MessageEnvelope], list[list[object]], list[DispatchPayloadWithAttachmentsRequest]]:
     """Dispatch queued events through the real handoff path and capture final envelopes.
@@ -6847,13 +6848,15 @@ async def _capture_gate_dispatches(
     media_batches: list[list[object]] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[1])
+    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[2])
         envelopes.append(dispatch.envelope)
+        media_batches.append(list(cast("list[object] | None", kwargs.get("media_events")) or []))
+        if captured_plan_extra_content is not None:
+            captured_plan_extra_content.append(kwargs.get("extra_content"))
         return _respond_dispatch_plan()
 
     async def record_response(*args: object, **_kwargs: object) -> None:
-        media_batches.append(list(cast("DispatchPayloadInputs", args[4]).media_events))
         await prepare_payload_via_seam(bot, args)
 
     async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
@@ -7276,11 +7279,13 @@ async def test_untrusted_raw_payload_metadata_spoofing_does_not_reach_envelope_o
     content[SKIP_MENTIONS_KEY] = True
     content["com.mindroom.hook_source"] = "spoofed:message_received"
     content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = 2
+    captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
         bot,
         room,
         [(event, "message", None, {})],
+        captured_plan_extra_content=captured_extra_content,
     )
 
     assert envelopes[0].source_kind == "message"
@@ -7288,6 +7293,7 @@ async def test_untrusted_raw_payload_metadata_spoofing_does_not_reach_envelope_o
     assert envelopes[0].message_received_depth == 0
     assert envelopes[0].attachment_ids == ()
     assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
 
 
 @pytest.mark.asyncio
@@ -7306,17 +7312,20 @@ async def test_untrusted_nested_skip_mentions_does_not_suppress_visible_mentions
         "m.mentions": {"user_ids": ["@mindroom_test_agent:localhost"]},
         SKIP_MENTIONS_KEY: True,
     }
+    captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
         bot,
         room,
         [(event, "message", None, {})],
+        captured_plan_extra_content=captured_extra_content,
     )
 
     assert envelopes[0].source_kind == "message"
     assert envelopes[0].mentioned_agents == ("test_agent",)
     assert envelopes[0].attachment_ids == ()
     assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
 
 
 @pytest.mark.asyncio
@@ -7335,6 +7344,7 @@ async def test_untrusted_coalesced_payload_metadata_spoofing_does_not_reach_enve
     second_content[ORIGINAL_SENDER_KEY] = "@spoofed:localhost"
     second_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
     second_content[SKIP_MENTIONS_KEY] = True
+    captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
         bot,
@@ -7343,6 +7353,7 @@ async def test_untrusted_coalesced_payload_metadata_spoofing_does_not_reach_enve
             (first, "message", None, {"coalescing_thread_id": "$thread"}),
             (second, "message", None, {"coalescing_thread_id": "$thread"}),
         ],
+        captured_plan_extra_content=captured_extra_content,
     )
 
     assert len(envelopes) == 1
@@ -7350,6 +7361,7 @@ async def test_untrusted_coalesced_payload_metadata_spoofing_does_not_reach_enve
     assert envelopes[0].requester_id == "@user:localhost"
     assert envelopes[0].attachment_ids == ()
     assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
 
 
 @pytest.mark.asyncio
@@ -7377,16 +7389,19 @@ async def test_untrusted_synthetic_voice_payload_metadata_spoofing_is_not_truste
         server_timestamp=1000,
         payload_trusted=True,
     )
+    captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
         bot,
         room,
         [(spoofed_voice, "voice", None, {})],
+        captured_plan_extra_content=captured_extra_content,
     )
 
     assert envelopes[0].source_kind == "voice"
     assert envelopes[0].attachment_ids == ()
     assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
 
 
 @pytest.mark.asyncio
@@ -7413,17 +7428,26 @@ async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_pa
         server_timestamp=1000,
         payload_trusted=True,
     )
+    captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
         bot,
         room,
         [(voice_event, "voice", None, {"payload_trusted": True})],
+        captured_plan_extra_content=captured_extra_content,
     )
 
     assert envelopes[0].source_kind == "voice"
     assert envelopes[0].attachment_ids == ("voice-attachment",)
     assert payload_requests[0].current_attachment_ids == ["voice-attachment"]
     assert payload_requests[0].trusted_current_attachment_ids == ["voice-attachment"]
+    assert captured_extra_content == [
+        {
+            ATTACHMENT_IDS_KEY: ["voice-attachment"],
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -7450,17 +7474,26 @@ async def test_trusted_voice_transcript_metadata_reaches_envelope_and_payload(
         server_timestamp=1000,
         payload_trusted=True,
     )
+    captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
         bot,
         room,
         [(voice_event, "voice", None, {"payload_trusted": True})],
+        captured_plan_extra_content=captured_extra_content,
     )
 
     assert envelopes[0].source_kind == "voice"
     assert payload_requests[0].current_attachment_ids == ["voice-attachment"]
     assert payload_requests[0].trusted_current_attachment_ids == ["voice-attachment"]
     assert payload_requests[0].voice_transcript is True
+    assert captured_extra_content == [
+        {
+            ATTACHMENT_IDS_KEY: ["voice-attachment"],
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VOICE_TRANSCRIPT_KEY: True,
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -7541,11 +7574,13 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
     response.body = json.dumps(hydrated_content).encode("utf-8")
     bot.client.download = AsyncMock(return_value=response)
     captured_envelopes: list[MessageEnvelope] = []
+    captured_extra_content: list[object] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[1])
+    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[2])
         captured_envelopes.append(dispatch.envelope)
+        captured_extra_content.append(kwargs.get("extra_content"))
         return _respond_dispatch_plan()
 
     async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
@@ -7586,6 +7621,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
     assert captured_envelopes[0].requester_id == "@user:localhost"
     assert captured_envelopes[0].attachment_ids == ()
     assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
 
 
 @pytest.mark.asyncio
@@ -7610,7 +7646,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[1])
+        dispatch = cast("PreparedDispatch", args[2])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 
@@ -7670,7 +7706,7 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     captured_handled_turns: list[TurnRecord] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[1])
+        dispatch = cast("PreparedDispatch", args[2])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 
@@ -7783,8 +7819,101 @@ async def test_router_skips_intermediate_agent_stream_edit_without_precheck(tmp_
 
 
 @pytest.mark.asyncio
-async def test_first_router_turn_refreshes_lazy_members_before_dispatch(tmp_path: Path) -> None:
-    """A partial lazy-member cache must not hide a joined mentioned participant from the turn's planning."""
+async def test_router_early_skip_keeps_sidecar_preview_for_hydration(tmp_path: Path) -> None:
+    """Router early skip should not drop sidecar previews before hydration can recover metadata."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    sidecar_preview = cast("nio.RoomMessageText", _file_event(event_id="$sidecar-preview", body="preview"))
+    content = sidecar_preview.source["content"]
+    assert isinstance(content, dict)
+    content["io.mindroom.long_text"] = {
+        "version": 2,
+        "encoding": "matrix_event_content_json",
+        "original_event_size": 100_000,
+        "preview_size": len(sidecar_preview.body),
+        "is_complete_content": True,
+    }
+
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
+        room,
+        sidecar_preview,
+        facts=make_ingress_facts(sidecar_preview.sender, requester_user_id="@user:localhost"),
+        thread_id="$thread",
+    )
+
+    assert should_skip is False
+
+
+@pytest.mark.parametrize(
+    ("membership", "expected"),
+    [
+        ("absent", False),
+        ("invited", False),
+        ("joined", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_router_early_skip_only_honors_joined_non_agent_mentions(
+    tmp_path: Path,
+    membership: str,
+    expected: bool,
+) -> None:
+    """An absent or merely invited human mention must not bypass normal router dispatch."""
+    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    room.add_member(bot.matrix_id.full_id, "Router", None)
+    room.add_member("@user:localhost", "User", None)
+    # A synced cache is what makes "absent" mean absent rather than "not fetched yet".
+    room.members_synced = True
+    mentioned_user_id = "@human:localhost"
+    if membership != "absent":
+        room.add_member(
+            mentioned_user_id,
+            "Human",
+            None,
+            invited=membership == "invited",
+        )
+    event = _text_event(event_id="$human-mention", body=f"hello {mentioned_user_id}")
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content["m.mentions"] = {"user_ids": [mentioned_user_id]}
+
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
+        room,
+        event,
+        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
+        thread_id=None,
+    )
+
+    assert should_skip is expected
+
+
+@pytest.mark.asyncio
+async def test_router_early_skip_keeps_a_question_to_the_router_itself(tmp_path: Path) -> None:
+    """A message mentioning only the router reaches its dispatch plan, which answers it with guidance."""
+    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    room.add_member(bot.matrix_id.full_id, "Router", None)
+    room.add_member("@user:localhost", "User", None)
+    room.members_synced = True
+    event = _text_event(event_id="$router-mention", body=f"hello {bot.matrix_id.full_id}")
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content["m.mentions"] = {"user_ids": [bot.matrix_id.full_id]}
+
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
+        room,
+        event,
+        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
+        thread_id=None,
+    )
+
+    assert should_skip is False
+
+
+@pytest.mark.asyncio
+async def test_first_router_turn_refreshes_lazy_members_before_mention_routing(tmp_path: Path) -> None:
+    """A partial lazy-member cache must not hide a joined mentioned participant."""
     bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     requester_user_id = "@user:localhost"
@@ -7811,7 +7940,7 @@ async def test_first_router_turn_refreshes_lazy_members_before_dispatch(tmp_path
     ):
         outcome = await bot._turn_ingress.handle_text_event(room, event)
 
-    assert outcome is TurnDispatchOutcome.DEFERRED
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert room_membership_is_complete(room)
     assert mentioned_user_id in cached_joined_member_ids(room)
     assert not room.members_synced
@@ -7837,3 +7966,79 @@ async def test_first_turn_membership_refresh_failure_reuses_cached_state_for_pla
     assert drain_result.dispatch_failure_count == 0
     bot.client.joined_members.assert_awaited_once_with(room.room_id)
     assert not room.members_synced
+
+
+@pytest.mark.asyncio
+async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) -> None:
+    """Router skip checks should attribute dispatch-safe snapshot refreshes."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1000,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "plain follow-up",
+                },
+            },
+        ),
+    )
+    snapshot = AsyncMock(return_value=ThreadHistoryResult([], is_full_history=False))
+    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = snapshot
+
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
+        room,
+        event,
+        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
+        thread_id="$thread",
+    )
+
+    assert should_skip is False
+    snapshot.assert_awaited_once_with(
+        room.room_id,
+        "$thread",
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path: Path) -> None:
+    """Router early skip should not abort live dispatch when its optional snapshot read fails."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1000,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "plain follow-up",
+                },
+            },
+        ),
+    )
+    snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
+    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = snapshot
+
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
+        room,
+        event,
+        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
+        thread_id="$maybe-root",
+    )
+
+    assert should_skip is False
+    snapshot.assert_awaited_once_with(
+        room.room_id,
+        "$maybe-root",
+    )

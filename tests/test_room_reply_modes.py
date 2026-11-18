@@ -44,7 +44,6 @@ from mindroom.room_reply_modes import (
     resolve_room_reply_mode_override,
     set_room_reply_mode_override,
 )
-from mindroom.routing_judgment import ResponderSelection
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.bot_helpers import _room_file_event, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
@@ -63,7 +62,7 @@ from tests.conftest import (
 from tests.matrix_state_helpers import save_matrix_state
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.runtime_fakes import ready_runtime
-from tests.test_turn_policy import _context, _dispatch, _entity_id, _hold_lane, _policy_for, _room_with_members
+from tests.test_turn_policy import _context, _dispatch, _entity_id, _policy_for, _room_with_members, _text_event
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -242,7 +241,7 @@ _BOTH = ("general", "research")
 # Who answers each turn under each reply mode: each bot that does not ignore it, and how it answers.
 _WHO_ANSWERS = [
     pytest.param(_Turn(), {"general": "individual"}, {}, id="untagged-room-message-sole-agent"),
-    pytest.param(_Turn(agents=_BOTH), {"research": "routed"}, {}, id="untagged-room-message-two-agents"),
+    pytest.param(_Turn(agents=_BOTH), {ROUTER_AGENT_NAME: "route"}, {}, id="untagged-room-message-two-agents"),
     pytest.param(_Turn(agents=_BOTH, with_router=False, dm=True), {"general": "team"}, {}, id="untagged-dm-two-agents"),
     pytest.param(_Turn(thread=(SENDER,)), {"general": "individual"}, {}, id="untagged-thread-of-one-person"),
     pytest.param(
@@ -251,7 +250,12 @@ _WHO_ANSWERS = [
         {"general": "individual"},
         id="mentions-general",
     ),
-    pytest.param(_Turn(agents=_BOTH, mention=ROUTER_AGENT_NAME), {}, {}, id="mentions-only-the-router"),
+    pytest.param(
+        _Turn(agents=_BOTH, mention=ROUTER_AGENT_NAME),
+        {ROUTER_AGENT_NAME: "reject"},
+        {ROUTER_AGENT_NAME: "reject"},
+        id="mentions-only-the-router",
+    ),
     pytest.param(
         _Turn(agents=_BOTH, thread=(SENDER, "general")),
         {"general": "individual"},
@@ -305,11 +309,7 @@ _WHO_ANSWERS = [
 
 
 async def _answers(config: Config, turn: _Turn) -> dict[str, str]:
-    """Plan ``turn`` on every bot in its room and return how each bot that does not ignore it answers.
-
-    The router owns the room's routing lane, and its selection of who answers an unmentioned message among several
-    agents picks research, which then answers as `routed`.
-    """
+    """Plan ``turn`` on every bot in its room and return how each bot that does not ignore it answers."""
     room = _room_with_members(SENDER, *(_entity_id(config, agent).full_id for agent in turn.agents))
     mentioned = [] if turn.mention is None else [_entity_id(config, turn.mention)]
     history = None
@@ -323,16 +323,7 @@ async def _answers(config: Config, turn: _Turn) -> dict[str, str]:
         ]
     bots = (ROUTER_AGENT_NAME, *turn.agents) if turn.with_router else turn.agents
     answers: dict[str, str] = {}
-    process = ready_runtime(config, runtime_paths_for(config))
-    if turn.with_router:
-        _hold_lane(process, config, ROUTER_AGENT_NAME, room)
-    with (
-        patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=turn.dm)),
-        patch(
-            "mindroom.turn_policy.suggest_responder_for_message",
-            new=AsyncMock(return_value=ResponderSelection("research")),
-        ),
-    ):
+    with patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=turn.dm)):
         for bot in bots:
             context = _context(
                 mentioned=mentioned,
@@ -350,16 +341,16 @@ async def _answers(config: Config, turn: _Turn) -> dict[str, str]:
                     source_kind=turn.source_kind,
                 )
                 dispatch = replace(dispatch, envelope=replace(dispatch.envelope, origin=origin))
-            policy = _policy_for(config, bot, process)
-            plan = await policy.plan_turn(
+            plan = await _policy_for(config, bot).plan_turn(
                 room,
+                _text_event("hello agents"),
                 dispatch,
                 has_active_response_for_target=lambda _target, bot=bot: bot == turn.answering,
             )
             if plan.kind == "respond":
                 answers[bot] = plan.response_action.kind
-            elif plan.kind == "route" and (selected := await policy.select_responder(room, dispatch)) is not None:
-                answers[selected] = "routed"
+            elif plan.kind == "route":
+                answers[bot] = "route"
     return answers
 
 
@@ -403,13 +394,49 @@ async def test_mentions_room_flow_from_a_mention_to_an_admin_switching_back(tmp_
     await _run_reply_mode_command(_command_context(config), ADMIN, "auto")
 
     assert resolve_room_reply_mode_override(runtime_paths_for(config), ROOM_ID) == "auto"
-    assert await _answers(config, two_agents) == {"research": "routed"}
+    assert await _answers(config, two_agents) == {ROUTER_AGENT_NAME: "route"}
     assert await _answers(config, followed) == {"general": "individual"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "says"),
+    [
+        ("auto", "In a new untagged message, automatic routing can still choose an agent or team"),
+        ("mentions", "In this room, a new message gets an answer only when it mentions an agent or team."),
+    ],
+)
+async def test_router_only_mention_guidance_follows_the_reply_mode(
+    tmp_path: Path,
+    mode: RoomReplyMode,
+    says: str,
+) -> None:
+    """A person who mentions only the router learns how a new message gets an answer in this room."""
+    turn = _Turn(agents=_BOTH, mention=ROUTER_AGENT_NAME)
+    config = _config(tmp_path, reply_mode=mode)
+    room = _room_with_members(SENDER, *(_entity_id(config, agent).full_id for agent in turn.agents))
+    dispatch = _dispatch(
+        _context(mentioned=[_entity_id(config, ROUTER_AGENT_NAME)], am_i_mentioned=True),
+        agent_name=ROUTER_AGENT_NAME,
+    )
+
+    plan = await _policy_for(config, ROUTER_AGENT_NAME).plan_turn(
+        room,
+        _text_event("hello router"),
+        dispatch,
+        has_active_response_for_target=lambda _target: False,
+    )
+
+    assert plan.response_action.kind == "reject"
+    assert says in plan.response_action.rejection_message
+    assert plan.response_action.rejection_message.endswith(
+        "The router is not a conversational AI agent you can tag directly.",
+    )
+
+
 # Who acts on what a person sends, driven through each bot's ingress: the agents that answer, how many times each,
-# and the turns the router, which owns the room's routing lane, hands to the agent it selects.
-_ROUTED = "routed"
+# and the router's relays to the agent it picked.
+_RELAY = "router relay"
 _GENERAL_ONCE = {"general": 1}
 
 
@@ -567,14 +594,14 @@ _PATHS: dict[str, Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[N
 # fmt: off
 _WHO_ACTS = {
     #                                                    one agent: auto,  mentions            two agents: auto,              mentions
-    "untagged text":                                   (_GENERAL_ONCE,    {},                 {_ROUTED: 1},                  {}),
-    "untagged upload":                                 (_GENERAL_ONCE,    {},                 {_ROUTED: 1},                  {}),
+    "untagged text":                                   (_GENERAL_ONCE,    {},                 {_RELAY: 1},                   {}),
+    "untagged upload":                                 (_GENERAL_ONCE,    {},                 {_RELAY: 1},                   {}),
     "voice whose transcript mentions general":         (_GENERAL_ONCE,    _GENERAL_ONCE,      _GENERAL_ONCE,                 _GENERAL_ONCE),
     "upload whose caption mentions general":           (_GENERAL_ONCE,    _GENERAL_ONCE,      _GENERAL_ONCE,                 _GENERAL_ONCE),
     # The untagged message is answered or routed in `auto`; the edit starts nothing in either mode.
-    "edit that adds a mention to an untagged message": (_GENERAL_ONCE,    {},                 {_ROUTED: 1},                  {}),
+    "edit that adds a mention to an untagged message": (_GENERAL_ONCE,    {},                 {_RELAY: 1},                   {}),
     # Every message is room-level in room mode, so the follow-up is a new message that needs its own mention.
-    "untagged follow-up in a room-mode room":          ({"general": 2},   _GENERAL_ONCE,      {"general": 1, _ROUTED: 1},    _GENERAL_ONCE),
+    "untagged follow-up in a room-mode room":          ({"general": 2},   _GENERAL_ONCE,      {"general": 1, _RELAY: 1},     _GENERAL_ONCE),
     "untagged follow-up in a thread general replied in": (_GENERAL_ONCE,  _GENERAL_ONCE,      _GENERAL_ONCE,                 _GENERAL_ONCE),
 }
 # fmt: on
@@ -655,12 +682,8 @@ async def _who_acts(
     )
     voice_audio = Audio(content=b"voice", mime_type="audio/ogg")
 
-    # The router is the room's one running bot, so it owns the routing lane.
-    router = bots[ROUTER_AGENT_NAME]
-    router.running = True
-    router.client.rooms = {ROOM_ID: nio.MatrixRoom(ROOM_ID, router.client.user_id)}
     with (
-        patch("mindroom.turns.dispatch.route_turn", new=AsyncMock(return_value=())) as route,
+        patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as relay,
         patch(
             "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
             new=AsyncMock(return_value=attachment),
@@ -679,8 +702,8 @@ async def _who_acts(
             await drain_coalescing(bot)
 
     acted = {name: generate.await_count for name, generate in generates.items() if generate.await_count}
-    if route.await_count:
-        acted[_ROUTED] = route.await_count
+    if relay.await_count:
+        acted[_RELAY] = relay.await_count
     return acted, bots
 
 
@@ -693,7 +716,7 @@ async def test_each_ingress_path_reaches_whom_the_reply_mode_says(
     mode: RoomReplyMode,
     expected: dict[str, int],
 ) -> None:
-    """Text, uploads, voice, captioned uploads, edits, and room-mode follow-ups reach the lane owner and agents as the mode says."""
+    """Text, uploads, voice, captioned uploads, edits, and room-mode follow-ups reach the router and agents as the mode says."""
     acted, _bots = await _who_acts(
         tmp_path,
         _PATHS[path],

@@ -29,6 +29,7 @@ from mindroom.matrix.media import (
     FileOrVideoMessageEvent,
     is_file_or_video_message_event,
     is_image_message_event,
+    is_matrix_media_dispatch_event,
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_forks import fork_parent_thread_ids
@@ -248,6 +249,31 @@ class InboundTurnNormalizer:
             source=resolved_source,
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
+
+    async def register_routed_attachment(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        event: nio.RoomMessageFormatted | PreparedIngress | MediaDispatchEvent,
+    ) -> str | None:
+        """Register a routed media event and return its attachment ID when available."""
+        if not is_matrix_media_dispatch_event(event):
+            return None
+        attachment_record = await register_matrix_media_attachment(
+            self._client(),
+            self.deps.storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
+        if attachment_record is None:
+            self.deps.logger.error(
+                "Failed to register routed media attachment",
+                event_id=event.event_id,
+            )
+            return None
+        return attachment_record.attachment_id
 
     async def register_batch_media_attachments(
         self,

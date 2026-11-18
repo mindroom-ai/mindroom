@@ -143,10 +143,6 @@ class PreparedTurn:
     # agent. A live read, not a snapshot: dispatch asks after awaiting its context, and a message admitted
     # meanwhile counts.
     queues_other_run: Callable[[RunIdentity], bool]
-    # The batch's normalized events with their provenance, in order: what a routing handoff rebuilds this turn from.
-    inputs: tuple[tuple[PreparedIngress, IngressFacts], ...]
-    # The person's event a turn the room's routing lane handed to this bot answers; None for every other turn.
-    answers_event_id: str | None = None
 
 
 _COALESCED_MESSAGES_INTRO = (
@@ -503,5 +499,4 @@ def build_prepared_turn(
         selection=next((event.selection for event in ordered_pending_events if event.selection is not None), None),
         queued_follow_up_notices=queued_follow_up_notices,
         queues_other_run=queues_other_run,
-        inputs=tuple((pending_event.event, pending_event.facts) for pending_event in ordered_pending_events),
     )
