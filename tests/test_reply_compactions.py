@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal, cast
 
+import nio
 import pytest
 
+from mindroom.constants import COMPACTIONS_CONTENT_KEY
 from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
 from mindroom.history.types import (
     CompactionLifecycleFailure,
@@ -14,7 +17,9 @@ from mindroom.history.types import (
     CompactionMode,
     CompactionOutcome,
 )
+from mindroom.matrix.large_messages import prepare_large_message
 from tests.history_helpers import RecordingCompactionLifecycle
+from tests.test_large_messages import _UploadClient
 
 if TYPE_CHECKING:
     from mindroom.delivery_gateway import MatrixCompactionLifecycle
@@ -147,6 +152,53 @@ async def test_failure_sets_status_and_reason(status: Literal["failed", "timeout
     assert entry["summary_model"] == "haiku-fallback"
     assert entry["duration_ms"] == 30_000
     assert "runs_remaining" not in entry
+
+
+@pytest.mark.asyncio
+async def test_a_verbose_failure_reason_is_capped_so_a_short_answer_edit_still_fits() -> None:
+    """A long provider error is cut to a short reason, so every later edit of the reply stays a normal edit."""
+    recorder = ReplyCompactions()
+    lifecycle = _lifecycle(recorder)
+    entry_id = await lifecycle.start(_start())
+    await lifecycle.complete_failure(
+        replace(_failure(entry_id, "failed"), failure_reason="provider said: " + "x" * 40_000),
+    )
+
+    content = recorder.content()
+    assert content is not None
+    reason = content[0]["failure_reason"]
+    assert isinstance(reason, str)
+    assert len(reason) == 301
+    assert reason.startswith("provider said: xxx")
+    assert reason.endswith("…")
+    edit = {
+        "msgtype": "m.text",
+        "body": "* Short answer.",
+        "m.new_content": {"msgtype": "m.text", "body": "Short answer.", COMPACTIONS_CONTENT_KEY: content},
+        COMPACTIONS_CONTENT_KEY: content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+    }
+    prepared = await prepare_large_message(
+        _UploadClient(nio.UploadResponse("mxc://server/sidecar")),
+        "!room:server",
+        edit,
+        room_encrypted=False,
+        sidecar_required=True,
+    )
+    assert prepared["m.new_content"]["body"] == "Short answer."
+
+
+@pytest.mark.asyncio
+async def test_a_short_failure_reason_is_kept_whole() -> None:
+    """A reason within the cap is stored unchanged."""
+    recorder = ReplyCompactions()
+    lifecycle = _lifecycle(recorder)
+    entry_id = await lifecycle.start(_start())
+    await lifecycle.complete_failure(replace(_failure(entry_id, "failed"), failure_reason="y" * 300))
+
+    content = recorder.content()
+    assert content is not None
+    assert content[0]["failure_reason"] == "y" * 300
 
 
 @pytest.mark.asyncio

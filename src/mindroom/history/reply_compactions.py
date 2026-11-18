@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _TERMINAL_STATUSES = frozenset({"success", "failed", "timeout"})
+# Every later write of the reply repeats the entry, so a provider's long error must not crowd out its answer.
+_FAILURE_REASON_MAX_CHARS = 300
+
+
+def _short_reason(reason: str) -> str:
+    """Return the reason cut to the cap, marked with an ellipsis when cut."""
+    return reason if len(reason) <= _FAILURE_REASON_MAX_CHARS else reason[:_FAILURE_REASON_MAX_CHARS] + "…"
 
 
 class ReplyCompactions:
@@ -161,7 +168,7 @@ class ReplyCompactionLifecycle:
         self._recorder.update(
             event.notice_event_id,
             status=event.status,
-            failure_reason=event.failure_reason,
+            failure_reason=_short_reason(event.failure_reason),
             duration_ms=event.duration_ms,
             summary_model=event.summary_model,
         )
