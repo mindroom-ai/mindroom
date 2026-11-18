@@ -648,3 +648,16 @@ async def test_thread_mode_without_power_says_moderator_rights(room_state: RoomS
     # Nothing changed: agents keep the mode the room's clients show.
     assert resolve_room_thread_mode_override(room_state[1], THREAD_MODE_ROOM_ID) is None
     assert ("io.mindroom.thread_mode", "") not in room_state[3]
+
+
+@pytest.mark.asyncio
+async def test_thread_mode_failure_that_is_no_refusal_asks_to_retry(room_state: RoomState) -> None:
+    """A state write that fails for another reason than power does not ask for moderator rights."""
+    failing = AsyncMock(spec=nio.AsyncClient)
+    failing.room_put_state.return_value = nio.RoomPutStateError("server error", "M_UNKNOWN")
+    _answering, command = _thread_mode_command_through(room_state, failing)
+
+    reply = await command
+
+    assert reply.startswith("⚠️ This room now uses `room` thread mode")
+    assert "Run the command again to retry." in reply

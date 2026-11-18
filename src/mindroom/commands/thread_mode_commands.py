@@ -6,12 +6,7 @@ from typing import TYPE_CHECKING, cast, get_args
 
 from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.room_modes import change_room_thread_mode
-from mindroom.room_thread_modes import (
-    RoomThreadMode,
-    clear_room_thread_mode_override,
-    resolve_room_thread_mode_override,
-    set_room_thread_mode_override,
-)
+from mindroom.room_thread_modes import RoomThreadMode, resolve_room_thread_mode_override
 from mindroom.steward_duties import moderator_rights_message
 
 if TYPE_CHECKING:
@@ -48,7 +43,7 @@ async def handle_thread_mode_command(
     room_id: str,
     requester_user_id: str,
     sender_user_id: str,
-    put_state: Callable[..., Awaitable[bool]] | None = None,
+    put_state: Callable[..., Awaitable[bool | None]] | None = None,
 ) -> str:
     """Show, set, or clear the room-level thread mode override, written through ``put_state``, the room steward's."""
     requested = args_text.strip().lower()
@@ -61,29 +56,24 @@ async def handle_thread_mode_command(
     if await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id)) is None:
         return "❌ Room admin only."
 
-    previous = resolve_room_thread_mode_override(runtime_paths, room_id)
-    if requested in _RESET_ARGUMENTS:
-        removed = previous is not None
-        current = await change_room_thread_mode(client, config, runtime_paths, room_id, None, put_state=put_state)
-        if not removed:
-            # A rerun after a failed publication finds no override; it still warns while publishing fails.
-            reply = "This room has no thread mode override."
-            if current:
-                return reply
-        else:
-            reply = "Room thread mode override removed. Agents use their configured modes again."
-    else:
-        mode = cast("RoomThreadMode", requested)
-        current = await change_room_thread_mode(client, config, runtime_paths, room_id, mode, put_state=put_state)
+    mode = None if requested in _RESET_ARGUMENTS else cast("RoomThreadMode", requested)
+    removed = resolve_room_thread_mode_override(runtime_paths, room_id) is not None
+    current = await change_room_thread_mode(client, config, runtime_paths, room_id, mode, put_state=put_state)
+    if current is None:
+        return moderator_rights_message("change the thread mode")
+    if mode is not None:
         reply = (
             f"This room now uses `{mode}` thread mode for future agent replies.\n\n"
             "Use `/thread_mode reset` to restore configured modes."
         )
-    if current:
-        return f"✅ {reply}"
-    # The room refused the state its clients read, so agents keep the mode those clients show.
-    if previous is None:
-        clear_room_thread_mode_override(runtime_paths, room_id)
+    elif removed:
+        reply = "Room thread mode override removed. Agents use their configured modes again."
     else:
-        set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=previous)
-    return moderator_rights_message("change the thread mode")
+        # A rerun after a failed publication finds no override; it still warns while publishing fails.
+        reply = "This room has no thread mode override."
+    if current:
+        return f"✅ {reply}" if mode is not None or removed else reply
+    return (
+        f"⚠️ {reply}\n\nClients may still show the old thread mode in this room because publishing the new one failed. "
+        "Run the command again to retry."
+    )

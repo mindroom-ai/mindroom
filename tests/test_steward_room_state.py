@@ -1176,8 +1176,6 @@ async def test_command_reports_a_failed_publication(room_state: RoomState, comma
     """The command changes nothing and asks for moderator rights when the room refuses the state its clients read."""
     config, paths, _, _, client = room_state
     set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="thread")
-    client.room_put_state.side_effect = None
-    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     for _ in range(2):  # A second failure answers the same.
         reply = await handle_thread_mode_command(
             command,
@@ -1187,6 +1185,7 @@ async def test_command_reports_a_failed_publication(room_state: RoomState, comma
             room_id=ROOM_ID,
             requester_user_id="@admin:localhost",
             sender_user_id="@admin:localhost",
+            put_state=AsyncMock(return_value=None),
         )
         assert reply == "I need moderator rights in this room to change the thread mode."
         assert resolve_room_thread_mode_override(paths, ROOM_ID) == "thread"

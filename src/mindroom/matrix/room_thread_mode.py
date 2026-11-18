@@ -32,12 +32,13 @@ async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per compari
     runtime_paths: RuntimePaths,
     room_id: str,
     *,
-    put_state: Callable[..., Awaitable[bool]] | None = None,
-) -> bool:
+    put_state: Callable[..., Awaitable[bool | None]] | None = None,
+) -> bool | None:
     """Compare one state event with reply-path responders and return whether it is current.
 
     The room's steward reads and writes with its own client; a bot that answers a command reads with its client
     and writes through ``put_state``, the steward's.
+    None says the room refused the write for lack of power.
     Failures leave the next trigger free to retry.
     """
     try:

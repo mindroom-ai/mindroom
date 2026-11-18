@@ -61,7 +61,7 @@ class _Room:
         )
         return await require_room_reader(request, ROOM_ID)
 
-    def thread_mode_command(self, args_text: str) -> Coroutine[Any, Any, str]:
+    def thread_mode_command(self, args_text: str, put_state: AsyncMock | None = None) -> Coroutine[Any, Any, str]:
         """Alice's `!thread_mode` command, as the router answers it."""
         return handle_thread_mode_command(
             args_text,
@@ -71,6 +71,7 @@ class _Room:
             room_id=ROOM_ID,
             requester_user_id=ALICE,
             sender_user_id=ALICE,
+            put_state=put_state,
         )
 
     def stored(self) -> tuple[str | None, str | None]:
@@ -249,9 +250,11 @@ async def test_a_change_the_router_cannot_publish_is_saved_and_answers_503(room:
 @pytest.mark.asyncio
 async def test_a_thread_mode_command_the_room_refuses_changes_nothing(room: _Room) -> None:
     """`!thread_mode` keeps the old mode when the state write is refused, and its answer asks for the rights."""
-    room.client.room_put_state.side_effect = None
-    room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    assert await room.thread_mode_command("room") == "I need moderator rights in this room to change the thread mode."
+    refused = AsyncMock(return_value=None)
+    assert (
+        await room.thread_mode_command("room", refused)
+        == "I need moderator rights in this room to change the thread mode."
+    )
     assert room.stored() == (None, None)
     assert room.published() is None
 
