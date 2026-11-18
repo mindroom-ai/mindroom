@@ -1074,7 +1074,7 @@ async def _acknowledge_selection(bot: AgentBot) -> tuple[str | None, str | None]
     return await bot._visible_responses.deliver_selection_acknowledgement(
         TurnRecord.create(["$event"], requester_id="@user:localhost"),
         target=_target(),
-        response_text="You selected: 1 Yes\n\nProcessing your response...",
+        response_text="Thinking...",
         delivery_turn_id="$event",
     )
 
@@ -1101,7 +1101,7 @@ async def test_selection_answer_adopts_the_span_its_acknowledgement_created(tmp_
     assert reply.event_id == ack_event_id
     spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
     assert [(span.span_id, span.outcome) for span in spans] == [(span_id, rl.SpanOutcome.COMPLETED)]
-    assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response...", "Selected answer."]
+    assert _sent_bodies(bot) == ["Thinking...", "Selected answer."]
     assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
 
 
@@ -1254,7 +1254,7 @@ async def test_a_selection_whose_source_ended_before_its_claim_removes_the_ackno
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.SUPPRESSED]
     bot.client.room_redact.assert_awaited_once()
     assert ack_event_id in (*bot.client.room_redact.await_args.args, *bot.client.room_redact.await_args.kwargs.values())
-    assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response..."]
+    assert _sent_bodies(bot) == ["Thinking..."]
 
 
 async def test_a_selection_no_reply_took_does_not_leave_its_acknowledgement_processing(tmp_path: Path) -> None:
@@ -1283,7 +1283,7 @@ async def test_a_selection_no_reply_took_does_not_leave_its_acknowledgement_proc
         )
 
     assert handed_off is False
-    assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response..."]
+    assert _sent_bodies(bot) == ["Thinking..."]
     reply = await _reply(bot)
     assert reply.terminal
     bot.client.room_redact.assert_awaited_once()
