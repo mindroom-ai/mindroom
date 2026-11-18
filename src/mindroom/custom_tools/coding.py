@@ -388,6 +388,7 @@ def _file_lock(resolved: Path) -> Iterator[None]:
 
 
 def _line_of(text: str, offset: int) -> int:
+    """Return the 1-based line number of ``offset`` in ``text``."""
     return text.count("\n", 0, offset) + 1
 
 
@@ -476,7 +477,7 @@ def _apply_edits(content: str, edits: list[_Edit]) -> tuple[str, str] | str:
     for start, end in landed:
         first_line, last_line = _line_of(new_content, start), _line_of(new_content, max(start, end - 1))
         ranges.append(str(first_line) if first_line == last_line else f"{first_line}-{last_line}")
-    report = f"{'line' if ranges == [ranges[0]] and '-' not in ranges[0] else 'lines'} {', '.join(ranges)}"
+    report = f"{'line' if len(ranges) == 1 and '-' not in ranges[0] else 'lines'} {', '.join(ranges)}"
     fuzzy = [f"edits[{index}]" for index in sorted({index for match, index in spans if match.was_fuzzy})]
     if fuzzy:
         report += f" ({', '.join(fuzzy) + ' ' if len(edits) > 1 else ''}matched after normalizing whitespace/quotes)"
@@ -484,6 +485,7 @@ def _apply_edits(content: str, edits: list[_Edit]) -> tuple[str, str] | str:
 
 
 def _with_crlf(text: str) -> str:
+    """Return ``text`` with each bare LF made CRLF."""
     return re.sub(r"(?<!\r)\n", "\r\n", text)
 
 
