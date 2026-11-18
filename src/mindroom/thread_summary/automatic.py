@@ -383,14 +383,18 @@ async def _untitled_prompt(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-    prompt_event_id: str,
+    prompt_event_ids: Collection[str],
     config: Config,
     runtime_paths: RuntimePaths,
     trusted_sender_ids: Collection[str],
     authorize_human: Callable[[str], bool],
     sole: bool,
 ) -> ResolvedVisibleMessage | None:
-    """Return the prompt while it is in an untitled, unresolved thread, and, when ``sole``, its only prompt, unedited."""
+    """Return the turn's first message in an untitled, unresolved thread; when ``sole``, only while it is the only turn.
+
+    Attachments and the text sent with them are one turn, so ``sole`` means the
+    thread's human messages are exactly ``prompt_event_ids``, all unedited.
+    """
     state = summary_state(
         history,
         thread_id=thread_id,
@@ -404,14 +408,17 @@ async def _untitled_prompt(
     ordinary = [
         message
         for message in state.ordinary_messages
-        if message.event_id == prompt_event_id or not is_managed_entity_id(message.sender, config, runtime_paths)
+        if message.event_id in prompt_event_ids or not is_managed_entity_id(message.sender, config, runtime_paths)
     ]
-    prompt_message = next((message for message in ordinary if message.event_id == prompt_event_id), None)
+    prompt_message = next((message for message in ordinary if message.event_id in prompt_event_ids), None)
     if prompt_message is None:
         return None
-    # An edit keeps the prompt's event ID but changes its text, so the prompt
+    # An edit keeps a message's event ID but changes its text, so the prompt
     # this title would be made from is no longer what the thread shows.
-    if sole and (len(ordinary) != 1 or prompt_message.latest_event_id != prompt_event_id):
+    if sole and (
+        {message.event_id for message in ordinary} != set(prompt_event_ids)
+        or any(message.latest_event_id != message.event_id for message in ordinary)
+    ):
         return None
     # Resolution lives in room state, which a history read cannot see.
     if await _thread_is_resolved(client, room_id, thread_id):
@@ -426,13 +433,13 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    prompt_event_id: str,
+    prompt_event_ids: Collection[str],
     prompt: str | None,
     conversation_reader: ConversationReader,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
 ) -> None:
-    """Title a new thread from its prompt without advancing the post-reply schedule.
+    """Title a new thread from its first turn's messages without advancing the post-reply schedule.
 
     ``prompt`` is None for a batch of messages starting a fork: only the parent's title can title it then.
     """
@@ -453,6 +460,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 conversation_reader,
                 room_id,
                 thread_id,
+                edits_of=prompt_event_ids,
                 unreadable_is_missing=True,
             )
             if not history.is_full_history:
@@ -471,7 +479,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 client=client,
                 room_id=room_id,
                 thread_id=thread_id,
-                prompt_event_id=prompt_event_id,
+                prompt_event_ids=prompt_event_ids,
                 config=config,
                 runtime_paths=runtime_paths,
                 trusted_sender_ids=trusted_sender_ids,
@@ -509,6 +517,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 conversation_reader,
                 room_id,
                 thread_id,
+                edits_of=prompt_event_ids,
                 unreadable_is_missing=True,
             )
             if not history.is_full_history:
