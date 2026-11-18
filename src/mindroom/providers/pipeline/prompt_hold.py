@@ -2,17 +2,16 @@
 
 The system prompt leads every request, so a changed one makes the provider read the whole conversation again. A
 request that names its conversation's hold file (``ModelRequest.prompt_hold``) to a route that takes a system prompt
-update (``Capabilities.system_updates``) is therefore sent the system prompt the conversation last sent, byte for
-byte, and a change to its stable first system message, such as an edited ``AGENTS.md``, as a system prompt update: a
-system message after the newest user message, which every later request sends again in the same place.
+update (``Capabilities.system_updates``) is therefore sent the system prompt the conversation last sent, and a change
+to its stable first system message, such as an edited ``AGENTS.md``, as a system prompt update: a system message
+after the newest user message, which every later request sends again in the same place.
 
 One rule decides it, here and nowhere else: a request is sent the held prompt and its updates only if the file was
-written for the same model and tools, the conversation was not idle past the cache lifetime, the request's other
-system messages are the held ones, and every stored anchor (the digest of the messages before an update, and of the
-first message) still matches the request's messages. Any other request is sent exactly as it was built, and the hold
-starts over from it. So whatever rewrites the conversation before an anchor, such as a compaction or a history limit,
-sends the request's own prompt, and a request that replays the same messages, such as a retry or a resumed run,
-sends the same held prompt and updates. A request without the field is never touched.
+written for the same model and tools, was used within the cache lifetime, holds the request's other system messages,
+and every anchor it stores (the digest of the first message, and of the messages before each update) matches the
+request's messages. Any other request is sent exactly as it was built, and the hold starts over from it. So a request
+whose conversation a compaction or a history limit rewrote sends its own prompt, and one that replays the same
+messages, such as a retry or a resumed run, sends the same held prompt and updates.
 
 The file lies in the agent's state root, so a restart keeps it and one requester's private prompt stays out of
 another's; its modification time is the conversation's last request.
@@ -46,6 +45,9 @@ if TYPE_CHECKING:
 
 __all__ = ["held_request", "prompt_hold_path", "prompt_hold_stream"]
 
+# The messages a request sends, and what its conversation's file holds once it sent them.
+type _Plan = tuple[Sequence[Message], dict[str, Any]]
+
 # A hold no request continues any more is deleted once it has been idle this long.
 _PRUNE_IDLE_SECONDS = 24 * 3600
 # A change larger than this, or one more update than this many, reads better as a new prompt.
@@ -61,26 +63,23 @@ _UPDATE_WITHDRAWN = (
     "MindRoom system prompt update. Every earlier system prompt update in this conversation is withdrawn; "
     "the system prompt applies as written."
 )
-# An inlined memory file's lines are never quoted in an update, so a memory the user asked to forget is not kept.
-_MEMORY_FILE = "/MEMORY.md"
 
 
 def prompt_hold_path(database: Path, session_id: str) -> Path:
-    """Return the hold file of conversation ``session_id``, whose runs ``database`` stores.
+    """Return the hold file of conversation ``session_id``, in the state root of the ``database`` that stores its runs.
 
-    It lies beside the database's ``sessions`` directory, in the same state root, so two requesters' private
-    instances of one agent, which may share a session id, never read each other's prompt.
+    Two requesters' private instances of one agent may share a session id, and never read each other's prompt.
     """
-    name = hashlib.sha256(session_id.encode()).hexdigest()
-    return database.parent.parent / "prompt_holds" / f"{name}.json"
+    return database.parent.parent / "prompt_holds" / f"{hashlib.sha256(session_id.encode()).hexdigest()}.json"
 
 
 def _update_text(held: str, fresh: str) -> str | None:
-    """Return the update that tells a model holding the ``held`` text what ``fresh`` says, or None when it may not.
+    """Return the update that tells a model sent the ``held`` text what ``fresh`` says, or None when none may.
 
-    Each changed run of lines is named by the inlined file and the heading it stands under, with the lines that no
-    longer hold quoted so the model can find them, since the prompt it was sent still shows them. The update states
-    the whole difference from the held text, so the newest update alone says what is in force.
+    It states the whole difference, so the newest update alone says what is in force. Each changed run of lines is
+    named by the inlined file and the heading above it and quotes the lines that no longer hold, which the prompt the
+    model was sent still shows. So a change to an inlined ``MEMORY.md`` is never told: a memory the user asked to
+    forget would stay in every later request.
     """
     if held == fresh:
         return _UPDATE_WITHDRAWN
@@ -94,11 +93,11 @@ def _update_text(held: str, fresh: str) -> str | None:
             continue
         changed += len(removed) + len(added)
         # The headings above the change, within its own section: nothing after the role stands under the role's.
-        before = list(takewhile(lambda line: line != "</your_role>", reversed(old[:old_start])))
-        file = next((line for line in before if line.startswith("### /")), None)
-        if any(line.startswith("### /") and line.endswith(_MEMORY_FILE) for line in (file, *removed, *added) if line):
+        above = list(takewhile(lambda line: line != "</your_role>", reversed(old[:old_start])))
+        file = next((line for line in above if line.startswith("### /")), None)
+        if any(line.startswith("### /") and line.endswith("/MEMORY.md") for line in (file, *removed, *added) if line):
             return None
-        heading = next((line for line in before if line.startswith("#")), None)
+        heading = next((line for line in above if line.startswith("#")), None)
         where = " > ".join(f'"{line}"' for line in dict.fromkeys((file, heading)) if line) or "the system prompt"
         parts.append(f"In {where}:")
         if removed:
@@ -114,8 +113,7 @@ def _update_text(held: str, fresh: str) -> str | None:
 def _anchors(messages: Sequence[Message], lengths: Sequence[int]) -> list[str | None]:
     """Return, for each of the ascending ``lengths``, the digest of what the first that many ``messages`` send.
 
-    None for a length the messages do not reach, or whose messages hold content that cannot be known here
-    (``message_digest``).
+    None for a length they do not reach, or one whose messages hold content unknown here (``message_digest``).
     """
     digest = hashlib.sha256()
     anchors: list[str | None] = []
@@ -129,10 +127,9 @@ def _anchors(messages: Sequence[Message], lengths: Sequence[int]) -> list[str | 
 
 
 def _may_stand(messages: Sequence[Message], position: int) -> bool:
-    """Return whether an update may stand before ``messages[position]``.
+    """Return whether an update may stand before ``messages[position]``: after a user message, before a reply or the end.
 
-    Claude takes a system message only right after a user message and before an assistant message or the request's
-    end, and OpenRouter silently sends one placed elsewhere as the user's text.
+    Claude takes a system message nowhere else, and OpenRouter silently sends one placed elsewhere as the user's text.
     """
     return messages[position - 1].role == "user" and (
         position == len(messages) or messages[position].role == "assistant"
@@ -150,11 +147,11 @@ def _read(path: Path, now: float) -> dict[str, Any] | None:
 
 def _continued(
     state: dict[str, Any],
-    route: list[str | None],
+    route: list[Any],
     system: Sequence[Message],
     rest: Sequence[Message],
-) -> tuple[Sequence[Message], dict[str, Any]] | None:
-    """Return what a request that continues the hold ``state`` sends and the state after it, or None when it cannot."""
+) -> _Plan | None:
+    """Return the plan of a request that continues the hold ``state``, or None when the hold must start over."""
     fresh = [message.content for message in system]
     held, updates = state["system"], state["updates"]
     lengths = [length for length, _, _ in updates]
@@ -195,25 +192,17 @@ def _continued(
     return (*sent, *rest[start:]), state
 
 
-def _plan(
-    inner: ModelProvider,
-    request: ModelRequest,
-    state: dict[str, Any] | None,
-) -> tuple[Sequence[Message], dict[str, Any]] | None:
-    """Return the messages ``request`` sends given the hold ``state``, and the state once it sent them.
+def _plan(inner: ModelProvider, request: ModelRequest, state: dict[str, Any] | None) -> _Plan | None:
+    """Return the plan of ``request`` for a conversation whose file holds ``state``.
 
-    None for a request that holds no prompt: one without a hold file, to a route that takes no update, or without a
-    leading system text and a message after it.
+    None for a request that holds no prompt: one to a route that takes no update, or without a leading system text
+    and a message after it.
     """
     messages = request.messages
     count = next((index for index, message in enumerate(messages) if message.role != "system"), len(messages))
     system, rest = messages[:count], messages[count:]
-    if (
-        request.prompt_hold is None
-        or not inner.capabilities.system_updates
-        or not (system and rest)
-        or not all(isinstance(message.content, str) for message in system)
-    ):
+    texts = [message.content for message in system]
+    if not (inner.capabilities.system_updates and texts and rest and all(isinstance(text, str) for text in texts)):
         return None
     tools = hashlib.sha256(stable_serialize([asdict(tool) for tool in request.tools]).encode()).hexdigest()
     route = [inner.identity.id, inner.identity.endpoint, tools]
@@ -221,14 +210,8 @@ def _plan(
         with suppress(KeyError, TypeError, ValueError, IndexError):
             if (continued := _continued(state, route, system, rest)) is not None:
                 return continued
-    texts = [message.content for message in system]
-    return messages, {
-        "route": route,
-        "system": texts,
-        "current": texts[0],
-        "first": _anchors(rest, [1])[0],
-        "updates": [],
-    }
+    first = _anchors(rest, [1])[0]
+    return messages, {"route": route, "system": texts, "current": texts[0], "first": first, "updates": []}
 
 
 def held_request(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
@@ -244,7 +227,6 @@ def _commit(inner: ModelProvider, request: ModelRequest, path: Path) -> ModelReq
     now = time.time()
     sent = replace(request, prompt_hold=None)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         with advisory_file_lock(path.parent / ".lock"):
             for other in path.parent.glob("*.json"):
                 if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:

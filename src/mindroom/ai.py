@@ -702,11 +702,16 @@ def _memory_conversation(
     )
 
 
-def _prompt_hold(ctx: ResponseTurnContext, build: AgentBuild, scope_context: ScopeSessionContext | None) -> Path | None:
-    """Name the file that holds the system prompt of the turn's conversation, None for a turn that holds none.
+def _with_prompt_hold(
+    ctx: ResponseTurnContext,
+    build: AgentBuild,
+    scope_context: ScopeSessionContext | None,
+) -> AgentBuild:
+    """Return ``build`` with its requests naming the file that holds the system prompt of the turn's conversation.
 
-    Only a route proven to take a system prompt update holds one, and neither an authored persona, a minimal agent,
-    nor a turn that stores no run (``usage_kind``), which no later turn replays.
+    So history is sized as each request is sent (``providers/pipeline/prompt_hold.py``). Only a route proven to take
+    a system prompt update holds one, and neither an authored persona, a minimal agent, nor a turn that stores no run
+    (``usage_kind``), which no later turn replays. The file lies in the state root of the conversation's database.
     """
     if (
         ctx.persona is not None
@@ -715,8 +720,9 @@ def _prompt_hold(ctx: ResponseTurnContext, build: AgentBuild, scope_context: Sco
         or scope_context is None
         or not build.spec.model.capabilities.system_updates
     ):
-        return None
-    return prompt_hold_path(scope_context.storage.path, scope_context.session_id)
+        return build
+    path = prompt_hold_path(scope_context.storage.path, scope_context.session_id)
+    return replace(build, request_template=replace(build.request_template, prompt_hold=path))
 
 
 async def _prepare_turn_memory(
@@ -847,9 +853,7 @@ async def _prepare_agent_and_prompt(
                 persona=ctx.persona,
                 tool_names=ctx.tool_names,
             )
-        # Every request of the turn names the conversation's held prompt, so history is sized as it will be sent.
-        template = replace(build.request_template, prompt_hold=_prompt_hold(ctx, build, scope_context))
-        return runtime_model, replace(build, request_template=template)
+        return runtime_model, _with_prompt_hold(ctx, build, scope_context)
 
     memory_backend = agent_memory_backend(config, agent_name)
     memory_conversation = _memory_conversation(ctx, config, scope_context)
