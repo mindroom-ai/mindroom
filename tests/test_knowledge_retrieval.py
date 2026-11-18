@@ -40,15 +40,9 @@ def _text_of_tokens(tokens: int) -> str:
     return text
 
 
-def _select_recall_hits(
-    hits: Sequence[MemoryResult],
-    *,
-    max_hits: int = _RECALL_SELECTION.limit,
-    score_gap: float | None = _RECALL_SELECTION.hybrid_score_gap,
-) -> list[MemoryResult]:
-    """Select ``hits`` as the per-turn recall does, through ``retrieve`` with ``_RECALL_SELECTION``."""
-    selection = replace(_RECALL_SELECTION, limit=max_hits, hybrid_score_gap=score_gap)
-    return asyncio.run(_retrieve_memories("query", hits, selection))
+def _select_recall_hits(hits: Sequence[MemoryResult], **changes: float) -> list[MemoryResult]:
+    """Select ``hits`` as the per-turn recall does, through ``retrieve`` with ``_RECALL_SELECTION`` and ``changes``."""
+    return asyncio.run(_retrieve_memories("query", hits, replace(_RECALL_SELECTION, **changes)))
 
 
 def test_selection_drops_hits_beyond_gap() -> None:
@@ -56,7 +50,7 @@ def test_selection_drops_hits_beyond_gap() -> None:
     hits = [_hit("a", 0.80), _hit("b", 0.78), _hit("c", 0.60), _hit("d", 0.79)]
 
     assert _select_recall_hits(hits) == hits[:2]
-    assert _select_recall_hits(hits, score_gap=0.25) == hits
+    assert _select_recall_hits(hits, hybrid_score_gap=0.25) == hits
 
 
 def test_selection_keeps_a_hit_exactly_at_the_gap() -> None:
@@ -67,11 +61,11 @@ def test_selection_keeps_a_hit_exactly_at_the_gap() -> None:
 
 
 def test_selection_stops_at_max_hits() -> None:
-    """No more than `max_hits` hits are kept."""
+    """No more than `limit` hits are kept."""
     hits = [_hit(str(index), 0.9) for index in range(8)]
 
     assert _select_recall_hits(hits) == hits[:5]
-    assert _select_recall_hits(hits, max_hits=2) == hits[:2]
+    assert _select_recall_hits(hits, limit=2) == hits[:2]
 
 
 def test_selection_respects_token_budget() -> None:
@@ -147,20 +141,16 @@ def test_selection_does_not_wait_for_a_stalled_encoder(monkeypatch: pytest.Monke
 
 
 class _Reranker:
-    """Returns fixed ``scores``, after ``delay`` seconds; ``failing`` raises instead."""
+    """Returns fixed ``scores``, after ``delay`` seconds."""
 
-    def __init__(self, scores: Sequence[float] = (), *, delay: float = 0.0, failing: bool = False) -> None:
+    def __init__(self, scores: Sequence[float], *, delay: float = 0.0) -> None:
         self.scores = list(scores)
         self.delay = delay
-        self.failing = failing
         self.calls: list[tuple[str, list[str]]] = []
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
         self.calls.append((query, list(documents)))
         await asyncio.sleep(self.delay)
-        if self.failing:
-            msg = "rerank service down"
-            raise RuntimeError(msg)
         return self.scores
 
 
@@ -182,14 +172,6 @@ async def test_reranker_orders_and_limits() -> None:
 
     assert kept == [Candidate("b", "text b", 0.9), Candidate("c", "text c", 0.5)]
     assert reranker.calls == [("query", ["text a", "text b", "text c"])]
-
-
-@pytest.mark.asyncio
-async def test_failing_reranker_keeps_hybrid_selection() -> None:
-    """A reranker that raises leaves the hybrid order and the hybrid score gap in charge."""
-    kept = await retrieve("query", _GAP_CANDIDATES, _GAP_SELECTION, reranker=_Reranker(failing=True))
-
-    assert kept == list(_GAP_CANDIDATES[:2])
 
 
 class _RaisingReranker:

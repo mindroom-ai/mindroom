@@ -1082,14 +1082,22 @@ class _StubReranker:
         return self.scores
 
 
-def _configure_reranker(monkeypatch: pytest.MonkeyPatch, config: Config, reranker: _StubReranker) -> None:
-    """Configure a reranker with the default 0.5 threshold, served by ``reranker``."""
-    config.reranker = KnowledgeRerankerConfig(provider="cohere", model="rerank-v3.5")
+def _configure_reranker(
+    monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    settings: dict[str, object] | None,
+    reranker: _StubReranker,
+) -> None:
+    """Configure the root reranker as a config file would set it, served by ``reranker`` whatever the settings."""
+    config.reranker = None if settings is None else TypeAdapter(RerankerConfig).validate_python(settings)
     monkeypatch.setattr(file_backend_module, "configured_reranker", lambda _config, _runtime_paths: reranker)
 
 
+#: A reranker with the default 0.5 threshold.
+_COHERE: dict[str, object] = {"provider": "cohere", "model": "rerank-v3.5"}
 # Hybrid scores the 0.05 gap keeps both of.
 _SHED_MEMORIES = [("The shed is painted green", 0.90), ("The shed roof is copper", 0.89)]
+_SHED_TEXTS = [memory for memory, _score in _SHED_MEMORIES]
 
 
 @pytest.mark.asyncio
@@ -1109,30 +1117,18 @@ async def test_recall_uses_reranker_when_enabled(
     config.memory.search.rerank = global_rerank
     config.agents["general"].memory_search = AgentMemorySearchConfig(rerank=agent_rerank)
     reranker = _StubReranker([0.9, 0.4])
-    _configure_reranker(monkeypatch, config, reranker)
+    _configure_reranker(monkeypatch, config, _COHERE, reranker)
     index_limits = _semantic_index(monkeypatch, _SHED_MEMORIES)
 
     prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
 
-    memories = [memory for memory, _score in _SHED_MEMORIES]
     assert index_limits == [20]
-    assert reranker.documents == ([memories] if reranked else [])
-    assert _injected(prompt_parts, memories) == (memories[:1] if reranked else memories)
-
-
-def _configure_reranker_settings(
-    monkeypatch: pytest.MonkeyPatch,
-    config: Config,
-    settings: dict[str, object] | None,
-    reranker: _StubReranker,
-) -> None:
-    """Configure the root reranker as a config file would set it, served by ``reranker`` whatever the settings."""
-    config.reranker = None if settings is None else TypeAdapter(RerankerConfig).validate_python(settings)
-    monkeypatch.setattr(file_backend_module, "configured_reranker", lambda _config, _runtime_paths: reranker)
+    assert reranker.documents == ([_SHED_TEXTS] if reranked else [])
+    assert _injected(prompt_parts, _SHED_TEXTS) == (_SHED_TEXTS[:1] if reranked else _SHED_TEXTS)
 
 
 _OTHER_RERANKERS = [
-    {"provider": "cohere", "model": "rerank-v3.5"},
+    _COHERE,
     {"provider": "vertex_ai", "model": "semantic-ranker-default@latest"},
     {"provider": "sentence_transformers", "model": "BAAI/bge-reranker-v2-m3"},
     None,
@@ -1140,43 +1136,30 @@ _OTHER_RERANKERS = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["typesafe", "openai_decisions"])
-async def test_recall_reranks_by_default_for_passing_provider(
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-    provider: str,
-) -> None:
-    """With `rerank` unset, a judgment reranker reranks recall and keeps the hits it scores at least 0.3."""
-    config.memory.search.mode = "semantic"
-    reranker = _StubReranker([0.9, 0.2])
-    _configure_reranker_settings(monkeypatch, config, {"provider": provider}, reranker)
-    _semantic_index(monkeypatch, _SHED_MEMORIES)
-
-    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
-
-    memories = [memory for memory, _score in _SHED_MEMORIES]
-    assert reranker.documents == [memories]
-    assert _injected(prompt_parts, memories) == memories[:1]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("settings", _OTHER_RERANKERS)
-async def test_recall_does_not_rerank_by_default_for_other_providers(
+@pytest.mark.parametrize(
+    ("settings", "reranked"),
+    [({"provider": "typesafe"}, True), ({"provider": "openai_decisions"}, True)]
+    + [(settings, False) for settings in _OTHER_RERANKERS],
+)
+async def test_recall_reranks_by_default_only_for_a_passing_provider(
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
     settings: dict[str, object] | None,
+    reranked: bool,
 ) -> None:
-    """With `rerank` unset, any other reranker, or none, leaves recall to the hybrid selection."""
+    """With `rerank` unset, a judgment reranker reranks recall and keeps the hits it scores at least 0.3.
+
+    Any other reranker, or none, leaves recall to the hybrid selection.
+    """
     config.memory.search.mode = "semantic"
     reranker = _StubReranker([0.9, 0.2])
-    _configure_reranker_settings(monkeypatch, config, settings, reranker)
+    _configure_reranker(monkeypatch, config, settings, reranker)
     _semantic_index(monkeypatch, _SHED_MEMORIES)
 
     prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
 
-    memories = [memory for memory, _score in _SHED_MEMORIES]
-    assert reranker.documents == []
-    assert _injected(prompt_parts, memories) == memories
+    assert reranker.documents == ([_SHED_TEXTS] if reranked else [])
+    assert _injected(prompt_parts, _SHED_TEXTS) == (_SHED_TEXTS[:1] if reranked else _SHED_TEXTS)
 
 
 @pytest.mark.asyncio
@@ -1202,10 +1185,7 @@ async def test_explicit_rerank_setting_overrides_the_provider_default(
     config.memory.search.rerank = global_rerank
     config.agents["general"].memory_search = AgentMemorySearchConfig(rerank=agent_rerank)
     reranker = _StubReranker([0.9, 0.2])
-    settings: dict[str, object] = {"provider": provider}
-    if provider == "cohere":
-        settings["model"] = "rerank-v3.5"
-    _configure_reranker_settings(monkeypatch, config, settings, reranker)
+    _configure_reranker(monkeypatch, config, _COHERE if provider == "cohere" else {"provider": provider}, reranker)
     _semantic_index(monkeypatch, _SHED_MEMORIES)
 
     await build_memory_prompt_parts("Tell me about the shed", "general", config)
@@ -1230,13 +1210,12 @@ async def test_judgment_reranker_recall_threshold(
     settings: dict[str, object] = {"provider": "typesafe"}
     if threshold is not None:
         settings["threshold"] = threshold
-    _configure_reranker_settings(monkeypatch, config, settings, _StubReranker([0.9, 0.35]))
+    _configure_reranker(monkeypatch, config, settings, _StubReranker([0.9, 0.35]))
     _semantic_index(monkeypatch, _SHED_MEMORIES)
 
     prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
 
-    memories = [memory for memory, _score in _SHED_MEMORIES]
-    assert _injected(prompt_parts, memories) == memories[:kept]
+    assert _injected(prompt_parts, _SHED_TEXTS) == _SHED_TEXTS[:kept]
 
 
 @pytest.mark.asyncio
@@ -1251,14 +1230,14 @@ async def test_recall_reranker_failure_matches_hybrid_recall(
     _semantic_index(monkeypatch, _SHED_MEMORIES)
     hybrid = await build_memory_prompt_parts("Tell me about the shed", "general", config)
     config.memory.search.rerank = True
-    _configure_reranker(monkeypatch, config, reranker)
+    _configure_reranker(monkeypatch, config, _COHERE, reranker)
     monkeypatch.setattr(file_backend_module, "_RECALL_RERANK_DEADLINE_SECONDS", 0.05)
 
     reranked = await build_memory_prompt_parts("Tell me about the shed", "general", config)
 
     assert reranker.documents
     assert reranked == hybrid
-    assert _injected(reranked, [memory for memory, _score in _SHED_MEMORIES]) == [m for m, _ in _SHED_MEMORIES]
+    assert _injected(reranked, _SHED_TEXTS) == _SHED_TEXTS
 
 
 @pytest.mark.asyncio
@@ -1315,7 +1294,7 @@ async def test_recall_keeps_hybrid_recall_for_invalid_reranker_scores(
     _semantic_index(monkeypatch, _SHED_MEMORIES)
     hybrid = await build_memory_prompt_parts("Tell me about the shed", "general", config)
     config.memory.search.rerank = True
-    _configure_reranker(monkeypatch, config, _StubReranker(scores))
+    _configure_reranker(monkeypatch, config, _COHERE, _StubReranker(scores))
 
     assert await build_memory_prompt_parts("Tell me about the shed", "general", config) == hybrid
 
@@ -1329,8 +1308,7 @@ async def test_recall_injects_nothing_when_every_hit_is_below_the_threshold(
     config.memory.search.mode = "semantic"
     config.memory.search.rerank = True
     _semantic_index(monkeypatch, _SHED_MEMORIES)
-    _configure_reranker(monkeypatch, config, _StubReranker([0.9, 0.4]))
-    config.reranker = KnowledgeRerankerConfig(provider="cohere", model="rerank-v3.5", threshold=0.95)
+    _configure_reranker(monkeypatch, config, {**_COHERE, "threshold": 0.95}, _StubReranker([0.9, 0.4]))
 
     prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
 
@@ -1342,7 +1320,7 @@ async def test_memory_search_reranks_twenty_candidates(config: Config, monkeypat
     """An asked-for memory search with reranking fetches 20 candidates and returns the best `limit` by its scores."""
     config.memory.search.mode = "semantic"
     config.memory.search.rerank = True
-    _configure_reranker(monkeypatch, config, _StubReranker([0.1, 0.3, 0.9]))
+    _configure_reranker(monkeypatch, config, _COHERE, _StubReranker([0.1, 0.3, 0.9]))
     scored = [("The shed is painted green", 0.9), ("The shed roof is copper", 0.8), ("Pixel eats kibble", 0.7)]
     index_limits = _semantic_index(monkeypatch, scored)
 
@@ -1366,7 +1344,7 @@ async def test_reranked_memory_search_above_twenty_returns_its_whole_limit(
     config.memory.search.mode = "semantic"
     scored = [(f"Shed note {index}", 0.9 - index / 100) for index in range(30)]
     reranker = _StubReranker([index / 100 for index in range(30)], failing=failing)
-    _configure_reranker_settings(monkeypatch, config, {"provider": "typesafe"}, reranker)
+    _configure_reranker(monkeypatch, config, {"provider": "typesafe"}, reranker)
     index_limits = _semantic_index(monkeypatch, scored)
 
     results = await search_agent_memories("shed", "general", config, limit=30)
