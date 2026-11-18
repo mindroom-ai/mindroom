@@ -545,11 +545,12 @@ def task_records_with_writers(
         content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
         if not isinstance(state_key, str) or content is None:
             continue
+        # A room keeps every finished task's state, so only the records a caller wants are parsed.
+        if not include_non_pending and _stored_task_status(content) != "pending":
+            continue
 
         task = _parse_scheduled_task_record(room_id, state_key, content)
         if not task:
-            continue
-        if not include_non_pending and task.status != "pending":
             continue
         tasks.append((task, event["sender"]))
 

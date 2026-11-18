@@ -598,6 +598,20 @@ def test_owner_rule_never_hands_a_task_to_a_bot_other_than_the_router_or_its_cre
     assert owner == ids["general"]
 
 
+def test_owner_rule_room_view_parses_only_matrix_state(tmp_path: Path) -> None:
+    """The owner rule's room view never parses MindRoom's own state, of which a busy room holds thousands of events."""
+    _runtime, ids = _owner_rule_setup(tmp_path)
+    finished = [scheduled_task_state_event(f"done{index}", {"status": "completed"}) for index in range(3)]
+    state = _schedule_room_state(ids, router_level=100)
+
+    with patch.object(nio.Event, "parse_event", wraps=nio.Event.parse_event) as parse:
+        room = room_from_state("!test:server", ids["general"], [*finished, *state])
+
+    assert [call.args[0]["type"] for call in parse.call_args_list] == [event["type"] for event in state]
+    owner = task_owner(room, _pending_once_workflow(), creator_id=ids["general"], router_id=ids["router"])
+    assert owner == ids["router"]
+
+
 @pytest.mark.asyncio
 async def test_restore_room_uses_canonical_state_parser_for_mixed_records(tmp_path: Path) -> None:
     """Restore should skip non-pending and malformed records while restoring valid pending records."""
@@ -1626,6 +1640,37 @@ async def test_get_scheduled_tasks_for_room_skips_cancelled_without_workflow(tmp
     )
 
     assert tasks == []
+
+
+@pytest.mark.asyncio
+async def test_pending_task_reads_never_parse_finished_tasks(tmp_path: Path) -> None:
+    """A room keeps every finished task's state, so reads of its pending tasks skip the others before parsing them."""
+    client = AsyncMock()
+    stored = {"workflow": _pending_once_workflow().model_dump_json()}
+    serve_full_room_state(
+        client,
+        "!test:server",
+        [
+            scheduled_task_state_event("done", {**stored, "status": "completed"}),
+            scheduled_task_state_event("broken", {**stored, "status": "failed"}),
+            scheduled_task_state_event("stopped", {**stored, "status": "cancelled"}),
+            scheduled_task_state_event("next", {**stored, "status": "pending"}),
+        ],
+    )
+
+    with patch.object(
+        scheduling,
+        "_parse_scheduled_task_record",
+        wraps=scheduling._parse_scheduled_task_record,
+    ) as parse:
+        tasks = await get_scheduled_tasks_for_room(
+            client=client,
+            room_id="!test:server",
+            runtime_paths=schedule_runtime_paths(tmp_path),
+        )
+
+    assert [task.task_id for task in tasks] == ["next"]
+    assert [call.args[1] for call in parse.call_args_list] == ["next"]
 
 
 @pytest.mark.asyncio
