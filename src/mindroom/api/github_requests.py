@@ -13,12 +13,14 @@ import asyncio
 import json
 import math
 import re
-from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, override
 from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from mindroom.api import config_lifecycle
@@ -43,11 +45,35 @@ from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedErr
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from fastapi import Response
+
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/github")
+
+class _UnechoedValidationRoute(APIRoute):
+    """A route answering a malformed body with one fixed error.
+
+    The app's 422 body leaves out rejected values but names rejected keys, and a token sent as a key is still a token.
+    """
+
+    @override
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def route(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except RequestValidationError:
+                return _error(422, "github_request_invalid")
+
+        return route
+
+
+router = APIRouter(prefix="/api/github", route_class=_UnechoedValidationRoute)
 
 _GITHUB_API = "https://api.github.com"
 _TIMEOUT_SECONDS = 30.0

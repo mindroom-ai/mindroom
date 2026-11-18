@@ -1350,3 +1350,31 @@ def test_logs_never_carry_a_token_or_its_login_lookup(
         "Bad credentials",
     ):
         assert secret not in logged
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/github/token", {"token": "ghp_value secret"}),
+        ("/api/github/token", {"ghp_key-secret": "x"}),
+        ("/api/github/token", {"token": ALICE_PAT, "ghp_key-secret": "x"}),
+        ("/api/github/token", ["ghp_value-secret"]),
+        ("/api/github/request", {"method": "GET", "path": "/graphql", "ghp_key-secret": "x"}),
+        ("/api/github/request", {"method": "ghp_value-secret", "path": "/graphql"}),
+    ],
+)
+def test_the_real_app_answers_a_malformed_body_without_echoing_it(
+    test_client: TestClient,
+    path: str,
+    body: object,
+) -> None:
+    """The mounted routes answer a fixed 422 that names neither a rejected value nor a rejected key."""
+    from mindroom.api import main  # noqa: PLC0415
+
+    auth = {"Authorization": f"Bearer {client_session_store(main.app).create(ALICE).token}"}
+    method = "PUT" if path.endswith("/token") else "POST"
+
+    response = test_client.request(method, path, json=body, headers=auth)
+
+    assert (response.status_code, response.json()) == (422, {"error": "github_request_invalid"})
+    assert "secret" not in response.text
