@@ -200,6 +200,9 @@ def _recovered_member_event(**membership: str | None) -> tuple[IngestionRecordAd
         ("open", "loop_started", "armed", True),
         ("open", "frame_settled", "open", False),
         ("open", "closed", "closed", True),
+        # A frame that was suspended when its loop closed, as at the process shutdown latch, opens nothing.
+        ("armed", "closed+frame_settled", "closed", False),
+        ("open", "closed+frame_settled", "closed", True),
         # Only an open account's sync vouched for anything, so only its lost history or recovered event revokes.
         ("closed", "history_loss", "closed", False),
         ("armed", "history_loss", "armed", False),
@@ -227,19 +230,20 @@ async def test_observer_eligibility_moves_only_by_its_table(
     epoch = index._epoch
     membership_sync._refresh_retry_at = float("inf")
 
-    if event == "loop_started":
-        membership_sync.observer_loop_started(config, _A)
-    elif event == "frame_settled":
-        membership_sync.observer_frame_settled(_A)
-    elif event == "closed":
-        membership_sync.observer_closed(config, _A, reason="sync_failure")
-    else:
-        carrier = (
-            (_ingestion_admission(IngestionRecordDisposition.HISTORY_LOSS, room_id=_ROOM), None)
-            if event == "history_loss"
-            else _recovered_member_event()
-        )
-        membership_sync.pre_admit_ingestion(config, runtime_paths, *carrier, observer_user_id=_A)
+    for step in event.split("+"):
+        if step == "loop_started":
+            membership_sync.observer_loop_started(config, _A)
+        elif step == "frame_settled":
+            membership_sync.observer_frame_settled(_A)
+        elif step == "closed":
+            membership_sync.observer_closed(config, _A, reason="sync_failure")
+        else:
+            carrier = (
+                (_ingestion_admission(IngestionRecordDisposition.HISTORY_LOSS, room_id=_ROOM), None)
+                if step == "history_loss"
+                else _recovered_member_event()
+            )
+            membership_sync.pre_admit_ingestion(config, runtime_paths, *carrier, observer_user_id=_A)
 
     assert _OBSERVER_STATES[membership_sync._observer_open.get(_A)] == next_state
     assert membership_sync.observer_is_open(_A) is (next_state == "open")

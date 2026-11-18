@@ -465,6 +465,54 @@ async def test_receive_loop_child_exit_fences_grants_before_the_sibling_is_drain
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["armed", "open"])
+@pytest.mark.parametrize("entry", ["process_shutdown", "stop"])
+async def test_shutdown_entry_closes_the_bots_observation_before_any_teardown(
+    tmp_path: Path,
+    state: str,
+    entry: str,
+) -> None:
+    """The process shutdown latch and a direct stop close the account at once: a suspended frame opens nothing."""
+    bot, _orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.running = True
+    bot.mark_sync_loop_started()
+    in_frame, release_frame, in_stop_hook, release_stop_hook = (asyncio.Event() for _ in range(4))
+    stopping: asyncio.Task[None] | None = None
+
+    async def held_room_update(_rooms: object) -> None:
+        in_frame.set()
+        await release_frame.wait()
+
+    async def held_stop_hook(*_args: object, **_kwargs: object) -> None:
+        in_stop_hook.set()
+        await release_stop_hook.wait()
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        if state == "open":
+            await _complete_frame(bot)
+        with patch.object(bot._room_lifecycle, "observe_trusted_sync_rooms", held_room_update):
+            frame = asyncio.create_task(_complete_frame(bot))
+            try:
+                await asyncio.wait_for(in_frame.wait(), 5)
+                if entry == "process_shutdown":
+                    bot.begin_process_shutdown()
+                else:
+                    with patch.object(bot, "_emit_agent_lifecycle_event", held_stop_hook):
+                        stopping = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
+                        await asyncio.wait_for(in_stop_hook.wait(), 5)
+
+                assert membership_observers({bot.agent_name: bot})[0] == []
+                release_frame.set()
+                await asyncio.wait_for(frame, 5)
+                assert membership_observers({bot.agent_name: bot})[0] == []
+            finally:
+                release_frame.set()
+                release_stop_hook.set()
+                await asyncio.wait_for(asyncio.gather(frame, *filter(None, [stopping]), return_exceptions=True), 5)
+
+
+@pytest.mark.asyncio
 async def test_quiesced_ingestion_ends_the_bots_observation_before_its_drain(tmp_path: Path) -> None:
     """A bot being stopped or replaced stops observing, and its rooms fail closed, before its ingestion drains."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)

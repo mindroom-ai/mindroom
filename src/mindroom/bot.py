@@ -1747,6 +1747,7 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Stop the agent bot."""
+        self.invalidate_agent_reply_memberships(reason="observer_stopping")
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
         self.running = False
@@ -1901,7 +1902,8 @@ class AgentBot:
             failures.append(error)
 
     def begin_process_shutdown(self) -> None:
-        """Close response and callback admission before any shutdown teardown yields."""
+        """Close response and callback admission, and this account's observation, before any teardown yields."""
+        self.invalidate_agent_reply_memberships(reason="observer_stopping")
         self._runtime_view.begin_process_shutdown()
         self._delivery_recovery_wake.set()
         self._journal_dispatcher.begin_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)

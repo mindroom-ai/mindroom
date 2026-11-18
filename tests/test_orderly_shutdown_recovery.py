@@ -606,7 +606,10 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
             assert await principal.is_pending(EDIT_EVENT_ID)
             assert attempted == []
             assert receive_starts == [1]
-            assert invalidations == before_shutdown_invalidations
+            # The shutdown latch closes the account's observation itself; no restarted loop reports anything more.
+            assert [
+                reason for reason in invalidations if reason != "observer_stopping"
+            ] == before_shutdown_invalidations
             assert not await bot._runtime_view.wait_for_admission_or_shutdown()
         finally:
             release_retry.set()
