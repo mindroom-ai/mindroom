@@ -27,6 +27,15 @@ export interface BudgetsConfig {
   fallback_model: string;
 }
 
+export type ReasoningLevel =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
 export interface ModelConfig {
   provider: ProviderType;
   id: string;
@@ -39,6 +48,7 @@ export interface ModelConfig {
   api_key?: string | null; // Model-specific key from config.yaml
   extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
   pricing?: ModelPricing | null; // Used to measure spend against budgets
+  reasoning?: { levels: ReasoningLevel[]; default: ReasoningLevel } | null; // `name@level` picks a level
 }
 
 export interface MemoryConfig {

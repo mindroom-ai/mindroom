@@ -14,13 +14,15 @@ from structlog.testing import capture_logs
 
 import mindroom.background_tasks as background_tasks_module
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.config.models import CompactionOverrideConfig
+from mindroom.config.main import Config
+from mindroom.config.models import CompactionOverrideConfig, ModelConfig, ReasoningConfig
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     PRIOR_USAGE_RUN_METADATA_KEY,
 )
+from mindroom.history.compaction import load_summarizer
 from mindroom.history.conversation_text import own_thread_message
 from mindroom.history.storage import (
     read_scope_state,
@@ -33,6 +35,8 @@ from mindroom.history.summary_call import (
     is_summary_timeout,
 )
 from mindroom.history.summary_input import _compaction_replay_messages, build_summary_input
+from mindroom.history.types import HistoryScope, ResolvedHistoryExecutionPlan
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import RequestOverrides
@@ -40,13 +44,16 @@ from mindroom.llm.usage import MessageMetrics
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import TableNames
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    bind_runtime_paths,
     install_model_providers,
     prepare_history_for_run_for_test,
     seed_session,
+    test_runtime_paths,
 )
 from tests.fakes.scripted_model import Await
 from tests.fakes.summary_model import summary_model, summary_steps, summary_turn
@@ -58,6 +65,7 @@ from tests.history_helpers import (
     _session,
     replay_settings,
 )
+from tests.providers.golden_support import Wire
 from tests.session_storage.agno_layout import converted_store
 
 if TYPE_CHECKING:
@@ -115,6 +123,57 @@ async def test_the_summary_request_is_one_call_without_provider_retries_a_thinki
     assert request.tools == ()
     assert request.tool_choice is None
     assert request.overrides == RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("model_name", "thinking"), [("haiku@off", {"type": "disabled"}), ("haiku", None)])
+async def test_a_compaction_model_at_off_keeps_its_thinking_switch(
+    model_name: str,
+    thinking: dict[str, str] | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The summary omits the authored thinking setting, except the switch a model's ``off`` level sends."""
+    wire = Wire(httpx.Response(400, json={"type": "error", "error": {"type": "invalid_request_error", "message": "x"}}))
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", wire.client.send)
+    reasoning = ReasoningConfig(levels=["off", "low"], default="low")
+    model = ModelConfig(provider="anthropic", id="claude-haiku-5", api_key="sk-test", reasoning=reasoning)
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(Config(models={"default": model, "haiku": model}), runtime_paths)
+    plan = ResolvedHistoryExecutionPlan(
+        automatic_compaction=True,
+        text_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name=model_name,
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=1,
+        reserve_tokens=0,
+        trigger_tokens=1,
+        limit_tokens=64_000,
+        summary_input_budget_tokens=4_000,
+        compaction_timeout_seconds=60.0,
+    )
+    summarizer = load_summarizer(
+        plan,
+        _ALL_HISTORY_SETTINGS,
+        config=config,
+        runtime_paths=runtime_paths,
+        session_id="session-1",
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        on_usage=None,
+    )
+
+    with pytest.raises(ProviderError):
+        await generate_compaction_summary(
+            model=summarizer.model.model,
+            summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=42.0,
+            on_usage=None,
+            keep_thinking_setting=summarizer.model.keeps_thinking_setting,
+        )
+
+    assert wire.body().get("thinking") == thinking
 
 
 class _ProviderCall:

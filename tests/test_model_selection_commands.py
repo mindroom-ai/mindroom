@@ -17,7 +17,7 @@ from mindroom.commands.parsing import command_parser
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ReasoningConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
@@ -37,6 +37,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
+_LEVELS = ReasoningConfig(levels=["low", "high"], default="low")
+
+
 def _helper_override(paths: RuntimePaths, config: Config) -> str | None:
     return resolve_thread_model_override(paths, "$root", config=config).active.get("helper")
 
@@ -48,6 +51,7 @@ def _helper_override(paths: RuntimePaths, config: Config) -> str | None:
         ("set", "reset", "reset"),
         ("set", "list", "list"),
         ("set", "default", "default"),
+        ("set", "leveled@high", "leveled@high"),
     ],
 )
 @pytest.mark.asyncio
@@ -60,6 +64,7 @@ async def test_explicit_model_operation(
     """Explicit reset clears even with a reset key; explicit set never uses aliases."""
     client, config, paths, index, router, _ = picker_setup(tmp_path)
     config.models.update({name: ModelConfig(provider="openai", id="test-model") for name in ("reset", "list")})
+    config.models["leveled"] = ModelConfig(provider="openai", id="test-model", reasoning=_LEVELS)
     set_thread_model_override(
         paths,
         thread_id="$root",
@@ -100,7 +105,7 @@ async def test_explicit_model_operation(
     assert result["override"] == expected
 
 
-@pytest.mark.parametrize("failure", ["malformed", "missing_root", "unknown_model", "padded_model"])
+@pytest.mark.parametrize("failure", ["malformed", "missing_root", "unknown_model", "unknown_level", "padded_model"])
 @pytest.mark.asyncio
 async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, failure: str) -> None:
     """Rejected metadata or scope must leave the override untouched despite valid body."""
@@ -120,6 +125,8 @@ async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, fai
         client.room_get_event.return_value = nio.RoomGetEventError("Not found", "M_NOT_FOUND")
     elif failure == "unknown_model":
         metadata.update(operation="set", model="deleted")
+    elif failure == "unknown_level":
+        metadata.update(operation="set", model="reset@high")
     elif failure == "padded_model":
         # Model names cannot hold spaces, so a padded key names no model and is never trimmed to "reset".
         metadata.update(operation="set", model=" reset ")
@@ -577,6 +584,20 @@ def test_model_show_names_the_entities_each_thread_override_governs(tmp_path: Pa
 
     assert "- `cheap` (openai cheap-model) for `helper`\n" in shown
     assert "- `expensive` (openai expensive-model) for `restricted`\n" in shown
+
+
+def test_model_command_sets_a_model_at_a_level_and_lists_the_levels(tmp_path: Path) -> None:
+    """``!model name@level`` stores the reference; a level the model does not list is an unknown model."""
+    config = restricted_config(tmp_path)
+    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=_LEVELS)
+    paths = runtime_paths_for(config)
+
+    assert "`cheap@high`" in _run_model_command(config, "cheap@high", USER)
+    assert resolved_thread_models(config, paths)["helper"] == "cheap@high"
+    rejected = _run_model_command(config, "cheap@xhigh", USER)
+    assert rejected.startswith("❌ Unknown model `cheap@xhigh`")
+    assert "- `cheap` (openai cheap-model; levels: low, high; default low)\n" in rejected
+    assert resolved_thread_models(config, paths)["helper"] == "cheap@high"
 
 
 @pytest.mark.asyncio
