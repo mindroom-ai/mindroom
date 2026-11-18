@@ -227,6 +227,8 @@ def test_zai_off_keeps_the_authored_extra_body() -> None:
     [
         ("anthropic", {"output_config": "high"}, "output_config"),
         ("anthropic", {"output_config": True}, "output_config"),
+        ("anthropic", {"output_config": []}, "output_config"),
+        ("anthropic", {"output_config": False}, "output_config"),
         ("zai", {"extra_body": "bad"}, "extra_body"),
         ("zai", {"request_params": {"extra_body": []}}, "request_params.extra_body"),
     ],

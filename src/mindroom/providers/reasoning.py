@@ -36,10 +36,7 @@ def _claude_settings(level: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]
 
     Claude rejects an effort beside disabled thinking, so ``off`` drops the effort and a level drops disabled thinking.
     """
-    output_config = extra_kwargs.get("output_config") or {}
-    if not isinstance(output_config, Mapping):
-        msg = f"extra_kwargs.output_config must be a mapping, not {type(output_config).__name__}"
-        raise ValueError(msg)  # noqa: TRY004 - config load reports a ValueError as a validation error
+    output_config = _mapping(extra_kwargs, "output_config")
     if level == "off":
         settings = _without(extra_kwargs, "output_config")
         if rest := _without(dict(output_config), "effort"):
