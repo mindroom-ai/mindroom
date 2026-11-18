@@ -339,7 +339,6 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     return CliFollowUpTurn(
         ctx=replace(
             turn,
-            reply_to_event_id=continuation.source_event_ids[0],
             matrix_run_metadata=deepcopy(persisted.metadata),
             active_model_name=continuation.runtime_model_name if switch is None else switch.model_name,
             transient_enrichment_items=(

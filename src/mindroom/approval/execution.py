@@ -301,7 +301,7 @@ def _continuation_turn_context(
         session_id=continuation.session_id,
         run_id=continuation.run_id,
         correlation_id=continuation.correlation_id or uuid4().hex,
-        reply_to_event_id=continuation.sources.logical_source_event_ids[-1],
+        reply_to_event_id=continuation.reply_to_event_id,
         room_id=continuation.room_id,
         thread_id=continuation.thread_id,
         requester_id=continuation.requester_id,

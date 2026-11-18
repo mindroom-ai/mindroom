@@ -2655,6 +2655,44 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_approval_answers_the_event_its_paused_turn_answered(tmp_path: Path) -> None:
+    """A routed turn's source is its hidden route; its tools and what its reply sends answer the person's message."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    store = runner.deps.replies.store
+    await _admit_approval_source(store)
+    tool_runtime = runner.deps.tool_runtime
+    continuation = approval_continuation(
+        approval_id="approval-routed",
+        run_id="run-paused",
+        reply_to_event_id="$person",
+    )
+    continuation = replace(
+        continuation,
+        execution_identity=tool_runtime.build_execution_identity(
+            target=continuation_target(continuation),
+            user_id=continuation.requester_id,
+        ),
+    )
+    assert await paused_for_approval(store, continuation) == continuation
+    await bot._take_over_replies()
+
+    async def continue_run(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
+        return CompletedApprovalRun(response_text="done", metadata_content={})
+
+    deliver_final = AsyncMock(return_value=completed_outcome())
+    with (
+        patch.object(tool_runtime, "build_turn_context", wraps=tool_runtime.build_turn_context) as tool_context,
+        patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run),
+        patch.object(DeliveryGateway, "deliver_final", new=deliver_final),
+    ):
+        await runner._resume_approval_source("$source")
+
+    assert [call.args[0].reply_to_event_id for call in tool_context.call_args_list] == ["$person"]
+    assert [call.args[0].target.reply_to_event_id for call in deliver_final.await_args_list] == ["$person"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("revoked_layer", ["room", "entity", "pending"])
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_ready_approval_replay_rechecks_current_authorization(
@@ -3297,7 +3335,7 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
     await _admit_approval_source(runner.deps.replies.store)
-    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    request = _plain_request(_target(thread_id="$thread", reply_to_event_id="$person"), source_event_id="$source")
     paused = _ordered_pause(
         PausedAttempt(
             session_id="session-1",
@@ -3348,6 +3386,10 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
     assert edit_request.tool_trace == list(paused.tool_trace)
     send_text.assert_not_awaited()
     retry_sources.assert_called_once_with(request.room_id, ("$source",))
+    # The pause keeps the event its turn answers, which is not its source when a steward routed the turn.
+    continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
+    assert continuation is not None
+    assert continuation.reply_to_event_id == "$person"
     assert outcome.final_visible_body == paused.response_text
     assert outcome.delivery_kind == "edited"
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}

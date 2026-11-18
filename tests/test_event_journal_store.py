@@ -82,6 +82,7 @@ from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
 from mindroom.response_sources import ResponseSources
+from mindroom.turn_origin import TurnIntent
 from mindroom.turn_record import TurnRecord
 from tests.approval_card_helpers import card_is_terminal, pending_card, resolve_card_event, terminal_edit
 from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
@@ -6757,6 +6758,32 @@ class TestApprovalContinuations:
         del stored["turn_id"]
         await self.store_context(alice, stored)
         assert await alice.approvals.approval_continuation("approval-1") == replace(continuation, turn_id="approval-1")
+
+    @pytest.mark.parametrize("follow_up", [False, True])
+    async def test_continuation_without_a_reply_target_loads_with_the_event_its_resume_answered(
+        self,
+        alice: PrincipalStore,
+        *,
+        follow_up: bool,
+    ) -> None:
+        """A continuation keeps the event its reply answers; one stored before it did answers its newest source.
+
+        A job follow-up is a runtime source, not a Matrix event, so a follow-up's stored before answers none.
+        """
+        await self.admit_sources(alice)
+        continuation = replace(self.continuation(), reply_to_event_id="$person")
+        if follow_up:
+            continuation = replace(continuation, origin=replace(continuation.origin, intent=TurnIntent.JOB_FOLLOW_UP))
+        await paused_for_approval(alice, continuation)
+        assert await alice.approvals.approval_continuation("approval-1") == continuation
+
+        stored = await self.stored_context(alice)
+        del stored["reply_to_event_id"]
+        await self.store_context(alice, stored)
+        assert await alice.approvals.approval_continuation("approval-1") == replace(
+            continuation,
+            reply_to_event_id=None if follow_up else "$source-2",
+        )
 
     async def test_continuation_loads_the_execution_identity_its_run_paused_under(
         self,

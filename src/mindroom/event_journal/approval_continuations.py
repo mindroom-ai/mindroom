@@ -216,6 +216,9 @@ class ApprovalContinuation:
     message_received_depth: int = 0
     dispatch_policy_source_kind: str | None = None
     correlation_id: str | None = None
+    # The event the paused turn's reply answers, which its resumed run and tools answer too. A routed turn's is the
+    # person's message, though its source is the steward's hidden route.
+    reply_to_event_id: str | None = None
     # The paused turn's ID, which its resumed run keeps.
     turn_id: str = field(kw_only=True)
     history_scope: HistoryScope | None = None
@@ -269,6 +272,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "message_received_depth": continuation.message_received_depth,
         "dispatch_policy_source_kind": continuation.dispatch_policy_source_kind,
         "correlation_id": continuation.correlation_id,
+        "reply_to_event_id": continuation.reply_to_event_id,
         "turn_id": continuation.turn_id,
         "history_scope": continuation.history_scope.to_metadata() if continuation.history_scope is not None else None,
         "origin": _origin_to_dict(continuation.origin),
@@ -337,6 +341,7 @@ def _from_rows(
     claimed = row["state"] == "ready" and claim_span_id is not None
     claim_span = None if claim_span_id is None else reply_spans.load(transaction, principal_id, claim_span_id)
     generation = int(row["generation"])
+    origin = _origin_from_dict(cast("dict[str, object]", stored["origin"]))
     return ApprovalContinuation(
         cli_call=cast("dict[str, object] | None", stored["cli_call"]),
         approval_id=str(row["approval_id"]),
@@ -378,6 +383,21 @@ def _from_rows(
         message_received_depth=int(stored["message_received_depth"]),
         dispatch_policy_source_kind=cast("str | None", stored["dispatch_policy_source_kind"]),
         correlation_id=cast("str | None", stored["correlation_id"]),
+        # LEGACY_COMPAT: Approval continuations stored without the event their reply answers.
+        # Legacy format: the stored context of an approval continuation had no reply_to_event_id key.
+        # Last legacy release: every release before this change ships, v2026.11.411 the newest when written, stores
+        #   continuations without it; replacement: unreleased, the first release with this change stores the event
+        #   the paused turn's reply answers in every continuation.
+        # Handling: absence reads as the turn's newest source, the event a resume answered before the upgrade, and as
+        #   no event for a job follow-up, whose source is no Matrix event.
+        # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_without_a_reply_target_loads_with_the_event_its_resume_answered.
+        reply_to_event_id=(
+            cast("str | None", stored["reply_to_event_id"])
+            if "reply_to_event_id" in stored
+            else None
+            if origin.intent is TurnIntent.JOB_FOLLOW_UP
+            else span.sources.logical_source_event_ids[-1]
+        ),
         # LEGACY_COMPAT: Approval continuations stored without their paused turn's ID.
         # Legacy format: the stored context of an approval continuation had no turn_id key.
         # Last legacy release: every release before this change ships, v2026.11.203 the newest when written, stores
@@ -388,7 +408,7 @@ def _from_rows(
         # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_without_a_turn_id_loads_with_its_approval_id.
         turn_id=cast("str | None", stored.get("turn_id")) or str(row["approval_id"]),
         history_scope=HistoryScope.from_metadata(stored["history_scope"]),
-        origin=_origin_from_dict(cast("dict[str, object]", stored["origin"])),
+        origin=origin,
         memory_prompt=cast("str | None", stored["memory_prompt"]),
         memory_thread_history=tuple(
             ApprovalMemoryTurn(

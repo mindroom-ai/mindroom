@@ -581,6 +581,14 @@ async def test_approval_settlement_preserves_tool_boundary(
     assert len(trace) == (1 if show_tool_calls else 0)
 
 
+def test_a_resumed_turn_runs_as_an_answer_to_the_event_its_paused_turn_answered() -> None:
+    """A routed turn's source is its hidden route, and its resumed run still answers the person's message."""
+    continuation = approval_continuation(reply_to_event_id="$person")
+    context = _continuation_turn_context(continuation, model_name="default", metadata=None)
+    assert context.reply_to_event_id == "$person"
+    assert context.active_event_ids == frozenset({"$source"})
+
+
 async def _settle_scripted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1605,7 +1613,7 @@ async def test_an_approval_resume_answers_its_original_requester_s_steer(
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner.approvals._approval_execution, config=lambda: config, runtime_paths=paths)
-    target = continuation_target(continuation, reply_to_event_id=continuation.source_event_ids[0])
+    target = continuation_target(continuation)
     envelope = runner.approvals.approval_response_request(continuation, target=target).response_envelope
     context = runner.deps.tool_runtime.build_context(target, user_id=identity.requester_id, active_model_name="default")
     assert context is not None

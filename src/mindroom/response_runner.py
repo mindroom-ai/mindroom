@@ -779,10 +779,7 @@ class ResponseRunner:
         continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
         if continuation is None:
             return
-        request = self.approvals.approval_response_request(
-            continuation,
-            target=continuation_target(continuation, reply_to_event_id=source_event_id),
-        )
+        request = self.approvals.approval_response_request(continuation, target=continuation_target(continuation))
 
         async def ownership_disappeared(_target: MessageTarget) -> SourceFate:
             # Reached only when no approval owns the source any more: whoever ended it settled its sources.
