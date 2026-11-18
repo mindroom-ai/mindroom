@@ -17,7 +17,11 @@ from nio.exceptions import OlmTrustError
 from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.guarded_rooms import send_refused
-from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
+from mindroom.matrix.large_messages import (
+    MatrixEventTooLargeError,
+    fit_reasoning_to_ordinary_event,
+    prepare_large_message,
+)
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_thread_relation
 from mindroom.timing import emit_timing_event
@@ -292,11 +296,13 @@ async def _prepare_matrix_message(
 
     content_sent = content
     if not content_is_prepared:
+        # Reasoning must not push an ordinary-size message or edit into a sidecar.
+        fitted = fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=room_encrypted)
         try:
             content_sent = await prepare_large_message(
                 client,
                 room_id,
-                content,
+                fitted,
                 room_encrypted=room_encrypted,
                 sidecar_required=sidecar_required,
             )
@@ -309,7 +315,7 @@ async def _prepare_matrix_message(
         # If encryption became enabled, rebuild from the semantic source once:
         # the first upload remains unreferenced and the sent event points only
         # at encrypted bytes. Matrix room encryption cannot later be disabled.
-        if not room_encrypted and content_sent is not content:
+        if not room_encrypted and content_sent is not fitted:
             encryption_outcome = await resolve_room_encryption_outcome(
                 client,
                 room_id,
@@ -324,7 +330,7 @@ async def _prepare_matrix_message(
                     content_sent = await prepare_large_message(
                         client,
                         room_id,
-                        content,
+                        fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=True),
                         room_encrypted=True,
                         sidecar_required=sidecar_required,
                     )

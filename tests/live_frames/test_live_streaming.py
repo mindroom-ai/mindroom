@@ -202,6 +202,9 @@ async def test_reasoning_streams_live_and_the_final_event_keeps_it(tmp_path: Pat
     ]
     assert any(shown)
     assert all("io.mindroom.reasoning" not in content for content in edits.contents)
+    assert all(
+        "io.mindroom.reasoning" not in (write.content or {}) for write in records.writes if write.kind != "terminal"
+    )
 
 
 def _reasoning_segment_stream() -> AsyncIterator[Any]:
@@ -593,6 +596,51 @@ async def test_stopped_frames_catch_up_at_once(tmp_path: Path, frames: _Frames) 
     assert len(frames.sent) == 2
     assert edits.contents[0]["body"].startswith("Hello world")
     assert edits.contents[0]["io.mindroom.live_checkpoint"] == {"sid": frames.sent[0]["sid"], "seq": 1}
+
+
+@pytest.mark.asyncio
+async def test_progress_edits_carry_reasoning_once_frames_stop(tmp_path: Path, frames: _Frames) -> None:
+    """Frames that stop for good leave reasoning to the progress edits, so the reply keeps showing it."""
+    frames.outcomes = [LiveSendOutcome.SENT, LiveSendOutcome.STOP]
+    records, edits = _records(), _Edits()
+    stream = _stream("Hello", 0.05, ReasoningDelta("Checking the cache"), 0.1, " world", 0.1, " again", 0.05)
+    await _run(_config(tmp_path), stream, records, edits)
+
+    assert len(frames.sent) == 2
+    assert edits.contents
+    reasoning = edits.contents[-1]["io.mindroom.reasoning"]
+    assert reasoning["text"] == "Checking the cache"
+    assert reasoning["duration_ms"] >= 0
+    assert reasoning["segments"][0]["start"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reasoning_alone_reaches_a_placeholder_once_frames_stop(tmp_path: Path, frames: _Frames) -> None:
+    """Before any answer text, stopped frames still hand the reasoning to the placeholder, and it keeps growing there."""
+    frames.outcomes = [LiveSendOutcome.STOP]
+    records, edits = _records(), _Edits()
+    config = _config(tmp_path, min_update_interval=0.01, interval_ramp_seconds=60)
+    stream = _stream(ReasoningDelta("Checking"), 0.2, ReasoningDelta(" the cache"), 0.2, "Answer", 0.02)
+    await _run(config, stream, records, edits, placeholder_event_id="$placeholder")
+
+    shown = [content["io.mindroom.reasoning"]["text"] for content in edits.contents if "Answer" not in content["body"]]
+    assert shown[0] == "Checking"
+    assert shown[-1] == "Checking the cache"
+
+
+@pytest.mark.asyncio
+async def test_without_frames_progress_edits_carry_reasoning_but_the_first_send_does_not(tmp_path: Path) -> None:
+    """With frames switched off, edits carry the reasoning so far; the create leaves it to them."""
+    records, edits = _records(), _Edits()
+    stream = _stream(ReasoningDelta("Checking the cache"), 0.05, "Hello", 0.1, " world", 0.1, " again", 0.1)
+    config = _config(tmp_path, live_frames=False, min_update_interval=0.01, interval_ramp_seconds=60)
+    await _run(config, stream, records, edits)
+
+    (create,) = [write for write in records.writes if write.kind == "create"]
+    assert create.content is not None
+    assert "io.mindroom.reasoning" not in create.content
+    assert edits.contents
+    assert all(content["io.mindroom.reasoning"]["text"] == "Checking the cache" for content in edits.contents)
 
 
 @pytest.mark.asyncio

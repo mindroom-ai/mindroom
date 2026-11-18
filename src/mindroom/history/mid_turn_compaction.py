@@ -19,6 +19,7 @@ from uuid import uuid4
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.helper_usage import get_helper_usage_owner
+from mindroom.history.conversation_text import is_own_thread_message
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.replay import HistorySummaryBudgetError
 from mindroom.history.request_size import request_sizer
@@ -494,6 +495,7 @@ def _current_prompt(messages: Sequence[Message], prompt_id: str | None) -> Messa
             and message.add_to_agent_memory
             and not is_compaction_summary(message)
             and not is_queued_notice_message(message)
+            and not is_own_thread_message(message)
         ),
         None,
     )

@@ -6,11 +6,12 @@ import asyncio
 import base64
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
@@ -1207,6 +1208,50 @@ def test_a_token_github_refuses_keeps_the_token_saved_before(
     assert github.requests[-1].headers["authorization"] == f"Bearer {ALICE_PAT}"
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(403, headers={"x-ratelimit-remaining": "0"}, json={"message": "API rate limit exceeded"}),
+        httpx.Response(403, headers={"retry-after": "60"}, json={"message": "secondary rate limit"}),
+        httpx.Response(429, headers={"retry-after": "60"}),
+        httpx.Response(429, headers={"x-ratelimit-remaining": "0"}),
+        httpx.Response(429),
+    ],
+    ids=["403-remaining-0", "403-retry-after", "429-retry-after", "429-remaining-0", "429"],
+)
+def test_a_rate_limited_token_check_is_a_bad_gateway_not_a_rejection(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    answer: httpx.Response,
+) -> None:
+    """GitHub limiting the check says nothing of the token: 502 `github_rate_limited`, and the token before stays."""
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
+    github.handler = lambda request: answer if request.url.path == "/user" else httpx.Response(200, json={})
+
+    response = save_token(client, session(app, ALICE), "ghp_limited-token")
+
+    assert (response.status_code, response.json()) == (502, {"error": "github_rate_limited"})
+    assert stored_token(paths, ALICE) == {"token": ALICE_PAT, "login": "pat-gh"}
+
+
+def test_a_403_with_rate_limit_left_is_a_rejection(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A 403 while GitHub still reports requests left refuses the token, whatever its rate headers say."""
+    github.handler = lambda _request: httpx.Response(403, headers={"x-ratelimit-remaining": "4999"})
+
+    response = save_token(client, session(app, ALICE))
+
+    assert (response.status_code, response.json()) == (400, {"error": "github_token_rejected"})
+    assert stored_token(paths, ALICE) is None
+
+
 @pytest.mark.parametrize("source", [{"_source": "ui"}, {"_source": "env"}, {}], ids=["ui", "env", "unmarked"])
 def test_a_global_or_shared_token_document_is_never_the_users(
     app: FastAPI,
@@ -1573,21 +1618,29 @@ def test_replacing_an_unreadable_token_never_lets_the_app_connection_answer(
     assert [r.url.path for r in github.requests] == ["/user"]
 
 
+@pytest.mark.parametrize(
+    "error",
+    [OSError("disk full"), ValueError("Path must stay within its authorized root.")],
+    ids=["os-error", "path-guard"],
+)
 def test_a_failed_publish_keeps_the_unreadable_token(
     app: FastAPI,
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
     monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
 ) -> None:
-    """A new token that cannot be written leaves the old bytes, so requests still fail closed, not as the App."""
+    """A new token that cannot be written leaves the old bytes, so requests still fail closed, not as the App.
+
+    A `ValueError` from the store answers as a failed write does, naming nothing of it.
+    """
     connect(paths, ALICE)
     github.handler = user_answer()
     damage_token(paths, ALICE, b"not json")
 
     def fail(_path: Path, _data: bytes) -> NoReturn:
-        msg = "disk full"
-        raise OSError(msg)
+        raise error
 
     monkeypatch.setattr(credentials_manager, "_atomic_write_private_file", fail)
 
@@ -1595,6 +1648,7 @@ def test_a_failed_publish_keeps_the_unreadable_token(
     response = ask(client, session(app, ALICE), method="POST", body={"title": "x"})
 
     assert (saved.status_code, saved.json()) == (503, {"error": "github_connection_unavailable"})
+    assert str(error) not in saved.text
     assert (response.status_code, response.json()) == (503, {"error": "github_token_unreadable"})
     path = get_runtime_credentials_manager(paths).for_primary_runtime_scope(ALICE, None)
     assert path.get_credentials_path("github_user_token").read_bytes() == b"not json"
@@ -1611,3 +1665,144 @@ def test_other_saves_still_refuse_to_overwrite_an_unreadable_document(tmp_path: 
     manager.save_credentials("github_user_token", {"token": "x", "login": "y"}, replace_unreadable=True)
 
     assert manager.load_credentials("github_user_token") == {"token": "x", "login": "y"}
+
+
+def test_a_token_store_its_path_guards_refuse_is_unreadable(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store that refuses with `ValueError` reads as an unreadable token, so nothing falls back to the App."""
+    connect(paths, ALICE)
+    real = github_requests.credential_layers
+
+    def guarded(service: str, **kwargs: Any) -> credentials_manager.CredentialLayers:  # noqa: ANN401
+        if service == "github_user_token":
+            msg = "Path must stay within its authorized root."
+            raise ValueError(msg)
+        return real(service, **kwargs)
+
+    monkeypatch.setattr(github_requests, "credential_layers", guarded)
+
+    status = client.get("/api/github/status", headers=session(app, ALICE))
+    response = ask(client, session(app, ALICE))
+
+    assert (status.status_code, status.json()) == (503, {"error": "github_token_unreadable"})
+    assert (response.status_code, response.json()) == (503, {"error": "github_token_unreadable"})
+    assert github.requests == []
+
+
+def test_a_removal_during_a_tokens_check_waits_for_it_and_then_removes_it(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A user's `DELETE` sent while their `PUT` is checking with GitHub runs after that save, so it is not undone.
+
+    Another user's removal does not wait.
+    """
+    checking, release = threading.Event(), threading.Event()
+    answer = user_answer()
+
+    async def held_check(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            checking.set()
+            await asyncio.to_thread(release.wait, 10)
+        return answer(request)
+
+    github.handler = held_check
+    alice, bob = session(app, ALICE), session(app, BOB)
+    with ThreadPoolExecutor(3) as pool:
+        try:
+            put = pool.submit(save_token, client, alice)
+            assert checking.wait(10)
+            delete = pool.submit(client.delete, "/api/github/token", headers=alice)
+            other = pool.submit(client.delete, "/api/github/token", headers=bob)
+            assert other.result(10).json() == {"connected": False}
+            done, _pending = wait([delete], timeout=0.3)
+            assert not done
+        finally:
+            release.set()
+        saved, removed = put.result(10), delete.result(10)
+
+    assert (saved.status_code, saved.json()) == (200, {"connected": True, "via": "token", "login": "pat-gh"})
+    assert (removed.status_code, removed.json()) == (200, {"connected": False})
+    assert stored_token(paths, ALICE) is None
+    assert ALICE not in github_requests._token_locks
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError("disk full"), ValueError("Path must stay within its authorized root.")],
+    ids=["os-error", "path-guard"],
+)
+def test_a_removal_the_store_fails_is_a_sanitized_unavailable(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    """A store that fails to remove the token answers 503 naming nothing of it, and the token stays."""
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
+
+    def fail(*_args: object) -> NoReturn:
+        raise error
+
+    monkeypatch.setattr(credentials_manager.CredentialsManager, "delete_credentials", fail)
+
+    with capture_logs() as logs:
+        removed = client.delete("/api/github/token", headers=session(app, ALICE))
+
+    assert (removed.status_code, removed.json()) == (503, {"error": "github_connection_unavailable"})
+    assert str(error) not in removed.text
+    assert str(error) not in repr(logs)
+    assert ALICE_PAT not in repr(logs)
+    assert stored_token(paths, ALICE) == {"token": ALICE_PAT, "login": "pat-gh"}
+
+
+def route_request(app: FastAPI, user_id: str) -> Request:
+    """A request to the app presenting a new client session of ``user_id``, for calling a route handler directly."""
+    headers = [(b"authorization", session(app, user_id)["Authorization"].encode())]
+    return Request({"type": "http", "app": app, "method": "PUT", "path": "/api/github/token", "headers": headers})
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_save_holds_the_users_lock_until_its_write_finishes(
+    app: FastAPI,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `PUT` cancelled while its write runs lets the user's queued `DELETE` run only after that write."""
+    github.handler = user_answer()
+    writing, release = threading.Event(), threading.Event()
+    publish = credentials_manager._atomic_write_private_file
+
+    def held_publish(path: Path, data: bytes) -> None:
+        if path.name == "github_user_token_credentials.json":
+            writing.set()
+            release.wait(10)
+        publish(path, data)
+
+    monkeypatch.setattr(credentials_manager, "_atomic_write_private_file", held_publish)
+    token = github_requests.GitHubToken(token=ALICE_PAT)
+    put = asyncio.create_task(github_requests.save_github_token(token, route_request(app, ALICE)))
+    try:
+        assert await asyncio.to_thread(writing.wait, 10)
+        delete = asyncio.create_task(github_requests.delete_github_token(route_request(app, ALICE)))
+        await asyncio.sleep(0.05)
+        put.cancel()
+        await asyncio.sleep(0.2)
+        assert not delete.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await put
+    assert await delete == {"connected": False}
+    assert stored_token(paths, ALICE) is None
