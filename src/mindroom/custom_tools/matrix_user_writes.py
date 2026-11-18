@@ -16,7 +16,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from http import HTTPStatus
 from threading import Lock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
@@ -460,21 +460,15 @@ async def _target(
     """Return the ID of the event that ``action`` on ``event_id`` acts on, refusing one it may not act on.
 
     An edit's replacement event stands for the message it replaced: clients ignore a reaction to a replacement and a
-    replacement of one, and redacting one removes only the edit, so the message shows its earlier text again. A
+    replacement of one, and redacting one removes only the edit, so the message shows its earlier text again. Only a
+    message's own sender edits it, so a replacement event another account sent stands for no message and is refused. A
     reaction is no replacement, so the person's own reaction is redacted as named. The homeserver takes a change to a
     deleted message, and to an event the room does not hold, such as one of another room, and nobody sees it, so the
     event is read in the room and a deleted one refused. ``react`` may then act on any event; ``edit`` and ``redact``
     only on the person's own message or reaction, never on state such as the events that made a room and set its name,
     topic, and members, many of them the person's own; ``edit`` only on a text message.
     """
-    event = await read_event(client, room_id, event_id)
-    content = event.get("content")
-    relation = content.get("m.relates_to") if isinstance(content, dict) else None
-    if isinstance(relation, dict) and relation.get("rel_type") == "m.replace":
-        replaced = relation.get("event_id")
-        if isinstance(replaced, str):
-            event_id = replaced
-            event = await read_event(client, room_id, event_id)
+    event_id, event = await _named_message(client, room_id, event_id)
     if redacted(event):
         verb = {"react": "reacted to", "edit": "edited", "redact": "redacted"}[action]
         msg = f"{event_id} was deleted, so it cannot be {verb}."
@@ -497,6 +491,23 @@ async def _target(
             msg = f"Only text messages can be edited, and {event_id} is a message of type {msgtype}."
             raise MatrixRequestError(msg)
     return event_id
+
+
+async def _named_message(client: nio.AsyncClient, room_id: str, event_id: str) -> tuple[str, dict[str, Any]]:
+    """Return the ID and the event that ``event_id`` names in the room: itself, or the message it is an edit of."""
+    event = await read_event(client, room_id, event_id)
+    content = event.get("content")
+    relation = content.get("m.relates_to") if isinstance(content, dict) else None
+    if not isinstance(relation, dict) or relation.get("rel_type") != "m.replace":
+        return event_id, event
+    replaced = relation.get("event_id")
+    if not isinstance(replaced, str):
+        return event_id, event
+    original = await read_event(client, room_id, replaced)
+    if original.get("sender") != event.get("sender"):
+        msg = f"{event_id} is no edit of {replaced}: another account sent it."
+        raise MatrixRequestError(msg)
+    return replaced, original
 
 
 async def _newest_in_thread(client: nio.AsyncClient, room_id: str, thread_id: str) -> str:

@@ -68,7 +68,7 @@ if TYPE_CHECKING:
 BOB = "@bob:example.com"
 CAROL = "@carol:example.com"
 OTHER_ROOM = "!other:example.com"
-NEW_DM = "!new:example.com"
+SECOND_ROOM = "!new:example.com"
 CLIENT = "/_matrix/client/v3"
 ROOM_PATH = f"{CLIENT}/rooms/{ROOM}"
 ENCRYPTION_PATH = f"{ROOM_PATH}/state/m.room.encryption"
@@ -173,7 +173,7 @@ def homeserver() -> FakeHomeserver:
         {
             f"{_send_path()}*": Answer({"event_id": "$sent"}),
             f"{_send_path(event_type='m.reaction')}*": Answer({"event_id": "$reaction"}),
-            f"{_send_path(NEW_DM)}*": Answer({"event_id": "$dm"}),
+            f"{_send_path(SECOND_ROOM)}*": Answer({"event_id": "$dm"}),
         },
     )
 
@@ -935,24 +935,30 @@ async def test_a_deleted_message_is_refused(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "arguments",
-    [{"action": "edit", "message": "Hi all"}, {"action": "redact"}],
-    ids=["edit", "redact"],
+    [{"action": "react", "emoji": "👍"}, {"action": "edit", "message": "Hi all"}, {"action": "redact"}],
+    ids=["react", "edit", "redact"],
 )
-async def test_a_replacement_events_message_must_be_the_owners_too(
+@pytest.mark.parametrize(("edit_sender", "message_sender"), [(BOB, OWNER), (OWNER, BOB)], ids=["forged", "own"])
+async def test_a_replacement_event_another_account_sent_stands_for_no_message(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
     arguments: dict[str, str],
+    edit_sender: str,
+    message_sender: str,
 ) -> None:
-    """The message an edit or redaction names, through the owner's own replacement event, must be the owner's too."""
-    homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$theirs", "Hello", sender=OWNER)
-    homeserver.answers[f"{ROOM_PATH}/event/$theirs"] = text_message("$theirs", "Hi", sender=BOB)
+    """Only a message's own sender edits it, so a replacement event from another account reaches no message.
+
+    Else naming someone's forged edit of the owner's message would redact or rewrite the owner's message.
+    """
+    homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$message", "Hello", sender=edit_sender)
+    homeserver.answers[f"{ROOM_PATH}/event/$message"] = text_message("$message", "Hi", sender=message_sender)
 
     result = await _write(config, paths, homeserver, room_id=ROOM, event_id="$edit", **arguments)
 
     assert result == error_result(
         arguments["action"],
-        f"Only your owner's own events can be changed, and $theirs was sent by {BOB}.",
+        "$edit is no edit of $message: another account sent it.",
     )
     assert _changes(homeserver) == []
 
@@ -1265,7 +1271,7 @@ async def test_a_stray_room_id_does_not_give_create_room_its_own_rate_limit(
     homeserver: FakeHomeserver,
 ) -> None:
     """create_room takes no room_id, so every create_room shares one count."""
-    homeserver.answers[CREATE_PATH] = {"room_id": NEW_DM}
+    homeserver.answers[CREATE_PATH] = {"room_id": SECOND_ROOM}
     toolkit = owner_toolkit(config, paths)
 
     with owner_turn(config, paths), homeserver.serving_the_toolkit():
@@ -1400,12 +1406,12 @@ async def test_each_write_leaves_one_audit_line_without_the_text(
 
 @dataclass
 class _HangingHomeserver(FakeHomeserver):
-    """A homeserver that never answers a send into ``NEW_DM``, and says when one has arrived."""
+    """A homeserver that never answers a send into ``SECOND_ROOM``, and says when one has arrived."""
 
     send_arrived: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def request(self, method: str, url: str, **kwargs: Any) -> Any:  # noqa: ANN401
-        if unquote(urlsplit(url).path).startswith(_send_path(NEW_DM)):
+        if unquote(urlsplit(url).path).startswith(_send_path(SECOND_ROOM)):
             self.send_arrived.set()
             await asyncio.Event().wait()
         return await super().request(method, url, **kwargs)
@@ -1415,7 +1421,7 @@ class _HangingHomeserver(FakeHomeserver):
 async def test_a_write_cancelled_midway_leaves_its_audit_line(config: Config, paths: RuntimePaths) -> None:
     """A write stopped while its message was going out to a DM is logged as interrupted, with the room."""
     homeserver = _HangingHomeserver(
-        {DIRECT_PATH: {BOB: [NEW_DM]}, _members_path(NEW_DM): _members(alice="join", bob="join")},
+        {DIRECT_PATH: {BOB: [SECOND_ROOM]}, _members_path(SECOND_ROOM): _members(alice="join", bob="join")},
     )
 
     with capture_logs() as logs:
@@ -1429,7 +1435,7 @@ async def test_a_write_cancelled_midway_leaves_its_audit_line(config: Config, pa
 
     [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
     assert (audit["status"], audit["error"]) == ("interrupted", "CancelledError")
-    assert (audit["action"], audit["room_id"], audit["event_id"]) == ("send", NEW_DM, None)
+    assert (audit["action"], audit["room_id"], audit["event_id"]) == ("send", SECOND_ROOM, None)
     assert all("secret plan" not in str(entry) for entry in logs)
 
 
@@ -1456,7 +1462,7 @@ async def test_the_audit_line_names_whom_a_write_invited(
     homeserver: FakeHomeserver,
 ) -> None:
     """Whom the owner's account invited into a room is logged; a new room invites nobody."""
-    homeserver.answers.update({f"{ROOM_PATH}/invite": {}, CREATE_PATH: {"room_id": NEW_DM}})
+    homeserver.answers.update({f"{ROOM_PATH}/invite": {}, CREATE_PATH: {"room_id": SECOND_ROOM}})
 
     with capture_logs() as logs:
         invited = await _write(config, paths, homeserver, action="invite", room_id=ROOM, user_id=BOB)
@@ -1490,8 +1496,8 @@ async def test_a_blank_write_argument_is_left_out(
     """A blank argument, as a model may send for one it means to leave out, is no reply target, thread, recipient, or file."""
     homeserver.answers.update(
         {
-            DIRECT_PATH: {BOB: [NEW_DM]},
-            _members_path(NEW_DM): _members(alice="join", bob="join"),
+            DIRECT_PATH: {BOB: [SECOND_ROOM]},
+            _members_path(SECOND_ROOM): _members(alice="join", bob="join"),
         },
     )
 
