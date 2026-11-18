@@ -94,6 +94,8 @@ _PATH = re.compile(rf"(/graphql|/repos(?:/{_PCHAR}+){{2,}})(?:\?(?:{_PCHAR}|[/?]
 # The user's own personal access token, beside their GitHub App connection; never the `github` tool's shared token.
 _TOKEN_SERVICE = "github_user_token"  # noqa: S105
 _TOKEN_CHECK_TIMEOUT_SECONDS = 10.0
+# GitHub's `/user` answer is a few kilobytes; a larger one is not the answer the check expects.
+_MAX_TOKEN_CHECK_BYTES = 64 * 1024
 _DEFAULT_ACCEPT = "application/vnd.github+json"
 _API_VERSION = "2022-11-28"
 
@@ -281,17 +283,24 @@ async def _status(context: OAuthCredentialContext | None) -> dict[str, object] |
 async def _token_login(token: str) -> str | JSONResponse:
     """Return the login GitHub names for ``token``, or the error to answer when it refuses or fails to name one."""
     headers = {"Authorization": f"Bearer {token}", "Accept": _DEFAULT_ACCEPT, "X-GitHub-Api-Version": _API_VERSION}
+    body = None
     try:
-        async with asyncio.timeout(_TOKEN_CHECK_TIMEOUT_SECONDS), _github_client() as client:
-            response = await client.get(f"{_GITHUB_API}/user", headers=headers)
+        async with (
+            asyncio.timeout(_TOKEN_CHECK_TIMEOUT_SECONDS),
+            _github_client() as client,
+            client.stream("GET", f"{_GITHUB_API}/user", headers=headers) as response,
+        ):
+            # GitHub's status alone decides a failed check, so its body is never downloaded.
+            if response.status_code == 200:
+                content = await _bounded_body(response, _MAX_TOKEN_CHECK_BYTES)
+                body = None if content is None else _answer_body(content, response.headers.get("content-type", ""))
     except (httpx.HTTPError, TimeoutError) as exc:
         logger.warning("github_token_check_failed", error_type=type(exc).__name__)
         return _error(502, "github_unreachable")
     if response.status_code in {401, 403}:
         logger.info("github_token_rejected", status=response.status_code)
         return _error(400, "github_token_rejected")
-    body = _answer_body(response.content, response.headers.get("content-type", ""))
-    login = body.get("login") if response.status_code == 200 and isinstance(body, dict) else None
+    login = body.get("login") if isinstance(body, dict) else None
     if not isinstance(login, str) or not login:
         logger.warning("github_token_check_failed", status=response.status_code)
         return _error(502, "github_unreachable")
@@ -359,12 +368,10 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
                 async with client.stream(method, url, headers=headers | typed, content=content) as response:
                     hop = _redirect(response, method, content) if redirects < _MAX_REDIRECTS else None
                     if hop is None:
-                        body = bytearray()
-                        async for chunk in response.aiter_bytes():
-                            body += chunk
-                            if len(body) > _MAX_RESPONSE_BYTES:
-                                logger.warning("github_request_too_large", method=payload.method, path=kind)
-                                return _error(502, "github_response_too_large")
+                        body = await _bounded_body(response, _MAX_RESPONSE_BYTES)
+                        if body is None:
+                            logger.warning("github_request_too_large", method=payload.method, path=kind)
+                            return _error(502, "github_response_too_large")
                         break
                 method, url, content = hop
     except (httpx.HTTPError, TimeoutError) as exc:
@@ -373,7 +380,7 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
     logger.info("github_request", method=payload.method, path=kind, status=response.status_code, redirects=redirects)
     return {
         "status": response.status_code,
-        "body": _answer_body(bytes(body), response.headers.get("content-type", "")),
+        "body": _answer_body(body, response.headers.get("content-type", "")),
         "headers": {name: response.headers[name] for name in _PASSED_HEADERS if name in response.headers},
     }
 
@@ -395,6 +402,16 @@ def _redirect(
     if response.status_code in {307, 308} or method == "GET":
         return method, url, content
     return None
+
+
+async def _bounded_body(response: httpx.Response, limit: int) -> bytes | None:
+    """Return the streamed ``response`` body, or None as soon as it grows past ``limit`` bytes."""
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body += chunk
+        if len(body) > limit:
+            return None
+    return bytes(body)
 
 
 def _answer_body(body: bytes, content_type: str) -> JsonValue:

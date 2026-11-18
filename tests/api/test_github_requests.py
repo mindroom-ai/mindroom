@@ -29,7 +29,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials, serve_token_endpoint
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -1435,4 +1435,52 @@ def test_an_unreadable_saved_token_can_be_replaced_or_removed(
     assert (saved.status_code, saved.json()) == (200, {"connected": True, "via": "token", "login": "pat-gh"})
     assert github.requests[-1].headers["authorization"] == f"Bearer {ALICE_PAT}"
     assert (removed.status_code, removed.json()) == (200, {"connected": True, "via": "app", "login": "alice-gh"})
+    assert stored_token(paths, ALICE) is None
+
+
+class CountedStream(httpx.AsyncByteStream):
+    """A response body that counts how many of its chunks were read."""
+
+    def __init__(self, *chunks: bytes) -> None:
+        self.chunks = chunks
+        self.read = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield each chunk, counting it."""
+        for chunk in self.chunks:
+            self.read += 1
+            yield chunk
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 404, 500])
+def test_a_token_check_reads_no_body_of_a_failed_answer(
+    app: FastAPI,
+    client: TestClient,
+    github: GitHubPeer,
+    status_code: int,
+) -> None:
+    """GitHub's status alone decides a failed check, so its body is never downloaded."""
+    body = CountedStream(b'{"message": "Bad credentials"}')
+    github.handler = lambda _request: httpx.Response(
+        status_code, stream=body, headers={"content-type": "application/json"}
+    )
+
+    assert save_token(client, session(app, ALICE)).status_code in {400, 502}
+    assert body.read == 0
+
+
+def test_a_token_check_answer_past_its_limit_is_a_bad_gateway(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+) -> None:
+    """A `/user` answer over 64 KiB is not read to its end, and nothing is stored."""
+    body = CountedStream(b'{"login": "pat-gh", "pad": "', b"a" * 65_536, b'"}', b" " * 65_536)
+    github.handler = lambda _request: httpx.Response(200, stream=body, headers={"content-type": "application/json"})
+
+    response = save_token(client, session(app, ALICE))
+
+    assert (response.status_code, response.json()) == (502, {"error": "github_unreachable"})
+    assert body.read == 2
     assert stored_token(paths, ALICE) is None
