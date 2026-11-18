@@ -137,15 +137,22 @@ class StewardDuties:
         await self.deps.room_lifecycle.send_welcome_message_if_empty(room_id)
 
     def mark_joined_for_room_state(self, room_id: str) -> None:
-        """Publish the room state of a room this bot joined by any path, once a sync frame carries its members."""
+        """Publish the state of a room this bot joined or left by any path, once a sync frame carries its members."""
         self._joined_room_ids.add(room_id)
 
     async def power_levels_event(self, room: nio.MatrixRoom, _event: nio.PowerLevelsEvent) -> None:
-        """Publish a room's state after its power levels changed, which can make this bot its steward."""
+        """Publish a room's state after its power levels changed, which can change its steward."""
         self._joined_room_ids.add(room.room_id)
 
-    async def publish_joined_room_state(self) -> None:
-        """Reconcile the thread mode and MindRoom accounts of the marked rooms this bot stewards and still holds."""
+    async def publish_joined_room_state(self, *, every_room: bool = False) -> None:
+        """Reconcile the thread mode and MindRoom accounts of the marked rooms, each through its steward.
+
+        ``every_room`` first marks each room this bot stewards: a sync that starts can bring a power change as state
+        alone, which reaches no callback.
+        """
+        client = self.deps.runtime.client
+        if every_room and client is not None:
+            self._joined_room_ids.update(room_id for room_id in client.rooms if self.is_steward(room_id))
         room_ids, self._joined_room_ids = self._joined_room_ids, set()
         await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))
 
@@ -155,6 +162,11 @@ class StewardDuties:
         A failure, such as a reconcile that timed out queued behind a slower one, leaves the room to a background retry,
         so the room catches up without another trigger while the caller still waits at most 10 s.
         """
+        steward = self.deps.runtime.orchestrator.room_steward(room_id)
+        if steward is not None and steward.agent_name != self.deps.hook_context.agent_name:
+            # The election names another bot, as after a power or membership change: it publishes after its next frame.
+            steward.steward_duties.mark_joined_for_room_state(room_id)
+            return
         if await self._reconcile_room_state(room_id):
             return
         pending = self._room_state_retries.get(room_id)

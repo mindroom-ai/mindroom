@@ -1200,7 +1200,7 @@ async def test_router_stop_cancels_its_room_state_retry_without_waiting(room_sta
     user = AgentMatrixUser(ROUTER_AGENT_NAME, ids[ROUTER_AGENT_NAME].full_id, "Router", TEST_PASSWORD)
     bot = install_runtime_journal_support(make_test_agent_bot(user, config=config, runtime_paths=paths))
     bot.client = client
-    duties = bot._steward
+    duties = bot.steward_duties
     await _hang_a_room_state_retry(duties, room_state)
     budget = bot._sync_shutdown_budget = ShutdownBudget.start(5.0)
     await bot.prepare_for_sync_shutdown()

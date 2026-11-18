@@ -3531,7 +3531,7 @@ def patch_response_runner_module(**changes: object) -> Generator[None]:
 def install_personal_room_shutdown_mock(bot: AgentBot) -> None:
     """Install lifecycle cancellation for partial shutdown fixtures through one seam, with idle steward duties."""
     bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
-    bot._steward = MagicMock(spec=StewardDuties)
+    bot.steward_duties = MagicMock(spec=StewardDuties)
 
 
 def install_shutdown_drain_mocks(

@@ -81,11 +81,16 @@ class AgentReplyMembershipSync:
         self.observer_closed(config, observer_user_id, reason="sync_loop_started")
         self._observer_open[observer_user_id] = False
 
-    def observer_frame_settled(self, observer_user_id: str) -> None:
-        """Open an armed account as an observer and ask for its rooms' read; a closed loop's late frame opens nothing."""
-        if self._observer_open.get(observer_user_id) is False:
+    def observer_frame_settled(self, observer_user_id: str) -> bool:
+        """Open an armed account as an observer and ask for its rooms' read; a closed loop's late frame opens nothing.
+
+        Return whether this frame opened the account.
+        """
+        opened = self._observer_open.get(observer_user_id) is False
+        if opened:
             self._observer_open[observer_user_id] = True
             self._grants_lost(revoke=False)
+        return opened
 
     def observer_closed(self, config: Config, observer_user_id: str, *, reason: str) -> None:
         """End one account's observation; only an account that was open loses its rooms' grants."""

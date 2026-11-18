@@ -208,7 +208,7 @@ class TestAgentBot(AgentBotTestBase):
             call(bot._room_lifecycle.on_invite, nio.InviteEvent),
             call(bot._room_lifecycle.on_space_child, nio.RoomSpaceChildEvent),
             call(bot._on_thread_tag_state, nio.UnknownEvent),
-            call(bot._steward.power_levels_event, nio.PowerLevelsEvent),
+            call(bot.steward_duties.power_levels_event, nio.PowerLevelsEvent),
         ]
         assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member
 

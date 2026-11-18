@@ -1856,7 +1856,7 @@ class _WelcomedRoom:
         # The config assigns the agent to the room before it joins, and drops it before it leaves.
         self.bot.config.agents[name].rooms = [self.room.room_id] if membership == "join" else []
         previous = "invite" if membership == "join" else "join"
-        await self.bot._steward.member_event(self.room, _membership_change(user_id, membership, previous))
+        await self.bot.steward_duties.member_event(self.room, _membership_change(user_id, membership, previous))
 
 
 def _membership_change(user_id: str, membership: str, previous: str) -> nio.RoomMemberEvent:

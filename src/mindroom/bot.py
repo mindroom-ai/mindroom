@@ -272,7 +272,7 @@ class AgentBot:
     _call_manager: CallManager | None
     _calls_full_reconcile_pending: bool
     _call_rooms_reconcile_pending: set[str]
-    _steward: StewardDuties
+    steward_duties: StewardDuties
     _interactive_selections: InteractiveSelections
     _voice_ingress: VoiceIngress
     _turn_dispatcher: TurnDispatcher
@@ -356,7 +356,7 @@ class AgentBot:
             self._lookup_personal_room_target,
             orchestrator.config_reload,
             self._report_personal_room_membership_change,
-            lambda room_id: self._steward.is_steward(room_id),
+            lambda room_id: self.steward_duties.is_steward(room_id),
         )
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
@@ -469,7 +469,7 @@ class AgentBot:
             conversation_reader=self._conversation_reader,
             logger=self.logger,
         )
-        self._steward = StewardDuties(
+        self.steward_duties = StewardDuties(
             StewardDutiesDeps(
                 runtime=self._runtime_view,
                 logger=self.logger,
@@ -1076,7 +1076,7 @@ class AgentBot:
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after configured joins and across restarts."""
         self._request_call_reconciliation(room_id)
-        await self._steward.room_joined(room_id)
+        await self.steward_duties.room_joined(room_id)
 
     async def _restore_joined_room(self, room_id: str) -> None:
         """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime."""
@@ -1356,12 +1356,12 @@ class AgentBot:
     ) -> None:
         """Run side effects that do not own raw sync checkpoint safety."""
         orchestrator = self.orchestrator
-        orchestrator.agent_reply_membership_sync.observer_frame_settled(self.matrix_id.full_id)
+        opened = orchestrator.agent_reply_membership_sync.observer_frame_settled(self.matrix_id.full_id)
         orchestrator.agent_reply_membership_sync.request_refresh(
             orchestrator.config,
             orchestrator.refresh_agent_reply_memberships,
         )
-        await self._steward.publish_joined_room_state()
+        await self.steward_duties.publish_joined_room_state(every_room=opened)
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
@@ -1433,8 +1433,8 @@ class AgentBot:
             )
             if joined:
                 self._request_call_reconciliation(room_id)
-        if joined and admission.previous_membership != "join":
-            self._steward.mark_joined_for_room_state(room_id)
+        if joined != (admission.previous_membership == "join"):
+            self.steward_duties.mark_joined_for_room_state(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
             if (runtime := get_background_runtime(self.runtime_paths)) is not None:
@@ -1625,7 +1625,7 @@ class AgentBot:
                 nio.UnknownEvent,
             )
             client.add_event_callback(
-                self._steward.power_levels_event,  # ty: ignore[invalid-argument-type]
+                self.steward_duties.power_levels_event,  # ty: ignore[invalid-argument-type]
                 nio.PowerLevelsEvent,
             )
             await self._register_call_manager_callbacks(client)
@@ -1649,7 +1649,7 @@ class AgentBot:
             # A running bot that does not observe yet may be in rooms no room list names: none stays proven absent.
             self._runtime_view.agent_reply_memberships.forget_joined_rooms()
 
-            await self._steward.started(client)
+            await self.steward_duties.started(client)
 
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
@@ -1934,7 +1934,7 @@ class AgentBot:
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
-        self._steward.stopping()
+        self.steward_duties.stopping()
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),
@@ -2110,7 +2110,7 @@ class AgentBot:
             await call_manager.on_room_membership_event(room, event)
         await self._personal_room_lifecycle.member_event(room, event)
         await self._room_lifecycle.on_contact_member(room.room_id, event)
-        await self._steward.member_event(room, event)
+        await self.steward_duties.member_event(room, event)
 
     def _lookup_personal_room_target(self, agent_name: str) -> PersonalRoomTarget | None:
         """Project a connected fleet member into its service and sync readiness."""

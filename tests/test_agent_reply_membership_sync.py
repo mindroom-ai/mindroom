@@ -101,6 +101,16 @@ def _fleet(*names: str, hold: asyncio.Event | None = None) -> tuple[list[_Bot], 
     return [_Bot(name, calls) for name in names], calls
 
 
+def test_only_the_first_settled_frame_of_a_loop_reports_that_it_opened_the_observer() -> None:
+    """The frame that opens an observer says so, which is when its bot publishes every room it stewards."""
+    config = Config()
+    membership_sync = AgentReplyMembershipSync(MagicMock(spec=AgentReplyMembershipIndex), lambda: ())
+    assert not membership_sync.observer_frame_settled(_OBSERVER)
+    membership_sync.observer_loop_started(config, _OBSERVER)
+    assert membership_sync.observer_frame_settled(_OBSERVER)
+    assert not membership_sync.observer_frame_settled(_OBSERVER)
+
+
 def test_history_loss_invalidates_grants_and_revokes_every_bots_calls_before_admission(tmp_path: Path) -> None:
     """A history-loss carrier fails its open account's rooms closed and schedules every bot's revocation synchronously."""
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
