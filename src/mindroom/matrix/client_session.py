@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import aiohttp
 import nio
+from nio.client.base_client import logged_in_async
 
 from mindroom.constants import (
     RuntimePaths,
@@ -57,6 +58,32 @@ class _AsyncRequestHeaders(Protocol):
         ...
 
 
+_STATE_EVENT_STRING_FIELDS = ("type", "state_key", "sender", "event_id")
+
+
+def _is_state_event(event: object) -> bool:
+    """Return whether one room-state entry has the fields nio's room-state schema requires."""
+    return (
+        isinstance(event, dict)
+        and all(isinstance(event.get(field), str) for field in _STATE_EVENT_STRING_FIELDS)
+        and isinstance(event.get("origin_server_ts"), int)
+    )
+
+
+class _RoomStateResponse(nio.RoomGetStateResponse):
+    """Room state without nio's JSON schema validation, which blocks the event loop for long in a large room.
+
+    A body that is not a list answers with nio's error response, and an entry without the required fields is dropped.
+    """
+
+    @classmethod
+    def from_dict(cls, parsed_dict: Any, room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:  # noqa: ANN401
+        """Keep the well-formed state events of one room-state body."""
+        if not isinstance(parsed_dict, list):
+            return cls.create_error(parsed_dict, room_id)
+        return cls([event for event in parsed_dict if _is_state_event(event)], room_id)
+
+
 class MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
 
@@ -85,6 +112,12 @@ class MindRoomAsyncClient(nio.AsyncClient):
             raise
         self._transport_failure_logged = False
         return response
+
+    @logged_in_async
+    async def room_get_state(self, room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        """Fetch a room's full state through ``_RoomStateResponse``."""
+        method, path = nio.Api.room_get_state(self.access_token, room_id)
+        return await self._send(_RoomStateResponse, method, path, response_data=(room_id,))
 
     def _log_transport_failure(self, error: BaseException) -> None:
         """Warn once per outage with the real cause; repeats stay at debug until the homeserver answers."""
