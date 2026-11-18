@@ -90,18 +90,19 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     The steward (decision 3) may be the owner account or a candidate.
     It coalesces and normalizes the turn as any bot does, runs the selector once, and sends one event of type `io.mindroom.route`.
     The event's content names, under the `io.mindroom.route` key, the chosen account (`entity`), every message of the turn with the newest last (`event_ids`) and the thread the answer belongs in (`thread_id`), and carries the relay context the responder reads: the trusted-relay source kind, the original sender, attachment IDs, voice markers, and a scheduled task's per-run settings.
-    The responder keeps only those keys, and only an event journaled as a route is read as one.
+    The responder keeps only those keys, and only an event journaled as a route is read as one: every other journal event loses the route key when it is rebuilt.
     It has no `m.relates_to` and no `m.mentions`, so no homeserver counts it in a thread and no mention rule fires for it, and it has a `body` only when the responder could not read the text otherwise: for a scheduled task's prompt, and for a responder that answers in the room and reads no conversation.
-    The steward routes under `router.access` alone, so a candidate steward whose own access denies the person still routes the person's message, and answers it itself only when its own access allows.
+    The steward routes under `router.access` alone, so a candidate steward whose own access denies the person still routes the person's message, and answers it itself, runs the person's commands and runs its own `message:received` hooks only when its own access allows.
     Every bot journals the event from sync, in encrypted rooms too, the way a silent schedule trigger is journaled, and only when its sender is an account the identity registry manages.
     The bot it names runs it as a mention through the existing trusted-relay path: the requester is the original sender, the bot's own access rules apply to that requester, and the answer replies to the person's event.
     Every other bot settles it without work.
     A candidate steward that the selection names answers the turn itself and sends no event.
     A turn nobody fits gets no event and no answer; when the selector fails, the candidate with the lowest Matrix ID is chosen.
     A selected responder that is still starting leaves the turn pending with nothing sent, and it is routed again once that responder is ready.
-    The steward records the route as its answer to the turn, so a replay sends no second route, and a replay whose record a crash lost finds the route in the room's history before it selects anyone.
+    The steward records the route as its answer to the turn, so a replay sends no second route, and a replay whose record a crash lost looks, before it selects anyone, for its own route in the room's history that names exactly the messages of its saved batch.
     A responder that receives a second route for a message it answered answers once, because the route names every message of the turn as an alias of its turn.
-    A bot rechecks that it is still the room's steward when its selection returns, and sends and answers nothing when it is not; two bots that both pass that check within the same moment can still both route, which is accepted.
+    A deletion of any of those messages reaches the answer; an edit regenerates it only when the route names that one message, as an edit of a relayed message did, and an edit of one of several routed messages changes nothing.
+    A bot rechecks that it is still the room's steward when its selection returns, and when a replay returns to a turn it had selected itself for, and sends and answers nothing when it is not; two bots that both pass that check within the same moment can still both route, which is accepted.
     A turn that pauses for an approval stores the event its reply answers, so the resumed reply and its tools answer the person's message and not the route.
     The fast paths read nothing shared, so their rare races are the ones the router had: a candidate that answers by its own rules while the steward routes the same message can produce a second answer.
 15. **Startup (question D): no account is required.**
