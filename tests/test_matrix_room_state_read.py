@@ -27,6 +27,7 @@ def _without(field: str) -> dict[str, object]:
     return event
 
 
+@pytest.mark.asyncio
 async def test_room_state_drops_malformed_events_and_answers_bad_bodies_with_errors() -> None:
     """Well-formed events pass, entries missing a required field are dropped, and a non-list body is an error."""
     good = _state_event("good")
