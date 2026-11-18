@@ -434,6 +434,12 @@ class _SpyTurnPolicy:
     def is_room_steward(self, room_id: str) -> bool:
         return self.inner.is_room_steward(room_id)
 
+    async def aims_command_at_me(self, *args: Any) -> bool:  # noqa: ANN401
+        return await self.inner.aims_command_at_me(*args)
+
+    async def owns_command(self, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        return await self.inner.owns_command(*args, **kwargs)
+
     def not_for_this_agent(self, *args: Any) -> bool:  # noqa: ANN401
         return self.inner.not_for_this_agent(*args)
 
@@ -2121,7 +2127,7 @@ async def test_a_late_reply_denial_at_ingress_settles_its_event_inside_the_fence
     site: str,
 ) -> None:
     """An edit, or a command whose conversation is unresolved, refused by a later authorization settles under the fence."""
-    harness = _build_harness(config, tmp_path, agent_name="general" if site == "edit" else ROUTER_AGENT_NAME)
+    harness = _build_harness(config, tmp_path, agent_name="general")
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
     gate = harness.runtime.response_admission_gate
     if site == "edit":
@@ -2167,6 +2173,29 @@ async def test_a_late_reply_denial_at_ingress_settles_its_event_inside_the_fence
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert settled == [((event.event_id,), 1)]
     assert harness.gateway.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_name", ["general", "research", ROUTER_AGENT_NAME])
+async def test_command_target_not_ready_notice_comes_from_the_commands_owner(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_name: str,
+) -> None:
+    """Only the bot a command is aimed at says its conversation is not resolved yet."""
+    harness = _build_harness(config, tmp_path, agent_name=agent_name)
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+
+    async def unresolved(*_args: object) -> str | None:
+        raise ThreadMembershipLookupError
+
+    monkeypatch.setattr(harness.ingress.deps.resolver, "coalescing_thread_id", unresolved)
+
+    outcome = await harness.ingress.handle_text_event(room, _text_event("!help", event_id="$unplaced:localhost"))
+
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    assert len(harness.gateway.sent) == (agent_name == "general")
 
 
 @pytest.mark.asyncio
@@ -3645,7 +3674,7 @@ async def test_command_an_agent_wrote_for_a_human_runs_with_that_humans_authorit
         ),
         test_runtime_paths(tmp_path / "runtime"),
     )
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    harness = _build_harness(config, tmp_path, agent_name="research")
     room = _joined_room(config, ROUTER_AGENT_NAME, "general", "research", requester=_SENDER)
     thread_root = "$thread-root:localhost"
     event = nio.RoomMessageText.from_dict(
@@ -3653,12 +3682,12 @@ async def test_command_an_agent_wrote_for_a_human_runs_with_that_humans_authorit
             "content": {
                 "body": "!model default",
                 "msgtype": "m.text",
-                "m.mentions": {"user_ids": [_entity_user_id(config, ROUTER_AGENT_NAME)]},
+                "m.mentions": {"user_ids": [_entity_user_id(config, "research")]},
                 "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root},
                 constants.ACTING_REQUESTER_KEY: _SENDER,
             },
             "event_id": "$agent-command:localhost",
-            "sender": _entity_user_id(config, "research"),
+            "sender": _entity_user_id(config, "general"),
             "origin_server_ts": 1_000_000,
             "room_id": _ROOM_ID,
             "type": "m.room.message",
@@ -3676,12 +3705,17 @@ async def test_command_an_agent_wrote_for_a_human_runs_with_that_humans_authorit
 async def test_desktop_command_an_agent_wrote_for_a_human_is_refused(tmp_path: Path) -> None:
     """Only the human may change their Desktop target; an agent posting the command for them is refused."""
     config = bind_runtime_paths(
-        Config(agents={"code": AgentConfig(display_name="Code", tools=["desktop"])}),
+        Config(
+            agents={
+                "code": AgentConfig(display_name="Code", tools=["desktop"]),
+                "general": AgentConfig(display_name="General"),
+            },
+        ),
         test_runtime_paths(tmp_path / "runtime"),
     )
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = _room_with_members(config, ROUTER_AGENT_NAME, "code")
-    room.members_synced = True
+    harness = _build_harness(config, tmp_path, agent_name="code")
+    shared_room, room = _room_with_members(config, "code", "general"), _room_with_members(config, "code")
+    shared_room.members_synced = room.members_synced = True
     credentials = get_runtime_credentials_manager(runtime_paths_for(config))
     save_desktop_credentials(credentials, {"device_id": "DEVICE"}, requester_id=_SENDER, agent_name="code")
 
@@ -3691,7 +3725,7 @@ async def test_desktop_command_an_agent_wrote_for_a_human_is_refused(tmp_path: P
                 "content": {
                     "body": "!desktop disconnect confirm",
                     "msgtype": "m.text",
-                    "m.mentions": {"user_ids": [_entity_user_id(config, ROUTER_AGENT_NAME)]},
+                    "m.mentions": {"user_ids": [_entity_user_id(config, "code")]},
                     constants.ACTING_REQUESTER_KEY: _SENDER,
                 },
                 "event_id": event_id,
@@ -3702,7 +3736,10 @@ async def test_desktop_command_an_agent_wrote_for_a_human_is_refused(tmp_path: P
             },
         )
 
-    await harness.deliver(room, disconnect_event(_entity_user_id(config, "code"), "$agent-command:localhost"))
+    await harness.deliver(
+        shared_room,
+        disconnect_event(_entity_user_id(config, "general"), "$agent-command:localhost"),
+    )
 
     assert harness.gateway.sent[-1].response_text == "❌ Agents cannot run this command for you. Send it yourself."
     assert load_desktop_credentials(credentials, requester_id=_SENDER, agent_name="code") is not None
@@ -3994,7 +4031,7 @@ async def test_a_steward_runs_no_command_of_a_person_it_only_routes_for(
     may_answer: bool,
 ) -> None:
     """Permission to route runs no command: a command runs only for a person its owner may answer."""
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    harness = _build_harness(config, tmp_path, agent_name="general")
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
     event = _text_event("!help", event_id="$routed-only-command:localhost")
     monkeypatch.setattr(harness.policy, "can_reply_to_sender_in_room", lambda *_args, **_kwargs: may_answer)
@@ -5594,12 +5631,12 @@ async def test_never_started_runner_task_releases_transferred_turn_claim(
 
 @pytest.mark.asyncio
 async def test_command_turn_records_terminal_outcome_through_turn_store(config: Config, tmp_path: Path) -> None:
-    """A ``!command`` turn executes on the router and records a terminal TurnStore outcome.
+    """A ``!command`` turn executes on the bot it is aimed at and records a terminal TurnStore outcome.
 
     Command-shaped human text is a control input: it dispatches directly at
     ingress and must never enter the coalescing gate.
     """
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    harness = _build_harness(config, tmp_path, agent_name="general")
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
     event = _text_event("!help", event_id="$command:localhost")
 
@@ -6012,7 +6049,7 @@ async def test_command_dispatch_failure_propagates_without_recording_terminal_ou
     tmp_path: Path,
 ) -> None:
     """A failed owner command must retain only retryable pending intent."""
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    harness = _build_harness(config, tmp_path, agent_name="general")
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
     event = _text_event("!help", event_id="$failed-command:localhost")
 
@@ -6029,10 +6066,10 @@ async def test_command_dispatch_failure_propagates_without_recording_terminal_ou
 
 
 @pytest.mark.asyncio
-async def test_non_router_agent_consumes_command_without_responding(config: Config, tmp_path: Path) -> None:
-    """Plain agents stay silent on command turns; the router owns command replies."""
-    harness = _build_harness(config, tmp_path, agent_name="general")
-    room = _room_with_members(config, "general")
+async def test_agent_a_command_is_not_aimed_at_consumes_it_without_responding(config: Config, tmp_path: Path) -> None:
+    """A bot stays silent on a command aimed at another: the candidate with the lowest Matrix ID runs this one."""
+    harness = _build_harness(config, tmp_path, agent_name="research")
+    room = _room_with_members(config, "general", "research")
     event = _text_event("!help", event_id="$command:localhost")
 
     await harness.deliver(room, event)

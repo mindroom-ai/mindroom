@@ -515,8 +515,12 @@ class TurnIngress:
         *,
         facts: IngressFacts,
     ) -> bool:
-        """Fail one command visibly when its conversation cannot be resolved yet."""
-        if command_for(facts, dispatch_prompt_for_event(event)) is None:
+        """Fail one command visibly when its conversation cannot be resolved yet.
+
+        The bot the command is aimed at says so; its thread is unread, so the thread's agent is not known.
+        """
+        command = command_for(facts, dispatch_prompt_for_event(event))
+        if command is None:
             return False
         requester_user_id = facts.lane_requester_id
         self.deps.logger.warning(
@@ -525,7 +529,14 @@ class TurnIngress:
             room_id=room.room_id,
             sender=event.sender,
         )
-        if self.deps.agent_name == ROUTER_AGENT_NAME:
+        mentioned_agents, _am_i_mentioned, _has_non_agent_mentions = check_agent_mentioned(
+            event.source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+        if await self.deps.turn_policy.aims_command_at_me(room, requester_user_id, command, mentioned_agents):
             async with self.deps.ingress.admitted_reply_decision(
                 requester_user_id,
                 room.room_id,
