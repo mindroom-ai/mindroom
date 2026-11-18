@@ -158,6 +158,7 @@ class TestResponseTrackingRegression:
         # Should NOT send another response if properly tracked
         # But here we're testing that the tracking was done
 
+    @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
     @pytest.mark.asyncio
     async def test_unknown_command_response_tracking(
         self,

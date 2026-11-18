@@ -2862,6 +2862,7 @@ async def test_committed_config_confirmation_resumes_before_changed_responder_ac
         thread_id=None,
         config_path="router.access.users",
         new_value=["@alice:example.com"],
+        sender=bot.client.user_id,
         decision_event_id=reaction_event_id,
         decision_key="✅",
     )

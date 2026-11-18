@@ -173,6 +173,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert initial_content["m.relates_to"]["event_id"] == "$thread_root:localhost"
         assert initial_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread_msg:localhost"
 
+    @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Plain-reply commands should answer the command event without following stale reply targets."""
@@ -261,6 +262,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert content["m.relates_to"]["event_id"] == "$cmd_reply:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply:localhost"
 
+    @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
     @pytest.mark.asyncio
     async def test_command_in_thread_works_correctly(self, tmp_path: Path) -> None:
         """Test that commands in threads work without errors."""
@@ -348,6 +350,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_thread:localhost"
 
+    @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
     @pytest.mark.asyncio
     async def test_command_reply_to_thread_message_stays_in_thread_transitively(
         self,

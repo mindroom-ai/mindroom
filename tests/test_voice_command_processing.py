@@ -294,6 +294,7 @@ async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> N
     mock_schedule.assert_not_awaited()
 
 
+@pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
 @pytest.mark.asyncio
 async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_path) -> None:  # noqa: ANN001
     """Router should schedule from the hydrated sidecar body and mentions."""
@@ -375,6 +376,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     assert [agent.full_id for agent in mentioned_agents] == ["@mindroom_home:localhost"]
 
 
+@pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
 @pytest.mark.asyncio
 async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) -> None:  # noqa: ANN001
     """Router should not special-case removed skill commands after sidecar hydration."""

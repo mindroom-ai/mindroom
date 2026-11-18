@@ -4344,6 +4344,16 @@ def enforce_turn_authorization() -> None:
 
 
 @pytest.fixture
+def commands_aimed_at_bot_under_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aim every command at the bot under test, whatever its entity.
+
+    Whom a command is aimed at is `TurnPolicy.owns_command`'s own test; these tests are about what running one does.
+    """
+    monkeypatch.setattr(TurnPolicy, "aims_command_at_me", AsyncMock(return_value=True))
+    monkeypatch.setattr(TurnPolicy, "owns_command", AsyncMock(return_value=True))
+
+
+@pytest.fixture
 def squad_probe() -> Iterator[type["ProbeToolkit"]]:
     """Register the probe toolkit the team suites' ``squad`` members offer, with cleared records, for the test."""
     from tests.team_turn_helpers import registered_probe  # noqa: PLC0415 - team_turn_helpers imports this module

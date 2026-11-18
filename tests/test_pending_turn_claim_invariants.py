@@ -296,14 +296,14 @@ async def test_command_control_input_releases_ingress_claim_exactly_once(
 ) -> None:
     """The command-control shortcut hands its ingress claim straight to the command dispatch.
 
-    A non-router agent silently consumes ``!help``: the command dispatch merges
-    the ingress claim (taken from the ticket, so the ticket's close must not
+    An agent silently consumes a ``!help`` aimed at another: the command dispatch
+    merges the ingress claim (taken from the ticket, so the ticket's close must not
     release it again), and the merged claim is released when the consumed
     command settles.
     """
-    harness = _build_harness(config, tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name="research")
     ledger = _install_claim_ledger(monkeypatch, harness.turn_store)
-    room = _room_with_members(config, "general")
+    room = _room_with_members(config, "general", "research")
     event = _text_event("!help", event_id="$command-claim:localhost")
 
     await harness.deliver(room, event)

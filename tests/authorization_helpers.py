@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -77,6 +79,7 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
     """Build a detached command context with an explicit isolated index and runtime stand-ins a test may replace."""
     from mindroom.commands.handler import CommandHandlerContext  # noqa: PLC0415
     from mindroom.scheduling.runtime import ScheduledTaskRuntime  # noqa: PLC0415
+    from mindroom.steward_duties import put_room_state_as_steward  # noqa: PLC0415
 
     _add_default_responder_candidate_resolver(kwargs)
     kwargs.setdefault(
@@ -88,9 +91,11 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
         MagicMock(side_effect=AssertionError("the test did not expect a Desktop controller lookup")),
     )
     kwargs.setdefault("scheduled_tasks", MagicMock(spec=ScheduledTaskRuntime))
+    # A detached context's bot is the only bot of its room, so it is the room's steward.
+    steward = SimpleNamespace(client=kwargs.get("client"))
     kwargs.setdefault(
         "put_room_state",
-        AsyncMock(side_effect=AssertionError("the test did not expect a room state write through the steward")),
+        partial(put_room_state_as_steward, SimpleNamespace(room_steward=lambda _room_id: steward)),
     )
     return CommandHandlerContext(*args, **kwargs)
 

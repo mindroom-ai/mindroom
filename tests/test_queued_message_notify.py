@@ -1999,6 +1999,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
                 new=AsyncMock(return_value=case.dispatch),
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
+            patch("mindroom.turn_policy.TurnPolicy.owns_command", new=AsyncMock(return_value=False)),
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,

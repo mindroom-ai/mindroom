@@ -592,7 +592,7 @@ class TurnPolicy:
             dispatch.requester_user_id,
             command,
             dispatch.context.mentioned_agents,
-            dispatch.context.thread_history,
+            dispatch.context.planning_thread_history,
         )
         if not owned or command.type not in COMMAND_TYPES_WITH_SIDE_EFFECTS:
             return owned

@@ -60,11 +60,12 @@ def _bot_with_scheduled_task_runtime(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_name", [ROUTER_AGENT_NAME, "general"])
 async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, agent_name: str) -> None:
-    """Router and agents restore the schedules they own; only the router restores config changes and welcomes."""
+    """Every bot restores the schedules it owns and the config previews it sent; only the owner account welcomes."""
     config = _bind_runtime(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "role": "General assistant", "rooms": ["lobby"]}},
             models={"default": {"provider": "openai", "id": "test-model"}},
+            authorization={"config_command_enabled": True},
         ),
         tmp_path,
     )
@@ -91,15 +92,20 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
 
     mock_join.assert_awaited_once_with(bot.client, "lobby")
     restore_room.assert_awaited_once_with(bot, "lobby")
-    is_router = agent_name == ROUTER_AGENT_NAME
-    assert mock_restore_configs.await_count == int(is_router)
-    assert mock_welcome.await_count == int(is_router)
+    mock_restore_configs.assert_awaited_once_with(bot.client, "lobby")
+    assert mock_welcome.await_count == int(agent_name == ROUTER_AGENT_NAME)
 
 
 @pytest.mark.asyncio
 async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: Path) -> None:
     """Restart setup runs even when the room is already joined."""
-    config = _bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
+    config = _bind_runtime(
+        Config(
+            models={"default": {"provider": "openai", "id": "test-model"}},
+            authorization={"config_command_enabled": True},
+        ),
+        tmp_path,
+    )
     bot, restore_room = _bot_with_scheduled_task_runtime(ROUTER_AGENT_NAME, config, ("lobby",))
 
     with (
