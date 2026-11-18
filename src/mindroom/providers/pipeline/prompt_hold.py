@@ -28,6 +28,7 @@ import time
 from contextlib import suppress
 from dataclasses import asdict, replace
 from difflib import SequenceMatcher
+from itertools import takewhile
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
@@ -92,11 +93,12 @@ def _update_text(held: str, fresh: str) -> str | None:
         if tag == "equal" or not (removed or added):
             continue
         changed += len(removed) + len(added)
-        before = old[:old_start]
-        file = next((line for line in reversed(before) if line.startswith("### /")), None)
+        # The headings above the change, within its own section: nothing after the role stands under the role's.
+        before = list(takewhile(lambda line: line != "</your_role>", reversed(old[:old_start])))
+        file = next((line for line in before if line.startswith("### /")), None)
         if any(line.startswith("### /") and line.endswith(_MEMORY_FILE) for line in (file, *removed, *added) if line):
             return None
-        heading = next((line for line in reversed(before) if line.startswith("#")), None)
+        heading = next((line for line in before if line.startswith("#")), None)
         where = " > ".join(f'"{line}"' for line in dict.fromkeys((file, heading)) if line) or "the system prompt"
         parts.append(f"In {where}:")
         if removed:
