@@ -182,7 +182,7 @@ This is `m.new_content` of the edit; the edit's outer copy has the same `body` a
 - Nothing signals the open fence, and Chat shows nothing for it until it closes.
 - Durable progress updates carry the value as `io.mindroom.ui` (in `m.new_content` when the update is an edit).
 - Live frames (`io.mindroom.live`) carry the same value as `ui`: present in a snapshot when there is a value; in a delta, `ui` replaces the whole value and `null` clears it. Frame version stays 1.
-- A frame that does not fit its size limit is sent without `ui` before anything else is cut; the fallback block shows until a frame that fits brings it back.
+- A snapshot that does not fit its size limit is sent without `ui` before anything else is cut, and the deltas after it leave `ui` out too; the fallback block shows until a snapshot that fits brings it back. A delta is fitted as itself, so one that fits sets or keeps `ui` whatever a snapshot would weigh.
 - A client older than this field ignores `ui`; a delta that carries nothing else makes it wait for the next snapshot.
 - On the final update of a reply that ended inside an open `ui` fence, the partial block stays an ordinary code block.
 - A Stop, restart or error note is written below what the reply had shown, so the hidden partial block is not revealed and cannot swallow the note.
@@ -273,7 +273,7 @@ Scope of the first slice: an agent's own replies only; not teams, the router, `m
 2. `fit_ui_widgets_to_ordinary_event` in `matrix/large_messages.py` runs wherever `fit_reasoning_to_ordinary_event` runs, just before it: if the event with the key and without its reasoning is over the limit that would move it to a sidecar or split it (27,000 bytes for an edit, 55,000 otherwise, the first-segment target under `split`), or over the 64,000-byte hard limit as delivered, the key is removed. Reasoning is then fitted into what is left, as today.
 3. A reply row prepared while an earlier row of the reply still owes its create is stored as a standalone payload and wrapped into an edit when claimed, with no second fit. Such a row keeps the key only if that whole edit, built from the frozen payload with both copies of its text and reasoning, is an ordinary edit (27,000 bytes, or the edit's segment target under `split`, and the hard limit). A row with no earlier row owed is the reply's create and is fitted as one.
 4. The throttle for oversized progress edits (`should_send_oversized_nonterminal_streaming_edit`) sizes the edit as step 2 would send it, so a droppable key never slows ordinary updates.
-5. Live frames: the publisher drops `ui` first when a frame does not fit, and records the documents it sent, so the next frame that fits restores it (section 5.5).
+5. Live frames: the publisher drops `ui` first when a snapshot does not fit, keeps it out of the deltas until a snapshot has room again, and fits each delta as itself (section 5.5).
 
 So a widget never rides on a sidecar preview or a split reply, and the fallback text is what large-message handling sees.
 

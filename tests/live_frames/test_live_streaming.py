@@ -1061,12 +1061,11 @@ _UI_VALUE: dict[str, object] = {"version": 1, "widgets": [{"id": "df4d729a5d", "
 
 
 @pytest.mark.asyncio
-async def test_a_frame_too_big_with_ui_goes_out_without_it_and_restores_it(
+async def test_a_snapshot_too_big_with_ui_goes_out_without_it_and_a_later_one_restores_it(
     frames: _Frames,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A widget value that does not fit is left out, frames keep running, and a frame that fits brings it back."""
-    monkeypatch.setattr(publisher_module, "_SNAPSHOT_INTERVAL_SECONDS", float("inf"))
+    """A widget value no snapshot can carry is left out, frames keep running, and a snapshot that fits brings it back."""
     publisher = LivePublisher(client=_encrypted_client(), room_id=_ROOM_ID)
     docs = LiveDocs(md="text", reasoning="", tools=(), status="streaming", activity="", ui=_UI_VALUE)
     monkeypatch.setattr(publisher, "_fits", lambda frame: "ui" not in frame.get("snapshot", {}))
@@ -1077,13 +1076,41 @@ async def test_a_frame_too_big_with_ui_goes_out_without_it_and_restores_it(
     assert publisher.last_sent.ui is None
     # Nothing but the value that does not fit changed, so there is nothing to send.
     assert await publisher._send_next("$reply", docs) is None
+    # A delta would fit it, but the next snapshot would drop it again, so deltas leave it out until one keeps it.
     await publisher._send_next("$reply", replace(docs, md="text more"))
     assert set(frames.sent[-1]["delta"]) == {"md"}
 
     monkeypatch.setattr(publisher, "_fits", lambda _frame: True)
+    assert await publisher._send_next("$reply", replace(docs, md="text more")) is None
+    publisher.last_snapshot_at = 0.0
     await publisher._send_next("$reply", replace(docs, md="text more"))
-    assert frames.sent[-1]["delta"] == {"ui": _UI_VALUE}
+    assert frames.sent[-1]["snapshot"]["ui"] == _UI_VALUE
     assert publisher.last_sent.ui == _UI_VALUE
+
+
+@pytest.mark.asyncio
+async def test_a_delta_that_fits_carries_ui_whatever_a_snapshot_would_weigh(
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frame that goes out is the one fitted: a small delta sets and keeps a widget no snapshot has room for."""
+    publisher = LivePublisher(client=_encrypted_client(), room_id=_ROOM_ID)
+    docs = LiveDocs(md="text", reasoning="", tools=(), status="streaming", activity="")
+    monkeypatch.setattr(publisher, "_fits", lambda frame: "ui" not in frame.get("snapshot", {}))
+
+    await publisher._send_next("$reply", docs)
+    await publisher._send_next("$reply", replace(docs, ui=_UI_VALUE))
+    assert frames.sent[-1]["delta"] == {"ui": _UI_VALUE}
+    await publisher._send_next("$reply", replace(docs, md="text more", ui=_UI_VALUE))
+    assert set(frames.sent[-1]["delta"]) == {"md"}
+    assert publisher.last_sent.ui == _UI_VALUE
+
+    # The snapshot that is due sheds it, and the deltas after it do not bring it back.
+    publisher.last_snapshot_at = 0.0
+    await publisher._send_next("$reply", replace(docs, md="text more", ui=_UI_VALUE))
+    assert "ui" not in frames.sent[-1]["snapshot"]
+    await publisher._send_next("$reply", replace(docs, md="text more still", ui=_UI_VALUE))
+    assert set(frames.sent[-1]["delta"]) == {"md"}
 
 
 @pytest.mark.asyncio

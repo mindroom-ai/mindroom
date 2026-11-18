@@ -48,6 +48,9 @@ class LivePublisher:
     # How many of the oldest tool entries frames show without previews, so snapshots fit the size limit. Only a
     # snapshot raises it, so the deltas between snapshots stay small.
     bare: int = 0
+    # Whether frames leave the widgets out, the first thing a snapshot too big sheds. Only a snapshot decides it, so
+    # the deltas between two snapshots do not bring back what the next one drops.
+    sheds_ui: bool = False
 
     def checkpoint(self) -> dict[str, object] | None:
         """Return the watermark a durable write carries: every frame up to it is no newer than that write."""
@@ -59,13 +62,7 @@ class LivePublisher:
         """Send one frame when the documents changed or a snapshot is due; return the outcome, None when none was due."""
         now = time.monotonic()
         snapshot_due = self.last_sent is None or now - self.last_snapshot_at >= _SNAPSHOT_INTERVAL_SECONDS
-        shown = replace(docs, tools=fitted_tools(docs.tools, bare=self.bare))
-        if shown.ui is not None and not self._fits(
-            live_frame(reply_event_id=reply_event_id, publisher_id=self.publisher_id, seq=self.seq + 1, snapshot=shown),
-        ):
-            # Widgets are the first thing a snapshot too big sheds, before any tool preview. `last_sent` then holds
-            # no value, so the first frame that fits again restores it.
-            docs, shown = replace(docs, ui=None), replace(shown, ui=None)
+        shown = self._shown(docs, self.bare)
         if not snapshot_due and shown == self.last_sent:
             return None
         self.seq += 1
@@ -78,13 +75,13 @@ class LivePublisher:
                 delta=live_delta(self.last_sent, shown),
             )
         if frame is None or not self._fits(frame):
-            bare = self.bare
+            bare, sheds_ui = self.bare, self.sheds_ui
             snapshot, fitted = self._fitted_snapshot(reply_event_id, docs)
             if frame is None or self._fits(snapshot):
                 snapshot_due, frame, shown = True, snapshot, fitted
             else:
                 # The size check is an estimate; a delta it rejects may still go out, where no snapshot fits it.
-                self.bare = bare
+                self.bare, self.sheds_ui = bare, sheds_ui
         outcome = await send_live_frame(
             self.client,
             self.room_id,
@@ -104,15 +101,21 @@ class LivePublisher:
     def _fits(self, frame: dict[str, object]) -> bool:
         return frame_fits(self.client, self.room_id, frame, event_type=LIVE_EVENT_TYPE)
 
+    def _shown(self, docs: LiveDocs, bare: int) -> LiveDocs:
+        """Return the documents a frame shows: no previews for the ``bare`` oldest tool entries, no widgets once shed."""
+        return replace(docs, tools=fitted_tools(docs.tools, bare=bare), ui=None if self.sheds_ui else docs.ui)
+
     def _fitted_snapshot(self, reply_event_id: str, docs: LiveDocs) -> tuple[dict[str, object], LiveDocs]:
-        """Return a snapshot frame within the size limit, without the previews of the fewest more oldest tool entries.
+        """Return a snapshot frame within the size limit.
+
+        It first leaves out the widgets, then the previews of the fewest more oldest tool entries.
 
         When even no previews do not fit, as when the Markdown alone is too big, the transport refuses the frame and
         frames stop.
         """
 
         def built(bare: int) -> tuple[dict[str, object], LiveDocs]:
-            shown = replace(docs, tools=fitted_tools(docs.tools, bare=bare))
+            shown = self._shown(docs, bare)
             frame = live_frame(
                 reply_event_id=reply_event_id,
                 publisher_id=self.publisher_id,
@@ -123,6 +126,9 @@ class LivePublisher:
 
         count = len(docs.tools)
         self.bare = min(self.bare, count)
+        # Tried with the widgets first, so a snapshot that has room for them again brings them back.
+        self.sheds_ui = False
+        self.sheds_ui = docs.ui is not None and not self._fits(built(self.bare)[0])
         if not self._fits(built(self.bare)[0]):
             fitting = bisect_left(range(count + 1), True, lo=self.bare + 1, key=lambda bare: self._fits(built(bare)[0]))
             self.bare = min(fitting, count)
