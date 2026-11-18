@@ -21,7 +21,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
+from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig, RouterConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
@@ -632,6 +632,31 @@ async def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Pa
 
     assert payload["status"] == "error"
     assert "not allowed by permissions.models" in payload["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("participant_model", "allowed"), [("cheap@low", True), ("cheap@high", False)])
+async def test_a_level_permission_admits_only_its_fallbacks_level(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    participant_model: str,
+    allowed: bool,
+) -> None:
+    """Over budget, a permitted ``sol@low`` admits its fallback ``cheap@low``, not ``cheap`` at another level."""
+    config = _subagent_workflow_config()
+    reasoning = ReasoningConfig(levels=["low", "high"], default="high")
+    pricing = ModelPricing(input=5, output=30)
+    config.models["sol"] = ModelConfig(provider="openai", id="sol-model", reasoning=reasoning, pricing=pricing)
+    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning)
+    config.budgets = BudgetsConfig(fallback_model="cheap@low", monthly_limit_usd=0)
+    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
+    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": participant_model}
+    spec = _subagent_workflow_spec([participant], models=["sol@low"])
+
+    with workflow.context():
+        payload = json.loads(await workflow.tools.validate_workflow(spec))
+
+    assert (payload["status"] == "ok") is allowed, payload
 
 
 @pytest.mark.asyncio

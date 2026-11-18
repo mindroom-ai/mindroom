@@ -945,11 +945,15 @@ def _validate_workflow_policy_for_context(
 
 
 def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
-    """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
+    """Permit the fallback at its own level wherever a permitted model would be swapped for it under the caller's budget."""
     permitted = {
-        model_name for model_name in context.config.models if not _model_refs(context, model_name).isdisjoint(model_refs)
+        model_name
+        for model_name in context.config.models
+        if not _model_refs(context, model_name).isdisjoint(model_refs)
     }
-    permitted |= {ref for ref in model_refs if split_model_reference(ref)[1] is not None and ref in context.config.models}
+    permitted |= {
+        ref for ref in model_refs if split_model_reference(ref)[1] is not None and ref in context.config.models
+    }
     substitutes = {
         budget_model(
             context.config,
@@ -961,7 +965,13 @@ def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) 
         )
         for model_name in permitted
     }
-    return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes - permitted))
+    return model_refs | {_effective_model_ref(context, model_name) for model_name in substitutes - permitted}
+
+
+def _effective_model_ref(context: ToolRuntimeContext, model_name: str) -> str:
+    """Return the model as it runs: ``name@level`` for a model with reasoning levels, else its name."""
+    reasoning = context.config.models[model_name].reasoning
+    return model_name if reasoning is None else f"{split_model_reference(model_name)[0]}@{reasoning.default}"
 
 
 def _participant_scope(context: ToolRuntimeContext, agent_name: str) -> ModelScope:
