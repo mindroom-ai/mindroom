@@ -804,6 +804,15 @@ class ReasoningConfig(BaseModel):
     )
     default: _ReasoningLevel = Field(description="Level the plain model name runs at; one of levels")
 
+    @field_validator("levels", "default", mode="before")
+    @classmethod
+    def _reject_bare_yaml_off(cls, value: object) -> object:
+        """Explain the ``false`` YAML reads from a bare ``off``, which the level words would only call invalid."""
+        if value is False or (isinstance(value, list) and any(level is False for level in value)):
+            msg = 'YAML reads a bare off as false; write "off" in quotes'
+            raise ValueError(msg)
+        return value
+
     @model_validator(mode="after")
     def _validate_levels(self) -> Self:
         if len(set(self.levels)) != len(self.levels):

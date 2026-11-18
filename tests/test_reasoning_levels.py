@@ -10,10 +10,11 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config, ConfigRuntimeValidationError
-from mindroom.config.models import ModelConfig, ModelTable
+from mindroom.config.models import ModelConfig, ModelTable, ReasoningConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.reasoning import apply_reasoning_level
 from mindroom.thread_summary.generation import _summary_provider
+from tests.conftest import load_config_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -265,3 +266,26 @@ def test_a_thread_summary_at_a_level_drops_its_model_s_temperature(
     assert built[0].extra_kwargs == {"reasoning_summary": "auto"}
     assert built[0].reasoning is not None
     assert built[0].reasoning.default == "high"
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    ["{levels: [off, high], default: high}", '{levels: ["off", high], default: off}'],
+)
+def test_a_bare_yaml_off_says_to_quote_it(reasoning: str, tmp_path: Path) -> None:
+    """YAML reads a bare ``off`` as false, so loading the file says to write it in quotes."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"models:\n  default:\n    provider: openai\n    id: m\n    reasoning: {reasoning}\n")
+
+    with pytest.raises(ValueError, match='write "off" in quotes'):
+        load_config_yaml(config_path)
+
+
+def test_a_quoted_yaml_off_loads(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    reasoning = '{levels: ["off", high], default: "off"}'
+    config_path.write_text(f"models:\n  default:\n    provider: openai\n    id: m\n    reasoning: {reasoning}\n")
+
+    models = load_config_yaml(config_path).models
+    assert models["default"].reasoning == ReasoningConfig(levels=["off", "high"], default="off")
+    assert "default@high" in models

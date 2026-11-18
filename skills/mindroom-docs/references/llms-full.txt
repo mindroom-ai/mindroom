@@ -2720,6 +2720,7 @@ MindRoom sends the level in the setting the provider reads, and the block wins o
 | `google` | `thinking_level: L` | `thinking_budget: 0` |
 | `ollama` | `think: L` | `think: false` |
 
+Write `off` in quotes, as in `levels: ["off", low, high]` or `default: "off"`, because YAML reads a bare `off` as false.
 `groq`, `cerebras`, and `synthetic` take no level, so a `reasoning` block on them fails config load.
 MindRoom does not know which levels each model accepts, so list only levels the model supports; a level it rejects fails the reply with the provider's error, like a wrong `extra_kwargs` value.
 For example, Claude 5 models reject disabled thinking, so do not list `off` for them.

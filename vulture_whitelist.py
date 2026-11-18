@@ -467,5 +467,6 @@ _.get_code  # importlib loader method the import system calls (src/mindroom/tool
 _.create_module  # importlib loader method the import system calls (src/mindroom/tool_system/plugin_imports.py)
 _.parent_subagent_id  # Public HeadlessRun field that request_headers callers read (src/mindroom/headless.py)
 _._validate_levels  # Pydantic model validator (src/mindroom/config/models.py)
+_._reject_bare_yaml_off  # Pydantic field validator (src/mindroom/config/models.py)
 _.reasoning_levels  # ModelCatalogEntry key the model picker reads (src/mindroom/model_catalog.py)
 _.reasoning_default  # ModelCatalogEntry key the model picker reads (src/mindroom/model_catalog.py)
