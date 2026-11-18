@@ -872,7 +872,8 @@ async def test_a_delegated_child_streams_frames_to_its_room(
 async def test_subagent_frame_meta_counts_usage_over_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A run's frames say what its requests that ended used: the first's while the second runs, both's at its end.
 
-    The default model has no price, so the usage names no cost.
+    Usage alone sends no frame, so the first request's goes out with the second's first words. The default model has
+    no price, so the usage names no cost.
     """
     room = FrameRoom()
 
@@ -886,9 +887,10 @@ async def test_subagent_frame_meta_counts_usage_over_requests(tmp_path: Path, mo
                 room.arrived.clear()
                 await room.arrived.wait()
 
+    first_words, *rest = answer("Three", usage(50, 5))
     child_turns = [
         calls(tool_call("add", "add", a=1, b=2), metrics=usage(100, 10)),
-        [Await(first_request_shown), *answer("Three", usage(50, 5))],
+        [first_words, Await(first_request_shown), *rest],
     ]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
     context, _bot = _in_room(runtime, room)
