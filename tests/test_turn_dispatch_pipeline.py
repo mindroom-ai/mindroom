@@ -10,7 +10,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.coalescing.batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner, requester_coalescing_key
+from mindroom.coalescing.batch import (
+    CoalescingKey,
+    PendingEvent,
+    RequesterCoalescingOwner,
+    build_prepared_turn,
+    requester_coalescing_key,
+)
 from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import IngressRetryError
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
@@ -32,7 +38,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import DispatchPayloadMetadata, PreparedIngress
+from mindroom.dispatch_handoff import DispatchPayloadMetadata, PreparedIngress, prepare_media_ingress
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
@@ -95,7 +101,7 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids
 from tests.test_turn_store import _in_room
 from tests.threading_helpers import seed_hydrated_conversation, seed_thread_history
-from tests.turn_dispatch_helpers import dispatch_test_turn
+from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
@@ -2787,7 +2793,7 @@ class TestAgentBot(AgentBotTestBase):
 
         async def summarize(*_args: object, **kwargs: object) -> None:
             assert kwargs["prompt"] == "Plan a trip"
-            assert kwargs["prompt_event_id"] == "$prompt"
+            assert kwargs["prompt_event_ids"] == ("$prompt",)
             started.set()
             await release.wait()
 
@@ -2831,14 +2837,14 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
         case: Literal["first_threshold_after_first_reply", "thread_reply", "coalesced"],
     ) -> None:
-        """Only a new thread's single prompt is titled early, and only when its first reply would title it anyway."""
+        """Only a new thread's first turn is titled early, and only when its first reply would title it anyway."""
         config = self._config_for_storage(tmp_path)
         config.defaults.thread_summary_first_threshold = 3 if case == "first_threshold_after_first_reply" else 1
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
         room = _matrix_room()
-        thread_id = "$root" if case == "thread_reply" else "$prompt"
+        thread_id = "$root" if case in {"thread_reply", "coalesced"} else "$prompt"
         event = PreparedIngress(
             sender="@user:localhost",
             event_id="$prompt",
@@ -2881,6 +2887,86 @@ class TestAgentBot(AgentBotTestBase):
 
         apply_plan.assert_awaited_once()
         summary.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("voice_in_batch", [False, True])
+    async def test_prompt_title_covers_attachment_and_text_sent_together(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        voice_in_batch: bool,
+    ) -> None:
+        """A new thread's video root and the text sent right after it flush as one turn, titled from both.
+
+        A voice source anywhere in the batch marks the whole turn a transcript, so a
+        typed text that starts with the voice prefix keeps it.
+        """
+        config = self._config_for_storage(tmp_path)
+        config.defaults.thread_summary_first_threshold = 1
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = _make_matrix_client_mock()
+        room = _matrix_room()
+        sender = "@user:localhost"
+        video = nio.RoomMessageVideo.from_dict(
+            {
+                "event_id": "$video",
+                "sender": sender,
+                "origin_server_ts": 1,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.video", "body": "clip.mp4", "filename": "clip.mp4", "url": "mxc://x/clip"},
+            },
+        )
+        body = f"{VOICE_PREFIX}Summarize this video" if voice_in_batch else "Summarize this video"
+        text_source = {
+            "content": {
+                "body": body,
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$video"},
+            },
+        }
+        text = PreparedIngress(sender=sender, event_id="$text", body=body, source=text_source)
+        key = requester_coalescing_key(room.room_id, "$video", sender)
+        facts = make_ingress_facts(sender, requester_user_id=sender)
+        turn = build_prepared_turn(
+            key,
+            [PendingEvent(event=event, room=room, facts=facts) for event in (prepare_media_ingress(video), text)],
+            queues_other_run=nothing_else_queued,
+        )
+        if voice_in_batch:
+            turn = replace(turn, payload=replace(turn.payload, voice_transcript=True))
+        target = MessageTarget.resolve(room_id=room.room_id, thread_id="$video", reply_to_event_id="$text")
+        dispatch = PreparedDispatch(
+            requester_user_id=sender,
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$video",
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=target,
+            correlation_id="$text",
+            envelope=_hook_envelope(body=body, source_event_id="$text", target=target),
+        )
+        plan = DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
+        replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
+        claim = await bot._turn_dispatcher.deps.turn_store.claim(
+            TurnRecord.create(turn.handled_turn.source_event_ids, completed=False),
+        )
+        assert isinstance(claim, TurnClaim)
+
+        with (
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_dispatcher, "_apply_turn_plan", new=AsyncMock()),
+            patch("mindroom.turns.dispatch.maybe_generate_prompt_summary", new=AsyncMock()) as summary,
+        ):
+            await bot._turn_dispatcher.handle_prepared_turn(replace(turn, claims=(claim,)))
+
+        summary.assert_called_once()
+        assert summary.call_args.kwargs["prompt_event_ids"] == ("$video", "$text")
+        assert summary.call_args.kwargs["prompt"] == f"[Attached video]\n{body}"
 
     @pytest.mark.asyncio
     async def test_a_coalesced_first_turn_of_a_fork_queues_its_inherited_title(
@@ -2943,4 +3029,4 @@ class TestAgentBot(AgentBotTestBase):
 
         summary.assert_awaited_once()
         assert summary.await_args.kwargs["prompt"] is None
-        assert summary.await_args.kwargs["prompt_event_id"] == "$fork"
+        assert summary.await_args.kwargs["prompt_event_ids"] == ("$fork",)

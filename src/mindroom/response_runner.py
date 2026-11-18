@@ -476,6 +476,14 @@ class ResponseRunner:
         """Return canonical thread IDs with active response lifecycles in one room."""
         return self.lifecycle_coordinator.active_thread_ids_for_room(room_id)
 
+    def note_continued_sources(self, source_event_ids: frozenset[str]) -> None:
+        """Remember the sources of the replies an older instance left to continue, so their replays are no news."""
+        self.lifecycle_coordinator.continued_sources = source_event_ids
+
+    def note_edited_source(self, source_event_id: str) -> None:
+        """Count a continued reply's source as news again once its sender edits it."""
+        self.lifecycle_coordinator.continued_sources -= {source_event_id}
+
     def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str) -> None:
         """Hold the conversation of each pending approval of this principal, from the ones pending now on."""
         self.lifecycle_coordinator.follow_approval_holds(signals, principal_id)
