@@ -57,28 +57,17 @@ def chat_pairing_desktop_error(config: Config, agent_name: str) -> str | None:
     return None
 
 
-def desktop_room_agent(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    room: nio.MatrixRoom,
-    requester_user_id: str,
-) -> str | None:
+def desktop_room_agent(config: Config, runtime_paths: RuntimePaths, room: nio.MatrixRoom, requester: str) -> str | None:
     """Return the Desktop agent of a room that holds only the requester, that agent and accounts that answer nobody.
 
     A MindRoom account that is no agent or team answers nobody, so it is no party to the room.
     """
     registry = entity_identity_registry(config, runtime_paths)
-    others = cached_member_ids(room) - {requester_user_id}
+    others = cached_member_ids(room) - {requester}
     names = [registry.current_entity_name_for_user_id(user_id) for user_id in others]
-    responders = [name for name in names if name in config.agents or name in config.teams]
-    if (
-        None in names
-        or len(responders) != 1
-        or chat_pairing_desktop_error(config, responders[0]) is not None
-        or not room_has_only(config, room, {requester_user_id, *others})
-    ):
-        return None
-    return responders[0]
+    answering = [name for name in names if name in config.agents or name in config.teams]
+    alone = None not in names and len(answering) == 1 and room_has_only(config, room, {requester, *others})
+    return answering[0] if alone and chat_pairing_desktop_error(config, answering[0]) is None else None
 
 
 def _validate_desktop_scope(scope: DesktopCommandScope) -> None:
