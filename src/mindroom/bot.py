@@ -1643,6 +1643,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 config_getter=lambda: self.config,
                 membership_index=self._runtime_view.agent_reply_memberships,
+                answers_in_room=lambda room_id: self.orchestrator.room_poster(room_id) is self,
                 callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
             )
             await self.refresh_presence()

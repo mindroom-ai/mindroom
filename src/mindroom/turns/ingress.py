@@ -58,6 +58,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.matrix.transport_progress import is_unfinished_reply
 from mindroom.mid_turn import mid_turn_mode
+from mindroom.model_selection import model_selection_names_runtime
 from mindroom.thread_utils import (
     check_agent_mentioned,
     mentions_another_participant,
@@ -270,6 +271,8 @@ class TurnIngress:
         requester_user_id = facts.lane_requester_id
         if (
             self.deps.agent_name != ROUTER_AGENT_NAME
+            # A model selection that names this account is a command for it, whatever its thread.
+            or model_selection_names_runtime(event.source.get("content", {}), self.deps.matrix_id.full_id)
             # A caption for an upload still waiting in this sender's burst must join that upload's
             # turn, or the router routes the upload alone while the named agent answers the caption.
             or any(

@@ -87,7 +87,9 @@ class _Receiver:
         runtime_paths: RuntimePaths,
         config_getter: Callable[[], Config],
         membership_index: AgentReplyMembershipIndex,
+        answers_in_room: Callable[[str], bool],
     ) -> None:
+        self.answers_in_room = answers_in_room
         self.client = client
         self.paths = runtime_paths
         self.config_getter = config_getter
@@ -105,7 +107,8 @@ class _Receiver:
     def admit(self, event: nio.AuthenticatedToDeviceEvent) -> bool:
         """Reserve bounded work synchronously, before the task wrapper queues it."""
         request = _parse(event)
-        if request is None:
+        # One device answers per room, so a client sees one runtime there.
+        if request is None or not self.answers_in_room(request.room_id):
             return False
         target = self._target(event)
         if target is None:
@@ -239,17 +242,19 @@ def register_model_catalog_receiver(
     runtime_paths: RuntimePaths,
     config_getter: Callable[[], Config],
     membership_index: AgentReplyMembershipIndex,
+    answers_in_room: Callable[[str], bool],
     callback_wrapper: Callable[
         [Callable[[nio.AuthenticatedToDeviceEvent], Awaitable[None]]],
         Callable[..., Awaitable[None]],
     ],
 ) -> None:
-    """Register discovery on this bot's device, with admission before background task creation."""
+    """Register discovery on this bot's device, which answers where ``answers_in_room``, before any task is made."""
     receiver = _Receiver(
         client=client,
         runtime_paths=runtime_paths,
         config_getter=config_getter,
         membership_index=membership_index,
+        answers_in_room=answers_in_room,
     )
     wrapped = callback_wrapper(receiver.on_event)
 

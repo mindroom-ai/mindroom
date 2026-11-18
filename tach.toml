@@ -6264,6 +6264,7 @@ depends_on = [
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.transport_progress",
     "mindroom.mid_turn",
+    "mindroom.model_selection",
     "mindroom.turn_record",
     "mindroom.turns.queued_notice",
 ]

@@ -49,7 +49,8 @@ The router can send the event only where the room's power levels allow it, which
 See [Model Overrides in Chat](../configuration/models.md#model-overrides-in-chat).
 
 Discovery uses Olm-encrypted to-device events, including for unencrypted rooms, so it needs no room-state advertisement, state permissions, or external endpoint.
-Every MindRoom account answers discovery on its own device, so a room without the router has a catalog; today's client addresses the router's device.
+One MindRoom account per room answers discovery on its own device: the router where it is joined, else the joined agent or team with the lowest Matrix ID.
+A room without the router therefore has a catalog, and a client sees one runtime per room.
 The answering account authenticates the actual requesting device and requires the requester and itself to be currently joined, plus at least one configured, joined agent the requester may address.
 An included thread must be a readable, unredacted root in that room, whether or not it is encrypted.
 Replies go only to the authenticated device, and sending a catalog never verifies a previously untrusted device.

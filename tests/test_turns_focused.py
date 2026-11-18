@@ -2231,6 +2231,29 @@ def test_leading_mention_pills_of_agents_aim_a_command(
 
 
 @pytest.mark.asyncio
+async def test_owner_device_runs_the_selection_chat_sends_in_an_agents_thread(config: Config, tmp_path: Path) -> None:
+    """Chat sends `!model` into the thread, naming the device and mentioning nobody: that device still runs it."""
+    history = thread_history_result(
+        [
+            make_visible_message(sender=_SENDER, body="please help", event_id="$thread:localhost"),
+            make_visible_message(sender=_entity_user_id(config, "general"), body="sure", event_id="$a:localhost"),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME, thread_history=history)
+    event = _text_event("!model reset", thread_id="$thread:localhost")
+    event.source["content"]["io.mindroom.model_selection"] = {
+        "version": 1,
+        "runtime_user_id": _entity_user_id(config, ROUTER_AGENT_NAME),
+        "operation": "reset",
+    }
+    with patch.object(harness.dispatcher.deps.command_executor, "execute", new=AsyncMock()) as execute:
+        await harness.ingress.handle_text_event(_room_with_members(config, "general", ROUTER_AGENT_NAME), event)
+
+    execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("first", ["general", "research"])
 async def test_two_bots_with_split_room_snapshots_answer_a_command_once(
     config: Config,

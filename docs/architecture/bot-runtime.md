@@ -75,10 +75,11 @@ A turn restarts cut short more than twice stops continuing from its recovered ru
 An approved run's resume saves no checkpoint, since the paused row is what an approval cut short settles from; a run that paused for a subagent without tool jobs is continued by its own turn with the subagent's answer and checkpoints as before.
 An interrupted edit regeneration also stays pending: a retry of the same edit recovers its attempts as above, and a newer edit's regeneration starts fresh, because it replaced the prompt the stopped attempts answered; a regeneration's approved resume that was cut short continues below what it showed, as an interrupted turn does.
 
-A chat command runs on the bot it is aimed at, which `TurnPolicy.owns_command` decides on every bot from its own copy of the room.
+A chat command runs on the bot it is aimed at, which `TurnPolicy.owns_command` decides from the bot's own copy of the room and the room's joined candidates.
 A Desktop agent alone with the requester runs `/desktop`; a command that mentions agents or teams goes to the lowest Matrix ID among the mentioned candidates; a command in a thread with one agent goes to that agent; any other command goes to the lowest Matrix ID among the room's candidates, whatever the reply mode, where `router.access` admits the requester.
-Bots can disagree while a join or a thread reaches them, so a command with side effects is also claimed per event (`claim_room_event`, purpose `command`) and only the saved owner runs it.
-A command that changes room state writes through the room's steward (`put_room_state_as_steward`), and answers `moderator_rights_message` and changes nothing when no steward may write.
+Bots can disagree while a join or a thread reaches them, so the first bot that decides saves the owner per event (`claim_room_event`, purpose `command`), and only the saved owner runs the command or says that its conversation is not resolved yet.
+A saved owner that never receives the command leaves it unanswered.
+A command that changes room state writes through the room's steward (`put_room_state_as_steward`), and answers `moderator_rights_message` when the room refuses the write.
 Potentially mutating chat commands are at-most-once: the start of execution is recorded before the handler runs, and the exact result before visible delivery.
 Recovery re-delivers a recorded result, while an interrupted attempt without one is not rerun and instead tells the requester its outcome is uncertain and to inspect state before retrying.
 `!config set` keeps its own Matrix-backed preview, decision, execution, and result journal, because its mutation begins only after the requester reacts to the preview.
