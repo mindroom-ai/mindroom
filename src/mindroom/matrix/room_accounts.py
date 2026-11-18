@@ -72,23 +72,33 @@ async def reconcile_room_router_binding(
     runtime_paths: RuntimePaths,  # noqa: ARG001
     room_id: str,
 ) -> bool:
-    """Name this router as the room's router unless the binding already does, and return whether it is current.
+    """Name this router as the room's router where no valid binding exists, and return whether nothing is left to do.
 
-    Rooms whose power levels keep the router from sending state refuse it, which logs at debug. Failures leave it to
-    the next trigger.
+    A binding naming another account stays, so two privileged routers cannot take turns overwriting it; a stale one
+    only leaves voice echoes as standalone rows until a room admin clears it. A room whose power levels refuse the write
+    is done too, since retrying cannot help. Other failures leave it to the next trigger.
     """
     try:
         async with asyncio.timeout(10):
-            content = {"user_id": client.user_id}
             current = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
-            if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
+            if isinstance(current, nio.RoomGetStateEventResponse) and isinstance(
+                bound := current.content.get("user_id"),
+                str,
+            ):
+                if bound != client.user_id:
+                    logger.debug("room_router_binding_held_by_other", room_id=room_id, router_user_id=bound)
                 return True
-            response = await client.room_put_state(room_id, ROUTER_BINDING_EVENT_TYPE, content, state_key="")
+            response = await client.room_put_state(
+                room_id,
+                ROUTER_BINDING_EVENT_TYPE,
+                {"user_id": client.user_id},
+                state_key="",
+            )
             if not isinstance(response, nio.RoomPutStateResponse):
                 forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
                 log = logger.debug if forbidden else logger.warning
                 log("room_router_binding_publish_failed", room_id=room_id, error=str(response))
-                return False
+                return forbidden
             return True
     except Exception:
         logger.warning("room_router_binding_publish_failed", room_id=room_id, exc_info=True)

@@ -291,17 +291,52 @@ async def test_a_room_that_refuses_the_routers_state_is_no_warning(
 
 
 @pytest.mark.asyncio
-async def test_router_binding_names_the_router_once(room_state: RoomState) -> None:
-    """The router claims the room's router binding, replaces another claim, and leaves its own claim alone."""
+@pytest.mark.parametrize("existing", [None, {}, {"user_id": 7}])
+async def test_router_binding_claims_an_absent_or_malformed_binding_once(
+    room_state: RoomState,
+    existing: dict[str, object] | None,
+) -> None:
+    """The router names itself where no valid binding exists, and leaves its own binding alone."""
     config, paths, ids, events, client = room_state
-    router = ids[ROUTER_AGENT_NAME].full_id
-    events[ROUTER_EVENT_TYPE, ""] = {"user_id": "@other_router:elsewhere.invalid"}
+    if existing is not None:
+        events[ROUTER_EVENT_TYPE, ""] = existing
 
     assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is True
-    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": router}
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": ids[ROUTER_AGENT_NAME].full_id}
     assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is True
     assert len(_writes(client, ROUTER_EVENT_TYPE)) == 1
     assert _writes(client, ROUTER_EVENT_TYPE)[0].kwargs["state_key"] == ""
+
+
+@pytest.mark.asyncio
+async def test_router_binding_leaves_another_routers_binding_alone(room_state: RoomState) -> None:
+    """Two privileged routers must not take turns overwriting one room's binding."""
+    config, paths, _, events, client = room_state
+    events[ROUTER_EVENT_TYPE, ""] = {"user_id": "@other_router:elsewhere.invalid"}
+    with capture_logs() as logs:
+        assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is True
+    assert events[ROUTER_EVENT_TYPE, ""] == {"user_id": "@other_router:elsewhere.invalid"}
+    assert not _writes(client, ROUTER_EVENT_TYPE)
+    assert [(log["event"], log["log_level"]) for log in logs] == [("room_router_binding_held_by_other", "debug")]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_router_binding_needs_no_retry(room_state: RoomState) -> None:
+    """A room that denies the optional binding is done; only the other room state decides on a retry."""
+    config, paths, _, _, client = room_state
+    write = client.room_put_state.side_effect
+
+    async def refuse_binding(room_id: str, event_type: str, content: dict[str, Any], state_key: str = "") -> object:
+        if event_type == ROUTER_EVENT_TYPE:
+            return nio.RoomPutStateError("user_level (0) < send_level (50)", "M_FORBIDDEN")
+        return await write(room_id, event_type, content, state_key=state_key)
+
+    client.room_put_state.side_effect = refuse_binding
+    assert await reconcile_room_router_binding(client, config, paths, ROOM_ID) is True
+    duties = _router_duties(room_state)
+    duties.mark_joined_for_room_state(ROOM_ID)
+    await duties.publish_joined_room_state()
+    assert not duties._room_state_retries
 
 
 @pytest.mark.asyncio
