@@ -232,7 +232,7 @@ async def test_a_snapshot_write_rereads_power_levels_and_still_omits_creators(he
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "event_type",
-    ["io.mindroom.background_jobs", "io.mindroom.auto_approve", "io.mindroom.accounts"],
+    ["io.mindroom.background_jobs", "io.mindroom.auto_approve", "io.mindroom.accounts", "com.mindroom.pending.config"],
 )
 async def test_managed_rooms_let_members_publish_their_own_agent_state(event_type: str) -> None:
     """A router that only joined a room another account created can still publish its own state there."""

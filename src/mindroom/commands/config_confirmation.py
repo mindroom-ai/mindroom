@@ -15,6 +15,7 @@ from mindroom.constants import CONFIG_CONFIRMATION_REACTION_KEY
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
+from mindroom.matrix.event_types import PENDING_CONFIG_EVENT_TYPE as _PENDING_CONFIG_EVENT_TYPE
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
@@ -29,8 +30,6 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
 logger = get_logger(__name__)
 
-# Event type for pending config changes in Matrix state
-_PENDING_CONFIG_EVENT_TYPE = "com.mindroom.pending.config"
 
 # Maximum age for pending confirmations (24 hours)
 _MAX_PENDING_AGE_HOURS = 24

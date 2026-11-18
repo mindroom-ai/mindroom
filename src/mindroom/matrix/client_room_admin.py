@@ -20,6 +20,7 @@ from mindroom.matrix.event_types import (
     CALL_MEMBER_EVENT_TYPE,
     MINDROOM_ACCOUNTS_EVENT_TYPE,
     MINDROOM_SERVER_EVENT_TYPE,
+    PENDING_CONFIG_EVENT_TYPE,
 )
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, has_privileged_creators, user_power_level
@@ -52,6 +53,8 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     # it has no power.
     AUTO_APPROVE_WINDOWS_EVENT_TYPE: 0,
     MINDROOM_ACCOUNTS_EVENT_TYPE: 0,
+    # The agent that answers `!config set` saves its preview; only the state it sent itself is ever read back.
+    PENDING_CONFIG_EVENT_TYPE: 0,
 }
 _TERMINAL_ROOM_JOIN_ERROR_CODES = frozenset(
     {
