@@ -18,6 +18,7 @@ from mindroom.matrix.room_history_reads import (
     _MAX_THREAD_ENUMERATION_PAGES,
     RoomThreadsPageError,
     enumerate_room_thread_root_ids,
+    get_room_threads_page,
 )
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
@@ -1559,7 +1560,10 @@ async def test_list_tagged_threads_include_untagged_filters_tagged_state_only_th
 
 @pytest.mark.asyncio
 async def test_enumerate_room_thread_root_ids_reads_ids_without_building_events() -> None:
-    """Each /threads page yields its roots' IDs without parsing any root, and a page nio's schema refuses still fails."""
+    """Enumeration takes each /threads page's root IDs without parsing a root, and fails on a page nio's schema refuses.
+
+    A full page read still parses its roots into events.
+    """
     roots = [
         {
             "event_id": f"$thread-{index}:localhost",
@@ -1587,6 +1591,9 @@ async def test_enumerate_room_thread_root_ids_reads_ids_without_building_events(
 
     assert thread_root_ids == [root["event_id"] for root in roots]
     assert truncated is False
+    events, page_token = await get_room_threads_page(client, "!room:localhost", limit=100)
+    assert [event.event_id for event in events] == thread_root_ids[:2]
+    assert page_token == "A"  # noqa: S105
     pages["A"] = {"chunk": [{**roots[2], "origin_server_ts": "yesterday"}]}
     with pytest.raises(RoomThreadsPageError):
         await enumerate_room_thread_root_ids(client, "!room:localhost")
