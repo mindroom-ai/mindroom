@@ -320,7 +320,13 @@ def should_send_oversized_nonterminal_streaming_edit(
         reasoning = source_content[REASONING_CONTENT_KEY]
         text = reasoning.get("text") if isinstance(reasoning, dict) else None
         if isinstance(text, str) and len(text) > _PROGRESS_SIDECAR_REASONING_CHARACTERS:
-            reasoning = {**reasoning, "text": f"{text[:_PROGRESS_SIDECAR_REASONING_CHARACTERS]}…"}
+            # Sized as fit_reasoning_to_ordinary_event sends it: the text cut, and the segments it no longer reaches.
+            kept = text[:_PROGRESS_SIDECAR_REASONING_CHARACTERS]
+            reasoning = {**reasoning, "text": f"{kept}…"}
+            segments = reasoning.get("segments")
+            if isinstance(segments, list):
+                end = utf16_length(kept)
+                reasoning["segments"] = [segment for segment in segments if segment["start"] < end]
         without_reasoning["m.new_content"][REASONING_CONTENT_KEY] = reasoning
         event_size = calculate_event_size(without_reasoning)
 
