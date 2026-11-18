@@ -16,6 +16,7 @@ from mindroom.agent_loop.tools import is_media_follow_up
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
+from mindroom.history.run_checkpoint import STOPPED_BY_USER_NOTE, is_recovered_run
 from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks.enrichment import strip_enrichment_blocks
@@ -123,7 +124,9 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     left out entirely, a background job follow-up keeps only its reply, and a run's own compaction summary and the notes
     a turn's preparation added to its thread context are left out.
     A stopped turn's answer, its last message, is a rendered summary that can quote tool calls with their inputs and
-    outputs, so it is left out too; earlier replies its thread context holds stay. ``agent_work`` keeps all of these,
+    outputs, so it is left out too; earlier replies its thread context holds stay. A stopped turn stored as its own
+    messages keeps the text its last response showed, without the note of the stop MindRoom ended it with
+    (``STOPPED_BY_USER_NOTE``). ``agent_work`` keeps all of these,
     plus tool calls and results, for a reviewer of how the agent worked. The turn context a run stores
     (``add_to_agent_memory=False``), such as memory results and the approval receipt, is never kept: it is neither
     what was said nor work the agent did.
@@ -136,6 +139,7 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
         return []
     runtime_prompt = automation or metadata.get(TURN_INTENT_RUN_METADATA_KEY) == TurnIntent.JOB_FOLLOW_UP
     rendered_answer = run.messages[-1] if run.messages and not agent_work and is_interrupted_replay_run(run) else None
+    stop_ending = run.messages[-1] if run.messages and not agent_work and is_recovered_run(run) else None
     requester = run_requester(run) or "unknown"
     said: list[Utterance] = []
     for message in run.messages:
@@ -146,6 +150,8 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
             if own_text.strip():
                 said.append(Utterance("reply", None, None, own_text, message))
             continue
+        if message is stop_ending:
+            content = content.removesuffix(STOPPED_BY_USER_NOTE).rstrip()
         mindroom_wrote = (
             runtime_prompt
             or is_queued_notice_message(message)

@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeIs, cast
 
 import nio
 
@@ -56,8 +56,37 @@ class _Request:
     thread_id: str | None
 
 
+class _DroppedError(Exception):
+    """A request the router declines; by design, the client receives no reply."""
+
+    def __init__(self, *, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _is_request(event: object) -> TypeIs[nio.AuthenticatedToDeviceEvent]:
+    return isinstance(event, nio.AuthenticatedToDeviceEvent) and event.type == _REQUEST_TYPE
+
+
+def _log_context(
+    event: nio.AuthenticatedToDeviceEvent,
+    request: _Request | None,
+    received: float | None = None,
+) -> dict[str, object]:
+    """Identify a request without its content, for diagnosing pickers that never appear."""
+    context: dict[str, object] = {
+        "sender": event.sender,
+        "sender_device_id": event.authenticated_sender.device_id,
+    }
+    if request is not None:
+        context |= {"request_id": request.request_id, "room_id": request.room_id, "thread_id": request.thread_id}
+    if received is not None:
+        context["elapsed_ms"] = round((time.monotonic() - received) * 1000)
+    return context
+
+
 def _parse(event: object) -> _Request | None:
-    if not isinstance(event, nio.AuthenticatedToDeviceEvent) or event.type != _REQUEST_TYPE:
+    if not _is_request(event):
         return None
     raw = event.source.get("content")
     if not isinstance(raw, Mapping):
@@ -78,6 +107,17 @@ def _parse(event: object) -> _Request | None:
         cast("str", raw["room_id"]),
         cast("str | None", raw.get("thread_id")),
     )
+
+
+def _drop(
+    event: nio.AuthenticatedToDeviceEvent,
+    request: _Request | None,
+    reason: str,
+    received: float | None = None,
+) -> bool:
+    """Log one silently dropped request; the client sees only a missing reply."""
+    logger.info("model_catalog_dropped", reason=reason, **_log_context(event, request, received))
+    return False
 
 
 class _Receiver:
@@ -103,29 +143,31 @@ class _Receiver:
         identity = event.authenticated_sender
         return PinnedMatrixDevice(identity.user_id, identity.device_id, identity.ed25519)
 
-    def admit(self, event: nio.AuthenticatedToDeviceEvent) -> bool:
+    def admit(self, event: nio.AuthenticatedToDeviceEvent) -> bool:  # noqa: PLR0911
         """Reserve bounded work synchronously, before the task wrapper queues it."""
+        if not _is_request(event):
+            return False
         request = _parse(event)
         if request is None:
-            return False
+            return _drop(event, None, "unparseable")
         target = self._target(event)
         if target is None:
-            return False
+            return _drop(event, request, "unknown_sender_device")
         key = (event.sender, event.authenticated_sender.device_id, request)
-        if (
-            key in self.active
-            or len(self.active) >= _MAX_IN_FLIGHT
-            or sum(sender == event.sender for sender, _, _ in self.active) >= _MAX_USER_IN_FLIGHT
-        ):
-            return False
+        if key in self.active:
+            return _drop(event, request, "duplicate_in_flight")
+        if len(self.active) >= _MAX_IN_FLIGHT:
+            return _drop(event, request, "rate_limited_global")
+        if sum(sender == event.sender for sender, _, _ in self.active) >= _MAX_USER_IN_FLIGHT:
+            return _drop(event, request, "rate_limited_user_inflight")
         now = time.monotonic()
         while self.rates and next(iter(self.rates.values()))[-1] <= now - _DEADLINE_SECONDS:
             self.rates.popitem(last=False)
         if event.sender not in self.rates and len(self.rates) >= _MAX_RATE_USERS:
-            return False
+            return _drop(event, request, "rate_limited_global_users")
         recent = [stamp for stamp in self.rates.get(event.sender, []) if stamp > now - _DEADLINE_SECONDS]
         if len(recent) >= _MAX_USER_REQUESTS:
-            return False
+            return _drop(event, request, "rate_limited_user_window")
         self.rates[event.sender] = [*recent, now]
         self.rates.move_to_end(event.sender)
         self.active[key] = (now + _DEADLINE_SECONDS, target)
@@ -136,8 +178,8 @@ class _Receiver:
         event: nio.AuthenticatedToDeviceEvent,
         request: _Request,
         config: Config,
-    ) -> ModelPickerScope | None:
-        return await validate_model_picker_scope(
+    ) -> ModelPickerScope:
+        scope = await validate_model_picker_scope(
             client=self.client,
             config=config,
             runtime_paths=self.paths,
@@ -146,6 +188,9 @@ class _Receiver:
             requester_user_id=event.sender,
             thread_id=request.thread_id,
         )
+        if isinstance(scope, str):
+            raise _DroppedError(reason=scope)
+        return scope
 
     def _selection(self, request: _Request, config: Config, scope: ModelPickerScope) -> dict[str, object]:
         thread_overrides = resolve_thread_model_override(self.paths, request.thread_id, config=config).active
@@ -172,17 +217,16 @@ class _Receiver:
         event: nio.AuthenticatedToDeviceEvent,
         request: _Request,
         target: PinnedMatrixDevice,
-    ) -> None:
+    ) -> int:
+        """Send the catalog and return its model count, or raise why the request is dropped."""
         config = self.config_getter()
-        if len(config.models) > _MAX_MODELS or not authenticated_sender_matches(self.client, event, target):
-            return
-        scope = await self._scope(event, request, config)
-        if scope is None:
-            return
+        if len(config.models) > _MAX_MODELS:
+            raise _DroppedError(reason="too_many_models")
+        if not authenticated_sender_matches(self.client, event, target):
+            raise _DroppedError(reason="sender_device_changed")
+        await self._scope(event, request, config)
         entries, revision = await self.catalog.snapshot(config)
         scope = await self._scope(event, request, config)
-        if scope is None:
-            return
         content: dict[str, object] = {
             "version": 1,
             "request_id": request.request_id,
@@ -197,22 +241,24 @@ class _Receiver:
             content["thread_id"] = request.thread_id
         # Match the transport's default JSON representation, including escapes.
         if len(json.dumps(content).encode("utf-8")) > _MAX_RESPONSE_BYTES:
-            return
+            raise _DroppedError(reason="response_too_large")
 
         # Authorize at the NIO handoff; NIO owns preparation and delivery retries.
-        if (
-            self.config_getter() is not config
-            or await self._scope(event, request, config) != scope
-            or self.config_getter() is not config
-            or not authenticated_sender_matches(self.client, event, target)
-        ):
-            return
+        if self.config_getter() is not config:
+            raise _DroppedError(reason="config_changed")
+        if await self._scope(event, request, config) != scope:
+            raise _DroppedError(reason="scope_changed")
+        if self.config_getter() is not config:
+            raise _DroppedError(reason="config_changed")
+        if not authenticated_sender_matches(self.client, event, target):
+            raise _DroppedError(reason="sender_device_changed")
         await send_encrypted_to_device(
             self.client,
             target,
             event_type=_RESPONSE_TYPE,
             content=content,
         )
+        return len(entries)
 
     async def on_event(self, event: nio.AuthenticatedToDeviceEvent) -> None:
         request = _parse(event)
@@ -223,13 +269,31 @@ class _Receiver:
         if admitted is None:
             return
         deadline, target = admitted
+        received = deadline - _DEADLINE_SECONDS
         try:
             async with asyncio.timeout(max(0, deadline - time.monotonic())):
-                await self._respond(event, request, target)
+                model_count = await self._respond(event, request, target)
+        except _DroppedError as dropped:
+            _drop(event, request, dropped.reason, received)
+        except TimeoutError:
+            _drop(event, request, "timeout", received)
+        except asyncio.CancelledError:
+            # Shutdown or restart cancels the task mid-request. Only the awaited
+            # body can raise it: the outcome handlers never await, so no request
+            # logs twice.
+            _drop(event, request, "cancelled", received)
+            raise
         except Exception as exc:
             # Operational unavailability is a timeout to the client, never a
             # partial catalog or a provider/configuration error disclosure.
-            logger.warning("model_catalog_unavailable", error_type=type(exc).__name__)
+            logger.warning(
+                "model_catalog_dropped",
+                reason="error",
+                error_type=type(exc).__name__,
+                **_log_context(event, request, received),
+            )
+        else:
+            logger.info("model_catalog_answered", model_count=model_count, **_log_context(event, request, received))
         finally:
             self.active.pop(key, None)
 

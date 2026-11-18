@@ -694,7 +694,7 @@ def test_format_tool_completed_event_formats_its_trace() -> None:
 
 
 def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None:
-    """Restart state keeps exact call and member identity without exposing it to Matrix clients."""
+    """Restart state keeps exact call and member identity; Matrix clients see only the call's id."""
     trace = ToolTraceEntry(
         type="tool_call_started",
         tool_name="inspect",
@@ -718,8 +718,12 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
     )
     assert public is not None
     public_event = public[_TOOL_TRACE_KEY]["events"][0]
-    assert "tool_call_id" not in public_event
-    assert "member_id" not in public_event
+    assert public_event == {
+        "type": "tool_call_started",
+        "tool_name": "inspect",
+        "args_preview": "path=report.txt",
+        "tool_call_id": "call-1",
+    }
     assert restored[0].tool_call_id == "call-1"
     assert restored[0].member_id == "general"
 

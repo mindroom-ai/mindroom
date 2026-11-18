@@ -40,6 +40,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
+    SUBMISSION_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
@@ -485,6 +486,7 @@ def _text_event(
     thread_id: str | None = None,
     source_kind: str | None = None,
     original_sender: str | None = None,
+    submission: dict[str, object] | None = None,
 ) -> nio.RoomMessageText:
     """Build a synthetic inbound text event for coalescing tests."""
     content: dict[str, object] = {
@@ -493,6 +495,8 @@ def _text_event(
     }
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    if submission is not None:
+        content[SUBMISSION_CONTENT_KEY] = submission
     if source_kind is not None:
         content[SOURCE_KIND_KEY] = source_kind
     if original_sender is not None:
@@ -606,6 +610,30 @@ def _file_event(
                 "room_id": "!room:localhost",
                 "type": "m.room.message",
                 "content": content,
+            },
+        ),
+    )
+
+
+def _video_event(*, event_id: str, server_timestamp: int, submission: dict[str, object]) -> nio.RoomMessageVideo:
+    """Build a synthetic inbound room-root video event sent as part of one composer submission."""
+    return cast(
+        "nio.RoomMessageVideo",
+        nio.RoomMessageVideo.from_dict(
+            {
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": server_timestamp,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.video",
+                    "body": "clip.mp4",
+                    "filename": "clip.mp4",
+                    "url": "mxc://localhost/test-video",
+                    "info": {"mimetype": "video/mp4"},
+                    SUBMISSION_CONTENT_KEY: submission,
+                },
             },
         ),
     )
@@ -967,6 +995,52 @@ async def test_room_root_image_and_thread_caption_coalesce_into_single_thread_di
         await bot._coalescing_gate.drain_all()
 
     assert calls == [(["$img", "$caption"], "$img")]
+
+
+@pytest.mark.asyncio
+async def test_marked_room_root_video_and_late_thread_caption_dispatch_once(tmp_path: Path) -> None:
+    """A caption whose callback starts past the debounce still joins the video its submission said was not complete."""
+    bot = _make_bot(tmp_path, debounce_ms=50)
+    room = _make_room()
+    video = _video_event(event_id="$video", server_timestamp=1000, submission={"id": "upload-1", "more": True})
+    caption = _text_event(
+        event_id="$caption",
+        body="what happens in this clip?",
+        server_timestamp=4200,
+        thread_id=video.event_id,
+        submission={"id": "upload-1", "more": False},
+    )
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        coalescing_key: CoalescingKey | None = None,
+        **_metadata: object,
+    ) -> None:
+        calls.append(
+            (
+                _handled_turn_source_event_ids(handled_turn),
+                coalescing_key.thread_id if coalescing_key is not None else None,
+            ),
+        )
+
+    with patch.object(
+        TurnDispatcher,
+        "dispatch_turn",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
+        await bot._turn_ingress.handle_media_event(room, video)
+        await asyncio.sleep(0.2)
+        assert calls == []
+        await bot._turn_ingress.handle_text_event(room, caption)
+        await _wait_for(lambda: len(calls) == 1)
+        await bot._coalescing_gate.drain_all()
+
+    assert calls == [(["$video", "$caption"], "$video")]
 
 
 @pytest.mark.parametrize("caption_in_upload_thread", [True, False])

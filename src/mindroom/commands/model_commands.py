@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.authorization import addressable_responder_names
 from mindroom.model_selection import model_selection_result, parse_model_selection
-from mindroom.model_selection_scope import validate_model_picker_scope
+from mindroom.model_selection_scope import ModelPickerScope, validate_model_picker_scope
 from mindroom.thread_models import (
     clear_thread_model_override,
     resolve_thread_model_override,
@@ -128,7 +128,7 @@ async def handle_structured_model_command(
         if thread_id is not None
         else None
     )
-    if scope is None or thread_id is None:
+    if not isinstance(scope, ModelPickerScope) or thread_id is None:
         error = "This thread is unavailable for model selection. Refresh the model picker."
         text = f"❌ {error}"
     else:

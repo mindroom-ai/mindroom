@@ -57,6 +57,7 @@ __all__ = [
     "SKILL_REVIEW_PROMPT",
     "TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
     "TEAM_MODE_SELECTION_PROMPT_TEMPLATE",
+    "THREAD_FORK_CONTEXT_TEMPLATE",
     "THREAD_HISTORY_OMITTED_MARKER_TEMPLATE",
     "THREAD_SUMMARY_INSTRUCTIONS",
     "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
@@ -224,6 +225,11 @@ When a request may need one of these domains, search the deferred tool catalog b
 
 THREAD_HISTORY_OMITTED_MARKER_TEMPLATE = (
     "[{omitted_count} earlier message(s) in this thread were omitted to fit the context window.]"
+)
+THREAD_FORK_CONTEXT_TEMPLATE = (
+    "This thread is a fork of thread {parent_thread_id}, forked after message {fork_point_event_id}. "
+    "Messages up to that one come from the parent thread; its tool calls, tool results and per-thread settings "
+    "(except the model) were not carried over."
 )
 CURRENT_MESSAGE_PROMPT_INTRO = "Current message:\n"
 IN_PROGRESS_PARTIAL_REPLY_HEADER = (
@@ -792,6 +798,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "MEMORY_EXISTING_SNIPPETS_TEMPLATE": frozenset({"existing_context"}),
         "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": frozenset({"agents_info", "message"}),
         "TEAM_MODE_SELECTION_PROMPT_TEMPLATE": frozenset({"message", "agent_names"}),
+        "THREAD_FORK_CONTEXT_TEMPLATE": frozenset({"parent_thread_id", "fork_point_event_id"}),
         "THREAD_HISTORY_OMITTED_MARKER_TEMPLATE": frozenset({"omitted_count"}),
         "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE": frozenset({"instructions", "room_instructions"}),
         "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": frozenset({"conversation", "tag_vocabulary"}),
