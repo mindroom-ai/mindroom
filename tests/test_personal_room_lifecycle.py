@@ -313,6 +313,27 @@ async def test_agent_steward_onboards_through_the_rooms_poster_and_the_owner_acc
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_leaves_an_onboarding_room_to_its_own_steward(coordination: Coordination) -> None:
+    """A pass neither reads nor settles the candidates of an onboarding room that another bot stewards."""
+    lifecycle = coordination.lifecycle
+    config = lifecycle.runtime.config
+    config.rooms["other"] = config.rooms["lobby"].model_copy()
+    config.personal_rooms.onboarding_rooms = ["lobby", "other"]
+    config.personal_rooms.backfill = True
+    state = MatrixState.load(lifecycle.runtime_paths)
+    state.add_room("other", "!other:localhost", "#other:localhost", "Other")
+    save_matrix_state(state, lifecycle.runtime_paths)
+    lifecycle.is_steward = lambda room_id: room_id == "!lobby:localhost"
+    lifecycle._retry_candidates[("@bob:localhost", "!other:localhost")] = False
+
+    await lifecycle._reconcile()
+
+    assert call("!other:localhost") not in lifecycle.runtime.client.joined_members.await_args_list
+    assert lifecycle._completed_candidates == {("@alice:localhost", "!lobby:localhost")}
+    coordination.owner.ensure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_non_steward_never_routes_onboarding(coordination: Coordination) -> None:
     """Only the onboarding room's steward selects and invokes the target service."""
     lifecycle = coordination.lifecycle

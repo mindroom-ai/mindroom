@@ -529,7 +529,7 @@ class PersonalRoomLifecycle:
         assert self.runtime.client is not None
         candidates: set[tuple[str, str]] = set()
         failed = False
-        for room_id in resolve_room_aliases(onboarding_rooms, self.runtime_paths):
+        for room_id in filter(self.is_steward, resolve_room_aliases(onboarding_rooms, self.runtime_paths)):
             try:
                 members = await get_room_members(self.runtime.client, room_id)
             except Exception:
@@ -562,6 +562,8 @@ class PersonalRoomLifecycle:
             candidates.update(backfill)
             failed |= backfill_failed
         candidates.update(self._retry_candidates)
+        # An onboarding room that another bot stewards is that bot's to read and settle.
+        candidates = {candidate for candidate in candidates if self.is_steward(candidate[1])}
         if not failed:
             # Forget what requesters whose intent is gone last reported.
             self._roster_mismatches = {key: seen for key, seen in self._roster_mismatches.items() if key in candidates}
