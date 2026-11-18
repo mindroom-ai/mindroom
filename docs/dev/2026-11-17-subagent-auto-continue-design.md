@@ -41,6 +41,8 @@ Success: after a clean shutdown or a crash, every background subagent turn the r
    Only a subagent job stopped while `running` by a shutdown, restart, or event-loop teardown, whose child turn the restart settled.
    Never continued: a job with a saved cancel request, a job whose reply was stopped (the Stop is now saved on the job, where it lived only in memory), a job whose grant is revoked (the pass cancels it first, and the continuation rechecks the delegation), a child turn that completed, failed, or was cancelled on its own before the stop (its settlement stands), and a job that was `awaiting_approval`.
    A child that waited for an approval is not continued because the restart denies its card: continuing would either ask the person again about a call they saw denied or go on without the call the child was waiting to make, so its job ends as before and the parent decides.
+   A job stopped before its child's first turn was reserved on the handle has no settled turn to continue from, so it also ends as before.
+   A subagent job that a restart stopped and that is not continued now ends with the job status `interrupted`, as a tool's job does, where it ended `failed`; its result text is unchanged.
 6. **Crash-loop guard.**
    The job's adapter counts its continuations (`restart_continuations`), saved with the job before each launch, so the count survives further restarts.
    A job continued after `_RESTART_CONTINUATION_LIMIT` (2) restarts is not continued again and ends as before, interrupted with "send a follow-up".

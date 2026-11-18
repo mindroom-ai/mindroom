@@ -8430,6 +8430,7 @@ visibility = [
     "mindroom.tool_system.agent_tools",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.delegation.targets",
+    "mindroom.delegation.continuation",
 ]
 
 [[modules]]
@@ -8457,6 +8458,7 @@ visibility = [
     "mindroom.approval.continuation_runner",
     "mindroom.delegation.execution",
     "mindroom.delegation.targets",
+    "mindroom.delegation.continuation",
 ]
 
 [[modules]]
@@ -9046,6 +9048,7 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.consumption",
+    "mindroom.delegation.continuation",
 ]
 
 [[modules]]
@@ -9130,10 +9133,30 @@ depends_on = [
     "mindroom.tool_jobs.follow_ups",
     "mindroom.event_journal",
     "mindroom.tool_system.plugins",
+    "mindroom.delegation.continuation",
+    "mindroom.tool_system.runtime_context",
 ]
 visibility = [
     "mindroom.orchestrator",
 ]
+
+[[modules]]
+path = "mindroom.delegation.continuation"
+depends_on = [
+    "mindroom.ai",
+    "mindroom.delegation.background",
+    "mindroom.delegation.execution",
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.personas",
+    "mindroom.delegation.recovery",
+    "mindroom.delegation.sessions",
+    "mindroom.delegation.state",
+    "mindroom.history.run_checkpoint",
+    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = ["mindroom.orchestration.tool_job_runtime"]
 
 [[modules]]
 path = "mindroom.orchestration.storage_preparation"
@@ -10169,6 +10192,7 @@ visibility = [
     "mindroom.history.conversation_text",
     "mindroom.loop_hooks",
     "mindroom.response_turn",
+    "mindroom.delegation.continuation",
 ]
 
 [[modules]]

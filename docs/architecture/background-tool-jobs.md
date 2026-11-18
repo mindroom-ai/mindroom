@@ -48,6 +48,13 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   The native driver, which pauses the parent run for each child approval, remains only where calls cannot become jobs: background jobs off, minimal mode, nested children, and an excluded `delegate` toolkit.
   A driver that started its own job and continued the paused parent with the result duplicated the generic start, wait, detach, claim, and record steps, and kept a parent pause and continuation per background subagent.
 - A subagent call an approval rule gates still pauses the reply for its own approval and becomes a job once approved, so a subagent job's `awaiting_approval` is always its child's and a restart never reads one as the other.
+- A subagent job a restart stops while its child works does not end: it stays running under its job ID, and the runtime continues the child with a follow-up turn of its own, because a restart is not a decision about running work and a parent told of an interruption reported it to the user instead of continuing (see `docs/dev/2026-11-17-subagent-auto-continue-design.md`).
+  Nothing ended, so no notice or follow-up reaches the parent until the continuation's real outcome does, and a parent waiting on the job reads that outcome.
+  A tool's job still ends interrupted, because a call cannot continue and running it again could repeat its effects.
+  The worker's pass launches the continuation, not recovery, which runs before the first sync, when room-backed reply grants are unresolved and authorization fails closed; the launch is the one `continue_subagent` uses, so the caller's delegation and the requester's access are checked again.
+  The child is sent `SUBAGENT_RESTART_CONTINUATION_PROMPT` after its cut-short run's own messages, or its turn's task again when that run called no tool and so left nothing in its history.
+  A job that was awaiting approval ends instead, because the restart denies its card and continuing would ask again about a call the person saw denied or go on without it; so does a job continued after two restarts already, in case continuing it is what stops the process.
+  A Stop of the reply that started a working subagent is saved with its job, so a restart does not continue work whose reply was stopped.
 - A follow-up waits until the job of the turn it continues has ended, not only until that child settled, because a child's turn settles before its job delivers the answer; a follow-up that took the handle in between would leave the earlier job's recovery without the turn it ran.
 - A job whose own call returned its result inline is kept one day instead of 30, because once it ended no listing, notice, or follow-up names it, so after its turn only a reread by its exact ID reads it; the day is a margin for such a reread, as by an ID a person saw in the jobs bar while the call ran.
   On a busy deployment about 99% of the stored result bytes belonged to such jobs, mostly images and shell output.
@@ -75,7 +82,10 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A starting process takes the saved jobs over before dispatch starts, and the journal refuses every later write of the runtime it replaced, so two processes never write one job.
 - A reply that a process stop cuts short continues in place by journal replay, below what the stopped attempt showed, with an account that names the finished calls it must not repeat (see [Bot Runtime](bot-runtime.md)).
   A detached job start is such a finished call, and its result names the job ID.
-  Jobs the stopped attempt left running are interrupted by the restart, and their outcomes reach the conversation like any other ended job.
+  Tool jobs the stopped attempt left running are interrupted by the restart, and their outcomes reach the conversation like any other ended job.
+  Its subagent jobs continue, and the job note of the turn that started one says so, because a call that was still waiting for its job left that turn no handle and its recovered run only says the call was interrupted.
+- A continuation is saved with its job, as the job's child and its count of continuations, before it starts, and reserves its turn only against the turn the restart settled, so a second restart at any point neither loses the continuation nor runs a turn twice.
+  The turn a restart settled is told apart from one that failed on its own by the reason only that settlement records, and its job's interruption is what the runtime may continue; any other end of the child is its job's end.
   An interrupted outcome tells the model that a call with side effects may already have taken effect and must not run again, while a read-only call can run again for its lost result.
 
 ## Evidence
@@ -101,6 +111,11 @@ A message is waiting only from its arrival during a busy turn until its own turn
 A bot that left a room cannot clear its jobs state there, so clients ignore jobs state from users who are not joined.
 A running job its call still waits for enters its room's jobs state only after it has run 5 seconds, at the worker's next periodic pass, normally within about 5 seconds, because every call of a reply is a job, most end within seconds, and clients keep every state event; a job awaiting approval or a cancel, one its call left running in the background, and one already listed are listed at once.
 A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.
+A subagent job is not continued, and ends interrupted for a follow-up to continue its child, when the restart found its child waiting for an approval or for a subagent of its own, whose paused run history never replays, or stopped it before its child's first turn was reserved.
+A continued subagent job is no longer linked to the reply that started it, so a later Stop of that reply does not refuse its child's approvals; it stays cancellable from the jobs bar.
+A continued child's rows in the Sub-agents panel carry no tool previews, because the conversation's rebuilt tool context does not know whether the reply that started it showed tool calls.
+A subagent job waits to continue until its bot has a Matrix client and its requester's access is resolved, so a job of a bot that never starts stays running.
+Tool hooks see a continuation as a `continue_subagent` call whose message is the continuation prompt.
 A saved job stays readable only while its tool's registered factory keeps the module and name the job was built from, so moving or renaming a factory makes that tool's saved jobs unavailable after the upgrade.
 Only functions of toolkits MindRoom assembles become jobs; the knowledge search, skill access, and team delegation functions MindRoom adds beside those toolkits execute inline.
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.

@@ -100,7 +100,9 @@ Use `continue_subagent` with the returned ID to send a follow-up into the same c
 The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
 Follow-ups keep the child's history, model, and mode, and recheck current permissions.
 A follow-up sent while the child is still running or awaiting approval is refused; finish that turn first.
-If MindRoom restarts during a child turn, that turn is reported as interrupted instead of being rerun; a pending approval of a child running as a background job is denied, and one that paused its parent's reply stays pending.
+If MindRoom restarts while a child works as a background job, the child continues on its own after the restart, from the work it had done and under the same job, and no call it finished runs again.
+A child that was waiting for an approval or for a subagent of its own, or whose job restarts have cut short three times, is reported as interrupted instead, and a follow-up continues it.
+A child turn that runs inside its parent's reply is reported as interrupted instead of being rerun; a pending approval of a child running as a background job is denied, and one that paused its parent's reply stays pending.
 
 ```python
 run_subagent(task="Independently review the proposed design and return its three main risks.", model="sonnet")
@@ -239,7 +241,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 Background jobs are on by default; set the root option `background_tool_jobs.enabled: false` and restart to turn them off.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
 With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and every shell command stops at its `timeout`.
-Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
+Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are handled as after any restart.
 An approval that needed a job fails when it resumes while the option is off.
 
 Tools that can run as background jobs accept an optional `background_after` argument, which the tool itself never receives.
@@ -319,7 +321,7 @@ A follow-up waits until the conversation is free and never interrupts a running 
 Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
 Another requester's reply in a shared room never hears of these results.
-A job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own.
+A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 
 ### The `job` function
 
@@ -361,7 +363,7 @@ Calls that must finish inside the run keep pausing it for their approval: tools 
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
 Cancelling the job denies its open cards; after **Stop** on the reply that started it, the job is cancelled when its child next needs an approval.
-A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job.
+A restart interrupts a job that waits for approval and denies its cards, a subagent's job included.
 Cards a job posts offer the same [auto-approval for a few minutes](../tool-approval.md#auto-approval-for-a-few-minutes) as other approval cards, and an active auto-approval also approves matching job calls without a card.
 A message never counts as an approval, and current permissions are rechecked before a job's call runs.
 Nested managed tools remain part of their accepted outer job rather than starting independent jobs.

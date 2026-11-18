@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+
 async def load_settled_subagent(
     subagent_id: str,
     *,

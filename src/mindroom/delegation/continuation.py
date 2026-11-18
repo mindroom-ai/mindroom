@@ -18,6 +18,9 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import require_tool_runtime_context
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.delegation.state import DelegationChild
     from mindroom.tool_jobs.runtime import BackgroundJob, JobSpec, ToolJobRuntime
 
 # How many of a job's continuations its saved adapter counts, so the count survives further restarts.
@@ -39,29 +42,12 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     context = require_tool_runtime_context()
     config, runtime_paths, owner = context.current_config, context.runtime_paths, job.owner
     continuations = job.adapter.get(_CONTINUATIONS_KEY, 0)
-    saved = delegation_child(job)
     if continuations >= _RESTART_CONTINUATION_LIMIT:
         return None
-    try:
-        child = await settled_subagent(
-            saved.subagent_id,
-            owner=owner,
-            config=config,
-            runtime_paths=runtime_paths,
-            depth=job.depth,
-        )
-    except SubagentSessionError:
+    child = await _stopped_turn(job, config, runtime_paths)
+    prompt = None if child is None else await _continuation_prompt(child, config, runtime_paths)
+    if child is None or prompt is None:
         return None
-    # The handle names the turn the job ran, or the turn a continuation saved before a second restart was prepared from.
-    if child.delegation_id not in {saved.delegation_id, saved.previous_delegation_id}:
-        return None
-    if not interrupted_by_restart(child):
-        return None
-    run = await read_child_run(child, config, runtime_paths)
-    recovered = run is not None and is_recovered_run(run)
-    if not recovered and run is not None and run.tools:
-        return None
-    prompt = config.get_prompt("SUBAGENT_RESTART_CONTINUATION_PROMPT") if recovered else child.task
     tools = config_plugins(config, runtime_paths).tools
     if follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth) is not None:
         return None
@@ -113,3 +99,31 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         return None
     spec.adapter[_CONTINUATIONS_KEY] = continuations + 1
     return spec
+
+
+async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: RuntimePaths) -> DelegationChild | None:
+    """Return the settled child turn a restart cut short under ``job``, or None when no such turn is its current one."""
+    saved = delegation_child(job)
+    try:
+        child = await settled_subagent(
+            saved.subagent_id,
+            owner=job.owner,
+            config=config,
+            runtime_paths=runtime_paths,
+            depth=job.depth,
+        )
+    except SubagentSessionError:
+        return None
+    # The handle names the turn the job ran, or the turn a continuation saved before a second restart was prepared from.
+    if child.delegation_id not in {saved.delegation_id, saved.previous_delegation_id}:
+        return None
+    return child if interrupted_by_restart(child) else None
+
+
+async def _continuation_prompt(child: DelegationChild, config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return what continues ``child``'s cut-short turn, or None for a paused run, which history never replays."""
+    run = await read_child_run(child, config, runtime_paths)
+    recovered = run is not None and is_recovered_run(run)
+    if not recovered and run is not None and run.tools:
+        return None
+    return config.get_prompt("SUBAGENT_RESTART_CONTINUATION_PROMPT") if recovered else child.task

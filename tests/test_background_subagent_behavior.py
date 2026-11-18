@@ -27,6 +27,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.orchestration import tool_job_runtime as tool_job_coordinator
 from mindroom.prompts import BACKGROUND_JOBS_CONTINUED_NOTICE, SUBAGENT_RESTART_CONTINUATION_PROMPT
 from mindroom.response_turn import pending_approval_requirements
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.notices import JobNotices, append_turn_start_job_note, job_notice_context
@@ -379,6 +380,37 @@ async def test_a_subagent_stopped_before_its_first_call_is_sent_its_task_again(
 
 
 @pytest.mark.asyncio
+async def test_a_continued_subagent_writes_its_answer_where_its_call_asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The output file a subagent call named is saved with its job, so its continuation's answer lands there."""
+    started, held = _held_child()
+    conversation = _Conversation(tmp_path, monkeypatch)
+    await conversation.open(held, answer("Continued report"))
+    delegate = tool_call(
+        "run_subagent",
+        "first",
+        task="Report",
+        agent_name="code",
+        background_after=0,
+        mindroom_output_path="report.txt",
+    )
+    try:
+        record = await conversation.reply(calls(delegate), answer("Parent free"))
+        job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
+        await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
+        await conversation.restart()
+        await wait_for_status(conversation.runtime, job_id, "completed")
+        receipt = json.loads(str((await conversation.job(job_id)).result))["mindroom_tool_output"]
+        assert receipt["status"] == "saved_to_file"
+        workspace = resolve_agent_runtime("leader", conversation.config, conversation.paths, _IDENTITY).workspace.root
+        assert "Continued report" in (workspace / receipt["path"]).read_text()
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.asyncio
 async def test_a_stopped_replys_subagent_is_not_continued_after_a_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -443,7 +475,10 @@ async def test_a_subagent_that_waited_for_its_own_subagent_is_not_continued_afte
     with_responder_access(config, "helper", users=[DELEGATING_REQUESTER])
     started, held = _held_child()
     conversation = _Conversation(tmp_path, monkeypatch, config=config)
-    await conversation.open(calls(tool_call("run_subagent", "nested", task="Help", agent_name="helper")), answer("Never"))
+    await conversation.open(
+        calls(tool_call("run_subagent", "nested", task="Help", agent_name="helper")),
+        answer("Never"),
+    )
     conversation.agents.models["helper"] = ScriptedModel([held, answer("Never")])
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
@@ -575,7 +610,9 @@ async def test_a_stopped_subagent_waits_for_its_requesters_access_and_its_bot(
         context = _delegate_runtime_context(conversation.config, conversation.paths, execution_identity=_IDENTITY)
         runtime, config, paths = conversation.runtime, conversation.config, conversation.paths
         await continue_stopped_jobs(runtime, config, paths, context, grant="pending")
+        assert [job.job_id for job in runtime.awaiting_continuation()] == [job_id]
         await continue_stopped_jobs(runtime, config, paths, None)
+        assert [job.job_id for job in runtime.awaiting_continuation()] == [job_id]
         assert (await conversation.job(job_id)).status == "running"
         assert len(conversation.agents.models["code"].requests) == 1
         await conversation.continue_stopped()

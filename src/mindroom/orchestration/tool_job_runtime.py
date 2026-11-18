@@ -383,7 +383,11 @@ class ToolJobRuntimeCoordinator:
             reply_to_event_id=None,
             session_id=owner.session_id,
         )
-        context = bot.tool_runtime_support.build_context(target, user_id=owner.requester_id, agent_name=owner.agent_name)
+        context = bot.tool_runtime_support.build_context(
+            target,
+            user_id=owner.requester_id,
+            agent_name=owner.agent_name,
+        )
         if context is None:
             return None
         # The job keeps the turn that started it, so a silent schedule's subagent stays silent.
