@@ -96,6 +96,7 @@ class StewardDuties:
     @property
     def _is_owner(self) -> bool:
         """Whether this bot is the owner account, which administers the configured rooms."""
+        # Owner-only administration (design decision 8): this tests an entity's role, not who is in a room.
         return self.deps.hook_context.agent_name == ROUTER_AGENT_NAME
 
     def is_steward(self, room_id: str) -> bool:
