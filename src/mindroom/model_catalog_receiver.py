@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, cast
 
 import nio
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import (
     PinnedMatrixDevice,
@@ -237,7 +236,6 @@ class _Receiver:
 def register_model_catalog_receiver(
     *,
     client: nio.AsyncClient,
-    agent_name: str,
     runtime_paths: RuntimePaths,
     config_getter: Callable[[], Config],
     membership_index: AgentReplyMembershipIndex,
@@ -246,9 +244,7 @@ def register_model_catalog_receiver(
         Callable[..., Awaitable[None]],
     ],
 ) -> None:
-    """Register router-only discovery, with admission before background task creation."""
-    if agent_name != ROUTER_AGENT_NAME:
-        return
+    """Register discovery on this bot's device, with admission before background task creation."""
     receiver = _Receiver(
         client=client,
         runtime_paths=runtime_paths,

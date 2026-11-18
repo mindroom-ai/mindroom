@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.authorization import responder_candidate_entities_from_cached_room
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.conversation_hydration import readable_event
 from mindroom.matrix.event_info import EventInfo
@@ -72,21 +71,19 @@ async def validate_model_picker_scope(
     requester_user_id: str,
     thread_id: str | None,
 ) -> ModelPickerScope | None:
-    """Require actual joined requester/router/eligible agents and an optional root."""
+    """Require the requester, the answering account and eligible agents actually joined, and an optional root."""
     registry = entity_identity_registry(config, runtime_paths)
-    router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
-    if client.user_id != router_id:
-        return None
+    required = {requester_user_id, client.user_id}
     try:
         before = await _joined_room(client, room_id)
-        if before is None or not {requester_user_id, router_id}.issubset(before.users):
+        if before is None or not required.issubset(before.users):
             return None
         if thread_id is not None and not await _readable_root(client, room_id, thread_id):
             return None
         after = await _joined_room(client, room_id)
     except (nio.EncryptionError, OSError, TimeoutError):
         return None
-    if after is None or not {requester_user_id, router_id}.issubset(after.users):
+    if after is None or not required.issubset(after.users):
         return None
     candidates = responder_candidate_entities_from_cached_room(
         after,

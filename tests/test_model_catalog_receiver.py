@@ -19,7 +19,7 @@ from mindroom.model_catalog_receiver import _MAX_USER_REQUESTS, _Receiver, regis
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import set_thread_model_override
 from tests.conftest import runtime_paths_for
-from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_setup
+from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup
 from tests.test_olm_to_device import olm_transport
 
 if TYPE_CHECKING:
@@ -68,7 +68,6 @@ def receiver_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple:
     current = [config]
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: current[0],
         membership_index=index,
@@ -224,7 +223,6 @@ async def test_duplicates_and_capacity_are_bounded_before_task_queue(
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
@@ -254,7 +252,6 @@ async def test_one_account_with_many_devices_leaves_capacity_for_other_users(tmp
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
@@ -297,7 +294,6 @@ async def test_completed_requests_from_many_devices_share_one_rate_window(
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
@@ -316,18 +312,26 @@ async def test_completed_requests_from_many_devices_share_one_rate_window(
 
 
 @pytest.mark.asyncio
-async def test_non_router_does_not_register(tmp_path: Path) -> None:
-    """Only the runtime router advertises discovery."""
-    client, config, paths, index, _, _ = picker_setup(tmp_path)
+async def test_agent_device_answers_discovery_in_room_without_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every bot answers discovery on its own device, so a room without the owner account has a catalog."""
+    _, config, paths, index, _, agent = picker_setup(tmp_path)
+    client = picker_client(config, paths, USER, account="helper")
+    device = OlmDevice(USER, "REQUESTER", {"ed25519": "fingerprint", "curve25519": "curve"})
+    client.olm = SimpleNamespace(device_store={USER: {"REQUESTER": device}})
+    sent = AsyncMock()
+    monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", sent)
     register_model_catalog_receiver(
         client=client,
-        agent_name="helper",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
         callback_wrapper=lambda callback: callback,
     )
-    client.add_to_device_callback.assert_not_called()
+    await client.add_to_device_callback.call_args.args[0](request())
+    assert sent.call_args.kwargs["content"]["agent_user_ids"] == [agent]
 
 
 @pytest.mark.asyncio
@@ -435,7 +439,6 @@ async def test_queued_request_cannot_repin_replaced_device(tmp_path: Path, monke
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
@@ -527,7 +530,6 @@ async def test_catalog_receiver_delivers_through_public_nio_transport(
         monkeypatch.setattr(client, "add_to_device_callback", registered)
         register_model_catalog_receiver(
             client=client,
-            agent_name="router",
             runtime_paths=paths,
             config_getter=lambda: config,
             membership_index=index,

@@ -44,9 +44,9 @@ def picker_setup(tmp_path: Path) -> tuple:
     return client, config, paths, AgentReplyMembershipIndex(), client.user_id, agent
 
 
-def picker_client(config: Config, paths: RuntimePaths, *members: str) -> AsyncMock:
-    """Return the router's client in a room where the router and *members* are joined and ``$root`` is readable."""
-    router = entity_identity_registry(config, paths).current_id("router").full_id
+def picker_client(config: Config, paths: RuntimePaths, *members: str, account: str = "router") -> AsyncMock:
+    """Return ``account``'s client in a room where it and *members* are joined and ``$root`` is readable."""
+    router = entity_identity_registry(config, paths).current_id(account).full_id
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = router
     client.device_id = "DEVICE"
@@ -110,6 +110,25 @@ async def test_scope_requires_actual_joined_authorized_agent(tmp_path: Path) -> 
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_device_answers_discovery_in_room_without_owner(tmp_path: Path) -> None:
+    """The answering account is the one that must be joined: an agent validates a room the owner is not in."""
+    _, config, paths, index, router, agent = picker_setup(tmp_path)
+    client = picker_client(config, paths, USER, account="helper")
+    scope = await validate_model_picker_scope(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        membership_index=index,
+        room_id=ROOM,
+        requester_user_id=USER,
+        thread_id="$root",
+    )
+    assert router not in client.rooms[ROOM].users
+    assert scope is not None
+    assert scope.agent_user_ids == (agent,)
 
 
 @pytest.mark.asyncio

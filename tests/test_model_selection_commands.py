@@ -182,7 +182,7 @@ async def test_other_runtime_target_never_owns_checkpoint(tmp_path: Path, wrong_
         event,
         USER,
         command,
-        target=MessageTarget.resolve(ROOM, "$root", "$command"),
+        dispatch=MagicMock(target=MessageTarget.resolve(ROOM, "$root", "$command")),
         handled_turn=TurnRecord.create(["$command"]),
         acts_for_requester=False,
     )
@@ -190,6 +190,31 @@ async def test_other_runtime_target_never_owns_checkpoint(tmp_path: Path, wrong_
     assert await harness.turn_store.get_turn_record("$command") is None
     assert not harness.gateway.sent
     assert _helper_override(paths, config) is None
+
+
+@pytest.mark.asyncio
+async def test_structured_selection_runs_on_the_runtime_it_names(tmp_path: Path) -> None:
+    """The device that answered discovery runs the selection that names it, though it answers no other command."""
+    client, config, _, _, router, _ = picker_setup(tmp_path)
+    executor = _build_harness(config, tmp_path / "turns", agent_name="router").dispatcher.deps.command_executor
+    executor.deps.runtime.client = client
+    metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": "reset"}
+    event = root_event(
+        event_id="$command",
+        content={"body": "!model reset", "msgtype": "m.text", "io.mindroom.model_selection": metadata},
+    )
+    with patch.object(executor, "execute", new=AsyncMock()) as execute:
+        owned = await executor.execute_if_owned(
+            client.rooms[ROOM],
+            event,
+            USER,
+            command_parser.parse(event.body),
+            dispatch=MagicMock(target=MessageTarget.resolve(ROOM, "$root", "$command")),
+            handled_turn=TurnRecord.create(["$command"]),
+            acts_for_requester=False,
+        )
+    assert owned is True
+    execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio

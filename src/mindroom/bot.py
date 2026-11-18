@@ -1635,7 +1635,6 @@ class AgentBot:
             )
             register_model_catalog_receiver(
                 client=client,
-                agent_name=self.agent_name,
                 runtime_paths=self.runtime_paths,
                 config_getter=lambda: self.config,
                 membership_index=self._runtime_view.agent_reply_memberships,

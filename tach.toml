@@ -8725,7 +8725,6 @@ depends_on = []
 path = "mindroom.model_selection_scope"
 depends_on = [
     "mindroom.matrix.event_info",
-    "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.conversation_hydration",
 ]
@@ -8737,7 +8736,6 @@ depends_on = []
 [[modules]]
 path = "mindroom.model_catalog_receiver"
 depends_on = [
-    "mindroom.constants",
     "mindroom.matrix.olm_to_device",
     "mindroom.model_catalog",
     "mindroom.model_selection_scope",

@@ -11,7 +11,7 @@ from weakref import WeakValueDictionary
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import COMMAND_TYPES_WITH_SIDE_EFFECTS, CommandType
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
-from mindroom.model_selection import model_selection_targets_other_runtime
+from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY, model_selection_targets_other_runtime
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
@@ -303,13 +303,20 @@ class CommandTurnExecutor:
         acts_for_requester: bool,
     ) -> bool:
         """Execute only on the bot that owns this command response."""
-        if command.type is CommandType.MODEL and model_selection_targets_other_runtime(
-            event.source.get("content", {}),
-            self._client().user_id,
-            self._client().device_id,
-        ):
+        client = self._client()
+        content = event.source.get("content", {})
+        is_model = command.type is CommandType.MODEL
+        if is_model and model_selection_targets_other_runtime(content, client.user_id, client.device_id):
             return False
-        if not await self.deps.turn_policy.owns_command(room, dispatch, command, source_event_id=event.event_id):
+        # A model selection names the device that answered its discovery: that bot runs it.
+        selection = content.get(MODEL_SELECTION_CONTENT_KEY)
+        names_me = is_model and isinstance(selection, dict) and selection.get("runtime_user_id") == client.user_id
+        if not names_me and not await self.deps.turn_policy.owns_command(
+            room,
+            dispatch,
+            command,
+            source_event_id=event.event_id,
+        ):
             return False
         await self.execute(
             room=room,
