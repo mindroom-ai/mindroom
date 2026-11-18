@@ -85,12 +85,16 @@ def get_user_friendly_error_message(
     """
     safe_error = redact_sensitive_text(failure_text(error))
     agent_prefix = f"[{agent_name}] " if agent_name else ""
+    provider_error = error if isinstance(error, ProviderError) else None
 
     logger.error(
         "agent_error",
         agent=agent_name or "agent",
         error_type=type(error).__name__,
         error=repr(error),
+        error_code=provider_error.code if provider_error else None,
+        status_code=provider_error.status_code if provider_error else None,
+        provider=provider_error.provider if provider_error else None,
     )
 
     if isinstance(error, ModelSafeguardRefusal):
