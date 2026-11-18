@@ -64,10 +64,10 @@ Detailed wiring with file:line evidence: [`2026-11-17-inline-compaction-backend-
 - `CompactionLifecycleStart` gains `phase: CompactionPhase = "pre_turn"`; `compact_scope_mid_turn` passes `"mid_turn"`.
 - New `history/reply_compactions.py`: `ReplyCompactions` (per-reply recorder; `bind(tool_count, changed)`, `start`, `update`, `content`) and `ReplyCompactionLifecycle` (implements `CompactionLifecycle`; `mode == "manual"` delegates to `MatrixCompactionLifecycle`, which still sends the notice; everything else records into the recorder and sends no notice).
 - `response_runner._deliver_turn` creates one recorder per reply, hands it to the lifecycle and to streamed and collected delivery; `final_extra_content()` adds the key.
-- `StreamingResponse` adds the key to every durable write (progress and final), nudges a refresh when the recorder changes (same as worker warm-up progress), lets a compaction change justify an otherwise empty progress edit and a live checkpoint, and puts the list into `LiveDocs`.
+- `StreamingResponse` adds the key to every durable write (progress and final) and puts the list into `LiveDocs`, which the frame publisher sends on its next tick. A compaction change never triggers, gates or requires a durable write: entries ride on the writes the stream makes anyway (text and tool progress, checkpoints due for other reasons, the placeholder send, the terminal write).
 - Prompt cache: no impact. Content keys never enter the prompt; `COMPACTION_NOTICE_CONTENT_KEY` stays in `_NON_TURN_NOTICE_CONTENT_KEYS`, and the plural key must not make a reply look like a notice.
 - Unchanged: quiet/contact/participation turns and callers without a lifecycle stay silent; run-local summaries never use the lifecycle.
-- Known limits (same as reasoning today): entries are not carried across approval resumes or restart replays; ledger-rendered terminal writes (cancel/error) drop the key.
+- Known limits: without live frames, a running compaction shows only once the next durable write lands. Same as reasoning today: entries are not carried across approval resumes or restart replays; ledger-rendered terminal writes (cancel/error) drop the key.
 
 ## Client (mindroom-chat)
 
@@ -84,7 +84,7 @@ Card title: "Context compacted" / "Compacting context… {n} s" / "Compaction fa
 
 ## Testing
 
-Backend: unit tests for the recorder and lifecycle, streaming tests for `after_tool` anchoring (tools shown and hidden), live frames, the placeholder progress edit during pre-turn, the final event, segmented first-segment-only, partial-reply context (plural key not skipped), mid-turn `phase`, and the runner test that auto sends no notice while manual still does.
+Backend: unit tests for the recorder and lifecycle, streaming tests for `after_tool` anchoring (tools shown and hidden), live frames, no durable write for a compaction alone (placeholder, regeneration, approval pause), the final event, segmented first-segment-only, partial-reply context (plural key not skipped), mid-turn `phase`, and the runner test that auto sends no notice while manual still does.
 
 Client: reader tests (valid, malformed, legacy notice), placement tests (top, after a marker, splitting a run, cog hidden, inside the Worked-for fold, two seams, seam plus thinking segment at one spot), state tests (ticking stops, interrupted on a terminal reply), live frame parse/apply, the quiet-marker fold, and an e2e spec that renders scenes 1-7 on desktop and phone (390 px), dark and light, with the card open, for the PR screenshots.
 

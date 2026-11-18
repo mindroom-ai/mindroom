@@ -247,7 +247,7 @@ def test_after_tool_read_once_at_start() -> None:
     """The entry anchors at the tool count when it began, not at a later count."""
     recorder = ReplyCompactions()
     count = 2
-    recorder.bind(tool_count=lambda: count, changed=lambda: None)
+    recorder.bind(tool_count=lambda: count)
 
     entry_id = recorder.start(_start())
     count = 5
@@ -269,10 +269,9 @@ def test_unbound_recorder_anchors_at_zero() -> None:
 
 
 def test_unbind_stops_reading_the_delivery() -> None:
-    """An unbound recorder no longer reads or nudges the delivery it was bound to."""
+    """An unbound recorder no longer reads the delivery it was bound to."""
     recorder = ReplyCompactions()
-    calls: list[None] = []
-    recorder.bind(tool_count=lambda: 3, changed=lambda: calls.append(None))
+    recorder.bind(tool_count=lambda: 3)
     recorder.unbind()
 
     recorder.start(_start())
@@ -280,56 +279,6 @@ def test_unbind_stops_reading_the_delivery() -> None:
     content = recorder.content()
     assert content is not None
     assert content[0]["after_tool"] == 0
-    assert calls == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["success", "failed"])
-async def test_a_failing_nudge_keeps_the_entry_and_its_lifecycle(outcome: str) -> None:
-    """A delivery nudge that raises loses only that refresh: start returns the id and later updates still land."""
-    recorder = ReplyCompactions()
-    nudges: list[None] = []
-
-    def failing_nudge() -> None:
-        nudges.append(None)
-        msg = "delivery queue gone"
-        raise RuntimeError(msg)
-
-    recorder.bind(tool_count=lambda: 0, changed=failing_nudge)
-    lifecycle = _lifecycle(recorder)
-
-    entry_id = await lifecycle.start(_start())
-    assert entry_id is not None
-    await lifecycle.progress(_progress(entry_id))
-    if outcome == "success":
-        await lifecycle.complete_success(_outcome(entry_id))
-    else:
-        await lifecycle.complete_failure(_failure(entry_id, "failed"))
-
-    content = recorder.content()
-    assert content is not None
-    [entry] = content
-    assert entry["id"] == entry_id
-    assert entry["status"] == outcome
-    assert len(nudges) == 3
-    assert recorder.version == 3
-
-
-@pytest.mark.asyncio
-async def test_changed_called_on_every_change() -> None:
-    """Every recorded change nudges the bound delivery and bumps the version."""
-    recorder = ReplyCompactions()
-    calls: list[None] = []
-    recorder.bind(tool_count=lambda: 0, changed=lambda: calls.append(None))
-    lifecycle = _lifecycle(recorder)
-    assert recorder.version == 0
-
-    entry_id = await lifecycle.start(_start())
-    await lifecycle.progress(_progress(entry_id))
-    await lifecycle.complete_success(_outcome(entry_id))
-
-    assert len(calls) == 3
-    assert recorder.version == 3
 
 
 def test_content_is_a_copy() -> None:

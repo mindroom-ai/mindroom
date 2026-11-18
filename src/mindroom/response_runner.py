@@ -2118,10 +2118,7 @@ class ResponseRunner:
                 replaces_text=turn.streaming_cls.replaces_text,
             )
             # A compaction anchors after the tools collected so far; the one final message carries the entries.
-            compactions.bind(
-                tool_count=lambda: len(presentation.tool_trace) if runtime.show_tool_calls else 0,
-                changed=lambda: None,
-            )
+            compactions.bind(tool_count=lambda: len(presentation.tool_trace) if runtime.show_tool_calls else 0)
             try:
                 body, collected_trace = await collect_streamed_response_content(
                     response_stream(),

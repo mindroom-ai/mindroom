@@ -25,6 +25,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
+    StreamingLifecycleSuspensionError,
     StreamingResponse,
     UnfinishedStreamedReply,
     send_streaming_response,
@@ -573,96 +574,32 @@ async def test_a_regenerations_compaction_never_blanks_the_answer_it_replaces(
 
 
 @pytest.mark.asyncio
-async def test_a_compaction_starting_while_the_first_replacement_edit_lands_is_shown_once_it_lands(
-    tmp_path: Path,
-) -> None:
-    """A compaction that starts while a regeneration's first edit is in flight shows as running once that edit lands."""
+async def test_without_frames_a_compaction_rides_on_the_next_durable_write(tmp_path: Path) -> None:
+    """A compaction alone never edits the placeholder; the next write the text makes carries its entry."""
     records, edits, recorder = _records(), _Edits(), ReplyCompactions()
     compaction = _Compaction(recorder)
-    first_edit_sent, release_first_edit = asyncio.Event(), asyncio.Event()
-    record_edit = edits.edit
+    stream = _stream(compaction.start, 0.2, "Partial", 0.2, compaction.succeed, 0.2, " answer.", 0.03)
+    await _run(
+        _config(tmp_path, update_interval=0.05, live_frames=False),
+        stream,
+        records,
+        edits,
+        placeholder_event_id="$placeholder",
+        compactions=recorder,
+    )
 
-    async def hold_first_edit(*args: Any) -> DeliveredMatrixEvent:  # noqa: ANN401
-        if not first_edit_sent.is_set():
-            first_edit_sent.set()
-            await release_first_edit.wait()
-        return await record_edit(*args)
-
-    async def start_while_held() -> AsyncIterator[Any]:
-        yield TextDelta("New answer")
-        await first_edit_sent.wait()
-        compaction.start()
-        release_first_edit.set()
-        # The compaction keeps running, and no text arrives meanwhile.
-        await asyncio.sleep(0.3)
-        compaction.succeed()
-        yield TextDelta(", finished.")
-        await asyncio.sleep(0.03)
-
-    with patch.object(edits, "edit", new=hold_first_edit):
-        await _run(
-            _config(tmp_path, update_interval=0.05, live_frames=False),
-            start_while_held(),
-            records,
-            edits,
-            existing_answer_event_id="$prior_answer",
-            compactions=recorder,
-        )
-
-    assert COMPACTIONS_CONTENT_KEY not in edits.contents[0]
-    running = [
-        content
-        for content in edits.contents
-        if [entry["status"] for entry in content.get(COMPACTIONS_CONTENT_KEY, [])] == ["running"]
-    ]
-    assert running
-    assert running[0]["body"] == "New answer"
-    assert _terminal(records)[COMPACTIONS_CONTENT_KEY][0]["status"] == "success"
+    assert edits.contents
+    assert PROGRESS_PLACEHOLDER not in [content["body"] for content in edits.contents]
+    assert [entry["status"] for entry in edits.contents[0][COMPACTIONS_CONTENT_KEY]] == ["running"]
+    assert edits.contents[0]["body"] == "Partial"
+    assert [entry["status"] for entry in _terminal(records)[COMPACTIONS_CONTENT_KEY]] == ["success"]
 
 
 @pytest.mark.asyncio
-async def test_compaction_start_on_placeholder_sends_progress_edit(tmp_path: Path) -> None:
-    """A compaction that starts while only the placeholder shows edits the placeholder at once to show it."""
+async def test_with_frames_a_compaction_shows_live_without_a_durable_write(tmp_path: Path, frames: _Frames) -> None:
+    """Frames show a running compaction at once; no durable edit is made for it alone."""
     records, edits, recorder = _records(), _Edits(), ReplyCompactions()
     compaction = _Compaction(recorder)
-    config = _config(tmp_path, live_frames=False)
-    stream = _stream(compaction.start, 0.1, compaction.progress, 0.1, compaction.succeed, 0.1, "Done.", 0.03)
-    await _run(config, stream, records, edits, placeholder_event_id="$placeholder", compactions=recorder)
-
-    statuses = [
-        [entry["status"] for entry in content[COMPACTIONS_CONTENT_KEY]]
-        for content in edits.contents
-        if COMPACTIONS_CONTENT_KEY in content
-    ]
-    assert statuses[0] == ["running"]
-    assert ["success"] in statuses
-    placeholder_edit = next(content for content in edits.contents if COMPACTIONS_CONTENT_KEY in content)
-    assert placeholder_edit["body"] == PROGRESS_PLACEHOLDER
-    assert "runs_remaining" not in _terminal(records)[COMPACTIONS_CONTENT_KEY][0]
-
-
-@pytest.mark.asyncio
-async def test_compaction_change_schedules_checkpoint_with_live_frames(tmp_path: Path, frames: _Frames) -> None:
-    """While frames carry progress, a compaction change alone still earns the next durable checkpoint."""
-    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
-    compaction = _Compaction(recorder)
-    # "Hello" is the reply's first event, so after it only the compaction is left to checkpoint.
-    stream = _stream("Hello", 0.05, compaction.start, 0.4)
-    await _run(_config(tmp_path, update_interval=0.1), stream, records, edits, compactions=recorder)
-
-    checkpoints = [content for content in edits.contents if COMPACTIONS_CONTENT_KEY in content]
-    assert checkpoints
-    assert checkpoints[0]["body"] == "Hello"
-    assert "io.mindroom.live_checkpoint" in checkpoints[0]
-    assert [entry["status"] for entry in _live_compactions(frames.sent)] == ["running"]
-
-
-@pytest.mark.asyncio
-async def test_compaction_on_placeholder_earns_a_checkpoint_with_live_frames(tmp_path: Path, frames: _Frames) -> None:
-    """With frames on and no text yet, a compaction that starts over the placeholder still earns a durable checkpoint."""
-    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
-    compaction = _Compaction(recorder)
-    # The pause lets frames go live first, so the compaction reaches the reply only through a checkpoint.
     stream = _stream(0.15, compaction.start, 0.4, "Done.", 0.03)
     await _run(
         _config(tmp_path, update_interval=0.1),
@@ -673,25 +610,12 @@ async def test_compaction_on_placeholder_earns_a_checkpoint_with_live_frames(tmp
         compactions=recorder,
     )
 
-    checkpoints = [
-        content
-        for content in edits.contents
-        if COMPACTIONS_CONTENT_KEY in content and "io.mindroom.live_checkpoint" in content
-    ]
-    assert checkpoints
-    assert checkpoints[0]["body"] == PROGRESS_PLACEHOLDER
-    assert [entry["status"] for entry in checkpoints[0][COMPACTIONS_CONTENT_KEY]] == ["running"]
-    assert edits.contents.index(checkpoints[0]) < next(
-        index for index, content in enumerate(edits.contents) if content["body"] == "Done."
-    )
     assert [entry["status"] for entry in _live_compactions(frames.sent)] == ["running"]
+    assert PROGRESS_PLACEHOLDER not in [content["body"] for content in edits.contents]
 
 
-def test_compaction_change_is_uncommitted_once_an_event_shows_the_stream(tmp_path: Path) -> None:
-    """A change the stream's event does not show yet is uncommitted; before one shows it, its first write does.
-
-    An earlier answer a regeneration writes over does not show the stream.
-    """
+def test_a_compaction_change_is_never_uncommitted_presentation(tmp_path: Path) -> None:
+    """Compaction entries ride on durable writes; a change alone owes none, so no pause or checkpoint waits on it."""
     recorder = ReplyCompactions()
     config = _config(tmp_path)
     streaming = StreamingResponse(
@@ -701,15 +625,49 @@ def test_compaction_change_is_uncommitted_once_an_event_shows_the_stream(tmp_pat
         compactions=recorder,
         **_records().hooks(),
     )
-    _Compaction(recorder).start()
-    assert not streaming.has_uncommitted_presentation()
-
-    streaming.event_id = "$prior_answer"
-    assert not streaming.has_uncommitted_presentation()
-
-    # As an adopted placeholder, or the stream's own first write, makes it.
+    streaming.event_id = "$placeholder"
     streaming._shows_stream = True
-    assert streaming.has_uncommitted_presentation()
+    _Compaction(recorder).start()
+
+    assert not streaming.has_uncommitted_presentation()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("frames")
+async def test_an_approval_pause_with_a_finished_compaction_pending_survives_refused_edits(tmp_path: Path) -> None:
+    """A pause whose only unsent change is a finished compaction needs no edit, so Matrix refusing edits cannot fail it."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    suspension = StreamingLifecycleSuspensionError("paused")
+    first_edit_landed = asyncio.Event()
+    record_edit = edits.edit
+
+    async def refuse_after_the_first(*args: Any) -> DeliveredMatrixEvent | None:  # noqa: ANN401
+        if first_edit_landed.is_set():
+            return None
+        delivered = await record_edit(*args)
+        first_edit_landed.set()
+        return delivered
+
+    async def paused_stream() -> AsyncIterator[Any]:
+        yield TextDelta("I checked the input.")
+        await first_edit_landed.wait()
+        compaction.start()
+        compaction.succeed()
+        await asyncio.sleep(0.1)
+        raise suspension
+
+    with patch.object(edits, "edit", new=refuse_after_the_first), pytest.raises(StreamingLifecycleSuspensionError):
+        await _run(
+            _config(tmp_path, update_interval=0.05, live_frames=False),
+            paused_stream(),
+            records,
+            edits,
+            placeholder_event_id="$placeholder",
+            compactions=recorder,
+        )
+
+    assert [content["body"] for content in edits.contents] == ["I checked the input."]
 
 
 @pytest.mark.asyncio

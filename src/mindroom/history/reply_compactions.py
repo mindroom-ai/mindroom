@@ -12,8 +12,6 @@ import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from mindroom.logging_config import get_logger
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -24,8 +22,6 @@ if TYPE_CHECKING:
         CompactionLifecycleStart,
         CompactionOutcome,
     )
-
-logger = get_logger(__name__)
 
 _TERMINAL_STATUSES = frozenset({"success", "failed", "timeout"})
 # Every later write of the reply repeats the entry, so a provider's long error must not crowd out its answer.
@@ -38,23 +34,19 @@ def _short_reason(reason: str) -> str:
 
 
 class ReplyCompactions:
-    """The compaction entries of one reply, in start order, with a version bumped on every change."""
+    """The compaction entries of one reply, in start order."""
 
     def __init__(self) -> None:
         self._entries: list[dict[str, object]] = []
         self._tool_count: Callable[[], int] | None = None
-        self._changed: Callable[[], None] | None = None
-        self.version = 0
 
-    def bind(self, *, tool_count: Callable[[], int], changed: Callable[[], None]) -> None:
-        """Attach the delivery showing the reply: its visible tool count, and a nudge to write a change."""
+    def bind(self, *, tool_count: Callable[[], int]) -> None:
+        """Attach the delivery showing the reply, whose visible tool count anchors each new compaction."""
         self._tool_count = tool_count
-        self._changed = changed
 
     def unbind(self) -> None:
         """Detach the delivery, which no longer shows the reply."""
         self._tool_count = None
-        self._changed = None
 
     def start(self, event: CompactionLifecycleStart) -> str:
         """Record a running compaction anchored after the tools shown so far, and return its id."""
@@ -74,7 +66,6 @@ class ReplyCompactions:
         if event.history_budget_tokens is not None:
             entry["history_budget_tokens"] = event.history_budget_tokens
         self._entries.append(entry)
-        self._note_change()
         return entry_id
 
     def update(self, entry_id: str, **fields: object) -> None:
@@ -88,23 +79,12 @@ class ReplyCompactions:
         entry.update({key: value for key, value in fields.items() if value is not None})
         if entry["status"] in _TERMINAL_STATUSES:
             entry.pop("runs_remaining", None)
-        self._note_change()
 
     def content(self) -> list[dict[str, object]] | None:
         """Return a copy of the entries for the reply's content, or ``None`` when there are none."""
         if not self._entries:
             return None
         return copy.deepcopy(self._entries)
-
-    def _note_change(self) -> None:
-        self.version += 1
-        if self._changed is None:
-            return
-        # Best effort: a failed nudge loses only this refresh. The entry is recorded, and the next write shows it.
-        try:
-            self._changed()
-        except Exception:
-            logger.warning("reply_compaction_refresh_failed", version=self.version, exc_info=True)
 
 
 class ReplyCompactionLifecycle:
