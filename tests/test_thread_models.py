@@ -987,6 +987,24 @@ async def test_thread_model_tool_rejects_unknown_model(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_model_tool_rejects_a_model_removed_since_the_turn_started(tmp_path: Path) -> None:
+    """A model a live reload removed is refused, and the thread keeps the selection it had."""
+    context = _make_tool_context(tmp_path)
+    current = context.config.model_copy(deep=True)
+    del current.models["large"]
+    tool = ThreadModelTools()
+
+    with tool_runtime_context(context):
+        await tool.switch_thread_model("default")
+    with tool_runtime_context(replace(context, config_provider=lambda: current)):
+        payload = json.loads(await tool.switch_thread_model("large"))
+
+    assert payload["status"] == "error"
+    assert payload["available_models"] == ["default"]
+    assert _stored_model(context.runtime_paths, THREAD_ID) == "default"
+
+
+@pytest.mark.asyncio
 async def test_thread_model_tool_reports_stale_override_as_inactive(tmp_path: Path) -> None:
     """An override naming a removed model must not be reported as active."""
     context = _make_tool_context(tmp_path)

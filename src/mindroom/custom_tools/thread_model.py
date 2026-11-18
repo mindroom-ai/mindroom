@@ -119,12 +119,15 @@ class ThreadModelTools(Toolkit):
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
-        if model_name not in context.config.models:
+        # The turn runs on its own config while live reloads move on: a model removed since must not be saved for
+        # later turns, and this turn cannot continue on one added since.
+        switchable = context.config.models.keys() & context.current_config.models.keys()
+        if model_name not in switchable:
             return self._payload(
                 "error",
                 action="switch",
                 message=f"Unknown model '{model_name}'.",
-                available_models=sorted(context.config.models),
+                available_models=sorted(switchable),
             )
         set_thread_model_override(
             context.runtime_paths,
