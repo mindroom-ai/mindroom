@@ -1352,10 +1352,12 @@ async def test_the_turns_metadata_reaches_the_summary_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("earlier_summary", [None, "OLD-SUMMARY"])
+@pytest.mark.parametrize("unseen", [False, True], ids=["prompt-only", "unseen-message"])
 async def test_first_request_over_the_limit_from_tools_compacts_history_before_dropping_it(
     tmp_path: Path,
     summary_calls: SummaryCalls,
     earlier_summary: str | None,
+    unseen: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
@@ -1378,8 +1380,10 @@ async def test_first_request_over_the_limit_from_tools_compacts_history_before_d
     lookup = Function(name="lookup", description="d" * 10_000, entrypoint=lambda: "ok")
     lifecycle = RecordingCompactionLifecycle()
     agent = _scoped_agent(model, config, paths, storage, tools=[lookup], lifecycle=lifecycle)
+    # A Matrix message the agent has not seen yet folds with the history, though the model has not run.
+    prompt = [Message(role="user", content="An unseen message"), Message(role="user", content="Do the task")]
 
-    output = await _run(agent, "Do the task")
+    output = await _run(agent, prompt if unseen else "Do the task")
 
     assert str(output.content) == "done"
     first = model.requests[0]
@@ -1390,7 +1394,8 @@ async def test_first_request_over_the_limit_from_tools_compacts_history_before_d
     assert folded_run_ids(storage) == [f"run-{index}" for index in range(4)]
     if earlier_summary is not None:
         assert earlier_summary in summary_calls.inputs[0]
-    # A fold before the reply's first model request sits before the reply, not between two of its requests.
+    # A fold before the reply's first model request sits before the reply, not between two of its requests, even when
+    # it takes the turn's unseen messages along.
     [start] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleStart)]
     assert start.phase == "pre_turn"
 

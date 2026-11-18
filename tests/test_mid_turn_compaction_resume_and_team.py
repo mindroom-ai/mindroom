@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -29,7 +30,7 @@ from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import TurnMessages, build_request, replayed_history
 from mindroom.history.storage import new_scope_session
 from mindroom.history.summary_message import is_compaction_summary
-from mindroom.history.types import CompactionOutcome
+from mindroom.history.types import CompactionLifecycle, CompactionLifecycleStart, CompactionOutcome
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TurnCompleted
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelRequest, StreamEvent
     from mindroom.session_storage.store import ConversationStore
@@ -262,6 +264,27 @@ async def _resume(agent: _Resumable, paused: RunRecord) -> RunRecord:
     return await forward_resume(agent.runner().events(paused, _approved(paused)), None, paused=paused)
 
 
+@dataclass(frozen=True, kw_only=True)
+class _ReportingResumeRunner(ResumeRunner):
+    """A resume whose hooks report compactions to ``lifecycle``, as a reply's own run does."""
+
+    lifecycle: CompactionLifecycle
+
+    @cached_property
+    def _hooks(self) -> LoopHooks:
+        turn = HookTurn(
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            model_name=self.model_name,
+            storage=self.storage,
+            replay_plan=configured_replay_plan(history_settings=self.build.history_settings, estimated_tokens=0),
+            prompt_id=None,
+            lifecycle=self.lifecycle,
+            checkpoints=False,
+        )
+        return agent_loop_hooks(self.build, turn)
+
+
 def _summaries(messages: Sequence[Message]) -> list[Message]:
     return [message for message in messages if is_compaction_summary(message)]
 
@@ -315,6 +338,40 @@ async def test_resumed_run_compacts_before_its_first_request_from_its_paused_res
     assert len(summary_calls.inputs) == 1
     assert len(model.requests) == 6
     assert len(_summaries(model.requests[5].messages)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("resume_probe", "summary_calls")
+async def test_a_compaction_before_a_resumes_first_request_is_mid_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The paused leg's model already answered, so a fold before the resume's first request sits mid-turn."""
+    model = _PausingLoop(
+        tool_rounds=5,
+        usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=999_900 if number == 5 else 10)),
+    )
+    agent = _resumable(tmp_path, monkeypatch, model, context_window=1_000_000, replays_history=True)
+    paused = await _pause(agent)
+    before = len(model.requests)
+    lifecycle = RecordingCompactionLifecycle()
+    session = agent.store.load_session("session-1")
+    assert session is not None
+    runner = _ReportingResumeRunner(
+        build=agent.build,
+        config=agent.config,
+        runtime_paths=agent.runtime_paths,
+        model_name="default",
+        storage=RunStorage(agent.store, session, TEST_AGENT_SCOPE),
+        user_id=None,
+        lifecycle=lifecycle,
+    )
+
+    await forward_resume(runner.events(paused, _approved(paused)), None, paused=paused)
+
+    assert len(_summaries(model.requests[before].messages)) == 1
+    [start] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleStart)]
+    assert start.phase == "mid_turn"
 
 
 @pytest.mark.asyncio
