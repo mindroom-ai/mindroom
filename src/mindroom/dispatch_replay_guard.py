@@ -94,7 +94,7 @@ async def _is_unresponded_requester_event(
     """Return whether a normalized candidate is an unanswered turn of the same run identity.
 
     The filters SQL cannot express. Whose turn an event really is depends on
-    trusted relay metadata inside its content, a router transcript echo is a
+    trusted relay metadata inside its content, a voice transcript echo is a
     display artifact rather than a turn, a message that may be for another
     participant -- one mentioning only others, or an upload or untranscribed
     voice message whose addressee is not known yet -- may never become this

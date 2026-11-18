@@ -350,7 +350,7 @@ async def _sole_untitled_prompt(
     )
     if state is None or state.summary_event_ids:
         return None
-    # The router's voice echo and routing relay, and a responder's reply
+    # A voice transcript echo and an old routing relay, and a responder's reply
     # placeholder, can land before a read; none is a second prompt.
     ordinary = [
         message

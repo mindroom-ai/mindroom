@@ -927,8 +927,7 @@ def record_finalized_visible_echo(
 ) -> None:
     """Mark one source's tracked echo replaced; a transcript is never overwritten by a fallback.
 
-    Echo publication never becomes the turn's answer: its response stays as it
-    was. A router that takes an echo as its outcome records that explicitly.
+    Echo publication never becomes the turn's answer: its response stays as it was.
     """
     found = _source_row(transaction, agent_name, source_event_id)
     if found is None:

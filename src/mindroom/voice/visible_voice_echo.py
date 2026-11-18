@@ -50,12 +50,15 @@ class VisibleVoiceEchoLifecycle:
         target: MessageTarget,
         transcript: PreparedIngress,
     ) -> None:
-        """Return once the transcript is in the room, or when none is posted; raise when it could not be sent."""
+        """Return once the transcript is in the room, or when none is posted; raise when it could not be sent.
+
+        The caller holds the reply decision's admission, so the config read here stays the one it decided on.
+        """
         content = transcript.source["content"]
         if not self.runtime.config.voice.visible_router_echo or content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True:
             return
         lock = _locks.setdefault((room_id, source_event_id), asyncio.Lock())
-        async with lock, self.runtime.admission_fence():
+        async with lock:
             owner = await self.claim_room_event(room_id, source_event_id, "voice_transcript", self.agent_name)
             # Another owner has posted, as it held this lock during its send; this bot's own receipt says it has.
             if owner != self.agent_name or await self.turn_store.visible_echo(source_event_id) is not None:
@@ -77,3 +80,4 @@ class VisibleVoiceEchoLifecycle:
                 msg = "The voice transcript could not be sent"
                 raise RuntimeError(msg)
             await self.turn_store.record_visible_echo(room_id, source_event_id, event_id)
+            await self.turn_store.record_finalized_visible_echo(source_event_id, event_id, is_fallback=False)

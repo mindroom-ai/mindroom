@@ -290,11 +290,6 @@ class TurnStore:
         """Return the visible echo tracked for one source event, and how its replacement ended."""
         return await self.deps.turn_records.read(turn_rows.visible_echo, source_event_id)
 
-    async def finalized_visible_echoes(self, source_event_ids: Sequence[str]) -> tuple[str, ...]:
-        """Return every visible echo of these sources whose replacement succeeded, in source order."""
-        echoes = [await self.visible_echo(source_event_id) for source_event_id in source_event_ids]
-        return tuple(echo.event_id for echo in echoes if echo is not None and echo.is_fallback is not None)
-
     async def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
         """Return the durable turn that owns one visible response event."""
         return await self.deps.turn_records.read(turn_rows.turn_for_response_event, response_event_id)

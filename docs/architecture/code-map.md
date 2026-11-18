@@ -68,7 +68,7 @@ Matrix sync callback
 | `turns/interactive_selection.py` | Admits an answer to an interactive question behind earlier ingress and runs its response after the gate |
 | `turns/queued_notice.py` | The queued notice and approval-wait reaction that text, media, and voice ingress share |
 | `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
-| `voice/readiness.py` | Voice preparation and checkpointing, gated on the router's visible echo |
+| `voice/readiness.py` | Voice preparation: transcription and its durable per-bot checkpoint |
 | `steward_duties.py` | What a room's steward does for the room: publish its thread mode and MindRoom accounts, on its own triggers, on a handover and in the startup and reload sweep, and emit room-membership hooks under a per-event claim taken for the steward elected then; also the owner account's orphaned-account cleanup and welcome in configured rooms |
 | `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access at the first gate and again under the admission fence |
 | `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
@@ -667,7 +667,7 @@ Matrix sync callback
 | `custom_tools/computer_announcement.py` | Tool hook that shows a chat_ui agent's worker computer in MindRoom Chat on its first worker browser call in a conversation |
 | `tools/react.py` | Tool-catalog registration for the reaction-only tool |
 | `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
-| `voice/visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
+| `voice/visible_voice_echo.py` | The answering agent posts a voice message's transcript once, before its reply |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `slack/` | Native Slack: the minimal Web API client, personal and project tools, events, and agent reply mirroring |
 | `slack/api.py` | Minimal async Slack Web API client over `httpx`, with Slack error and rate-limit mapping, parsing of conversation, message, permalink, and user targets, and message permalinks |

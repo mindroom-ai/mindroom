@@ -1971,7 +1971,7 @@ async def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(
     store = await _store(journal_store)
     await store.record_visible_echo(ROOM, "$event", "$echo")
 
-    assert await store.finalized_visible_echoes(("$event",)) == ()
+    assert await store.visible_echo("$event") == SourceVisibleEcho("$echo")
 
     await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
 
@@ -1979,7 +1979,6 @@ async def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(
     assert record is not None
     assert not record.completed
     assert record.response_event_id is None
-    assert await store.finalized_visible_echoes(("$event",)) == ("$echo",)
     assert await store.visible_echo("$event") == SourceVisibleEcho("$echo", is_fallback=False)
 
 
@@ -2979,7 +2978,8 @@ async def test_every_finalized_echo_of_a_coalesced_turn_is_known_after_a_restart
 
     reopened = await _store(journal_store)
 
-    assert await reopened.finalized_visible_echoes(("$voice-1", "$voice-2")) == ("$echo-1", "$echo-2")
+    assert await reopened.visible_echo("$voice-1") == SourceVisibleEcho("$echo-1", is_fallback=False)
+    assert await reopened.visible_echo("$voice-2") == SourceVisibleEcho("$echo-2", is_fallback=False)
     record = await reopened.get_turn_record("$voice-1")
     assert record is not None
     assert record.response_event_id is None, "an echo never becomes the turn's answer"

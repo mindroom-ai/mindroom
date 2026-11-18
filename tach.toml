@@ -6194,17 +6194,10 @@ depends_on = []
 [[modules]]
 path = "mindroom.voice.visible_voice_echo"
 depends_on = [
-    "mindroom.matrix.room_history_reads",
-    "mindroom.matrix.room_membership",
     "mindroom.constants",
     "mindroom.delivery_gateway",
-    "mindroom.dispatch_recovery_context",
-    "mindroom.event_journal",
 ]
-visibility = [
-    "mindroom.bot",
-    "mindroom.voice.readiness",
-]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.voice.readiness"
@@ -6212,7 +6205,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.inbound_turn_normalizer",
     "mindroom.turn_record",
-    "mindroom.voice.visible_voice_echo",
 ]
 visibility = ["mindroom.bot"]
 
