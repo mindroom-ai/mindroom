@@ -432,13 +432,14 @@ class AgentReplyMembershipIndex:
         self,
         config: Config,
         runtime_paths: RuntimePaths,
-        observers: Callable[[], tuple[Sequence[nio.AsyncClient], Callable[[str, Sequence[str]], str | None]]],
+        observers: Callable[[], tuple[Sequence[nio.AsyncClient], Callable[[str, Sequence[str]], str | None], bool]],
     ) -> None:
         """Atomically replace membership state from authoritative Matrix queries, each room read by one observer.
 
-        ``observers`` returns the observing accounts' clients and ``pick_observer``. It is asked once this refresh
-        holds the refresh lock, together with the epoch, so a refresh that waited for another one never reads
-        through an account that stopped observing meanwhile.
+        ``observers`` returns the observing accounts' clients, ``pick_observer``, and whether every running account
+        observes. It is asked once this refresh holds the refresh lock, together with the epoch, so a refresh that
+        waited for another one never reads through an account that stopped observing meanwhile.
+        The room lists prove a room absent only when, at publication, every running account observes and was read.
         A room keeps the observer its row names while that account is among the clients and its own answer lists the
         room; else ``pick_observer(room_id, joined_user_ids)`` picks one among the accounts whose answers list it,
         None when there is none.
@@ -450,7 +451,7 @@ class AgentReplyMembershipIndex:
             self.invalidate(config, reason="policy_changed_before_refresh")
         async with self._refresh_lock:
             expected_epoch = self._epoch
-            clients, pick_observer = observers()
+            clients, pick_observer, _ = observers()
             reread, self._reread_room_ids = self._reread_room_ids, set()
             snapshot = self._snapshot
             previous_rooms = (
@@ -478,6 +479,10 @@ class AgentReplyMembershipIndex:
             if self._desired_signature != signature or self._epoch != expected_epoch:
                 return
             candidate = _replay_refresh_transitions(candidate, self._snapshot, config, transitions)
+            now_clients, _, complete = observers()
+            if not complete or [client.user_id for client in now_clients] != [client.user_id for client in clients]:
+                # A running account does not observe yet, or one began to meanwhile: its rooms are in no room list.
+                candidate = replace(candidate, refresh_required=True, possible_joined_room_ids=None)
             self._publish(candidate)
             for room in candidate.rooms:
                 if room.ready and room.room_key is not None:

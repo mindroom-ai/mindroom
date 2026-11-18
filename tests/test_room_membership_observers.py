@@ -115,7 +115,7 @@ async def _refresh(
     *accounts: _Account,
     power: Mapping[str, float] | None = None,
 ) -> None:
-    await index.refresh(config, runtime_paths, lambda: (_clients(*accounts), _by_power(power or {})))
+    await index.refresh(config, runtime_paths, lambda: (_clients(*accounts), _by_power(power or {}), True))
 
 
 def _clients(*accounts: _Account) -> list[nio.AsyncClient]:
@@ -458,8 +458,8 @@ async def test_refresh_queued_behind_another_reads_only_through_the_accounts_obs
     membership_sync = _sync(index)
     observing = [a, b]
 
-    def observers() -> tuple[list[nio.AsyncClient], Callable[[str, Sequence[str]], str | None]]:
-        return _clients(*observing), _by_power({_A: 50})
+    def observers() -> tuple[list[nio.AsyncClient], Callable[[str, Sequence[str]], str | None], bool]:
+        return _clients(*observing), _by_power({_A: 50}), True
 
     blocked = asyncio.create_task(index.refresh(config, runtime_paths, observers))
     await _reached(a.reading)
@@ -601,7 +601,7 @@ async def test_two_config_keys_for_one_room_share_one_observer_and_one_read(tmp_
         return user_ids[(len(picks) - 1) % len(user_ids)]
 
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, lambda: (_clients(a, b), pick_observer))
+    await index.refresh(config, runtime_paths, lambda: (_clients(a, b), pick_observer, True))
 
     assert picks == [_ROOM]
     assert (a.reads, b.reads) == ([_ROOM], [])
@@ -742,6 +742,100 @@ async def test_own_join_of_a_room_another_account_observes_changes_nothing(tmp_p
     assert _observers(index) == {_ROOM: _A}
     assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
     assert not index.needs_refresh(config)
+
+
+def _bot(account: _Account, *, running: bool = True, observing: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(client=account, running=running, observes_room_members=observing)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("b_running", "b_observing", "a_list_fails", "during_refresh", "known"),
+    [
+        (True, True, False, None, True),
+        (False, False, False, None, True),
+        (True, False, False, None, False),
+        (True, True, True, None, False),
+        (False, False, False, "b_starts", False),
+        (True, False, False, "b_catches_up", False),
+        (True, False, False, "b_stops_running", True),
+    ],
+)
+async def test_census_proves_absence_only_when_every_running_bot_observes_and_answers(
+    tmp_path: Path,
+    *,
+    b_running: bool,
+    b_observing: bool,
+    a_list_fails: bool,
+    during_refresh: str | None,
+    known: bool,
+) -> None:
+    """A room list names every joined room only when each running bot observes, from the start to the publication."""
+    config, runtime_paths = _config(tmp_path)
+    a = _Account(_A, {_ROOM: (_A, _ALICE)}, joined_rooms_fails=a_list_fails, hold=asyncio.Event())
+    b = _Account(_B, {_OTHER: (_B, _ALICE)})
+    bots = {"a": _bot(a), "b": _bot(b, running=b_running, observing=b_observing)}
+    index = AgentReplyMembershipIndex()
+
+    refresh = asyncio.create_task(
+        index.refresh(config, runtime_paths, lambda: membership_observers(cast("Mapping[str, AgentBot]", bots))),
+    )
+    if not a_list_fails:
+        await _reached(a.reading)
+    if during_refresh == "b_starts":
+        bots["b"].running = True
+    elif during_refresh == "b_catches_up":
+        bots["b"].observes_room_members = True
+    elif during_refresh == "b_stops_running":
+        bots["b"].running = False
+    assert a.hold is not None
+    a.hold.set()
+    await asyncio.wait_for(refresh, 5)
+
+    assert index.knows_joined_rooms() is known
+    assert index.needs_refresh(config) is not known
+    # Unknown means a source in a room no row covers waits; only a complete census settles it as absent.
+    assert index.grants_pending(config, joined_rooms=[], current_room_id="!unlisted:example.com") is not known
+    assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths) is not a_list_fails
+
+
+@pytest.mark.asyncio
+async def test_dm_of_an_observer_whose_loop_failed_waits_until_that_observer_caught_up(tmp_path: Path) -> None:
+    """A census of the other accounts never proves absent a room only a restarting account has joined."""
+    config, runtime_paths = _config(tmp_path)
+    index = AgentReplyMembershipIndex()
+    membership_sync = _sync(index)
+    accounts = {_A: _Account(_A, {_ROOM: (_A, _ALICE)}), _B: _Account(_B, {_OTHER: (_B, _ALICE)})}
+    bots = {
+        user_id: SimpleNamespace(client=account, running=True, observes_room_members=False)
+        for user_id, account in accounts.items()
+    }
+
+    def pending() -> bool:
+        return index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)
+
+    async def loop_caught_up_then_refresh(*user_ids: str) -> None:
+        for user_id in user_ids:
+            membership_sync.observer_loop_started(config, user_id)
+            membership_sync.observer_frame_settled(user_id)
+        for user_id, bot in bots.items():
+            bot.observes_room_members = membership_sync.observer_is_open(user_id)
+        await index.refresh(config, runtime_paths, lambda: membership_observers(cast("Mapping[str, AgentBot]", bots)))
+
+    await loop_caught_up_then_refresh(_A, _B)
+    assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+
+    membership_sync.observer_closed(config, _A, reason="sync_failure")
+    assert (index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths), pending()) == (False, True)
+
+    await loop_caught_up_then_refresh()
+    assert accounts[_A].reads == [_ROOM]
+    assert (index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths), pending()) == (False, True)
+    assert index.is_current_room_member(_ALICE, _OTHER, config, runtime_paths)
+
+    await loop_caught_up_then_refresh(_A)
+    assert (index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths), pending()) == (True, False)
+    assert index.knows_joined_rooms()
 
 
 @pytest.mark.asyncio

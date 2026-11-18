@@ -46,12 +46,13 @@ def room_steward(bots: Mapping[str, AgentBot], room_id: str) -> AgentBot | None:
 
 def membership_observers(
     bots: Mapping[str, AgentBot],
-) -> tuple[list[nio.AsyncClient], Callable[[str, Sequence[str]], str | None]]:
+) -> tuple[list[nio.AsyncClient], Callable[[str, Sequence[str]], str | None], bool]:
     """Return the clients that may observe room members for reply access, and the steward rule among their accounts.
 
     A bot observes only while its own sync is live: from the first settled frame of a receive loop until that loop
     ends, however it ends.
     The rule ranks the accounts it is given for one room by the power each one's own cache of that room gives it.
+    The last value says whether every running bot observes: only then do the clients' room lists name every room.
     """
     clients = {
         bot.client.user_id: bot.client for bot in bots.values() if bot.client is not None and bot.observes_room_members
@@ -60,7 +61,7 @@ def membership_observers(
     def pick_observer(room_id: str, user_ids: Sequence[str]) -> str | None:
         return pick_steward((user_id, _own_power(clients[user_id], room_id)) for user_id in user_ids)
 
-    return list(clients.values()), pick_observer
+    return list(clients.values()), pick_observer, all(bot.observes_room_members for bot in bots.values() if bot.running)
 
 
 def _own_power(client: nio.AsyncClient, room_id: str) -> float:

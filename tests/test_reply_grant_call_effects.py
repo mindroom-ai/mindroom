@@ -288,7 +288,11 @@ async def test_a_draining_bot_starts_no_invite_or_call_work_but_still_revokes(
     assert calls.ops("reconcile") == (["router"] if draining else ["code", "router"])
     assert invites.await_count == (0 if draining else 1)
 
-    router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    router.orchestrator.agent_reply_membership_sync.invalidate_observer(
+        router.config,
+        router.matrix_id.full_id,
+        reason="uncertain_sync_response",
+    )
     await _settle()
     assert calls.ops("revoked") == ["code", "code", "router", "router"]
 
