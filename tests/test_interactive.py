@@ -385,6 +385,7 @@ Second question:
             (["☎", "☎\ufe0e"], ["☎", "2️⃣"]),
             (["2", "2"], ["1️⃣", "2️⃣"]),
             (["❶", "❷"], ["❶", "❷"]),
+            (["🛟", "🛟", "2️⃣ ", " "], ["🛟", "🔹", "2️⃣", "❓"]),
         ],
     )
     def test_parse_and_format_interactive_treats_lookalike_and_digit_emojis_as_taken(

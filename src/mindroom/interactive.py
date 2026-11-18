@@ -257,7 +257,7 @@ def _coerce_interactive_option(raw_option: object) -> dict[str, str] | None:
     label = str(option_data.get("label") or "Option")
     value = str(option_data.get("value") or label.lower())
     return {
-        "emoji": str(option_data.get("emoji") or "❓"),
+        "emoji": str(option_data.get("emoji") or "").strip() or "❓",
         "label": label,
         "value": value,
     }
