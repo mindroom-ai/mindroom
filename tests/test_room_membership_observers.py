@@ -708,6 +708,7 @@ async def test_own_join_of_a_room_no_room_list_named_waits_for_that_accounts_rea
     assert index.knows_joined_rooms()
     assert not index.needs_refresh(config)
     assert not index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)
+    epoch = index._epoch
 
     membership_sync.pre_admit_ingestion(
         config,
@@ -717,6 +718,8 @@ async def test_own_join_of_a_room_no_room_list_named_waits_for_that_accounts_rea
         observer_user_id=_A,
     )
 
+    # A refresh in flight may hold a room list that predates the join too, so this join voids it.
+    assert index._epoch == epoch + 1
     assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
     assert index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)
     assert index.needs_refresh(config)
@@ -726,6 +729,51 @@ async def test_own_join_of_a_room_no_room_list_named_waits_for_that_accounts_rea
 
     assert _observers(index) == {_ROOM: _A}
     assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    assert not index.needs_refresh(config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("published", ["row_of_another_account", "discovery_unknown"])
+async def test_own_join_during_the_prospective_observers_read_is_discovery_evidence_only(
+    tmp_path: Path,
+    published: str,
+) -> None:
+    """An own join never fences the read that makes its account the observer, never grants, and sets no backoff.
+
+    Either the room's row still names an account that stopped observing, or nothing is known yet, as at a first
+    start, when every joined room reports a join: the join then publishes nothing and voids nothing.
+    """
+    config, runtime_paths = _config(tmp_path)
+    a = _Account(_A, {_ROOM: (_A, _B, _ALICE)})
+    b = _Account(_B, {_ROOM: (_A, _B, _ALICE)})
+    index = AgentReplyMembershipIndex()
+    membership_sync = _sync(index)
+    if published == "row_of_another_account":
+        await _refresh(index, config, runtime_paths, a, b, power={_B: 50})
+        membership_sync.invalidate_observer(config, _B, reason="observer_stopping")
+    else:
+        index.invalidate(config, reason="initial_config")
+    a.hold = asyncio.Event()
+
+    async def refresh() -> object:
+        return await index.refresh(config, runtime_paths, lambda: (_clients(a), _by_power({}), True))
+
+    membership_sync.request_refresh(config, refresh)
+    await _reached(a.reading)
+    epoch, snapshot = index._epoch, index.snapshot
+
+    membership_sync.pre_admit_ingestion(config, runtime_paths, _own_join("invite"), None, observer_user_id=_A)
+
+    assert (index._epoch, index.snapshot) == (epoch, snapshot)
+    assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    assert index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)
+    a.hold.set()
+    await asyncio.wait_for(membership_sync.refresh_for_access_check(config, refresh), 5)
+
+    assert _observers(index) == {_ROOM: _A}
+    assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    assert a.reads == [_ROOM]
+    assert membership_sync._refresh_retry_at == 0.0
     assert not index.needs_refresh(config)
 
 

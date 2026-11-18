@@ -371,17 +371,22 @@ class AgentReplyMembershipIndex:
         *,
         observer_user_id: str,
         reason: str,
+        joined: bool = False,
     ) -> bool:
         """Fail one room closed until its members can be read again, when ``observer_user_id`` observes it.
 
         A room without a row gets an unready one, and a room the snapshot holds unjoined counts as possibly joined;
         both ask the next refresh to read it. Another account's ready row for the room stays as it is.
+        The account having ``joined`` the room is discovery evidence only: it changes just a room held unjoined.
         """
         signature = _agent_reply_membership_policy_signature(config)
         snapshot = self._snapshot
         if self._desired_signature != signature or snapshot.policy_signature != signature:
             return False
-        if self._refresh_transitions is not None:
+        possible_room_ids = snapshot.possible_joined_room_ids
+        if joined and (possible_room_ids is None or room_id in possible_room_ids):
+            return False
+        if not joined and self._refresh_transitions is not None:
             # The refresh in flight may be pinning the room to this account, which no published row shows yet.
             self._refresh_transitions.append(_LiveTransition(room_id, None, observer_user_id))
         state = matrix_state_for_runtime(runtime_paths)
@@ -398,7 +403,6 @@ class AgentReplyMembershipIndex:
             for room in snapshot.rooms
             if room.ready and room.room_id == room_id and room.observer_user_id == observer_user_id
         )
-        possible_room_ids = snapshot.possible_joined_room_ids
         if room_has_row and not observed_rooms and (possible_room_ids is None or room_id in possible_room_ids):
             return False
 

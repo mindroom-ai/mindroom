@@ -141,6 +141,7 @@ class AgentReplyMembershipSync:
             room_id,
             observer_user_id=observer_user_id,
             reason=reason,
+            joined=reason == "observer_joined",
         ):
             self._grants_lost(revoke=reason != "observer_joined")
 

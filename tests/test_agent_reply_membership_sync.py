@@ -215,6 +215,7 @@ def test_room_fence_revokes_every_bots_calls_before_admission(
         "!departed:localhost",
         observer_user_id=_OBSERVER,
         reason=reason,
+        joined=False,
     )
     memberships.invalidate_observer.assert_not_called()
     assert calls.log == ([("router", "scheduled_revoke"), ("voice", "scheduled_revoke")] if grant_changed else [])
@@ -269,6 +270,7 @@ def test_own_join_asks_for_the_rooms_read_and_revokes_no_call(tmp_path: Path) ->
         "!joined:localhost",
         observer_user_id=_OBSERVER,
         reason="observer_joined",
+        joined=True,
     )
     assert membership_sync._refresh_retry_at == 0.0
     assert calls.log == []
