@@ -1957,6 +1957,19 @@ async def test_router_welcome_lists_agents_that_join_after_it(
 
 
 @pytest.mark.asyncio
+async def test_welcome_is_not_edited_in_a_room_the_config_dropped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room the config no longer names keeps the welcome it has, though the owner account is still joined to it."""
+    welcomed = await _router_welcomed_an_empty_room(tmp_path, monkeypatch)
+    welcomed.bot.rooms = []
+    await welcomed.change("code", "join")
+    assert await wait_for_background_tasks(timeout=1, owner=welcomed.bot._runtime_view)
+    welcomed.edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_router_membership_handling_does_not_wait_for_the_welcome_edit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
