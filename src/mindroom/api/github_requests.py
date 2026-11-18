@@ -251,14 +251,12 @@ async def _stored_token(context: OAuthCredentialContext | None) -> dict[str, str
 
 
 def _save_token(context: OAuthCredentialContext, document: dict[str, str]) -> None:
-    """Save ``document`` as the user's token, replacing one that cannot be read; blocks on the filesystem."""
-    store = _token_store(context)
-    try:
-        store.read_saved_credentials(_TOKEN_SERVICE)
-    except CredentialsUnreadableError:
-        # The store refuses to overwrite a document it cannot read, and the user's new token is meant to replace it.
-        store.delete_credentials(_TOKEN_SERVICE)
-    store.save_credentials(_TOKEN_SERVICE, document)
+    """Save ``document`` as the user's token, replacing even one that cannot be read; blocks on the filesystem.
+
+    The replacement is one atomic publish, so a request meets the old token or the new one, never none, which would
+    let the GitHub App connection answer, and a failed publish leaves the old document.
+    """
+    _token_store(context).save_credentials(_TOKEN_SERVICE, document, replace_unreadable=True)
 
 
 async def _status(context: OAuthCredentialContext | None) -> dict[str, object] | JSONResponse:
@@ -324,7 +322,11 @@ async def save_github_token(payload: GitHubToken, request: Request) -> dict[str,
     login = await _token_login(payload.token)
     if isinstance(login, JSONResponse):
         return login
-    await asyncio.to_thread(_save_token, context, {"token": payload.token, "login": login})
+    try:
+        await asyncio.to_thread(_save_token, context, {"token": payload.token, "login": login})
+    except OSError as exc:
+        logger.warning("github_token_save_failed", error_type=type(exc).__name__)
+        return _error(503, _UNAVAILABLE)
     logger.info("github_token_saved")
     return {"connected": True, "via": "token", "login": login}
 

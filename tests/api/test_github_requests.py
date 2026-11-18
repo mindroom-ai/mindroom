@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -21,6 +22,7 @@ from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials import manager as credentials_manager
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
 from mindroom.oauth.github import github_oauth_provider
@@ -42,6 +44,7 @@ ALICE_TOKEN = "gho-alice-access"  # noqa: S105
 SHARED_TOKEN = "ghp-shared-token"  # noqa: S105
 ALICE_PAT = "github_pat_alice-personal"
 DEFAULT_ACCEPT = "application/vnd.github+json"
+ENCRYPTION_KEY = base64.b64encode(bytes(32)).decode()
 
 type Handler = Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]]
 
@@ -1515,3 +1518,73 @@ def test_a_token_check_answer_past_its_limit_is_a_bad_gateway(
     assert (response.status_code, response.json()) == (502, {"error": "github_unreachable"})
     assert body.read == 2
     assert stored_token(paths, ALICE) is None
+
+
+@DAMAGED_TOKENS
+def test_replacing_an_unreadable_token_never_lets_the_app_connection_answer(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+) -> None:
+    """Up to the moment the new token is published, requests still meet the unreadable one, never no token."""
+    connect(paths, ALICE)
+    github.handler = user_answer()
+    damage_token(paths, ALICE, payload)
+    publish = credentials_manager._atomic_write_private_file
+    during: list[httpx.Response] = []
+
+    def publish_after_a_request(path: Path, data: bytes) -> None:
+        if path.name == "github_user_token_credentials.json":
+            during.append(ask(client, session(app, ALICE), method="POST", body={"title": "x"}))
+        publish(path, data)
+
+    monkeypatch.setattr(credentials_manager, "_atomic_write_private_file", publish_after_a_request)
+
+    saved = save_token(client, session(app, ALICE))
+
+    assert saved.status_code == 200
+    assert [(r.status_code, r.json()) for r in during] == [(503, {"error": "github_token_unreadable"})]
+    assert [r.url.path for r in github.requests] == ["/user"]
+
+
+def test_a_failed_publish_keeps_the_unreadable_token(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new token that cannot be written leaves the old bytes, so requests still fail closed, not as the App."""
+    connect(paths, ALICE)
+    github.handler = user_answer()
+    damage_token(paths, ALICE, b"not json")
+
+    def fail(_path: Path, _data: bytes) -> NoReturn:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr(credentials_manager, "_atomic_write_private_file", fail)
+
+    saved = save_token(client, session(app, ALICE))
+    response = ask(client, session(app, ALICE), method="POST", body={"title": "x"})
+
+    assert (saved.status_code, saved.json()) == (503, {"error": "github_connection_unavailable"})
+    assert (response.status_code, response.json()) == (503, {"error": "github_token_unreadable"})
+    path = get_runtime_credentials_manager(paths).for_primary_runtime_scope(ALICE, None)
+    assert path.get_credentials_path("github_user_token").read_bytes() == b"not json"
+    assert [r.url.path for r in github.requests] == ["/user"]
+
+
+def test_other_saves_still_refuse_to_overwrite_an_unreadable_document(tmp_path: Path) -> None:
+    """Only the token route's explicit opt-in replaces a document the store cannot read."""
+    manager = credentials_manager.CredentialsManager(base_path=tmp_path, encryption_key=ENCRYPTION_KEY)
+    manager.get_credentials_path("github_user_token").write_bytes(b"MINDROOM-CREDENTIALS-V1\nsealed")
+
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        manager.save_credentials("github_user_token", {"token": "x", "login": "y"})
+    manager.save_credentials("github_user_token", {"token": "x", "login": "y"}, replace_unreadable=True)
+
+    assert manager.load_credentials("github_user_token") == {"token": "x", "login": "y"}
