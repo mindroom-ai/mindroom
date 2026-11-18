@@ -455,15 +455,23 @@ def test_the_read_function_takes_no_user_to_act_as(config: Config, paths: Runtim
 
 
 def test_a_rule_that_requires_approval_gates_the_write_function(config: Config, paths: RuntimePaths) -> None:
-    """A write asks the owner first when a `tool_approval` rule says so; a caller that cannot resume is not offered it."""
+    """A write asks the owner first when a `tool_approval` rule says so; a caller that cannot resume is not offered it.
+
+    With background tool jobs, which are on by default, the approval is the first phase of the write's job.
+    """
     config.tool_approval = ToolApprovalConfig(rules=[WRITES_NEED_APPROVAL])
 
     functions = gated_functions(owner_toolkit(config, paths), config)
+    as_jobs = gated_functions(owner_toolkit(config, paths), config, approvals_as_jobs=True)
     unresumable = gated_functions(owner_toolkit(config, paths), config, resumable=False)
 
     assert {name: function.gate for name, function in functions.items()} == {
         "matrix_user_read": None,
         "matrix_user_write": ToolGate.POLICY,
+    }
+    assert {name: function.gate for name, function in as_jobs.items()} == {
+        "matrix_user_read": None,
+        "matrix_user_write": ToolGate.JOB,
     }
     assert list(unresumable) == ["matrix_user_read"]
 
