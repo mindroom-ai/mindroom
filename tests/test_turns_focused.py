@@ -7796,13 +7796,14 @@ async def test_a_routed_responder_answers_the_persons_own_event_for_that_person(
 
 
 @pytest.mark.asyncio
-async def test_a_route_to_another_responder_leaves_this_one_silent(tmp_path: Path) -> None:
-    """Every bot in the room receives the route; only the one it names answers."""
+@pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "general"])
+async def test_a_route_to_another_responder_leaves_this_one_silent(tmp_path: Path, steward: str) -> None:
+    """Every bot in the room receives the route, the steward that sent it too; only the one it names answers."""
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
 
-    await harness.deliver(room, _route_message(config, steward=ROUTER_AGENT_NAME, entity="research"))
+    await harness.deliver(room, _route_message(config, steward=steward, entity="research"))
 
     assert harness.runner.requests == []
 

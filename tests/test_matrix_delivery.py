@@ -78,6 +78,21 @@ async def test_send_message_result_ignores_unverified_devices_in_encrypted_room(
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
 
 
+@pytest.mark.asyncio
+async def test_a_hidden_route_sent_to_an_encrypted_room_keeps_its_event_type() -> None:
+    """Nio encrypts an event under the type it is given, so a route in an encrypted room decrypts as a route."""
+    client = _mock_client(encrypted=True)
+    content = {"io.mindroom.route": {"entity": "@mindroom_general:localhost", "event_id": "$question"}}
+
+    delivered = await send_message_result(client, "!room:localhost", content, message_type="io.mindroom.route")
+
+    assert delivered is not None
+    sent = client.room_send.await_args.kwargs
+    assert sent["message_type"] == "io.mindroom.route"
+    assert sent["content"] == content
+    assert sent["ignore_unverified_devices"] is True
+
+
 def test_outbound_matrix_events_use_delivery_boundary() -> None:
     """Production code must not bypass the encryption guard and failure handling with direct room_send calls."""
     source_root = Path(__file__).parents[1] / "src" / "mindroom"
