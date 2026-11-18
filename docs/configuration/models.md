@@ -665,7 +665,7 @@ MindRoom sends the level in the setting the provider reads, and the block wins o
 | Provider | A level `L` | `off` |
 |----------|-------------|-------|
 | `openai`, `codex`, `azure`, `openrouter`, `llama_cpp`, `kimi` | `reasoning_effort: L` | `reasoning_effort: none` |
-| `zai` | `reasoning_effort: L` | `extra_body.thinking: {type: disabled}`, no `reasoning_effort` |
+| `zai` | `reasoning_effort: L` | no `off` level |
 | `deepseek` | `reasoning_effort: L`, `use_thinking: true` | `use_thinking: false` |
 | `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L`, and an authored `thinking: {type: disabled}` is dropped | `thinking: {type: disabled}`, and an authored `output_config.effort` is dropped |
 | `google` | `thinking_level: L` | `thinking_budget: 0` |
@@ -673,6 +673,7 @@ MindRoom sends the level in the setting the provider reads, and the block wins o
 
 Write `off` in quotes, as in `levels: ["off", low, high]` or `default: "off"`, because YAML reads a bare `off` as false.
 `groq`, `cerebras`, and `synthetic` take no level, so a `reasoning` block on them fails config load.
+Z.ai has no setting MindRoom can switch thinking off with, so listing `off` for a `zai` model fails config load too; set `extra_kwargs.extra_body.thinking` yourself on a separate model entry.
 MindRoom does not know which levels each model accepts, so list only levels the model supports; a level it rejects fails the reply with the provider's error, like a wrong `extra_kwargs` value.
 For example, Claude 5 models reject disabled thinking, so do not list `off` for them.
 `request_params` and `extra_body` still win over the block.

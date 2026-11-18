@@ -771,23 +771,10 @@ async def test_a_model_reference_at_a_level_sends_that_level(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("provider", "authored", "sent", "absent"),
-    [
-        ("zai", {"reasoning_effort": "high"}, {"thinking": {"type": "disabled"}}, "reasoning_effort"),
-        ("anthropic", {"output_config": {"effort": "xhigh"}}, {"thinking": {"type": "disabled"}}, "output_config"),
-    ],
-)
-async def test_off_sends_the_route_s_thinking_switch_without_an_effort(
-    provider: str,
-    authored: dict[str, Any],
-    sent: dict[str, Any],
-    absent: str,
-    runtime_paths: RuntimePaths,
-    wire: Wire,
-) -> None:
+async def test_claude_off_sends_disabled_thinking_without_an_effort(runtime_paths: RuntimePaths, wire: Wire) -> None:
     levels = {"levels": ["off", "high"], "default": "high"}
-    model = ModelConfig(provider=provider, id="m", api_key="sk-config", reasoning=levels, extra_kwargs=authored)
+    authored = {"output_config": {"effort": "xhigh"}}
+    model = ModelConfig(provider="anthropic", id="m", api_key="sk-config", reasoning=levels, extra_kwargs=authored)
     wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
 
     with pytest.raises(ProviderError):
@@ -796,8 +783,8 @@ async def test_off_sends_the_route_s_thinking_switch_without_an_effort(
             ModelRequest(messages=[_user()]),
         )
 
-    assert _sends(wire.body(), sent), wire.body()
-    assert absent not in wire.body()
+    assert _sends(wire.body(), {"thinking": {"type": "disabled"}}), wire.body()
+    assert "output_config" not in wire.body()
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import copy
-import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -69,11 +68,24 @@ def test_a_route_that_takes_no_level_rejects_the_block(provider: str, runtime_pa
 
 def test_every_route_with_a_level_key_accepts_the_block_at_every_level(runtime_paths: RuntimePaths) -> None:
     levels = {"levels": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "default": "low"}
-    providers = ["openai", "codex", "azure", "openrouter", "deepseek", "zai", "llama_cpp", "kimi", "anthropic"]
+    providers = ["openai", "codex", "azure", "openrouter", "deepseek", "llama_cpp", "kimi", "anthropic"]
     providers += ["vertexai_claude", "bedrock_claude", "google", "ollama"]
     models = {provider: {"provider": provider, "id": "m", "reasoning": levels} for provider in providers}
+    # Z.ai has no typed thinking setting to turn off, so it takes every level but ``off``.
+    models["zai"] = {"provider": "zai", "id": "m", "reasoning": {**levels, "levels": levels["levels"][1:]}}
 
     Config.validate_with_runtime({"models": models}, runtime_paths)
+
+
+def test_zai_has_no_off_level(runtime_paths: RuntimePaths) -> None:
+    reasoning = {"levels": ["off", "low"], "default": "low"}
+    data = {"models": {"glm": {"provider": "zai", "id": "m", "reasoning": reasoning}}}
+
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"models\.glm: provider zai has no off level; set extra_kwargs\.extra_body\.thinking yourself",
+    ):
+        Config.validate_with_runtime(data, runtime_paths)
 
 
 # --- References ---------------------------------------------------------------------------------------------
@@ -153,7 +165,6 @@ def _applied(provider: str, level: str, extra_kwargs: dict[str, Any] | None = No
         ("azure", "low", {"reasoning_effort": "low"}),
         ("openrouter", "max", {"reasoning_effort": "max"}),
         ("zai", "high", {"reasoning_effort": "high"}),
-        ("zai", "off", {"extra_body": {"thinking": {"type": "disabled"}}}),
         ("llama_cpp", "medium", {"reasoning_effort": "medium"}),
         ("kimi", "high", {"reasoning_effort": "high"}),
         ("deepseek", "high", {"reasoning_effort": "high", "use_thinking": True}),
@@ -209,42 +220,18 @@ def test_a_claude_level_drops_the_authored_setting_it_conflicts_with() -> None:
     assert _applied("anthropic", "low", raw) == {**raw, "output_config": {"effort": "low"}}
 
 
-def test_zai_off_keeps_the_authored_extra_body() -> None:
-    assert _applied(
-        "zai",
-        "off",
-        {"reasoning_effort": "high", "extra_body": {"thinking": {"type": "enabled"}, "x": 1}},
-    ) == {
-        "extra_body": {"thinking": {"type": "enabled"}, "x": 1},
-    }
-    assert _applied("zai", "off", {"extra_body": {"x": 1}}) == {
-        "extra_body": {"thinking": {"type": "disabled"}, "x": 1},
-    }
-
-
-@pytest.mark.parametrize(
-    ("provider", "extra_kwargs", "field"),
-    [
-        ("anthropic", {"output_config": "high"}, "output_config"),
-        ("anthropic", {"output_config": True}, "output_config"),
-        ("anthropic", {"output_config": []}, "output_config"),
-        ("anthropic", {"output_config": False}, "output_config"),
-        ("zai", {"extra_body": "bad"}, "extra_body"),
-        ("zai", {"request_params": {"extra_body": []}}, "request_params.extra_body"),
-    ],
-)
-def test_a_setting_that_is_no_mapping_fails_config_load_naming_it(
-    provider: str,
-    extra_kwargs: dict[str, Any],
-    field: str,
+@pytest.mark.parametrize("output_config", ["high", True, [], False])
+def test_a_claude_output_config_that_is_no_mapping_fails_config_load(
+    output_config: object,
     runtime_paths: RuntimePaths,
 ) -> None:
     reasoning = {"levels": ["off", "low"], "default": "low"}
-    model = {"provider": provider, "id": "m", "reasoning": reasoning, "extra_kwargs": extra_kwargs}
+    extra_kwargs = {"output_config": output_config}
+    model = {"provider": "anthropic", "id": "m", "reasoning": reasoning, "extra_kwargs": extra_kwargs}
 
     with pytest.raises(
         ConfigRuntimeValidationError,
-        match=rf"models\.m: extra_kwargs\.{re.escape(field)} must be a mapping",
+        match=r"models\.m: extra_kwargs\.output_config must be a mapping",
     ):
         Config.validate_with_runtime({"models": {"m": model}}, runtime_paths)
 
