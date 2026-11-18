@@ -151,7 +151,7 @@ def build_judgment_request(
             or not _text_is_bounded(message.text)
         ):
             return _incomplete("essential_input_too_large")
-    if any(redact_sensitive_text(text) != text for text in (*rubric, *(message.text for message in messages))):
+    if not all(is_unredacted(text) for text in (*rubric, *(message.text for message in messages))):
         return _incomplete("essential_input_redacted")
     aliases: dict[str, str] = {}
 

@@ -70,24 +70,20 @@ class _JudgmentReranker:
         if message is None:
             raise JudgmentError(failure="incomplete_state")
         passages = [(index, _redacted(document)) for index, document in enumerate(documents)]
-        candidates = [_candidate_question(index, passage) for index, passage in passages if passage is not None]
-        sent, request = self._packed(candidates, message)
+        judged = [(index, passage) for index, passage in passages if passage is not None]
+        count, request = self._packed([_candidate_question(index, passage) for index, passage in judged], message)
         result = await self.batch.evaluate(request)
         if result.failure is not None or result.decision is None:
             raise JudgmentError(failure=result.failure or "invalid_response")
         probabilities = [0.0 if probability is None else probability for probability in result.decision]
         cap = probabilities.pop() if self.gate else 1.0
         scores = [0.0] * len(documents)
-        for question, probability in zip(sent, probabilities, strict=True):
-            scores[int(question.id.removeprefix("c"))] = min(probability, cap)
+        for (index, _passage), probability in zip(judged[:count], probabilities, strict=True):
+            scores[index] = min(probability, cap)
         return scores
 
-    def _packed(
-        self,
-        candidates: Sequence[JudgmentQuestion],
-        message: str,
-    ) -> tuple[Sequence[JudgmentQuestion], JudgmentRequest]:
-        """Return the most leading ``candidates`` one request holds, and that request; raise when none fits.
+    def _packed(self, candidates: Sequence[JudgmentQuestion], message: str) -> tuple[int, JudgmentRequest]:
+        """Return how many leading ``candidates`` one request holds, and that request; raise when none fits.
 
         Size grows with every candidate, so a binary search finds that count; any reason but size raises at once.
         """
@@ -96,12 +92,9 @@ class _JudgmentReranker:
         def request_for(count: int) -> JudgmentRequest:
             return build_batch_request([*candidates[:count], *extra], message, instructions="")
 
-        def fits(request: JudgmentRequest) -> bool:
-            return request.complete and self.batch.fits(request)
-
         full = request_for(len(candidates))
-        if candidates and fits(full):
-            return candidates, full
+        if candidates and self.batch.fits(full):
+            return len(candidates), full
         if not candidates or full.incomplete_reason not in {None, "essential_input_too_large"}:
             raise JudgmentError(failure="incomplete_state")
         best: tuple[int, JudgmentRequest] | None = None
@@ -109,13 +102,13 @@ class _JudgmentReranker:
         while low <= high:
             count = (low + high) // 2
             request = request_for(count)
-            if fits(request):
+            if self.batch.fits(request):
                 best, low = (count, request), count + 1
             else:
                 high = count - 1
         if best is None:
             raise JudgmentError(failure="incomplete_state")
-        return candidates[: best[0]], best[1]
+        return best
 
 
 def create_judgment_reranker(

@@ -72,9 +72,7 @@ def _response_body(
 
 
 def _decode(body: bytes) -> JudgmentResponse[bool]:
-    answer = SYSTEM_ONE.decode_probabilities(_parse_json(body), ("participation",))
-    value = None if answer.answer is None else answer.answer[0]
-    return _accept_probability(replace(answer, answer=value), 0.8)
+    return _accept_probability(SYSTEM_ONE.decode_probabilities(_parse_json(body), ("participation",)), 0.8)
 
 
 async def test_client_posts_exact_contract_and_retains_probability() -> None:
@@ -420,7 +418,7 @@ async def test_synchronous_decode_overrun_cannot_return_success(monkeypatch: pyt
     clock = [0.0]
     original = client_module._accept_probability
 
-    def slow_accept(wire_answer: WireAnswer[float], threshold: float) -> JudgmentResponse[bool]:
+    def slow_accept(wire_answer: WireAnswer[tuple[float | None, ...]], threshold: float) -> JudgmentResponse[bool]:
         response = original(wire_answer, threshold)
         clock[0] = 2.0
         return response

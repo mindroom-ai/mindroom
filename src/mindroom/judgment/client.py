@@ -122,9 +122,9 @@ def token_usage(usage: dict[str, object]) -> TokenUsage:
     return TokenUsage(input_tokens=cast("int", counts[0]), output_tokens=cast("int", counts[1]))
 
 
-def _accept_probability(wire_answer: WireAnswer[float], threshold: float) -> JudgmentResponse[bool]:
+def _accept_probability(wire_answer: WireAnswer[tuple[float | None, ...]], threshold: float) -> JudgmentResponse[bool]:
     """Accept only the requested judgment probability, never a generated decision."""
-    value = wire_answer.answer
+    value = None if wire_answer.answer is None else wire_answer.answer[0]
     return JudgmentResponse(
         model=wire_answer.model,
         decision=None if value is None else value >= threshold,
@@ -274,9 +274,7 @@ class JudgmentClient:
             return self._wire.decode_probabilities(root, tuple(question["id"] for question in questions))
 
     async def _evaluate(self, request: JudgmentRequest) -> JudgmentResponse[bool]:
-        answer = await self._probabilities(request, batch=False)
-        value = None if answer.answer is None else answer.answer[0]
-        return _accept_probability(WireAnswer(answer.model, answer.usage, value), self._threshold)
+        return _accept_probability(await self._probabilities(request, batch=False), self._threshold)
 
     async def _evaluate_many(self, request: JudgmentRequest) -> JudgmentResponse[tuple[float | None, ...]]:
         answer = await self._probabilities(request, batch=True)
