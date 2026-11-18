@@ -536,6 +536,20 @@ async def test_one_failed_joined_rooms_keeps_discovery_unknown(tmp_path: Path) -
     assert index.needs_refresh(config)
     assert index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)
 
+    # A live change in a room another account observes must not drop the retry the failed room list still needs.
+    assert index.apply_member_event(config, _OTHER, _member_event(_BOB, "join"), control_user_id=_B)
+
+    assert index.is_current_room_member(_BOB, _OTHER, config, runtime_paths)
+    assert index.needs_refresh(config)
+
+    a.joined_rooms_fails = False
+    await _refresh(index, config, runtime_paths, a, b)
+
+    assert index.knows_joined_rooms()
+    assert not index.needs_refresh(config)
+    assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    assert index.is_current_room_member(_BOB, _OTHER, config, runtime_paths)
+
 
 @pytest.mark.asyncio
 async def test_without_any_observer_every_room_waits(tmp_path: Path) -> None:

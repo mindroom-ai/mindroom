@@ -548,7 +548,8 @@ def _snapshot_after_transition(
     updated_snapshot = replace(
         snapshot,
         rooms=updated_rooms_tuple,
-        refresh_required=any(not room.ready for room in updated_rooms_tuple),
+        # A live transition never ends a pending rebuild: only a refresh that answered everything does.
+        refresh_required=snapshot.refresh_required or any(not room.ready for room in updated_rooms_tuple),
         possible_joined_room_ids=possible_joined_room_ids,
     )
     return updated_snapshot, changed_room_keys
