@@ -49,9 +49,10 @@ class Capabilities:
     """What a provider route supports, so policy code stops probing adapter classes.
 
     ``url_media`` holds the media kinds whose URLs the route sends for the provider to fetch; the pipeline downloads
-    the URLs of every other kind (``providers/pipeline/remote_media.py``). ``system_updates`` says the route sends a
-    system prompt update (``providers/pipeline/prompt_hold.py``) as a system message where it stands in the
-    conversation, which its model follows over the earlier system prompt.
+    the URLs of every other kind (``providers/pipeline/remote_media.py``). ``system_updates`` is set on a route that
+    sends a system prompt update (``providers/pipeline/prompt_hold.py``) as a system message where it stands in the
+    conversation, which its model follows over the earlier system prompt; it tells whether a request caches its system
+    prompt, without which an update keeps no prefix.
     """
 
     structured_output: StructuredOutput = "json_mode"
@@ -60,7 +61,7 @@ class Capabilities:
     native_tool_search: bool = False
     native_compaction: bool = False
     provider_default_sampling: bool = False
-    system_updates: bool = False
+    system_updates: Callable[[ModelRequest], bool] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

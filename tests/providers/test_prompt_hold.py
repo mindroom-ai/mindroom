@@ -45,7 +45,13 @@ _B = _A.replace("AMBER", "VIOLET")
 _C = _A.replace("AMBER", "GREEN")
 _TURN = "Today is Wednesday."
 _OPUS = ModelIdentity(id="anthropic/claude-opus-5.5", provider="OpenRouter", endpoint="https://openrouter.ai/api/v1")
-_UPDATES = Capabilities(system_updates=True)
+
+
+def _takes_updates(_request: ModelRequest) -> bool:
+    return True
+
+
+_UPDATES = Capabilities(system_updates=_takes_updates)
 _SETTINGS = ModelRequest(messages=())
 
 
@@ -339,17 +345,28 @@ async def test_a_prompt_that_inlines_a_memory_file_is_never_told_as_an_update(
 
 
 def _applied(held: str, update: str) -> str:
-    """Return the text ``update`` turns ``held`` into, read as a model must: each hunk's old side replaced where it stands."""
+    """Return the text ``update`` turns ``held`` into, read as a model may: hunk by hunk, top to bottom.
+
+    Each hunk's old side stands once in the text the hunks above it made, and the same text follows from locating
+    every old side once in ``held`` instead.
+    """
     body = update.split("\nChange the system prompt as this diff shows:\n", 1)[1].split("\n")
     fence = body[0].removesuffix("diff")
     assert set(fence) == {"`"}
     assert body[-1] == fence
+    hunks = [
+        ([line[1:] for line in lines if line[0] in " -"], [line[1:] for line in lines if line[0] in " +"])
+        for lines in (hunk.split("\n") for hunk in "\n".join(body[1:-1]).split("\n@@\n"))
+    ]
     lines = held.split("\n")
-    for hunk in reversed("\n".join(body[1:-1]).split("\n@@\n")):
-        before = [line[1:] for line in hunk.split("\n") if line[0] in " -"]
-        after = [line[1:] for line in hunk.split("\n") if line[0] in " +"]
+    for before, after in hunks:
         [start] = [at for at in range(len(lines)) if lines[at : at + len(before)] == before]
         lines[start : start + len(before)] = after
+    located = held.split("\n")
+    starts = [[at for at in range(len(located)) if located[at : at + len(before)] == before] for before, _ in hunks]
+    for [start], (before, after) in reversed(list(zip(starts, hunks, strict=True))):
+        located[start : start + len(before)] = after
+    assert located == lines
     return "\n".join(lines)
 
 
@@ -371,6 +388,28 @@ def test_an_update_and_the_held_prompt_give_the_current_prompt_and_no_other(fres
     update = prompt_hold._update_text(held, fresh)
     assert update is not None
     assert _applied(held, update) == fresh
+
+
+def test_an_update_whose_later_hunk_restores_an_earlier_passage_reads_the_same_top_to_bottom() -> None:
+    """A hunk that adds back the passage an earlier hunk changed still names one place once that hunk is applied."""
+    tail = [f"n{i}" for i in range(8)]
+    held = "\n".join(["old", *tail, "last"])
+    fresh = "\n".join(["new", *tail, "last", "old", "n0", "n1"])
+    update = prompt_hold._update_text(held, fresh)
+    assert update is not None
+    assert update.count("\n@@\n") == 1
+    assert _applied(held, update) == fresh
+
+
+def test_a_hunk_that_an_earlier_hunk_makes_stand_twice_is_not_told() -> None:
+    """Copying a section to the top and editing the original leaves the edit's old side twice in the text read so far."""
+    rules = ["- Be kind.", "- Be exact.", "- Cite sources.", "- Say when unsure.", "- Keep notes.", ""]
+    tools = ["## Tools", "- Prefer the calculator."]
+    held = "\n".join(["# Helper", *rules, *tools, "- Ask first.", "", "## End", "- Sign off."])
+    fresh = "\n".join(
+        ["# Helper", *tools, "- Ask first.", "", "## End", *rules, *tools, "- Never ask.", "", "## End", "- Sign off."],
+    )
+    assert prompt_hold._update_text(held, fresh) is None
 
 
 def test_an_update_splits_its_hunks_by_a_bare_at_line_and_fences_them_past_any_backticks() -> None:

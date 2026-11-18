@@ -20,7 +20,12 @@ from mindroom.providers.cache_ladder import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ["contains_cache_marker", "openrouter_prompt_cache_control", "request_kwargs_with_prompt_cache"]
+__all__ = [
+    "contains_cache_marker",
+    "openrouter_prompt_cache_control",
+    "request_kwargs_with_prompt_cache",
+    "takes_automatic_markers",
+]
 
 _ANTHROPIC_MODEL_PREFIXES = ("anthropic/", "~anthropic/")
 _SYSTEM_ROLES = frozenset({"system", "developer"})
@@ -72,6 +77,17 @@ def contains_cache_marker(value: object) -> bool:
     return False
 
 
+def takes_automatic_markers(request_kwargs: dict[str, Any]) -> bool:
+    """Return whether Chat Completions kwargs take the automatic markers: they have messages and author no marker.
+
+    Any authored ``cache_control`` (on messages, tools, or the ``extra_body`` the SDK merges into the payload) turns
+    them all off.
+    """
+    return isinstance(request_kwargs.get("messages"), list) and not any(
+        contains_cache_marker(request_kwargs.get(key)) for key in ("messages", "tools", "extra_body")
+    )
+
+
 def request_kwargs_with_prompt_cache(
     request_kwargs: dict[str, Any],
     cache_control: dict[str, str],
@@ -79,16 +95,13 @@ def request_kwargs_with_prompt_cache(
 ) -> dict[str, Any]:
     """Return Chat Completions kwargs with Claude ladder breakpoints; ``system`` holds the request's system texts.
 
-    A request that already carries any authored ``cache_control`` (on messages, tools, or the ``extra_body`` the
-    SDK merges into the payload) is left untouched, so automatic markers never exceed the limit or mix TTLs with
-    authored ones. Otherwise the system prompt, conversation rungs, and last tool take markers in that order, at
+    A request that does not take the automatic markers (``takes_automatic_markers``) is left untouched, so they never
+    exceed the limit or mix TTLs with authored ones. Otherwise the system prompt, conversation rungs, and last tool take markers in that order, at
     most four.
     """
-    messages = request_kwargs.get("messages")
-    if not isinstance(messages, list) or any(
-        contains_cache_marker(request_kwargs.get(key)) for key in ("messages", "tools", "extra_body")
-    ):
+    if not takes_automatic_markers(request_kwargs):
         return request_kwargs
+    messages = request_kwargs["messages"]
     # One system marker, the message rungs, and one tool marker always fit the four-marker limit.
     prepared = messages.copy()
     system_count = 0

@@ -28,7 +28,11 @@ from mindroom.providers.openai.chat_wire import (
     chat_stop_reason,
 )
 from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
-from mindroom.providers.openai.openrouter_cache import openrouter_prompt_cache_control, request_kwargs_with_prompt_cache
+from mindroom.providers.openai.openrouter_cache import (
+    openrouter_prompt_cache_control,
+    request_kwargs_with_prompt_cache,
+    takes_automatic_markers,
+)
 from mindroom.token_counting.families import counter_for_model
 from mindroom.token_counting.requests import route_context_key, route_request_tokens
 
@@ -114,8 +118,26 @@ class ChatAdapter:
         body = sdk_request_body(self._request_kwargs(rendered), SDK_OPTION_KEYS)
         chat_body_parts(body, rendered.messages, parts, static=not start)
 
-    def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
-        kwargs = chat_request_kwargs(
+    def takes_system_update(self, request: ModelRequest) -> bool:
+        """Return whether the body ``stream`` sends for ``request`` caches the system prompt, which an update keeps.
+
+        ``Capabilities.system_updates`` of a route proven to take an update; anything the request authors turns the
+        automatic markers off (``takes_automatic_markers``).
+        """
+        return self._cache_control(request) is not None and takes_automatic_markers(self._chat_kwargs(request))
+
+    def _cache_control(self, request: ModelRequest) -> dict[str, str] | None:
+        if self.wire.route != "openrouter":
+            return None
+        # OpenRouter forwards Claude cache breakpoints to Anthropic upstreams.
+        return openrouter_prompt_cache_control(
+            self.identity.id,
+            cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache,
+            extended_cache_time=self.settings.extended_cache_time,
+        )
+
+    def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
+        return chat_request_kwargs(
             model_id=self.identity.id,
             messages=request.messages,
             tools=request.tools,
@@ -126,15 +148,11 @@ class ChatAdapter:
             wire=self.wire,
             provider=self.identity.provider,
         )
-        if self.wire.route != "openrouter":
-            return kwargs
-        # OpenRouter forwards Claude cache breakpoints to Anthropic upstreams; the ladder runs on the final body.
-        cache_control = openrouter_prompt_cache_control(
-            self.identity.id,
-            cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache,
-            extended_cache_time=self.settings.extended_cache_time,
-        )
-        if cache_control is None:
+
+    def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
+        kwargs = self._chat_kwargs(request)
+        # The cache ladder runs on the final body.
+        if (cache_control := self._cache_control(request)) is None:
             return kwargs
         return request_kwargs_with_prompt_cache(kwargs, cache_control, system_texts(request.messages))
 

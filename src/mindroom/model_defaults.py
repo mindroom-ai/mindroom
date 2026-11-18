@@ -244,8 +244,9 @@ _OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.2"
 _OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-5.5"
 _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5.5"
 # OpenRouter models proven to take a system message inside the conversation, keep it in place, and follow it over the
-# earlier system prompt (``providers/pipeline/prompt_hold.py``); a model joins once the same probes pass for it.
-OPENROUTER_SYSTEM_UPDATE_MODELS = frozenset({_OPENROUTER_CLAUDE_OPUS})
+# earlier system prompt (``providers/pipeline/prompt_hold.py``); a model joins once the same probes pass for it, so
+# the ids are literal, unmoved by the preferred defaults.
+OPENROUTER_SYSTEM_UPDATE_MODELS = frozenset({"anthropic/claude-opus-5.5"})
 _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-5.5"
 _OPENROUTER_GEMINI_HYDROGEN = f"google/{_GOOGLE_GEMINI_HYDROGEN}"
 _OPENROUTER_GEMINI_LITE = f"google/{_GOOGLE_GEMINI_LITE}"

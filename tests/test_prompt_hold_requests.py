@@ -23,7 +23,7 @@ from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.media import Image
 from mindroom.llm.messages import PROMPT_UPDATE_KEY, Message, system_text
-from mindroom.llm.provider import Capabilities, ModelRequest, complete
+from mindroom.llm.provider import Capabilities, ModelRequest, ToolSpec, complete
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY
 from mindroom.media_inputs import MediaInputs
 from mindroom.participation import ParticipationGate
@@ -220,6 +220,10 @@ class _Conversation:
         bodies = [json.loads(request.content) for request in self.wire.requests[self.sent :]]
         self.sent = len(self.wire.requests)
         return bodies
+
+
+def _takes_updates(_request: ModelRequest) -> bool:
+    return True
 
 
 def _assistant(text: str = "ok") -> dict[str, Any]:
@@ -623,6 +627,45 @@ async def test_a_route_that_may_reach_another_endpoint_or_model_is_sent_the_curr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authored", [None, "message", "tool"])
+async def test_a_request_whose_own_content_turns_the_hour_cache_off_is_sent_the_current_prompt(
+    tmp_path: Path,
+    authored: str | None,
+) -> None:
+    """An authored marker in a message, or a tool parameter named ``cache_control``, turns the automatic markers off.
+
+    Then no prefix keeps the held prompt cached, so an edit is sent as the current prompt and the hold is not written.
+    """
+    wire = Wire(_answer())
+    extra = {"api_key": "test-key", "cache_system_prompt": True, "extended_cache_time": True}
+    model = pipeline_provider(
+        openai_family_adapter({"provider": "openrouter", "id": _OPUS, "extra_kwargs": extra}, tmp_path, wire.respond),
+    )
+    expired = {"type": "text", "text": "First question", "cache_control": {"type": "ephemeral", "ttl": "5m"}}
+    question = Message(role="user", content=[expired] if authored == "message" else "First question")
+    schema = {"type": "object", "properties": {"cache_control": {"type": "string"}}}
+    tools = (ToolSpec(name="lookup", description=None, parameters=schema, strict=None),) if authored == "tool" else ()
+    hold = prompt_hold.prompt_hold_path(tmp_path / "sessions" / "agent.db", "session-1")
+
+    def request(rules: str, *messages: Message) -> ModelRequest:
+        system = Message(role="system", content=f"# Helper\n\n## Replies\n{rules}")
+        return ModelRequest(messages=(system, *messages), tools=tools, prompt_hold=hold)
+
+    await complete(model, request(_AMBER, question))
+    later = (question, Message(role="assistant", content="ok"), Message(role="user", content="Second question"))
+    await complete(model, request(_VIOLET, *later))
+    edited = wire.body()
+    if authored is None:
+        assert len(_updates(edited)) == 1
+        assert hold.exists()
+        return
+    assert _HEADER not in json.dumps(edited)
+    assert _VIOLET in json.dumps(edited["messages"][0])
+    assert _AMBER not in json.dumps(edited)
+    assert not hold.parent.exists()
+
+
+@pytest.mark.asyncio
 async def test_a_memory_file_inlined_in_the_role_is_never_told_as_an_update(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -690,7 +733,7 @@ async def test_an_update_follows_what_a_request_hook_adds_after_it(
 def _held_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, turns: list[Any], **settings: Any) -> _Reply:  # noqa: ANN401
     """Return a reply whose scripted model takes system prompt updates and records what the pipeline sends it."""
     reply = _scripted_reply(tmp_path, monkeypatch, turns, **settings)
-    reply.model.capabilities = Capabilities(system_updates=True)
+    reply.model.capabilities = Capabilities(system_updates=_takes_updates)
     install_model_providers(monkeypatch, {"default": pipeline_provider(reply.model)})
     return reply
 
@@ -796,7 +839,7 @@ async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_wr
     identity = _identity("held-session")
     multiply = calls(tool_call("multiply", "call_2", a=2, b=3), metrics=usage(10, 1))
     turns = [answer("First."), answer("Second."), _add("approved", 10, 1), multiply, answer("Done.")]
-    model = _CheckedModel(turns, capabilities=_route(system_updates=True))
+    model = _CheckedModel(turns, capabilities=_route(system_updates=_takes_updates))
     install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
     ctx = replace(
         make_turn_context(
@@ -814,12 +857,12 @@ async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_wr
     await ai_response(replace(ctx, prompt="Hello"), paths, config)
     config.agents["general"].instructions = ["Answer in Dutch."]
     await ai_response(replace(ctx, prompt="Hello again"), paths, config)
-    model.capabilities = _route(system_updates=held or "touched" in case)
+    model.capabilities = _route(system_updates=_takes_updates if held or "touched" in case else None)
     with monkeypatch.context() as pause:
         if "touched" in case:
             pause.setattr(prompt_hold.os, "utime", _refuse)
         paused = await _paused_adding(replace(ctx, prompt="Add them."), paths, config, image=image)
-    model.capabilities = _route(system_updates=True)
+    model.capabilities = _route(system_updates=_takes_updates)
     pausing = model.requests[-1]
     assert ("Answer in English." in system_text(pausing.messages), len(_told(pausing))) == (held, int(held))
     if compacted:

@@ -8,7 +8,7 @@ usable key, a starter placeholder included, fails at its first request with the 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import PROVIDER_ENV_KEYS
@@ -39,7 +39,6 @@ from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatWire, deepseek_request_thinks
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL, CodexAuthError, borrow_codex_key
 from mindroom.providers.openai.kimi_auth import KIMI_BASE_URL, KimiAuthError, borrow_kimi_token
-from mindroom.providers.openai.openrouter_cache import contains_cache_marker
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesWire
 from mindroom.providers.openai.settings import (
@@ -385,8 +384,8 @@ def _sends_system_updates(route_key: str, model_id: str, base_url: str, settings
 
     That was proven for the listed models behind OpenRouter's own endpoint, with the system prompt cached for an hour.
     A request another gateway answers, or one whose settings let OpenRouter pick another model or upstream provider,
-    may send the update as the user's text, and without that cache there is no prefix an update would keep: an
-    authored ``cache_control`` turns the automatic one-hour markers off.
+    may send the update as the user's text, and without that cache there is no prefix an update would keep. Whether a
+    request caches its system prompt depends on what it authors too (``ChatAdapter.takes_system_update``).
     """
     request_params = settings.request_params or {}
     bodies = (request_params, settings.extra_body or {}, request_params.get("extra_body") or {})
@@ -398,7 +397,6 @@ def _sends_system_updates(route_key: str, model_id: str, base_url: str, settings
         and settings.extended_cache_time
         and not settings.models
         and not any(key in body for body in bodies for key in _REROUTING_KEYS)
-        and not contains_cache_marker(list(bodies))
     )
 
 
@@ -435,9 +433,8 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
         omitted_media=route.omitted_media,
         url_media=frozenset({"image"}),
         provider_default_sampling=_provider_default_sampling(identity.id),
-        system_updates=_sends_system_updates(route_key, identity.id, base_url, settings),
     )
-    return ChatAdapter(
+    adapter = ChatAdapter(
         identity=identity,
         capabilities=capabilities,
         # OpenAI's own API takes the system prompt as ``developer``; OpenAI-compatible servers, such as vLLM and
@@ -460,6 +457,9 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
             per_request=route_key == "kimi",
         ),
     )
+    if not _sends_system_updates(route_key, identity.id, base_url, settings):
+        return adapter
+    return replace(adapter, capabilities=replace(capabilities, system_updates=adapter.takes_system_update))
 
 
 def _supports_explicit_breakpoint(model_id: str, endpoint: str) -> bool:

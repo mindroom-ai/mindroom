@@ -36,7 +36,7 @@ import time
 from contextlib import suppress
 from dataclasses import asdict, replace
 from difflib import SequenceMatcher
-from functools import partial
+from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
@@ -92,13 +92,15 @@ def prompt_hold_path(database: Path, session_id: str) -> Path:
     return database.parent.parent / "prompt_holds" / f"{hashlib.sha256(session_id.encode()).hexdigest()}.json"
 
 
+# Each sizing and send of a request recomputes its update until the hold stores it.
+@lru_cache(maxsize=8)
 def _update_text(held: str, fresh: str) -> str | None:
     """Return the update that tells a model sent the ``held`` text that ``fresh`` is in force, or None when none may.
 
     It states the whole difference, so the newest update alone says what is in force: a unified diff without line
     numbers, whose hunks quote each change with the lines around it and are split by a bare ``@@`` line. Every
-    hunk's old side stands exactly once in ``held``, so the update and ``held`` give ``fresh`` and no other text; a
-    change that cannot be told so is not told.
+    hunk's old side stands exactly once in ``held``, and in the text the hunks above it made of ``held``, so the
+    update and ``held`` give ``fresh`` and no other text, read either way; a change that cannot be told so is not told.
     Nor is any change to a prompt that inlines a ``MEMORY.md``, whose every preloaded file follows a heading of its
     path: an update quotes lines and is sent again, so it would keep a memory the user asked to forget.
     """
@@ -110,8 +112,10 @@ def _update_text(held: str, fresh: str) -> str | None:
     body: list[str] = []
     for group in SequenceMatcher(None, old, new, autojunk=False).get_grouped_opcodes(_CONTEXT_LINES):
         before = old[group[0][1] : group[-1][2]]
-        if sum(old[start : start + len(before)] == before for start in range(len(old) - len(before) + 1)) != 1:
-            return None
+        # Read in ``held``, and in what the hunks above it made of ``held``.
+        for lines in (old, new[: group[0][3]] + old[group[0][1] :]):
+            if sum(lines[start : start + len(before)] == before for start in range(len(lines) - len(before) + 1)) != 1:
+                return None
         body += ["@@"] if body else []
         for tag, i1, i2, j1, j2 in group:
             if tag == "equal":
@@ -201,19 +205,37 @@ def _continued(state: _State, route: object, system: Sequence[Message], rest: Se
     return (*sent, *rest[start:]), state
 
 
-def _plan(inner: ModelProvider, request: ModelRequest, state: _State | None) -> _Plan | None:
-    """Return the plan of ``request`` for a conversation whose file holds ``state``, None to send it as it was built.
+def _split(messages: Sequence[Message]) -> tuple[Sequence[Message], Sequence[Message]]:
+    """Return the leading system messages of ``messages`` and the messages after them."""
+    count = next((index for index, message in enumerate(messages) if message.role != "system"), len(messages))
+    return messages[:count], messages[count:]
 
-    That is a request that holds no prompt: one to a route that takes no update, one that turns its prompt cache off,
-    one without a leading system text and a message after it, or a read-only one that does not continue the hold.
+
+def _holds(inner: ModelProvider, request: ModelRequest) -> bool:
+    """Return whether ``request`` may hold a prompt: whether ``inner`` caches its system prompt, which an update keeps.
+
+    Not a request to a route that takes no update, one whose own content turns the cache off, nor one without a
+    leading system text and a message after it.
+    """
+    system, rest = _split(request.messages)
+    takes = inner.capabilities.system_updates
+    return (
+        takes is not None
+        and request.overrides.prompt_cache
+        and bool(system and rest)
+        and all(isinstance(message.content, str) for message in system)
+        and takes(request)
+    )
+
+
+def _plan(inner: ModelProvider, request: ModelRequest, state: _State | None) -> _Plan | None:
+    """Return the plan of a ``request`` that ``_holds``, for a conversation whose file holds ``state``.
+
+    None sends it as it was built: a read-only request that does not continue the hold.
     """
     messages = request.messages
-    count = next((index for index, message in enumerate(messages) if message.role != "system"), len(messages))
-    system, rest = messages[:count], messages[count:]
+    system, rest = _split(messages)
     texts = [message.content for message in system]
-    holds = inner.capabilities.system_updates and request.overrides.prompt_cache
-    if not (holds and texts and rest and all(isinstance(text, str) for text in texts)):
-        return None
     # What the wire sends of the tools: a deferred one is left out, or loaded by a search.
     tools = [*map(asdict, request.tools), sorted(request.deferred_tools.names), request.deferred_tools.portable]
     route = [inner.identity.id, inner.identity.endpoint, hashlib.sha256(stable_serialize(tools).encode()).hexdigest()]
@@ -241,7 +263,7 @@ def held_request(inner: ModelProvider, request: ModelRequest, *, pins: bool = Fa
     if request.prompt_hold is None:
         return request
     state = pin[0] if pin else _read(request.prompt_hold, time.time())
-    plan = _plan(inner, request, state)
+    plan = _plan(inner, request, state) if _holds(inner, request) else None
     sent = replace(request, messages=request.messages if plan is None else plan[0], prompt_hold=None)
     if pin is not None and not pin:
         # The run it continues may have been sent another prompt than the file holds: only its newest answer tells.
@@ -260,6 +282,8 @@ def _commit(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
     path = request.prompt_hold
     assert path is not None
     sent = replace(request, prompt_hold=None)
+    if not _holds(inner, request):
+        return sent
     try:
         with advisory_file_lock(path.parent / ".lock"):
             for other in path.parent.glob("*.json"):
