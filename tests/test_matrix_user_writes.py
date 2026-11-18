@@ -1143,6 +1143,25 @@ async def test_an_edit_of_an_edit_replaces_the_original_message(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("named", ["$own", "$edit"], ids=["the-message", "its-edit"])
+async def test_an_edit_of_a_deleted_message_is_refused(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    named: str,
+) -> None:
+    """A deleted message keeps its sender and type, and the homeserver takes a replacement nobody would ever see."""
+    deleted = {"redacted_because": {"type": "m.room.redaction", "sender": OWNER}}
+    homeserver.answers[OWN_EVENT_PATH] = room_event("$own", "m.room.message", {}, sender=OWNER, unsigned=deleted)
+    homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$own", "Hello", sender=OWNER)
+
+    result = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id=named, message="Hi all")
+
+    assert result == error_result("edit", "$own was deleted, so it cannot be edited.")
+    assert _changes(homeserver) == []
+
+
+@pytest.mark.asyncio
 async def test_an_edit_of_an_edit_checks_the_message_it_replaced(
     config: Config,
     paths: RuntimePaths,

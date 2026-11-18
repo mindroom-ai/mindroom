@@ -58,6 +58,7 @@ __all__ = [
     "read_people",
     "read_room",
     "read_rooms",
+    "redacted",
     "request_failure",
     "room_encrypted",
     "room_named",
@@ -478,7 +479,8 @@ def _bundled(event: dict[str, Any], rel_type: str) -> dict[str, Any]:
     return _mapping(_mapping(_mapping(event.get("unsigned")).get("m.relations")).get(rel_type))
 
 
-def _redacted(event: dict[str, Any]) -> bool:
+def redacted(event: dict[str, Any]) -> bool:
+    """Return whether ``event`` was deleted: a redacted event keeps its sender and type, but not its content."""
     return "redacted_because" in _mapping(event.get("unsigned"))
 
 
@@ -502,7 +504,7 @@ def _replaces(edit: dict[str, Any], message: dict[str, Any]) -> bool:
         and edit.get("type") == message.get("type")
         and isinstance(edit.get("event_id"), str)
         and isinstance(_content(edit).get("m.new_content"), dict)
-        and not _redacted(edit)
+        and not redacted(edit)
     )
 
 
@@ -629,7 +631,7 @@ def _message_lines(events: list[dict[str, Any]], *, thread_page: bool = False) -
     A run of messages that cannot be read is one line that counts them. On a ``thread_page``, a page of one thread, a
     reply does not name its thread.
     """
-    events = [event for event in events if not _redacted(event)]
+    events = [event for event in events if not redacted(event)]
     edits: dict[str, list[dict[str, Any]]] = {}
     reactions: dict[str, dict[str, set[str]]] = {}
     for event in events:
@@ -752,7 +754,7 @@ async def search_messages(
     for hit in json_objects(found, "results"):
         event = _mapping(hit.get("result"))
         room = event.get("room_id")
-        if _redacted(event) or not isinstance(room, str):
+        if redacted(event) or not isinstance(room, str):
             continue
         if _relation(event).get("rel_type") != _EDIT:
             if _is_message(event):

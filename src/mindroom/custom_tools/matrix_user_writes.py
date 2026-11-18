@@ -34,6 +34,7 @@ from mindroom.custom_tools.matrix_user_reads import (
     matrix_json,
     optional_json,
     read_event,
+    redacted,
     request_failure,
     room_encrypted,
     room_needed,
@@ -471,7 +472,11 @@ async def _event_write(
             # An earlier edit's result names its replacement event. Clients ignore a replacement of a replacement, so
             # the message it replaced is the one to edit, if it too may be.
             event_id = replaced
-            await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
+            named = await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
+        if redacted(named):
+            # The homeserver takes a replacement of a deleted message, and nobody sees it.
+            msg = f"{event_id} was deleted, so it cannot be edited."
+            raise MatrixRequestError(msg)
         text = str(write.message).strip()
         new_content = format_message_with_mentions(turn.config, turn.runtime_paths, text)
         # ``extra_content`` puts the marker on both layers, as history keeps the edit's replacement content.
