@@ -42,7 +42,7 @@ Matrix sync callback
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `delivery_replay.py` | Durable per-scope claims for inbound deliveries: event ids, Matrix thread roots, and nonces, each scope in its own file under its own lock; external triggers also split their old shared file through it |
 | `orchestrator.py` | MultiAgentOrchestrator - composition root: wires the fleet, services, and reload lifecycle, and applies reload plans |
-| `room_steward.py` | The steward rule: which running, joined bot does a room's shared invisible work (highest power, ties to the lowest Matrix ID), which one posts where no agent answers, and which synced bot observes a room's members for reply access |
+| `room_steward.py` | The steward rule: which running, joined bot does a room's shared invisible work (highest power, ties to the lowest Matrix ID), which one posts where no agent answers, and which bot, while its receive loop has caught up, observes a room's members for reply access |
 | `integrations.py` | The built-in integration registry, the one place core wires an integration's runtime: each integration's public routes, its binding to the live bots and the shutdown drain of what it bound, final-reply mirroring, config checks, and created-agent tool edits |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: the process's one config load (published to the embedded API), queueing, response drain, and update-plan dispatch |
