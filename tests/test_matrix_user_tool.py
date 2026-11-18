@@ -495,9 +495,8 @@ async def test_without_a_rule_that_requires_approval_a_write_runs_at_once(
     [
         {"action": "send", "message": "Hi"},
         {"action": "invite", "room_id": ROOM},
-        {"action": "create_room", "name": "Trip"},
     ],
-    ids=["send", "invite", "create_room"],
+    ids=["send", "invite"],
 )
 async def test_the_write_function_takes_no_user_to_act_as(
     config: Config,

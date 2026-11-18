@@ -1098,7 +1098,7 @@ async def test_join_leave_invite_create_room(config: Config, paths: RuntimePaths
         await _write(config, paths, homeserver, action="join", room_id=ALIAS),
         await _write(config, paths, homeserver, action="invite", room_id=ROOM, user_id=BOB),
         await _write(config, paths, homeserver, action="leave", room_id=OTHER_ROOM),
-        await _write(config, paths, homeserver, action="create_room", name="Trip", user_id=BOB),
+        await _write(config, paths, homeserver, action="create_room", name="Trip"),
     ]
 
     assert results == [
@@ -1111,7 +1111,7 @@ async def test_join_leave_invite_create_room(config: Config, paths: RuntimePaths
         ("POST", f"{CLIENT}/join/{ALIAS}", {}),
         ("POST", f"{ROOM_PATH}/invite", {"user_id": BOB}),
         ("POST", f"{CLIENT}/rooms/{OTHER_ROOM}/leave", {}),
-        ("POST", CREATE_PATH, {"name": "Trip", "preset": "private_chat", "invite": [BOB]}),
+        ("POST", CREATE_PATH, {"name": "Trip", "preset": "private_chat"}),
     ]
     assert all(request.query["user_id"] == [OWNER] for request in homeserver.requests)
 
@@ -1234,7 +1234,7 @@ async def test_a_stray_room_id_does_not_give_create_room_its_own_rate_limit(
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """create_room takes no room_id, and whom it invites names no room, so every create_room shares one count."""
+    """create_room takes no room_id, so every create_room shares one count."""
     homeserver.answers[CREATE_PATH] = {"room_id": NEW_DM}
     toolkit = owner_toolkit(config, paths)
 
@@ -1245,7 +1245,6 @@ async def test_a_stray_room_id_does_not_give_create_room_its_own_rate_limit(
                     action="create_room",
                     name="Trip",
                     room_id=f"!stray{n}:example.com",
-                    user_id=f"@guest{n}:example.com",
                 ),
             )
             for n in range(13)
@@ -1290,7 +1289,7 @@ async def test_a_create_room_the_homeserver_did_not_confirm_says_it_may_exist(
     homeserver.answers[CREATE_PATH] = failure
 
     with capture_logs() as logs:
-        result = await _write(config, paths, homeserver, action="create_room", name="Trip", user_id=BOB)
+        result = await _write(config, paths, homeserver, action="create_room", name="Trip")
 
     assert result == error_result("create_room", ROOM_UNCONFIRMED)
     [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
@@ -1421,29 +1420,22 @@ async def test_a_write_that_fails_unexpectedly_leaves_its_audit_line(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        {"action": "invite", "room_id": ROOM, "user_id": BOB},
-        {"action": "create_room", "name": "Trip", "user_id": BOB},
-    ],
-    ids=["invite", "create_room"],
-)
 async def test_the_audit_line_names_whom_a_write_invited(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
-    arguments: dict[str, str],
 ) -> None:
-    """Whom the owner's account invited is logged, into a room or a new room."""
+    """Whom the owner's account invited into a room is logged; a new room invites nobody."""
     homeserver.answers.update({f"{ROOM_PATH}/invite": {}, CREATE_PATH: {"room_id": NEW_DM}})
 
     with capture_logs() as logs:
-        result = await _write(config, paths, homeserver, **arguments)
+        invited = await _write(config, paths, homeserver, action="invite", room_id=ROOM, user_id=BOB)
+        created = await _write(config, paths, homeserver, action="create_room", name="Trip")
 
-    assert result["status"] == "ok"
-    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
-    assert audit["invited"] == BOB
+    assert (invited["status"], created["status"]) == ("ok", "ok")
+    invite, create = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
+    assert invite["invited"] == BOB
+    assert "invited" not in create
 
 
 @pytest.mark.asyncio
@@ -1508,6 +1500,10 @@ async def test_a_blank_write_argument_is_left_out(
         ({"action": "leave", "room_id": " "}, f"leave {ROOM_NEEDED}"),
         ({"action": "invite", "room_id": ROOM}, "invite needs user_id."),
         ({"action": "create_room"}, "create_room needs name."),
+        (
+            {"action": "create_room", "name": "Trip", "user_id": BOB},
+            "create_room invites nobody: make the room first, then invite each person with invite.",
+        ),
     ],
 )
 async def test_each_action_names_what_it_is_missing(

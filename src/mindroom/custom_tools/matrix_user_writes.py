@@ -70,6 +70,9 @@ _ONE_EVENT = "send takes message or attachment, not both: send the text and the 
 _REPLY_NEEDS_TEXT = "A reply (event_id) needs message."
 _NOT_A_USER_ID = "user_id is a full Matrix ID such as @bob:example.com."
 _NOT_THE_OWNER = "user_id is whom to message or invite, never your owner."
+# A homeserver answers ok for a new room whose invitation failed, so create_room invites nobody and invite, whose
+# refusal the homeserver states, does it.
+_CREATE_INVITES_NOBODY = "create_room invites nobody: make the room first, then invite each person with invite."
 _ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
 _ENCRYPTION_UNKNOWN = "Nothing was sent: whether the room is encrypted could not be read"
 _ROOM_UNCONFIRMED = (
@@ -115,7 +118,7 @@ class MatrixUserWrite:
         if self.action == "send":
             return self._send_problem()
         if self.action == "create_room":
-            return _user_problem(self.user_id) if self.name is not None else "create_room needs name."
+            return self._create_room_problem()
         if self.room_id is None:
             return room_needed(self.action)
         needed = {
@@ -131,6 +134,11 @@ class MatrixUserWrite:
             # The `react` tool's rule: a reaction acknowledges a message, so it is never a sentence.
             return reaction_key_error(str(self.emoji).strip())
         return _user_problem(self.user_id) if self.action == "invite" else None
+
+    def _create_room_problem(self) -> str | None:
+        if self.name is None:
+            return "create_room needs name."
+        return None if self.user_id is None else _CREATE_INVITES_NOBODY
 
     def _send_problem(self) -> str | None:
         if (self.room_id is None) == (self.user_id is None):
@@ -150,7 +158,7 @@ class _Written:
 
     room_id: str | None
     event_id: str | None = None
-    # Whom it invited: into a room, or into a new room.
+    # Whom an invite invited.
     invited: str | None = None
 
 
@@ -218,7 +226,7 @@ async def _write(
         max_actions=_MAX_WRITES,
         tool_name="matrix_user",
         context=turn,
-        room_id="" if write.action == "create_room" else write.room_id or write.user_id or "",
+        room_id=write.room_id or write.user_id or "",
         limit_label="matrix_user writes",
     )
     if limited is not None:
@@ -229,11 +237,7 @@ async def _write(
     if write.action in {"react", "edit", "redact"}:
         return await _event_write(client, actor, turn, write, written, marker)
     if write.action == "create_room":
-        written.invited = write.user_id
-        # A plain request: the homeserver's default power levels, as a room the person makes in their own client has.
-        invite = {"invite": [write.user_id]} if write.user_id is not None else {}
-        body = {"name": write.name, "preset": "private_chat", **invite}
-        written.room_id = await _create_room(client, body)
+        written.room_id = await _create_room(client, str(write.name))
         return {"room_id": written.room_id}
     room_id, room = str(write.room_id), quote(str(write.room_id), safe="")
     if write.action == "join":
@@ -277,12 +281,13 @@ def _turn_file(turn: ToolRuntimeContext, attachment_id: str) -> AttachmentRecord
     return record
 
 
-async def _create_room(client: nio.AsyncClient, body: dict[str, object]) -> str:
-    """Make a room and return its ID, saying that none was made only when the homeserver's refusal proves it.
+async def _create_room(client: nio.AsyncClient, name: str) -> str:
+    """Make a private room called ``name`` and return its ID, saying that none was made only when a refusal proves it.
 
-    A refusal has a 4xx status. After any other failure the room may exist, with whom it invited, and a second request
-    would make another.
+    A refusal has a 4xx status. After any other failure the room may exist, and a second request would make another.
+    The request is plain: the homeserver's default power levels, as a room the person makes in their own client has.
     """
+    body = {"name": name, "preset": "private_chat"}
     try:
         room_id = (await matrix_json(client, "POST", "/createRoom", body)).get("room_id")
     except REQUEST_FAILURES as error:

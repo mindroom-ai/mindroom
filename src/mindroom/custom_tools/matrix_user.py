@@ -276,7 +276,7 @@ class MatrixUserTools(Toolkit):
         - edit: Replace your owner's message event_id in room_id with message.
         - redact: Remove your owner's message or reaction event_id in room_id; message is the reason.
         - join, leave: room_id. invite: user_id into room_id.
-        - create_room: A private room called name, inviting user_id if given.
+        - create_room: A private room called name; invite people with invite.
         """
         # Like any argument an action does not take, create_room's room_id and an attachment other than send's are left
         # out, so they name no room or file, for the rate limit or the audit line.
