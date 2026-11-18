@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.delegation.targets import DelegationTarget
@@ -41,6 +42,11 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import JobSpec, ToolJobRuntime
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+def _model_choice(name: str, model: ModelConfig) -> str:
+    """Name one model for the tool description, with its reasoning levels and how to pick one."""
+    return f"{name} ({model.reasoning.describe()}; write {name}@<level>)" if model.reasoning else name
 
 
 class DelegateTools(Toolkit):
@@ -165,7 +171,7 @@ class DelegateTools(Toolkit):
             "Omit agent_name or pass null to select yourself; the same allowlist applies. "
             f"{background_guidance}"
             "Set model to a configured model name to override the child's model for this session. "
-            f"Available models: {', '.join(sorted(self._config.models))}. "
+            f"Available models: {', '.join(_model_choice(name, model) for name, model in sorted(self._config.models.items()))}. "
             "Omit model or pass null to use the child's normal thread, room, or configured model. "
             f"{'This' if background else 'The caller waits; this'} does not create a Matrix thread. "
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session; "

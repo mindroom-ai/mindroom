@@ -336,7 +336,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
+                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -607,7 +607,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -830,7 +830,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
+                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -979,7 +979,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
               },
               "mindroom_output_path": {
                 "anyOf": [

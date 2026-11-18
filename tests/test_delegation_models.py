@@ -9,13 +9,14 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, ReasoningConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.agent_tool_helpers import toolkit_offers
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths, respond
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True], ids=["direct", "native"])
 @pytest.mark.parametrize("agent_name", [None, "worker"], ids=["self", "named"])
-@pytest.mark.parametrize("model", [None, "alternate", "missing", "", "   "])
+@pytest.mark.parametrize("model", [None, "alternate", "alternate@high", "missing", "alternate@xhigh", "", "   "])
 async def test_subagent_model_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -48,7 +49,11 @@ async def test_subagent_model_selection(
         },
         models={
             "default": ModelConfig(provider="openai", id="gpt-6-astra"),
-            "alternate": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
+            "alternate": ModelConfig(
+                provider="anthropic",
+                id="claude-sonnet-5",
+                reasoning=ReasoningConfig(levels=["low", "high"], default="low"),
+            ),
         },
         defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
@@ -112,7 +117,7 @@ async def test_subagent_model_selection(
 
     records = list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
     handles = list((paths.storage_root / "subagent_sessions").glob("*.json"))
-    if model in (None, "alternate"):
+    if model in (None, "alternate", "alternate@high"):
         expected_model = model or "default"
         assert f"Answer from {expected_model}" in result
         assert built_models == [expected_model]
@@ -130,3 +135,21 @@ async def test_subagent_model_selection(
         assert not records
         assert not handles
     assert config.agents["leader"].model == config.agents["worker"].model == "default"
+
+
+def test_the_subagent_tool_description_lists_each_model_s_reasoning_levels(tmp_path: Path) -> None:
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])},
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-6-astra"),
+            "sol": ModelConfig(provider="codex", id="gpt-6.2-sol", reasoning={"levels": ["low", "high"], "default": "low"}),
+        },
+        defaults=DefaultsConfig(tools=[]),
+    )
+    paths = _runtime_paths(tmp_path)
+    tools = DelegateTools("leader", paths, config, agent_workspace_root_path(paths.storage_root, "leader"))
+
+    description = toolkit_offers(tools, "run_subagent").description
+
+    assert description is not None
+    assert "Available models: default, sol (levels: low, high; default low; write sol@<level>). " in description

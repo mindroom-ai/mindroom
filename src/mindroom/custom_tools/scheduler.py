@@ -75,7 +75,8 @@ class SchedulerTools(Toolkit):
                 independently sent tool messages remain visible. Leave unset to infer
                 the mode from the scheduling request.
             model: Configured model alias for each scheduled run (including team
-                members), e.g. "cheap". Leave unset to use normal agent, room, and
+                members), e.g. "cheap", or `name@level` for one of its reasoning
+                levels, e.g. "sol@high". Leave unset to use normal agent, room, and
                 thread model selection. This does not change the conversation model.
 
         Returns:
@@ -181,8 +182,8 @@ class SchedulerTools(Toolkit):
                 and omit empty, whitespace-only, or exact `NO_REPLY` finals while
                 keeping findings, failures, and independently sent tool messages
                 visible. Leave unset to preserve the existing mode.
-            model: Configured model alias for each run, including team members.
-                Leave unset to preserve the existing choice. Use an empty string
+            model: Configured model alias for each run, including team members,
+                or `name@level` for one of its reasoning levels. Leave unset to preserve the existing choice. Use an empty string
                 to restore normal agent, room, and thread model selection.
 
         Returns:
