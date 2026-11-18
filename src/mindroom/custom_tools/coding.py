@@ -14,22 +14,24 @@ from __future__ import annotations
 
 import bisect
 import difflib
-import fcntl
 import itertools
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 import unicodedata
-from contextlib import contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from glob import has_magic
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Optional, cast
+from weakref import WeakValueDictionary
 
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation, TypeAdapter, ValidationError
 
+from mindroom.file_locks import wait_for_exclusive_lock
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.path_confinement import is_git_metadata_path
 from mindroom.path_safety import (
@@ -64,6 +66,9 @@ _EDITS_SHAPE = 'Pass edits=[{"old_text": "...", "new_text": "..."}].'
 _NO_CHANGES = "\nNo changes written."
 # The default of edit_file's edits, so a call that leaves them out differs from one that sends null.
 _OMITTED: Any = cast("Any", object())
+_WORKER_LOCK_TIMEOUT_SECONDS = 10.0
+_PRIMARY_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
+_PRIMARY_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass
@@ -378,10 +383,20 @@ _EDITS = TypeAdapter(list[_Edit])
 
 
 @contextmanager
-def _directory_lock(resolved: Path) -> Iterator[None]:
-    """Hold an exclusive ``flock`` on the nearest existing directory of ``resolved``, which threads and processes share.
+def _primary_file_lock(resolved: Path) -> Iterator[None]:
+    """Serialize the primary's writers of one resolved path in memory, never taking a lock worker code could hold."""
+    with _PRIMARY_LOCKS_GUARD:
+        # The local reference keeps the weakly held lock alive while this call waits on or holds it.
+        lock = _PRIMARY_LOCKS.setdefault(resolved, threading.Lock())
+    with lock:
+        yield
 
-    Each call opens its own descriptor; the lock survives the file's atomic replacement and leaves no lock file.
+
+@contextmanager
+def _directory_lock(resolved: Path) -> Iterator[None]:
+    """In a sandbox request, hold an exclusive lock on the nearest existing directory of ``resolved``.
+
+    Each call opens its own descriptor, so separate requests wait for each other, then fail before any read or write.
     """
     directory = resolved.parent
     while not directory.is_dir():
@@ -393,7 +408,9 @@ def _directory_lock(resolved: Path) -> Iterator[None]:
         yield
         return
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if not wait_for_exclusive_lock(descriptor, timeout_seconds=_WORKER_LOCK_TIMEOUT_SECONDS):
+            msg = f"another call is editing files in {directory}; try again"
+            raise TimeoutError(msg)
         yield
     finally:
         os.close(descriptor)
@@ -527,19 +544,18 @@ def _apply_edits(content: str, edits: list[_Edit]) -> tuple[str, int, str] | str
 
 
 def _edit_resolved(base_dir: Path, resolved: Path, path: str, edits: list[_Edit]) -> str:
-    """Apply ``edits`` to the file at ``resolved`` under its directory's lock, and return the result or the error."""
-    with _directory_lock(resolved):
-        raw = _read_resolved(base_dir, resolved, path)
-        if isinstance(raw, str):
-            return raw + _NO_CHANGES
-        applied = _apply_edits(raw.decode("utf-8", errors="replace"), edits)
-        if isinstance(applied, str):
-            return f"Error: {applied}{_NO_CHANGES}"
-        new_content, replacements, report = applied
-        try:
-            write_resolved_file(base_dir, resolved, new_content.encode("utf-8"))
-        except OSError as e:
-            return f"Error writing file: {e}"
+    """Apply ``edits`` to the file at ``resolved``, which the caller holds locked, and return the result or the error."""
+    raw = _read_resolved(base_dir, resolved, path)
+    if isinstance(raw, str):
+        return raw + _NO_CHANGES
+    applied = _apply_edits(raw.decode("utf-8", errors="replace"), edits)
+    if isinstance(applied, str):
+        return f"Error: {applied}{_NO_CHANGES}"
+    new_content, replacements, report = applied
+    try:
+        write_resolved_file(base_dir, resolved, new_content.encode("utf-8"))
+    except OSError as e:
+        return f"Error writing file: {e}"
     counted = f" ({replacements} replacements)" if replacements > len(edits) else ""
     return f"Applied {len(edits)} edit{'s' if len(edits) > 1 else ''}{counted} to {path}: {report}."
 
@@ -731,12 +747,15 @@ class CodingTools(Toolkit):
         base_dir: str | None = None,
         file_access: FileAccess = "workspace",
         shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]] = no_shared_directory_roots,
+        *,
+        in_sandbox_request: bool = False,
     ) -> None:
         self.base_dir = resolve_tool_base_dir(base_dir)
         # Without a workspace the base dir is only the process working directory, which workspace access refuses.
         self.has_workspace = bool(base_dir)
         self.restrict_to_base_dir = file_access == "workspace"
         self.shared_directory_roots = shared_directory_roots
+        self.in_sandbox_request = in_sandbox_request
         super().__init__(
             name="coding",
             tools=[
@@ -748,6 +767,9 @@ class CodingTools(Toolkit):
                 self.ls,
             ],
         )
+
+    def _file_lock(self, resolved: Path) -> AbstractContextManager[None]:
+        return _directory_lock(resolved) if self.in_sandbox_request else _primary_file_lock(resolved)
 
     @shared_directory_aware("path", writes=False)
     def read_file(
@@ -808,7 +830,8 @@ class CodingTools(Toolkit):
         if is_git_metadata_path(resolved):
             return blocked_git_metadata_message("writing file", path)
         try:
-            return _edit_resolved(self.base_dir, resolved, path, parsed)
+            with self._file_lock(resolved):
+                return _edit_resolved(self.base_dir, resolved, path, parsed)
         except OSError as e:
             return f"Error: {e}{_NO_CHANGES}"
 
@@ -832,7 +855,7 @@ class CodingTools(Toolkit):
             return blocked_git_metadata_message("writing file", path)
 
         try:
-            with _directory_lock(resolved):
+            with self._file_lock(resolved):
                 write_resolved_file(self.base_dir, resolved, content.encode("utf-8"))
         except OSError as e:
             return f"Error writing file: {e}"

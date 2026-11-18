@@ -10877,7 +10877,9 @@ Edits must not overlap, and when one fails none is written: the error names the 
 On success it returns the lines each edit changed in the new file, numbered as `read_file()` numbers them, not a diff.
 In a file whose lines all end in CRLF, `old_text` and `new_text` may use LF or CRLF and the file keeps CRLF, unless the file or an edit holds a lone CR; then, as with mixed endings, the file is matched and edited byte for byte.
 A byte order mark stays in the file once, also when an edit that starts at it copies it into `old_text` or `new_text`; any other U+FEFF is ordinary text.
-`edit_file()` and `write_file()` calls on files in one directory run one after another, from any thread or worker process, so no edit is lost to another call's write; a directory the agent may enter but not read cannot hold that lock, so calls there run unlocked.
+In the primary, `edit_file()` and `write_file()` calls on the same resolved path run one after another, so no edit is lost to another call's write.
+In a worker, calls serialize only when they lock the same stable, readable directory; one that waits too long for that lock returns a busy error without changing the file, and a directory the agent may enter but not read cannot hold the lock, so calls there run unlocked.
+Primary and worker calls do not serialize with each other, with another primary, or with other writers such as shell commands.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
 Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
@@ -17926,6 +17928,7 @@ Kubernetes mounts such knowledge read-only, because kubelet follows links inside
 The primary treats everything inside a mounted workspace as worker-controlled.
 Files it reads or writes there, such as skills, subagent profiles, context files, workspace template copies, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, the files `prompt_curation` measures, the memory files, staging copies, reports, verdicts, and thread-export `index.json` files `dreaming` reads, and the files chat clients list, read, and save through the [workspace file routes](https://docs.mindroom.chat/workspace-files/), are reached from the workspace root without following links, never written through a file that has another hard link, opened non-blocking so a FIFO cannot stall the primary, and published by atomic replacement or exclusive creation.
 The primary never takes a file lock inside a workspace, because worker code could hold it forever.
+Primary `coding` edits and writes to the same resolved path serialize in memory within one primary process.
 `dreaming` writes each run's agenda, staging copy of `memory/`, and patch under `.mindroom/dreaming/runs/`, and deletes finished staging and old runs without following links.
 It writes an approved proposal into `memory/` from bytes worker code staged, which gives the agent nothing it could not write itself; it writes only Markdown under `memory/` other than today's daily note and context files, and keeps its progress below `tracking/`, outside the workspace.
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.

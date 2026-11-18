@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import multiprocessing
 import os
@@ -13,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import mindroom.api.sandbox_runner as sandbox_runner_module
+from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools import coding as coding_module
 from mindroom.custom_tools.coding import (
     CodingTools,
@@ -28,11 +31,13 @@ from mindroom.path_safety import (
     resolve_base_dir_path,
     split_search_pattern,
 )
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_schema import tool_parameters, validated_entrypoint
 from mindroom.tools.file import file_tools
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.config.models import FileAccess
@@ -634,7 +639,7 @@ def _edit_after_both_read(
     barrier: Any,  # noqa: ANN401 - a multiprocessing barrier, whose class the context makes.
     results: Any,  # noqa: ANN401 - a multiprocessing queue.
 ) -> None:
-    """Run in a child process: edit ``path``, waiting after the read until the other child has read too."""
+    """Run in a child process as a sandbox request: edit ``path``, waiting after the read until the other has read."""
     read = coding_module.read_resolved_file
 
     def read_then_wait(base: Path, resolved: Path) -> bytes:
@@ -644,15 +649,131 @@ def _edit_after_both_read(
         return content
 
     coding_module.read_resolved_file = read_then_wait
-    results.put(CodingTools(base_dir=base_dir, file_access=file_access).edit_file(path, _one(*edit)))
+    tools = CodingTools(base_dir=base_dir, file_access=file_access, in_sandbox_request=True)
+    results.put(tools.edit_file(path, _one(*edit)))
+
+
+def _write_while_holding(base_dir: str, held: Any, release: Any) -> None:  # noqa: ANN401 - multiprocessing events.
+    """Run in a child process as a sandbox request: write ``a.txt``, pausing inside the directory lock."""
+    write = coding_module.write_resolved_file
+
+    def write_after_release(base: Path, resolved: Path, payload: bytes) -> None:
+        held.set()
+        release.wait(timeout=60)
+        write(base, resolved, payload)
+
+    coding_module.write_resolved_file = write_after_release
+    CodingTools(base_dir=base_dir, in_sandbox_request=True).write_file("a.txt", "runner\n")
+
+
+def _reap(processes: list[Any]) -> None:
+    for process in processes:
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+
+
+def _no_directory_lock(resolved: Path) -> None:
+    msg = f"the primary took a directory lock for {resolved}"
+    raise AssertionError(msg)
 
 
 class TestEditFileConcurrency:
-    """Concurrent edit_file and write_file calls on one file serialize, across threads and processes."""
+    """The primary serializes its own calls on one path in memory; sandbox requests lock the directory."""
+
+    def test_toolkits_choose_their_lock_where_they_are_built(self, tmp_path: Path) -> None:
+        """The sandbox runner builds request toolkits with the directory lock; the primary never does."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+        process_env = {"MINDROOM_SANDBOX_RUNNER_MODE": "true"}
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path / "storage",
+            process_env=process_env,
+        )
+        tools = builtin_tool_registry()
+        runner_toolkit, _entrypoint = sandbox_runner_module._resolve_entrypoint(
+            runtime_paths=runtime_paths,
+            config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+            tool_name="coding",
+            function_name="edit_file",
+            tools=tools,
+        )
+        primary_toolkit = get_tool_by_name("coding", runtime_paths, tools=tools, worker_target=None)
+
+        assert runner_toolkit.in_sandbox_request is True
+        assert primary_toolkit.in_sandbox_request is False
+
+    def test_primary_never_waits_on_a_runner_s_directory_lock(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """While a runner request holds a directory's lock, the primary edits and writes a file beside it."""
+        (tmp_path / "a.txt").write_text("a\n")
+        (tmp_path / "b.txt").write_text("old\n")
+        context = multiprocessing.get_context("spawn")
+        held, release = context.Event(), context.Event()
+        runner = context.Process(target=_write_while_holding, args=(str(tmp_path), held, release))
+        monkeypatch.setattr(coding_module, "_directory_lock", _no_directory_lock)
+        tools = CodingTools(base_dir=str(tmp_path))
+        runner.start()
+        try:
+            assert held.wait(timeout=60)
+            assert tools.edit_file("b.txt", _one("old", "edited")) == "Applied 1 edit to b.txt: line 1."
+            assert tools.write_file("b.txt", "written\n").startswith("Wrote")
+            assert (tmp_path / "b.txt").read_text() == "written\n"
+            assert (tmp_path / "a.txt").read_text() == "a\n"
+        finally:
+            release.set()
+            _reap([runner])
+        assert (tmp_path / "a.txt").read_text() == "runner\n"
 
     @pytest.mark.parametrize("where", ["inside", "outside"])
-    def test_edits_from_two_processes_both_land(self, tmp_path: Path, where: str) -> None:
-        """Two worker processes editing one file both land, as each worker request runs in its own process."""
+    def test_two_primary_toolkits_editing_one_path_both_land(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        where: str,
+    ) -> None:
+        """Two primary toolkits racing on one resolved path keep both edits, inside the workspace and outside it."""
+        base_dir = tmp_path / "base"
+        base_dir.mkdir()
+        target = base_dir / "race.txt" if where == "inside" else tmp_path / "race.txt"
+        target.write_text("AAAA\nBBBB\n")
+        file_access = "workspace" if where == "inside" else "unrestricted"
+        barrier = threading.Barrier(2)
+        read = coding_module.read_resolved_file
+
+        def read_then_wait(base: Path, resolved: Path) -> bytes:
+            content = read(base, resolved)
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait(timeout=0.5)
+            return content
+
+        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
+        monkeypatch.setattr(coding_module, "_directory_lock", _no_directory_lock)
+        results: list[str] = []
+        threads = [
+            threading.Thread(
+                target=lambda e=edit: results.append(
+                    CodingTools(base_dir=str(base_dir), file_access=file_access).edit_file(str(target), _one(*e)),
+                ),
+            )
+            for edit in (("AAAA", "A" * 50), ("BBBB", "b"))
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert all(result.startswith("Applied") for result in results), results
+        assert target.read_text() == "A" * 50 + "\nb\n"
+
+    @pytest.mark.parametrize("where", ["inside", "outside"])
+    def test_edits_from_two_runner_processes_both_land(self, tmp_path: Path, where: str) -> None:
+        """Two sandbox requests editing one file both land, as each worker request runs in its own process."""
         base_dir = tmp_path / "base"
         base_dir.mkdir()
         target = base_dir / "race.txt" if where == "inside" else tmp_path / "race.txt"
@@ -667,35 +788,59 @@ class TestEditFileConcurrency:
             )
             for edit in (("AAAA", "A" * 50), ("BBBB", "b"))
         ]
-        for process in processes:
-            process.start()
-        reports = [results.get(timeout=60) for _ in processes]
-        for process in processes:
-            process.join(timeout=10)
+        try:
+            for process in processes:
+                process.start()
+            reports = [results.get(timeout=60) for _ in processes]
+        finally:
+            _reap(processes)
 
         assert all(report.startswith("Applied") for report in reports), reports
         assert target.read_text() == "A" * 50 + "\nb\n"
 
+    def test_runner_lock_wait_is_bounded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A runner request that cannot get the directory lock fails with a busy error and changes nothing."""
+        (tmp_path / "f.txt").write_text("old\n")
+        monkeypatch.setattr(coding_module, "_WORKER_LOCK_TIMEOUT_SECONDS", 0.2)
+        tools = CodingTools(base_dir=str(tmp_path), in_sandbox_request=True)
+        descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            edited = tools.edit_file("f.txt", _one("old", "new"))
+            written = tools.write_file("f.txt", "newer\n")
+        finally:
+            os.close(descriptor)
+
+        assert edited.startswith("Error: another call is editing files in")
+        assert edited.endswith("No changes written.")
+        assert written.startswith("Error writing file: another call is editing files in")
+        assert (tmp_path / "f.txt").read_text() == "old\n"
+
     def test_write_file_waits_for_an_edit_in_progress(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A write_file that starts while an edit is between its read and its write lands after the edit."""
+        """A write_file that tries to lock while an edit is between its read and its write lands after the edit."""
         target = tmp_path / "race.txt"
         target.write_text("old\n")
         tools = CodingTools(base_dir=str(tmp_path))
-        edit_read, written = threading.Event(), threading.Event()
-        read = coding_module.read_resolved_file
+        edit_read, write_waits = threading.Event(), threading.Event()
+        read, lock = coding_module.read_resolved_file, coding_module._primary_file_lock
 
         def read_then_wait(base: Path, resolved: Path) -> bytes:
             content = read(base, resolved)
             edit_read.set()
-            written.wait(timeout=0.5)
+            assert write_waits.wait(timeout=30), "write_file never tried to take the lock"
             return content
 
+        def observed_lock(resolved: Path) -> AbstractContextManager[None]:
+            if edit_read.is_set():
+                write_waits.set()
+            return lock(resolved)
+
         def write() -> None:
-            edit_read.wait(timeout=10)
+            assert edit_read.wait(timeout=30)
             results.append(tools.write_file("race.txt", "new\n"))
-            written.set()
 
         monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
+        monkeypatch.setattr(coding_module, "_primary_file_lock", observed_lock)
         results: list[str] = []
         threads = [
             threading.Thread(target=lambda: results.append(tools.edit_file("race.txt", _one("old", "edited")))),
@@ -704,19 +849,20 @@ class TestEditFileConcurrency:
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            thread.join(timeout=60)
 
+        assert write_waits.is_set()
         assert sorted(result.split()[0] for result in results) == ["Applied", "Wrote"], results
         assert target.read_text() == "new\n"
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
     def test_unreadable_directory_is_edited_without_the_lock(self, tmp_path: Path) -> None:
-        """A directory the caller may enter but not list still takes edits and writes, as before the lock."""
+        """In a sandbox request, a directory it may enter but not list still takes edits and writes, unlocked."""
         base_dir, locked = tmp_path / "base", tmp_path / "locked"
         base_dir.mkdir()
         locked.mkdir()
         (locked / "f.txt").write_text("old\n")
-        tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted")
+        tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted", in_sandbox_request=True)
         locked.chmod(0o300)
         try:
             assert tools.edit_file(str(locked / "f.txt"), _one("old", "new")).startswith("Applied 1 edit")
@@ -730,11 +876,11 @@ class TestEditFileConcurrency:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Calls on files in different directories are not serialized: both reach the barrier together."""
+        """Sandbox requests on files in different directories are not serialized: both reach the barrier together."""
         for name in ("one", "two"):
             (tmp_path / name).mkdir()
             (tmp_path / name / "f.txt").write_text(f"{name}\n")
-        tools = CodingTools(base_dir=str(tmp_path))
+        tools = CodingTools(base_dir=str(tmp_path), in_sandbox_request=True)
         barrier = threading.Barrier(2)
         read = coding_module.read_resolved_file
 
