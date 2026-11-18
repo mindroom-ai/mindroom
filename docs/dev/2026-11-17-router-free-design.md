@@ -24,13 +24,13 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
 
 ## Decisions
 
-1. **Routing runs in the process, with no relay.**
+1. **Routing is hidden: the room's steward sends a route event that no client shows.**
    Picking a responder for an unmentioned message in a room with several candidates reuses `suggest_responder`, `router.model` and `router.judgment`.
-   One bot per room, the owner of its routing lane, picks, and hands the turn to the chosen agent inside the process (decision 14).
-   The handoff is saved before it moves, so a replay or a second bot cannot pick again.
-   The chosen agent answers the original message directly, and no relay message is posted.
+   One bot per room, its steward, picks, and tells the chosen agent with a hidden `io.mindroom.route` event (decision 14).
+   The event is a real Matrix event, so it is durable, every bot admits it through its own sync, and no cross-bot state is shared in the process.
+   The chosen agent answers the person's original message for that person, and no relay message, notice or title is posted by the steward.
    Mentions, thread continuation, `reply_mode: mentions` and the multi-human silence rules stay as they are.
-   Relay events already in room history are still read as before.
+   Visible relay messages already in room history are still read and answered as before.
 2. **Everything visible about a message comes from the agent that answers it.**
    - Voice: the transcript is produced in the process, routing reads the transcript, and the answering agent posts the transcript and then its reply; when nobody answers, no transcript is posted.
    - Approval cards are posted by the agent or team that asks, and each card records its sender so restart recovery edits the right card.
@@ -61,7 +61,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
 9. **Invariant.**
    Everything that works in a managed room works in a room with one person and one agent.
    No code path may test for a specific account's presence.
-10. **Deleted:** the `invite_router` tool (its name answers "no longer needed" for one release), the relay path, the router's persona, presence line and avatar generation, and every router-only fallback branch.
+10. **Deleted:** the `invite_router` tool (its name answers "no longer needed" for one release), the visible relay message, the router's persona, presence line and avatar generation, and every router-only fallback branch.
     This pull request keeps publishing what today's MindRoom Chat reads.
 11. **One pull request, least code.**
     Each task deletes the router path it replaces in the same commit; the only dual paths are the compatibility existing deployments need (old events, pending cards, old config, the plugin alias).
@@ -81,21 +81,24 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     A row fails closed when its observer leaves the room, reports a sync gap, restarts its sync loop or stops, and the next refresh picks a new observer and reads the room again before the row is ready.
     A power-level change alone does not move the observer, because a joined, syncing account stays an authoritative witness of membership; this avoids a handover protocol.
     A grant room that no running MindRoom account has joined stays unready, which denies, and is reported as a config warning.
-14. **Selection agreement (question C): one routing lane per room, and a durable handoff inside the process.**
-    A first design let every candidate coalesce and decide for itself and reconciled them through one saved row per source event.
-    Three review rounds kept finding holes with one root, several independent coalescers, so it was replaced.
+14. **Selection agreement (question C): the room's steward selects, and a hidden `io.mindroom.route` event carries the selection.**
+    Two earlier designs kept the selection inside the process: one saved row per source event that every candidate reconciled, then one routing lane per room with a durable handoff between journals.
+    Review kept finding cross-bot holes in both, with one root: the old visible relay was a real Matrix event, so it had durability, per-bot sync admission, requester identity, membership checks and deduplication for free, and each in-process replacement had to rebuild them.
+    So the relay's transport stays and only its visibility goes.
     Every bot first answers by its own rules, which are the rules of `origin/main`: the only candidate, a mention, the thread's agent, a follow-up to its running reply, a team, adaptive participation.
-    A turn those rules leave unanswered (several candidates, nobody mentioned, the thread names no responder and holds one person, `router.access` allows the requester when set) is routed by the room's lane owner alone, and every other bot ignores it, as it ignored it while a router existed.
-    The lane owner is the room's steward (decision 3), which may be the owner account or a candidate.
-    It coalesces and normalizes the turn as any bot does (edits, attachments, voice transcript), runs the selector once, and saves one handoff row in the event journal: a stable ID, the room, the exact source events, the normalized events that rebuild the prepared turn, the chosen bot or "nobody fits", and the lane's generation.
-    Accepting the handoff is one journal transaction: the turn becomes an event in the chosen bot's journal under the handoff's ID, the lane owner's events for it settle, and the row gives up its payload.
-    So the lane owner's events stay pending until acceptance, the turn is always in exactly one journal, and a second acceptance changes nothing.
-    The chosen bot answers the person's original event for the original requester, through the context path old router relays use, and checks that requester's access again when it takes the turn.
-    A restart accepts every saved handoff before any bot replays, and a replayed lane-owner turn finds the row of its sources and only moves it on, so no crash point asks the model again or answers twice.
-    A turn nobody fits is saved and settled, and nobody answers; when the selector fails, the candidate with the lowest Matrix ID is chosen.
-    Each room has one lane owner at a time, recorded with a generation that grows when the owner changes.
-    A new owner moves the handoffs its predecessor saved and never moved, which their rows alone carry, and a bot that lost the lane while it was selecting saves nothing.
-    The fast paths read no row, so their rare races are the ones the router had: a candidate that answers by its own rules while the lane owner routes the same message can produce a second answer.
+    A turn those rules leave unanswered (several candidates, nobody mentioned, the thread names no responder and holds one person, `router.access` allows the requester when set) is routed by the room's steward alone, and every other bot ignores it, as it ignored it while a router existed.
+    The steward (decision 3) may be the owner account or a candidate.
+    It coalesces and normalizes the turn as any bot does, runs the selector once, and sends one event of type `io.mindroom.route`.
+    The event's content names, under the `io.mindroom.route` key, the chosen account (`entity`), the person's event (`event_id`) and the thread the answer belongs in (`thread_id`), and carries the relay context the responder reads: the trusted-relay source kind, the original sender, attachment IDs, and a scheduled task's per-run settings.
+    It has no `m.relates_to` and no `m.mentions`, so no homeserver counts it in a thread and no mention rule fires for it, and it has a `body` only when it relays a scheduled task whose prompt the responder could not read otherwise.
+    Every bot journals the event from sync, in encrypted rooms too, the way a silent schedule trigger is journaled, and only when its sender is an account the identity registry manages.
+    The bot it names runs it as a mention through the existing trusted-relay path: the requester is the original sender, the bot's own access rules apply to that requester, and the answer replies to the person's event.
+    Every other bot settles it without work.
+    A candidate steward that the selection names answers the turn itself and sends no event.
+    A turn nobody fits gets no event and no answer; when the selector fails, the candidate with the lowest Matrix ID is chosen.
+    A selected responder that is still starting leaves the turn pending with nothing sent, and it is routed again once that responder is ready.
+    The steward records the route as its answer to the turn, so a replay sends no second route, and a responder that receives a second route for a message it answered answers once, because the route names the message as an alias of its turn.
+    The fast paths read nothing shared, so their rare races are the ones the router had: a candidate that answers by its own rules while the steward routes the same message can produce a second answer.
 15. **Startup (question D): no account is required.**
     Every configured account starts through the same retrying path, with the owner account first when the config needs one.
     When room-backed access is configured, dispatch stays parked until every bot that started has finished its first own sync or has stopped, and then one refresh builds the member rows; a room whose observer is not ready stays unready and its messages wait, as they do today while the router's refresh is pending.
@@ -108,6 +111,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
 - **The orchestrator assigns the steward and keeps a healthy incumbent.** It needs a handover protocol and saved assignments; deriving the steward from room state needs neither, and pinning the observer per row gives member tracking the stability it needs.
 - **The steward or the owner posts system messages.** It keeps a second voice in the room, which is the confusion this record removes.
 - **A visible "picked X" line in place of the relay.** It keeps the extra message per routed turn.
+- **Selecting inside the process, with per-source claims or a durable handoff between journals.** Both were built on this branch; each had to rebuild what a Matrix event gives for free, and review kept finding cross-bot holes (decision 14).
 - **Merging every bot's view of room membership.** Nothing orders one bot's join against another bot's kick, so a merged view can admit someone who left.
 - **Rename `router:` to `routing:`.** It forces a config migration for no behavior change.
 - **Routing in the homeserver, an appservice or the client.** It breaks decision 8 or excludes other Matrix clients and bridges.
@@ -117,7 +121,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
 One pull request on `refactor/router-free`, built as these tasks in order:
 
 1. The steward function.
-2. Process routing, with the relay path deleted.
+2. Routing through a hidden `io.mindroom.route` event from the room's steward.
 3. Member tracking per room.
 4. Steward duties: room state, member hooks, per-event claims.
 5. Voice transcript from the answering agent.

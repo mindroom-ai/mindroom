@@ -20,7 +20,7 @@ Matrix sync callback
        -> coalescing/ingress_lanes.py                            (per-(room, sender) receipt-order FIFO; STT readiness waits here)
        -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
   -> turns/dispatch.py (owns one turn from gate exit: prepare -> decide -> execute -> record)
-       -> turn_policy.py + command_turn_executor.py              (ignore / respond decision, command execution)
+       -> turn_policy.py + command_turn_executor.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
        -> reply_turn/locked_turn.py                              (one settlement for agent, team, and approval turns)
             -> response_turn.py                                  (shared streaming turn driver; blocking replies collect it)
@@ -65,7 +65,6 @@ Matrix sync callback
 | `bot_room_lifecycle.py` | One bot's room joins and leaves: configured and invited rooms, durable pending invites, following rooms listed under a room, cleanup of rooms it no longer keeps, the router's welcome, and an entity's notice in a managed room |
 | `turns/ingress.py` | TurnIngress - owns one inbound text or media event from its Matrix callback to gate admission, including onboarding commands, approval replies, edits, and commands that bypass the gate |
 | `turns/dispatch.py` | TurnDispatcher - owns one turn from the coalescing gate's exit to its recorded outcome: prepare, decide, execute, record |
-| `turns/routing_lane.py` | A room's routing lane: the lane owner's one selection per message, saved as a handoff and moved to the chosen bot's journal, and the turn that bot rebuilds from it to answer the person's own event |
 | `turns/interactive_selection.py` | Admits an answer to an interactive question behind earlier ingress and runs its response after the gate |
 | `turns/queued_notice.py` | The queued notice and approval-wait reaction that text, media, and voice ingress share |
 | `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
@@ -79,7 +78,8 @@ Matrix sync callback
 | `coalescing/ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
 | `coalescing/gate.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `coalescing/batch.py` | Coalesced dispatch batch construction |
-| `turn_policy.py` | Turn policy: decide ignore or respond for inbound turns, claiming an unmentioned turn's saved responder before answering it |
+| `router/relay.py` | Routing as a room's steward: responder selection with its fallback, responder readiness, relay metadata, and the hidden `io.mindroom.route` event |
+| `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns; only the room's steward routes |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
 | `participation_hook.py` | The reply's participation check as a pre-request loop hook: the configured judgment backend on a projection with tool calls and files as placeholders, or a decision request on the reply's exact messages, ending the run when it stays silent |
 | `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, the bounded HTTP client, and LLM, System One, and OpenAI Decisions adapters |
@@ -117,7 +117,7 @@ Matrix sync callback
 | `event_journal/legacy_turn_rows.py` | One-time conversion of `turn_records` blobs, journal redaction tombstones, and the pre-journal JSON ledger into turn rows |
 | `event_journal/legacy_approval_failures.py` | One-time conversion of the free-text failure reasons failing approval continuations stored into their failure kind and detail |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
-| `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
+| `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish; silent schedule triggers and hidden routes run as messages |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions, and the `reaction:received` hooks for reactions no built-in consumer took |
@@ -213,8 +213,6 @@ Matrix sync callback
 | `custom_tools/temporary_secrets.py` | `temporary_secrets` agent tool: `request_temporary_secret` asks the requester for a secret that the conversation's shell commands receive as an environment variable |
 | `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, where to add missing ones, and `request_secret`, which asks the requester for a key with a card |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
-| `event_journal/room_claims.py` | Per-event room claims: one saved owner per room event and purpose, shared by every bot, where the first writer wins |
-| `event_journal/routing_handoffs.py` | The routing lane's rows: each room's lane owner with its generation, and the handoffs a lane owner saved for the bot chosen to answer, moved between two journals in one transaction |
 | `tool_jobs/runtime.py` | Accepted execution ownership, what a job runs and how it is known, durable outcomes, scoped discovery, and result claims |
 | `delegation/background.py` | A subagent call's job: the child it is known by, its saved snapshot, its outcome, and its cleanup inside the generic execution owner |
 | `delegation/job_approvals.py` | A child's approval requests, asked through the cards of the job that runs it |

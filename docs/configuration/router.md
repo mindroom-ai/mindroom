@@ -49,9 +49,12 @@ Then:
 2. If the thread requires explicit targeting, the router stays silent; eligible individual agents already in the thread may still use opt-in [adaptive participation](threads.md#adaptive-participation).
 3. If exactly one eligible responder remains, it answers directly without an AI routing call.
 4. If several remain, the router reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
-5. The router posts a message mentioning the chosen agent or team (for example "@code could you help with this?"), and that entity answers in the thread.
+5. The router tells the chosen agent or team with a hidden event, and that entity answers the message in the thread.
+   No routing message appears in the room.
 
-If routing fails, for example because of a model error or an invalid choice, the router replies "Please try mentioning an agent or team directly with @ or rephrase your request."
+In a room without the router, the MindRoom account with the highest power level there routes the same way, and answers itself when it is the best match.
+If the routing call fails, for example because of a model error or an invalid choice, the candidate with the lowest Matrix ID answers.
+If no candidate fits the message, nobody answers; mention an agent or team to get an answer.
 Mentioning an agent or team with `@name` always bypasses routing, but the entity still answers only if it is in the room, listed for that room in its `rooms` when the room is configured, and allowed by its `access`.
 An entity invited into a configured room that does not list it posts a note when it joins, and repeats that note instead of answering when it alone is mentioned there: the room's agents are managed in the MindRoom configuration, so talk to the entity in a new room it is invited to.
 A request that mentions several entities gets the same explanation when every entity it cannot use is such an invited, unlisted entity.
@@ -61,7 +64,7 @@ See [Multi-Human Thread Protection](threads.md#multi-human-thread-protection) fo
 ### Mentioning the router
 
 The router is not a conversational agent.
-A message that mentions only the router gets a short rules-of-engagement reply instead of an answer.
+A message that mentions only the router gets no answer.
 Mention a specific agent or team to get an answer, or several agents for an ad-hoc collaboration.
 
 ## Responder Selection Judgments

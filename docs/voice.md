@@ -88,8 +88,8 @@ The echo also appears in a room whose [reply mode](configuration/threads.md#repl
 If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly without a router handoff.
 
 **Router must choose.**
-If several agents or teams can respond and none is targeted, the router routes on the transcript and posts a normal handoff such as `@home could you help with this?`.
-The chosen responder answers that handoff and still receives the original audio attachment.
+If several agents or teams can respond and none is targeted, the router routes on the transcript and tells the chosen responder with a hidden event, so no handoff message appears in the room.
+The chosen responder answers the voice message and still receives the original audio attachment.
 
 **No router, or router cannot reply to the sender.**
 Agents and teams handle the voice message directly with the same rules as text, and no router echo appears.

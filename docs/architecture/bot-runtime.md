@@ -110,10 +110,11 @@ Shutdown closes callback admission before withdrawing runtime capabilities, and 
 A cleanup that outlasts its budget keeps its owners, and the Matrix client and journal stay open until it finishes.
 Shutdown invalidates membership readiness only after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
 Replay does not wait for a later sync token or Sliding Sync position: recovered callbacks may rely on the room ID, but cached membership and state are best-effort.
-A message that mentions nobody and that no bot answers by its own rules is routed by one bot per room, the owner of the room's routing lane, which is the room's steward.
-The lane owner saves a handoff row in the journal (`routing_handoffs`) before the turn moves, and accepting the row puts the turn in the chosen bot's journal and settles the lane owner's events in one transaction.
-Startup accepts every saved handoff before any bot replays, and a replayed lane-owner turn finds the row of its sources instead of selecting again, so a crash at any point leaves one answer and one selection.
-The lane's generation in `routing_lanes` grows when its owner changes, and a bot that lost the lane while it selected saves nothing.
+A message that mentions nobody and that no bot answers by its own rules is routed by one bot per room, the room's steward.
+The steward selects a responder and sends it a hidden `io.mindroom.route` event, which names the responder, the person's event and the thread, carries the relay context, and has no `m.relates_to`, `m.mentions` or text for people.
+Every bot journals that event from sync as `EventKind.ROUTE`, only when an account the identity registry manages sent it, and journal dispatch hands it to the message callback as a mention of the responder in reply to the person's event.
+The responder answers the person's event for that person under its own access rules, every other bot settles the route without work, and the person's event is an alias of the responder's turn.
+The steward records the route as its answer, so a replay sends none again; a responder that is still starting leaves the turn pending with nothing sent, and a steward the selection names answers the turn itself with no event.
 
 ### Delivery and membership
 
@@ -163,7 +164,7 @@ A voice message's batching scope and its echo thread are distinct: a root audio 
 The user-visible history behavior is on [Conversation history](../configuration/history.md#compacted-history-and-redaction).
 
 - A redaction is recorded once per agent, in the transaction that admits it, and applied there to every Matrix login of that agent and to the agent's turns; it is kept when the bot leaves the room, because an earlier login the agent returns to, or a rejoin the server does not replay the redaction to, would otherwise show the deleted text again.
-- Deleting a human message that an old router relay answers for (the router relayed through v2026.11.396) deletes that relay: the routed reply ends, and its approval wait with it, exactly as for a directly sent message, because reply discovery matches exact logical ids and the redacted alias is resolved to its sources first.
+- Deleting a human message that a route answers for deletes that route, hidden or an old visible relay (the router relayed visibly through v2026.11.396): the routed reply ends, and its approval wait with it, exactly as for a directly sent message, because reply discovery matches exact logical ids and the redacted alias is resolved to its sources first.
 - Nothing durable records that history cleanup is owed: every response derives it from the recorded redactions, so a crash between redaction and cleanup, or a redacted event no turn owns, needs no recovery path.
 - Approval creation and source-redaction admission serialize, so an approval cannot acquire a source that a deletion already settled.
 - Redacted replay can stay in local session storage until its history scope next serves a response, because cleanup runs only then.
