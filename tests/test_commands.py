@@ -722,14 +722,14 @@ async def test_schedule_command_reuses_failed_boundary_membership_snapshot(tmp_p
         ("counted", "sliding", None),
     ],
 )
-async def test_desktop_command_resolves_exact_agent_from_router_candidates(
+async def test_desktop_command_resolves_exact_agent_from_room_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     room_shape: str,
     sync_mode: str,
     expected_reply: str | None,
 ) -> None:
-    """Router-owned commands require the sole eligible agent and a complete membership with no other party."""
+    """`/desktop` requires the sole eligible agent and a complete membership with no party but the owner account."""
     runtime_paths = _test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
@@ -751,7 +751,7 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         runtime_paths,
         usernames={"router": "mindroom_router", "code": "mindroom_code"},
     )
-    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
     joined_user_ids = ["@mindroom_router:localhost", "@mindroom_code:localhost", "@alice:localhost"]
     if room_shape == "extra_member":
         joined_user_ids.append("@bob:localhost")

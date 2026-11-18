@@ -36,7 +36,7 @@ from mindroom.entity_resolution import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.room_membership import room_has_only, room_membership_is_complete
+from mindroom.matrix.room_membership import cached_member_ids, room_has_only, room_membership_is_complete
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
@@ -316,7 +316,10 @@ async def _desktop_agent_for_room(
     room: nio.MatrixRoom,
     requester_user_id: str,
 ) -> str | None:
-    """Resolve one eligible agent from a room containing only the requester and serving bots."""
+    """Resolve one eligible agent from a room containing only the requester, that agent and this bot.
+
+    A MindRoom account that is no agent or team answers nobody, so it is no party to the room.
+    """
     candidates = await context.responder_candidates_for_room(room, requester_user_id)
     registry = entity_identity_registry(context.config, context.runtime_paths)
     eligible: list[tuple[str, str]] = []
@@ -329,7 +332,13 @@ async def _desktop_agent_for_room(
     if len(eligible) != 1:
         return None
     agent_name, agent_user_id = eligible[0]
-    if not room_has_only(context.config, room, {requester_user_id, room.own_user_id, agent_user_id}):
+    responders = {*context.config.agents, *context.config.teams}
+    silent_ids = {
+        user_id
+        for user_id in cached_member_ids(room)
+        if (name := registry.current_entity_name_for_user_id(user_id)) is not None and name not in responders
+    }
+    if not room_has_only(context.config, room, {requester_user_id, room.own_user_id, agent_user_id} | silent_ids):
         return None
     return agent_name
 
@@ -448,8 +457,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             response_text = "❌ Couldn't confirm this room's membership; try again in a moment."
         elif (desktop_agent_name := await _desktop_agent_for_room(context, room, requester_user_id)) is None:
             response_text = (
-                "❌ Use `/desktop` in a private room containing only you, the serving bot, "
-                "and exactly one Desktop-enabled agent."
+                "❌ Use `/desktop` in a private room containing only you and exactly one Desktop-enabled agent."
             )
         else:
             response_text = handle_desktop_command(

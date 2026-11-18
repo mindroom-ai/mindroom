@@ -39,8 +39,12 @@ A message starting with `/` that is not a command, such as a file path like `/ho
 
 ## Command Handling
 
-The router answers commands, in the main room and in threads, even in rooms with a single agent.
-The exception is `/desktop`, which a private agent may answer itself when the room contains only you and that agent; see [`/desktop`](tools/desktop.md#desktop) for its room requirements.
+The agent or team a command is aimed at answers it.
+A command that mentions agents or teams, such as `@code !model`, is answered by the one among them with the lowest Matrix ID.
+A command in a thread with one agent is answered by that agent.
+Any other command is answered by the agent or team in the room with the lowest Matrix ID, whatever the room's reply mode.
+`/desktop` has its own room requirements; see [`/desktop`](tools/desktop.md#desktop).
+A command that changes room state, such as `/thread_mode`, `/auto_approve` or `/encrypt confirm`, answers `I need moderator rights in this room to ...` and changes nothing when no MindRoom account in the room may send state events.
 
 Commands follow the same [authorization](authorization.md) rules as ordinary messages.
 "Room admin" means a Matrix room administrator, while "platform administrator" means a user listed in `administrators`.
@@ -96,7 +100,7 @@ Shown values are redacted like `config_manager` output; see [Access, Redaction, 
 ### Configuration Confirmations
 
 `/config set` validates the change against the full configuration and replies with an error ending in `Changes were NOT applied.` when it is invalid.
-A valid change gets a preview of the current and new values from the router, with ✅ and ❌ reactions.
+A valid change gets a preview of the current and new values, with ✅ and ❌ reactions.
 Only the user who requested the change can confirm or cancel it, and that user must still be a platform administrator.
 Unconfirmed changes expire after 24 hours.
 
