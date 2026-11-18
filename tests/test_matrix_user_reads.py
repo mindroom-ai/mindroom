@@ -1003,6 +1003,29 @@ async def test_search_shows_an_edits_new_text_and_skips_redactions(
 
 
 @pytest.mark.asyncio
+async def test_search_keeps_an_edit_when_another_sender_edited_the_same_message(
+    client: nio.AsyncClient,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Each sender's edit of a message has its own line, so a newer forged edit cannot take the author's place."""
+    mallory = "@mallory:example.com"
+    homeserver.answers[SEARCH_PATH] = search_answer(
+        edit_of("$forged", "$plan", "budget cut", sender=mallory, minute=5, room_id=ROOM),
+        edit_of("$fix", "$plan", "budget is due friday", minute=4, room_id=ROOM),
+        edit_of("$older", "$plan", "budget is due thursday", minute=3, room_id=ROOM),
+    )
+
+    result = await search_messages(client, "budget", room_id=None, page_token=None, limit=None)
+
+    assert result == {
+        "messages": [
+            f"{ROOM} | {message_line('$plan', 'budget cut [edit]', sender=mallory, minute=5)}",
+            f"{ROOM} | {message_line('$plan', 'budget is due friday [edit]', minute=4)}",
+        ],
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("original_first", [True, False], ids=["original-first", "edit-first"])
 async def test_search_prefers_the_original_hit_over_its_edit_hit(
     client: nio.AsyncClient,
@@ -1226,7 +1249,7 @@ async def test_mark_read_reports_when_only_the_markers_moved(
     with pytest.raises(MatrixRequestError) as error:
         await mark_read(client, ROOM, event_id="$seen")
 
-    assert str(error.value) == f"The room is read up to $seen, but it is still marked unread: {said}"
+    assert str(error.value) == f"The room is read up to $seen, but clearing its unread mark was not confirmed: {said}"
     assert f"{ROOM_PATH}/read_markers" in homeserver.paths()
 
 
