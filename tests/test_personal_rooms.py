@@ -337,6 +337,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
             lambda _: None,
             Mock(),
             Mock(),
+            lambda _room_id: False,
         )
         await lifecycle.member_event(
             nio.MatrixRoom(room_id, server.user_id),
@@ -354,6 +355,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
         lambda _: PersonalRoomTarget(restarted, True),
         Mock(),
         Mock(),
+        lambda _room_id: True,
     )
     await router._reconcile()
     record = read_personal_room(path)
@@ -805,6 +807,7 @@ async def test_a_pending_guest_removal_retry_does_not_delay_shutdown(
         lookup_target=lambda _agent: None,
         config_reload=Mock(),
         report_membership_change=Mock(),
+        is_steward=lambda _room_id: False,
     )
 
     await asyncio.wait_for(lifecycle.cancel_reconciliation(timeout_seconds=1), timeout=2)
@@ -827,6 +830,7 @@ async def test_the_room_lifecycle_removes_an_invited_person(tmp_path: Path, monk
         lookup_target=lambda _agent: None,
         config_reload=Mock(),
         report_membership_change=Mock(),
+        is_steward=lambda _room_id: False,
     )
     room = nio.MatrixRoom(room_id, server.user_id)
     room.add_member("@alice:localhost", None, None)
@@ -1169,6 +1173,7 @@ async def test_a_refused_initial_join_says_why_in_the_reconciliation_warning(
         lambda _: PersonalRoomTarget(owner, True),
         Mock(),
         Mock(),
+        lambda _room_id: True,
     )
 
     with capture_logs() as logs:
@@ -2816,6 +2821,7 @@ async def test_owner_event_retires_initial_join_after_later_invite(
         lambda _agent: None,
         Mock(),
         Mock(),
+        lambda _room_id: False,
     )
     server.set_member(room_id, "@alice:localhost", observed_membership)
     event = _room_member_event(membership=observed_membership, prev_membership=previous_membership)
@@ -2862,6 +2868,7 @@ async def test_owner_event_retirement_requires_recorded_room_and_user(
         lambda _agent: None,
         Mock(),
         Mock(),
+        lambda _room_id: False,
     )
     leave = _room_member_event(membership="leave", prev_membership="invite")
     await lifecycle.member_event(nio.MatrixRoom("!other:localhost", server.user_id), leave)
@@ -2892,6 +2899,7 @@ async def test_unrecorded_owner_event_creates_no_lock_when_feature_disabled(
         lambda _agent: None,
         Mock(),
         Mock(),
+        lambda _room_id: False,
     )
     await lifecycle.member_event(
         nio.MatrixRoom("!other:localhost", server.user_id),
@@ -3442,6 +3450,7 @@ async def test_a_refused_initial_join_counts_when_the_homeserver_joins_the_owner
         lambda _: PersonalRoomTarget(owner, True),
         Mock(),
         Mock(),
+        lambda _room_id: True,
     )
 
     with capture_logs() as logs:

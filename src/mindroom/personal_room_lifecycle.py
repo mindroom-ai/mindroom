@@ -11,7 +11,6 @@ import nio
 
 from mindroom.background_tasks import create_background_task
 from mindroom.config.personal_agents import read_personal_agent_roster
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.personal_room_store import (
@@ -47,7 +46,7 @@ _RECONCILIATION_RETRY_SECONDS = 30.0
 _RECONCILIATION_MAX_RETRY_SECONDS = 3600.0
 # A retry usually heals a first failure, so a candidate is an error only once it has failed this many attempts in a row.
 _RECONCILIATION_ERROR_FAILURES = 3
-# Every bot in a room reports each membership event, so the router drops repeats among this many recent ones.
+# Every bot in a room reports each membership event, so the observing bot drops repeats among this many recent ones.
 _RECENT_MEMBERSHIP_EVENTS = 1024
 
 
@@ -104,8 +103,10 @@ class PersonalRoomLifecycle:
     lookup_target: Callable[[str], PersonalRoomTarget | None]
     # Starts a user's agent once provisioning added it to the roster.
     config_reload: ConfigReloadLifecycle
-    # Tells the router that a membership event (room_id, event_id) changed a room, which may unblock its roster.
+    # Tells every bot that a membership event (room_id, event_id) changed a room, which may unblock a roster.
     report_membership_change: Callable[[str, str], None]
+    # Whether this bot is a room's steward now; an onboarding room's steward observes its joins.
+    is_steward: Callable[[str], bool]
     # A live join and a reconciliation pass can both reach one user; only one may register the account.
     _provisioning: set[tuple[str, str]] = field(default_factory=set, init=False)
     _reconciled: bool = field(default=False, init=False)
@@ -131,8 +132,11 @@ class PersonalRoomLifecycle:
 
     @property
     def observes_onboarding_joins(self) -> bool:
-        """Whether router baseline joins need durable admission for this feature."""
-        return self.agent_name == ROUTER_AGENT_NAME and self.runtime.config.personal_rooms is not None
+        """Whether this bot stewards an onboarding room, whose baseline joins need durable admission for this feature."""
+        settings = self.runtime.config.personal_rooms
+        return settings is not None and any(
+            self.is_steward(room_id) for room_id in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
+        )
 
     def config_changed(self) -> None:
         """Revisit existing records and optional backfill after a configuration reload."""
@@ -246,7 +250,7 @@ class PersonalRoomLifecycle:
         *,
         reinvite_departed_owner: bool = False,
     ) -> None:
-        """Forward a trusted router observation; unavailable owners leave it retryable.
+        """Forward a trusted observation by the onboarding room's steward; unavailable owners leave it retryable.
 
         When personal_rooms.agent names a template, the requester's own agent
         serves the room: a missing one is provisioned only while the requester
@@ -257,9 +261,9 @@ class PersonalRoomLifecycle:
         """
         settings = self.runtime.config.personal_rooms
         if (
-            not self.observes_onboarding_joins
-            or settings is None
+            settings is None
             or source_room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
+            or not self.is_steward(source_room_id)
             or not is_human_requester_id(user_id, self.runtime.config, self.runtime_paths)
         ):
             return
@@ -412,7 +416,7 @@ class PersonalRoomLifecycle:
     ) -> bool:
         """Recognize exact self-onboarding commands, typed with `!` or `/`; ``requester_user_id`` is the event's trusted requester."""
         settings = self.runtime.config.personal_rooms
-        if not self.observes_onboarding_joins or settings is None:
+        if settings is None or not self.is_steward(room.room_id):
             return False
         body = event.body.strip()
         if (
@@ -440,7 +444,7 @@ class PersonalRoomLifecycle:
         roster, is logged and settles: raising would hold the room's event lane, so this agent would answer nothing
         there until someone repaired the room. A room whose reconciliation is still failing keeps retrying after
         doubling delays up to hourly; otherwise the room is checked again on restart or configuration reload.
-        Any change of membership, unlike a profile update, also tells the router, which retries at once onboarding
+        Any change of membership, unlike a profile update, also tells every bot, so the observing one retries at once onboarding
         that this room's imported roster blocked.
         """
         if event.membership != event.prev_membership:
@@ -459,7 +463,7 @@ class PersonalRoomLifecycle:
         await self.service.guest_membership_event(room, event.state_key, event.membership)
         if self.runtime.config.personal_rooms is None or event.membership != "join" or event.prev_membership == "join":
             return
-        if self.observes_onboarding_joins and event.prev_membership is not None:
+        if self.is_steward(room.room_id) and event.prev_membership is not None:
             await self._onboard_live(
                 event.state_key,
                 room.room_id,
@@ -615,7 +619,7 @@ class PersonalRoomLifecycle:
                     **retry,
                 )
                 if error.room_id in changed:
-                    # The room changed while this attempt read it, possibly before the router knew it was this room.
+                    # The room changed while this attempt read it, possibly before the observing bot knew it was this room.
                     self._retry_at_once({candidate})
             else:
                 (logger.error if persistent else logger.warning)(

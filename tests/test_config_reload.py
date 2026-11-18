@@ -1381,19 +1381,20 @@ async def test_initialize_binds_nothing_when_entity_account_preparation_fails(tm
 
 
 @pytest.mark.asyncio
-async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path) -> None:
-    """A generated agent's first sync lets the router onboard its owner at once instead of after a retry delay."""
+async def test_ready_personal_agent_nudges_every_bots_reconciliation(tmp_path: Path) -> None:
+    """A generated agent's first sync lets whichever bot observes onboarding onboard its owner at once."""
     paths = test_runtime_paths(tmp_path)
     _append_personal_agent_roster_entry(paths, personal_agent_entry())
     data = deepcopy(PERSONAL_AGENTS_BASE) | {"agents": {"general": {"display_name": "General"}}}
     orchestrator = _MultiAgentOrchestrator(paths, config=Config.validate_with_runtime(data, paths))
-    router = MagicMock(spec=AgentBot)
-    install_bots(orchestrator, {ROUTER_AGENT_NAME: router})
+    router, general = MagicMock(spec=AgentBot), MagicMock(spec=AgentBot)
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: router, "general": general})
 
     await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="general"))
     router.personal_room_target_ready.assert_not_called()
     await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="mind_alice_smith"))
     router.personal_room_target_ready.assert_called_once_with()
+    general.personal_room_target_ready.assert_called_once_with()
 
 
 @pytest.mark.asyncio

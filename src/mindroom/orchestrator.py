@@ -1071,9 +1071,8 @@ class _MultiAgentOrchestrator:
         if bot.agent_name == ROUTER_AGENT_NAME and bot.running and bot.client is not None:
             await self._approval_recovery.mark_router_ready()
         if self.config.personal_agent_instance(bot.agent_name) is not None:
-            router = self.agent_bots.get(ROUTER_AGENT_NAME)
-            if router is not None:
-                router.personal_room_target_ready()
+            for observer in self.agent_bots.values():
+                observer.personal_room_target_ready()
         self.turn_recovery.schedule()
 
     async def refresh_agent_reply_memberships(self) -> RefreshOutcome:

@@ -72,7 +72,7 @@ def coordination(tmp_path: Path) -> Coordination:
     owner = Mock(spec=PersonalRoomService)
     local = Mock(spec=PersonalRoomService)
     lookup = Mock(return_value=PersonalRoomTarget(owner, first_sync_complete=True))
-    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, Mock(), Mock())
+    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, Mock(), Mock(), lambda _room_id: True)
     return Coordination(lifecycle, owner, local, lookup)
 
 
@@ -126,6 +126,7 @@ def template_coordination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Te
         lookup,
         config_reload := Mock(status=ConfigReloadStatus(status="applied")),
         Mock(),
+        lambda _room_id: True,
     )
     return TemplateCoordination(lifecycle, target, lookup, provision, config_reload)
 
@@ -263,10 +264,26 @@ async def test_missing_target_keeps_live_trigger_retryable(coordination: Coordin
 
 
 @pytest.mark.asyncio
-async def test_non_router_never_routes_onboarding(coordination: Coordination) -> None:
-    """Only the router selects and invokes the target service."""
+async def test_onboarding_join_observed_by_room_steward(coordination: Coordination) -> None:
+    """Any entity that stewards the onboarding room observes its joins, and stewarding another room observes none."""
     lifecycle = coordination.lifecycle
     lifecycle.agent_name = "helper"
+    lifecycle.is_steward = lambda room_id: room_id == "!other:localhost"
+    assert not lifecycle.observes_onboarding_joins
+    await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
+    coordination.owner.ensure.assert_not_awaited()
+    lifecycle.is_steward = lambda room_id: room_id == "!lobby:localhost"
+    assert lifecycle.observes_onboarding_joins
+    join = RoomMemberJoin("!lobby:localhost", "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
+    await lifecycle.baseline_join(join)
+    coordination.owner.ensure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_non_steward_never_routes_onboarding(coordination: Coordination) -> None:
+    """Only the onboarding room's steward selects and invokes the target service."""
+    lifecycle = coordination.lifecycle
+    lifecycle.is_steward = lambda _room_id: False
     lifecycle.runtime.config.personal_rooms.backfill = True
     assert not lifecycle.observes_onboarding_joins
     assert not await lifecycle.handle_command(
