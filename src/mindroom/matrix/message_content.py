@@ -113,19 +113,23 @@ def _with_event_marker(
     resolved_content: dict[str, Any],
     event_content: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return hydrated content that still says an agent wrote the event, when the event says so.
+    """Return hydrated content that says an agent wrote the event exactly when the event says so.
 
-    Like its relation, the agent-authored marker is a property of the event the server stored. A payload without
-    it, such as one uploaded for another event, cannot give the event back the authority its marker took away, so
-    the event's marker is put on the hydrated content, and on an edit's replacement content, which history keeps.
+    Like its relation, the agent-authored marker is a property of the event the server stored, which admission
+    judged. A payload, such as one uploaded for another event, can neither give the event back the authority its
+    marker took away nor take authority from an event that carries none. So the event's marker, on either layer of
+    an edit, is put on the hydrated content and on its replacement content, which history keeps, and a marker only
+    the payload carries is dropped.
     """
-    layers = (event_content, _normalized_content_dict(event_content.get("m.new_content")))
-    markers = [layer[AGENT_AUTHORED_KEY] for layer in layers if AGENT_AUTHORED_KEY in layer]
-    if markers:
-        resolved_content[AGENT_AUTHORED_KEY] = markers[0]
-        new_content = resolved_content.get("m.new_content")
-        if isinstance(new_content, dict):
-            new_content[AGENT_AUTHORED_KEY] = markers[0]
+    event_layers = (event_content, _normalized_content_dict(event_content.get("m.new_content")))
+    markers = [layer[AGENT_AUTHORED_KEY] for layer in event_layers if AGENT_AUTHORED_KEY in layer]
+    for layer in (resolved_content, resolved_content.get("m.new_content")):
+        if not isinstance(layer, dict):
+            continue
+        if markers:
+            layer[AGENT_AUTHORED_KEY] = markers[0]
+        else:
+            layer.pop(AGENT_AUTHORED_KEY, None)
     return resolved_content
 
 

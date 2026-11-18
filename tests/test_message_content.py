@@ -528,6 +528,38 @@ class TestResolvedMessageExtraction:
         assert resolved[AGENT_AUTHORED_KEY] == agent
         assert visible_content_from_content(resolved)[AGENT_AUTHORED_KEY] == agent
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("edit", [False, True], ids=["message", "edit"])
+    async def test_hydration_cannot_mark_an_event_that_carries_no_marker(self, *, edit: bool) -> None:
+        """A sidecar payload that carries the marker cannot say an agent wrote an event that does not say so.
+
+        Admission reads the event and listening the hydrated content, so both must see the event's own answer.
+        """
+        marker = {AGENT_AUTHORED_KEY: "@mind:example.com"}
+        preview = {
+            "msgtype": "m.file",
+            "body": "Preview",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            "url": "mxc://server/marked-sidecar",
+        }
+        content: dict[str, object] = preview
+        payload: dict[str, object] = {"msgtype": "m.text", "body": "Full text", **marker}
+        if edit:
+            relation = {"rel_type": "m.replace", "event_id": "$original"}
+            content = {"msgtype": "m.text", "body": "* Preview", "m.new_content": preview, "m.relates_to": relation}
+            payload = {"msgtype": "m.text", "body": "* Full text", "m.new_content": payload, **marker}
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadResponse, body=json.dumps(payload).encode("utf-8")),
+        )
+
+        event_source = await resolve_event_source_content({"type": "m.room.message", "content": content}, client)
+
+        resolved = event_source["content"]
+        assert visible_content_from_content(resolved)["body"] == "Full text"
+        assert AGENT_AUTHORED_KEY not in resolved
+        assert AGENT_AUTHORED_KEY not in visible_content_from_content(resolved)
+
     def test_visible_body_from_event_source_prefers_visible_edit_content(self) -> None:
         """Visible-body extraction should use m.new_content when present."""
         event_source = {
