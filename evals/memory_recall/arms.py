@@ -8,7 +8,7 @@ with fixed 5,000-character chunks and no excludes. Hits that may have been writt
 selection, so a note written from that very turn cannot leak its answer.
 
 The `shipped` arms measure the agent's own semantic hits, the part of the shipped per-turn recall that
-`select_recall_hits` chooses. The file backend appends team keyword hits after them, and its keyword fallback for a
+`_RECALL_SELECTION` chooses. The file backend appends team keyword hits after them, and its keyword fallback for a
 cold index keeps the top 3; neither is replayed, since the benchmarked agents have no team memory.
 """
 
@@ -35,8 +35,7 @@ from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.memory_entries import split_memory_entries
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
-from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT
-from mindroom.memory._prompting import select_recall_hits
+from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT, _RECALL_SELECTION, _retrieve_memories
 from mindroom.memory._semantic_file_search import _memory_results_from_hits
 from mindroom.path_globs import matches_root_glob
 from mindroom.runtime_resolution import resolve_knowledge_binding
@@ -68,7 +67,7 @@ class Arm:
     exclude: tuple[str, ...]
     #: Index each memory entry as its own file instead of the stock 5,000-character chunks of whole files.
     entry_chunks: bool
-    #: `top3` injects the three best hits, as today; `gap` uses `select_recall_hits`.
+    #: `top3` injects the three best hits, as today; `gap` uses the shipped `_RECALL_SELECTION`.
     selection: Literal["top3", "gap"]
     #: Inject nothing for a short reply in an existing thread.
     skip_short: bool
@@ -76,6 +75,8 @@ class Arm:
     shipped: bool = False
     #: The shipped overlay's `memory.search.exclude`; None keeps the product default.
     search_exclude: tuple[str, ...] | None = None
+    #: A `rerank_arms.RERANKERS` name: replay returns every candidate, which `rerank_arms.select_reranked` selects from.
+    reranker: str | None = None
 
 
 # Archived copies, raw session dumps (`YYYY-MM-DD-HHMM.md`) and other agents' memory.
@@ -108,6 +109,18 @@ ARMS: dict[str, Arm] = {
         skip_short=False,
         shipped=True,
     ),
+}
+# The `shipped` candidates, reranked by a local cross-encoder (A5), a judgment backend (A6), or one that also asks the
+# gate question (A7).
+ARMS |= {
+    name: replace(ARMS["shipped"], name=name, reranker=reranker)
+    for name, reranker in (
+        ("A5", "bge-reranker-v2-m3"),
+        ("A6o", "openai_decisions"),
+        ("A6t", "typesafe"),
+        ("A7o", "openai_decisions-gate"),
+        ("A7t", "typesafe-gate"),
+    )
 }
 
 # The most hits that keep live recall's ranking: the store fuses `max(limit * 2, 50)` candidates per ranking, 50 for
@@ -182,7 +195,10 @@ async def replay(
         if arm.selection == "top3":
             # Converted after the cut, as live recall converts its three hits, so the scores match too.
             return _memory_results_from_hits(kept[:_TOP_K], scope_user_id=_SCOPE_USER_ID)
-        return select_recall_hits(_memory_results_from_hits(kept, scope_user_id=_SCOPE_USER_ID))
+        candidates = _memory_results_from_hits(kept, scope_user_id=_SCOPE_USER_ID)
+        if arm.reranker is not None:
+            return candidates
+        return await _retrieve_memories(turn.query, candidates, _RECALL_SELECTION)
 
     return list(await asyncio.gather(*(recall(turn) for turn in turns)))
 

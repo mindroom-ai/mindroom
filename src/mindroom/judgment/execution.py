@@ -110,6 +110,7 @@ async def run_judgment[T](
     timeout_seconds: float,
     allow_network: bool,
     capacity: JudgmentCapacity = SHARED_CAPACITY,
+    max_request_bytes: int = MAX_REQUEST_BYTES,
 ) -> JudgmentResult[T]:
     """Run one bounded attempt; abandoned worker threads retain their capacity."""
     started = perf_counter()
@@ -117,7 +118,7 @@ async def run_judgment[T](
         return _result(request, started, "incomplete_state")
     if (
         request.state_bytes != len(request.body)
-        or len(request.body) > MAX_REQUEST_BYTES
+        or len(request.body) > max_request_bytes
         or hashlib.sha256(request.body).hexdigest() != request.request_hash
         or not owner
     ):

@@ -226,7 +226,7 @@ A model alias whose provider adds native tools that cannot be disabled is refuse
 For participation, a TypeSafe or OpenAI Decisions probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
 All backends get the same question and context, but their judgments can differ.
 
-At most eight judgments run at once across the process, including [router judgments](router.md#responder-selection-judgments), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
+At most eight judgments run at once across the process, including [router judgments](router.md#responder-selection-judgments) but not [reranking](../knowledge.md#judgment-rerankers), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
 Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe and OpenAI Decisions, without request text or credentials.
 
 #### Participation Context and Fallback

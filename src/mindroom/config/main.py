@@ -44,7 +44,7 @@ from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents
 from mindroom.config.judgment import LLMJudgmentConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, RerankerConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphConfig
 from mindroom.config.legacy_access import (
     AccessMigrationError,
@@ -52,6 +52,7 @@ from mindroom.config.legacy_access import (
     persist_access_migration,
     validate_access_migration_source,
 )
+from mindroom.config.legacy_fields import rename_legacy_knowledge_reranker
 from mindroom.config.matrix import (
     EventJournalConfig,
     MatrixSpaceConfig,
@@ -409,9 +410,12 @@ class Config(BaseModel):
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
     )
-    knowledge_reranker: KnowledgeRerankerConfig | None = Field(
+    reranker: RerankerConfig | None = Field(
         default=None,
-        description="Optional reranker for search_knowledge_base results; searches keep hybrid ranking without one",
+        description=(
+            "Optional reranker for search_knowledge_base results, and for memory searches with memory.search.rerank; "
+            "searches keep hybrid ranking without one"
+        ),
     )
     mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict,
@@ -567,10 +571,10 @@ class Config(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_root_config(cls, data: object) -> object:
-        """Replace explicit YAML nulls in optional root sections and migrate retired access settings."""
+        """Replace explicit YAML nulls in optional root sections and migrate retired settings."""
         if not isinstance(data, dict):
             return data
-        normalized = cast("dict[str, Any]", data.copy())
+        normalized = rename_legacy_knowledge_reranker(cast("dict[str, Any]", data.copy()))
         for name in _OPTIONAL_SECTION_NAMES:
             if normalized.get(name) is None:
                 normalized[name] = {}

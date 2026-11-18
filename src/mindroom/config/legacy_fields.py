@@ -105,6 +105,26 @@ def reject_legacy_defaults_fields(value: object) -> object:
     return value
 
 
+# LEGACY_COMPAT: Root knowledge_reranker setting.
+# Legacy format: the root reranker was configured as knowledge_reranker, when only search_knowledge_base used it.
+# Last legacy release: v2026.11.406; replacement: unreleased; memory searches can rerank too, so the setting is reranker.
+# Handling: Rename it to reranker before validation, so a config that still sets it loads unchanged and the next
+#   dashboard save writes the new name; a config that sets both fails, naming both.
+# Coverage: tests/test_config_validation_helpers.py::test_knowledge_reranker_key_still_loads,
+#   tests/test_config_validation_helpers.py::test_both_reranker_keys_rejected.
+def rename_legacy_knowledge_reranker(data: dict[str, object]) -> dict[str, object]:
+    """Rename a retired ``knowledge_reranker`` key of root config ``data`` to ``reranker`` in place, and return ``data``."""
+    if "knowledge_reranker" not in data:
+        return data
+    if "reranker" in data:
+        msg = (
+            "Both 'knowledge_reranker' and 'reranker' are set; 'knowledge_reranker' is the retired name, so remove it."
+        )
+        raise ValueError(msg)
+    data["reranker"] = data.pop("knowledge_reranker")
+    return data
+
+
 # LEGACY_COMPAT: Retired push-model auto-flush settings.
 # Legacy format: memory.auto_flush.max_dirty_age_seconds and memory.auto_flush.max_cross_session_reprioritize, which
 #   the dashboard wrote on every save.

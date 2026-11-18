@@ -352,3 +352,18 @@ def test_chunk_strategy_is_part_of_the_index_settings(tmp_path: Path) -> None:
     assert IndexingSettings.from_metadata(entries.to_metadata()) == entries
     assert IndexingSettings.from_metadata(unrecorded) == fixed
     assert published_index_settings_compatible(fixed, entries)
+
+
+def test_rerank_flag_keeps_index_signature(tmp_path: Path) -> None:
+    """Turning memory reranking on changes no index setting, so the memory index is not embedded again."""
+    plain_config, base_id, root = _semantic_overlay(tmp_path)
+    reranked_config, reranked_base_id, reranked_root = _semantic_overlay(tmp_path, search={"rerank": True})
+
+    assert reranked_config.memory.search.rerank
+    assert (reranked_base_id, reranked_root) == (base_id, root)
+    assert indexing_settings_key(reranked_config, tmp_path, base_id, root) == indexing_settings_key(
+        plain_config,
+        tmp_path,
+        base_id,
+        root,
+    )
