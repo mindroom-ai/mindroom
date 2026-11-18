@@ -239,7 +239,7 @@ def _read_token(context: OAuthCredentialContext) -> dict[str, str] | None:
     try:
         document = _token_store(context).read_saved_credentials(_TOKEN_SERVICE)
     except ValueError as exc:
-        # The store's path guards refusing its directory, which only tampering with it causes.
+        # The store refusing to build or open its path; a link or other non-file there reads as no document instead.
         msg = f"Stored credentials for {_TOKEN_SERVICE} could not be located"
         raise CredentialsUnreadableError(msg) from exc
     if document is None:
@@ -364,7 +364,7 @@ async def save_github_token(payload: GitHubToken, request: Request) -> dict[str,
             # Finished even when the request is cancelled, so the lock is never released while it still writes.
             await run_blocking_until_complete(_save_token, context, {"token": payload.token, "login": login})
         except (OSError, ValueError) as exc:
-            # A `ValueError` is the store's path guards refusing its directory; neither answer names the path.
+            # The store refuses some writes with `ValueError`; neither answer names the path or the error.
             logger.warning("github_token_save_failed", error_type=type(exc).__name__)
             return _error(503, _UNAVAILABLE)
     logger.info("github_token_saved")
@@ -381,7 +381,7 @@ async def delete_github_token(request: Request) -> dict[str, object] | JSONRespo
             try:
                 await run_blocking_until_complete(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
             except (OSError, ValueError) as exc:
-                # As on save, a `ValueError` is the store's path guards refusing its directory.
+                # As on save, the store may refuse with `ValueError`; the answer names neither path nor error.
                 logger.warning("github_token_delete_failed", error_type=type(exc).__name__)
                 return _error(503, _UNAVAILABLE)
     return await _status(context)

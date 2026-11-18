@@ -1633,7 +1633,7 @@ def test_a_failed_publish_keeps_the_unreadable_token(
 ) -> None:
     """A new token that cannot be written leaves the old bytes, so requests still fail closed, not as the App.
 
-    A path guard refusing a tampered store directory answers as a failed write does, naming nothing of it.
+    A `ValueError` from the store answers as a failed write does, naming nothing of it.
     """
     connect(paths, ALICE)
     github.handler = user_answer()
@@ -1674,7 +1674,7 @@ def test_a_token_store_its_path_guards_refuse_is_unreadable(
     github: GitHubPeer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A store whose path guards refuse it reads as an unreadable token, so nothing falls back to the App."""
+    """A store that refuses with `ValueError` reads as an unreadable token, so nothing falls back to the App."""
     connect(paths, ALICE)
     real = github_requests.credential_layers
 
