@@ -782,18 +782,16 @@ async def get_thread_tag_content(
         THREAD_TAGS_EVENT_TYPE,
         _thread_tag_state_key(thread_root_id, tag),
     )
-    if isinstance(response, nio.RoomGetStateEventError):
-        if response.status_code == "M_NOT_FOUND":
-            return None
-        msg = f"Failed to read thread tag {tag!r} for {thread_root_id} in {room_id}: {response}"
-        raise ThreadTagsError(msg)
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        return None
+    failure = f"Failed to read thread tag {tag!r} for {thread_root_id} in {room_id}"
     if not isinstance(response, nio.RoomGetStateEventResponse):
-        msg = f"Failed to read thread tag {tag!r} for {thread_root_id} in {room_id}: {response}"
+        msg = f"{failure}: {response}"
         raise ThreadTagsError(msg)
     # nio answers only a 404 with an error response; any other failure arrives here with the error body as content.
     transport = response.transport_response
     if isinstance(transport, aiohttp.ClientResponse) and transport.status != 200:
-        msg = f"Failed to read thread tag {tag!r} for {thread_root_id} in {room_id}: HTTP {transport.status} {response.content}"
+        msg = f"{failure}: HTTP {transport.status} {response.content}"
         raise ThreadTagsError(msg)
     content = response.content
     if not isinstance(content, dict) or not content:

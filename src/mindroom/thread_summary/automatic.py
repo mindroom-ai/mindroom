@@ -136,7 +136,7 @@ async def _thread_is_resolved(
             error_type=type(exc).__name__,
         )
         return False
-    return content is not None and parse_thread_tag_record(RESOLVED_THREAD_TAG, content) is not None
+    return parse_thread_tag_record(RESOLVED_THREAD_TAG, content) is not None
 
 
 async def _summary_delivery_timestamp(

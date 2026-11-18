@@ -1504,7 +1504,7 @@ class TestMaybeGenerateThreadSummary:
         """The tag read fails open; a state blip must not suppress summaries.
 
         A raw transport error from the tag read must not abort the pass either. Letting it escape would skip the
-        baseline advance and re-run the full state and history reads on every turn.
+        baseline advance and re-run the tag and history reads on every turn.
         """
         self.room_state.failing_reads = frozenset({1, 2})
         self.room_state.read_failure = read_failure
