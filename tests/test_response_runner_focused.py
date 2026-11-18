@@ -1896,6 +1896,21 @@ async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
     settle_failure.assert_awaited_once_with(continuation, failure)
 
 
+@pytest.mark.parametrize("replayed", [True, False], ids=["replay", "no span"])
+def test_a_reply_starts_its_compactions_from_what_its_stopped_attempt_showed(*, replayed: bool) -> None:
+    """A replay's recorder starts with the stopped attempt's entries, and the span's answer records what it shows."""
+    done = {"id": "c1", "phase": "pre_turn", "mode": "auto", "after_tool": 0, "status": "success"}
+    handle = SimpleNamespace(prior_compactions=(done,), compactions=None) if replayed else None
+
+    with patch("mindroom.response_runner.current_span", return_value=handle):
+        compactions = response_runner._reply_compactions()
+
+    assert compactions.content() == ([done] if replayed else None)
+    if handle is not None:
+        assert handle.compactions is not None
+        assert handle.compactions() == [done]
+
+
 def test_a_replay_account_lists_finished_and_running_tools_without_team_chrome(tmp_path: Path) -> None:
     """The replayed turn learns which tools of the stopped attempt finished and which may still have been running."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

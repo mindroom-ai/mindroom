@@ -65,7 +65,8 @@ Detailed wiring with file:line evidence: [`2026-11-17-inline-compaction-backend-
 - `StreamingResponse` adds the key to every durable write (progress and final), nudges a refresh when the recorder changes (same as worker warm-up progress), lets a compaction change justify an otherwise empty progress edit and a live checkpoint, and puts the list into `LiveDocs`.
 - Prompt cache: no impact. Content keys never enter the prompt; `COMPACTION_NOTICE_CONTENT_KEY` stays in `_NON_TURN_NOTICE_CONTENT_KEYS`, and the plural key must not make a reply look like a notice.
 - Unchanged: quiet/contact/participation turns and callers without a lifecycle stay silent; run-local summaries never use the lifecycle.
-- Known limits (same as reasoning today): entries are not carried across approval resumes or restart replays; ledger-rendered terminal writes (cancel/error) drop the key.
+- A restart replay keeps the entries its stopped attempt showed: each answer segment of the reply's records stores them, and the replay's recorder starts with them.
+- Known limits (same as reasoning today): entries are not carried across approval resumes; ledger-rendered terminal writes (cancel/error) drop the key.
 
 ## Client (mindroom-chat)
 

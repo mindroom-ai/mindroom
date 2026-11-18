@@ -45,6 +45,7 @@ from mindroom.reply_presentation import (
     format_error_note,
     note_segment,
     render_body,
+    shown_compactions,
     with_answer,
 )
 from mindroom.response_sources import ResponseSources
@@ -61,7 +62,7 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 
     from mindroom.cancellation import CancelSource
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
@@ -81,6 +82,10 @@ class SpanHandle:
     base: Presentation
     # What a stopped attempt showed, for the streamer to continue below.
     resumed: UnfinishedStreamedReply | None = None
+    # The compaction entries a stopped attempt showed, which a replay keeps showing.
+    prior_compactions: tuple[dict[str, object], ...] = ()
+    # The span's current compaction entries, which its answer records as shown.
+    compactions: Callable[[], Sequence[Mapping[str, object]] | None] | None = None
     # The span's last direct progress edit that Matrix accepted and no durable
     # write has recorded yet.
     unconfirmed_progress: rl.ProgressConfirmation | None = None
@@ -151,12 +156,14 @@ class SpanHandle:
                     own_text,
                     {index + resumed_count: index for index in range(1, len(own_trace) + 1)},
                 )
+        entries = self.compactions() if self.compactions is not None else None
         return Segment(
             kind="answer",
             text=own_text,
             span_id=self.span.span_id,
             tool_trace=own_trace,
             team_state=team_state,
+            compactions=tuple(entries or ()),
         )
 
     def presentation(
@@ -737,6 +744,7 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
         reply=reply,
         base=replace(base, placeholder=empty.placeholder, show_tool_calls=empty.show_tool_calls),
         resumed=resumed,
+        prior_compactions=shown_compactions(shown),
     )
 
 

@@ -15,7 +15,7 @@ from uuid import uuid4
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Mapping
 
     from mindroom.delivery_gateway import MatrixCompactionLifecycle
     from mindroom.history.types import (
@@ -33,8 +33,9 @@ _TERMINAL_STATUSES = frozenset({"success", "failed", "timeout"})
 class ReplyCompactions:
     """The compaction entries of one reply, in start order, with a version bumped on every change."""
 
-    def __init__(self) -> None:
-        self._entries: list[dict[str, object]] = []
+    def __init__(self, entries: Iterable[Mapping[str, object]] = ()) -> None:
+        """Start with ``entries``, the ones an earlier attempt at the reply showed."""
+        self._entries: list[dict[str, object]] = [copy.deepcopy(dict(entry)) for entry in entries]
         self._tool_count: Callable[[], int] | None = None
         self._changed: Callable[[], None] | None = None
         self.version = 0

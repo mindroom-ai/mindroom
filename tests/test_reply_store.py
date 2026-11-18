@@ -45,7 +45,7 @@ from mindroom.reply_lifecycle import (
     SpanKind,
     SpanOutcome,
 )
-from mindroom.reply_presentation import Presentation, encode_presentation
+from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, Segment, encode_presentation
 from mindroom.response_sources import ResponseSources
 from mindroom.stop import SpanRegistry
 from mindroom.tool_system.events import ToolTraceEntry
@@ -675,6 +675,41 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
     calls = await runtime.interrupted_tool_calls(handle)
 
     assert [call.tool_name for call in calls] == ["counter"]
+
+
+@pytest.mark.parametrize("shown_text", ["Half of the report", AGENT_PLACEHOLDER], ids=["work", "placeholder"])
+async def test_a_replay_keeps_the_compactions_its_stopped_attempt_showed(
+    journal_store: EventJournalStore,
+    shown_text: str,
+) -> None:
+    """A replay starts from the compaction entries the stopped attempt showed, even over only its placeholder.
+
+    Its answer then records the entries its stream shows, so a later replay keeps them too.
+    """
+    principal = journal_store.principal(PRINCIPAL)
+    reply, first = await _claimed(principal)
+    runtime = reply_scope.ReplyRuntime(
+        store=principal,
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
+    )
+    done = {"id": "c1", "phase": "pre_turn", "mode": "auto", "after_tool": 0, "status": "success"}
+    shown = Presentation(
+        segments=(Segment(kind="answer", text=shown_text, span_id=first.span_id, compactions=(done,)),),
+    )
+    stopped = replace(reply, possibly_shown=encode_presentation(shown))
+    replay = replace(first, span_id="span-2", kind=SpanKind.REPLAY, claimed_at_ns=60)
+
+    handle = reply_scope._handle_for(runtime, stopped, replay, Presentation())
+
+    assert handle.prior_compactions == (done,)
+    later = {**done, "id": "c2", "status": "running"}
+    handle.compactions = lambda: [done, later]
+    [*_, answer] = handle.presentation("The rest.", ()).segments
+    assert answer.compactions == (done, later)
 
 
 async def test_a_regeneration_lists_only_the_tool_calls_of_its_own_edits_earlier_attempts(
