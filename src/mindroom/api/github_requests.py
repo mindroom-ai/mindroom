@@ -13,7 +13,7 @@ import asyncio
 import json
 import math
 import re
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, override
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, override
 from urllib.parse import unquote
 
 import httpx
@@ -96,7 +96,7 @@ _TOKEN_SERVICE = "github_user_token"  # noqa: S105
 _TOKEN_CHECK_TIMEOUT_SECONDS = 10.0
 # GitHub's `/user` answer is a few kilobytes; a larger one is not the answer the check expects.
 _MAX_TOKEN_CHECK_BYTES = 64 * 1024
-_DEFAULT_ACCEPT = "application/vnd.github+json"
+_DEFAULT_ACCEPT: Final = "application/vnd.github+json"
 _API_VERSION = "2022-11-28"
 
 
@@ -112,7 +112,7 @@ class GitHubRequest(BaseModel):
         "application/vnd.github+json",
         "application/vnd.github.full+json",
         "application/vnd.github.diff",
-    ] = "application/vnd.github+json"
+    ] = _DEFAULT_ACCEPT
 
 
 class GitHubToken(BaseModel):
