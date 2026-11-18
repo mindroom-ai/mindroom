@@ -859,8 +859,9 @@ async def workspace_pass(
     homeserver: FakeHomeserver,
     tmp_path: Path,
     exported: ExportedThreads,
+    threads: tuple[str, ...] = (ROOT,),
 ) -> list[str]:
-    """Run one workspace export pass over the thread and return the bodies its file holds."""
+    """Run one workspace export pass over ``threads`` and return the bodies the first thread's file holds."""
     config = thread_export_config(tmp_path)
     output_dir = tmp_path / "exports"
     source = ThreadExportSource(
@@ -873,7 +874,7 @@ async def workspace_pass(
     )
     with patch(
         "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
-        new=AsyncMock(return_value=([ROOT], False)),
+        new=AsyncMock(return_value=(list(threads), False)),
     ):
         (stats,) = await export_threads_to_sources(
             config=config,
@@ -885,6 +886,90 @@ async def workspace_pass(
     assert stats.failures == 0
     exported_file = output_dir / "room" / f"{quote(ROOT, safe='')}.yaml"
     return [message["body"] for message in yaml.safe_load(exported_file.read_text(encoding="utf-8"))["messages"]]
+
+
+async def test_room_changes_name_the_thread_of_every_change_its_export_shows(router: PrincipalStore) -> None:
+    """A room's changes name the thread each admitted change touched, and no other.
+
+    A workspace pass does not read a thread they leave out, so a change they missed would leave an export showing
+    what the thread no longer says.
+    """
+    other = "$other:example.org"
+    await admit_live(
+        router,
+        [
+            raw(ROOT, "root", ts=100),
+            raw("$b:example.org", "v1", ts=200, thread_id=ROOT),
+            raw(other, "other", ts=110),
+            raw("$o:example.org", "o", ts=210, thread_id=other),
+        ],
+    )
+    first = await router.room_changes(room_id=ROOM, since=None)
+    assert first.touched is None
+    since = first.position
+
+    async def touched(*sources: dict[str, Any]) -> frozenset[str] | None:
+        nonlocal since
+        await admit_live(router, sources)
+        changes = await router.room_changes(room_id=ROOM, since=since)
+        since = changes.position
+        return changes.touched
+
+    assert await touched() == frozenset()
+    for change in (
+        raw("$c:example.org", "reply", ts=300, thread_id=ROOT),
+        raw("$edit:example.org", "v2", ts=310, replaces="$b:example.org"),
+        raw("$root-edit:example.org", "root v2", ts=320, replaces=ROOT),
+        # A redacted visible edit, a redacted reply, and a redacted root, whose rows are gone or blanked.
+        redaction("$r1:example.org", "$edit:example.org", ts=330),
+        redaction("$r2:example.org", "$c:example.org", ts=340),
+        redaction("$r3:example.org", ROOT, ts=350),
+    ):
+        names = await touched(change)
+        assert names is not None
+        assert ROOT in names
+        assert other not in names
+    # The thread of an event this login never admitted or projected cannot be told.
+    assert await touched(redaction("$r4:example.org", "$unseen:example.org", ts=360)) is None
+    await admit_room_membership(router, ROOM, "leave", source=DepartureSource.LOCAL)
+    await admit_room_membership(router, ROOM, "join")
+    assert await touched() is None
+
+
+async def test_a_workspace_pass_reads_only_the_threads_that_changed(router: PrincipalStore, tmp_path: Path) -> None:
+    """Once both threads are exported warm, a pass fingerprints only the thread a change touched, and exports it."""
+    homeserver = FakeHomeserver()
+    other = "$other:example.org"
+    serve_thread(homeserver, raw(ROOT, "root", ts=100), [raw("$a:example.org", "first", ts=200, thread_id=ROOT)])
+    serve_thread(homeserver, raw(other, "other", ts=110), [raw("$o:example.org", "o", ts=210, thread_id=other)])
+    exported = ExportedThreads()
+    fingerprinted: list[str] = []
+    fingerprint = ExportProjectionView.thread_fingerprint
+
+    async def recording_fingerprint(view: ExportProjectionView, **kwargs: str) -> object:
+        fingerprinted.append(kwargs["thread_id"])
+        return await fingerprint(view, **kwargs)
+
+    async def exported_pass(*sources: dict[str, Any]) -> list[str]:
+        await admit_live(router, sources)
+        fingerprinted.clear()
+        return await workspace_pass(router, homeserver, tmp_path, exported, (ROOT, other))
+
+    with patch.object(ExportProjectionView, "thread_fingerprint", recording_fingerprint):
+        # A cold pass walks both threads, and the next one records what they hold.
+        await exported_pass()
+        await exported_pass()
+        assert await exported_pass() == ["root", "first"]
+        assert fingerprinted == []
+        assert await exported_pass(raw("$b:example.org", "second", ts=300, thread_id=ROOT)) == ["root", "first", "second"]
+        assert fingerprinted == [ROOT]
+        edit = raw("$e:example.org", "first v2", ts=310, replaces="$a:example.org")
+        assert await exported_pass(edit) == ["root", "first v2", "second"]
+        assert fingerprinted == [ROOT]
+        assert await exported_pass(redaction("$r:example.org", "$b:example.org", ts=320)) == ["root", "first v2"]
+        assert fingerprinted == [ROOT]
+        await exported_pass(raw("$o2:example.org", "o2", ts=330, thread_id=other))
+        assert fingerprinted == [other]
 
 
 async def test_a_rejoin_after_a_cold_export_exports_what_changed_while_away(

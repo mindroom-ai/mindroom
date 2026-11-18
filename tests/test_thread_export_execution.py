@@ -19,6 +19,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
+from mindroom.event_journal.reads import RoomChanges
 from mindroom.thread_export import ThreadExportSource, ThreadExportTarget, export_threads_to_sources
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (
@@ -1547,10 +1548,14 @@ def _remembering_source(
     exported: ExportedThreads,
     fingerprint: AsyncMock,
     room: _ThreadExportRoom = _REMEMBERED_ROOM,
+    touched: frozenset[str] | None = None,
 ) -> ThreadExportSource:
-    """Return a workspace source whose journal answers ``fingerprint`` for every thread."""
+    """Return a workspace source whose journal answers ``fingerprint`` for every thread and ``touched`` for the room."""
     reader = Mock()
     reader.completeness.thread_fingerprint = fingerprint
+    reader.completeness.room_changes = AsyncMock(
+        return_value=RoomChanges(position=(1, (1, None, None)), hydrations={_REMEMBERED_THREAD: _MARKER}, touched=touched),
+    )
     return ThreadExportSource(
         client=Mock(),
         reader=reader,
@@ -1611,6 +1616,39 @@ async def test_a_pass_skips_a_thread_nothing_changed_in_since_it_wrote_it(tmp_pa
     fingerprint.return_value = (_MARKER, frozenset({(_REMEMBERED_THREAD, "$edit:localhost", None)}))
     _, fetch = await _remembering_pass(config, output_dir, source)
 
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_pass_reads_only_the_threads_the_journal_says_changed(tmp_path: Path) -> None:
+    """A thread no event touched since the room's last pass, with its hydration row unchanged, is not even fingerprinted."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    exported = ExportedThreads()
+    fingerprint = _journal_answer()
+    await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint, touched=frozenset()))
+    written = _remembered_file(output_dir).read_bytes()
+    fingerprint.reset_mock()
+
+    untouched, fetch = await _remembering_pass(
+        config,
+        output_dir,
+        _remembering_source(exported, fingerprint, touched=frozenset({"$elsewhere:localhost"})),
+    )
+
+    fingerprint.assert_not_awaited()
+    fetch.assert_not_awaited()
+    assert (untouched.threads_exported, untouched.threads_unchanged, untouched.failures) == (1, 1, 0)
+    assert _remembered_file(output_dir).read_bytes() == written
+
+    fingerprint.return_value = (_MARKER, frozenset({(_REMEMBERED_THREAD, "$edit:localhost", None)}))
+    _, fetch = await _remembering_pass(
+        config,
+        output_dir,
+        _remembering_source(exported, fingerprint, touched=frozenset({_REMEMBERED_THREAD})),
+    )
+
+    fingerprint.assert_awaited_once()
     fetch.assert_awaited_once()
 
 
