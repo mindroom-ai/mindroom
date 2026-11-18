@@ -77,7 +77,7 @@ The private reply type is `io.mindroom.models.response`:
   "agent_user_ids": ["@mindroom_helper:example.org"],
   "catalog_revision": "sha256-of-published-entries",
   "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6-astra","icon_url":"mxc://example.org/image","reasoning_levels":["low","high"],"reasoning_default":"low"}],
-  "selection": {"override":"fast","reasoning":"high","inherited":[{"entity":"helper","model":"fast","source":"agent"}]}
+  "selection": {"override":"fast","reasoning":"high","inherited":[{"entity":"helper","user_id":"@mindroom_helper:example.org","model":"fast","source":"agent"}]}
 }
 ```
 
@@ -85,7 +85,7 @@ The response omits `thread_id` when the request did.
 `selection.override` is always present and is `null` for absent or deleted model overrides.
 It names a thread override only when every requester-visible responding entity uses that override, and is `null` when those entities have different thread overrides or some have none.
 `inherited` lists requester-visible responding entities with their room-level model, ignoring thread overrides.
-Each `inherited[].source` names what chose that model: `room` for a saved `!room_model` override, `room_config` for the room's authored `room_models` entry, or `agent` for the entity's own configured model.
+Each `inherited[].user_id` is that agent's or team's own Matrix account, and each `inherited[].source` names what chose that model: `room` for a saved `!room_model` override, `room_config` for the room's authored `room_models` entry, or `agent` for the entity's own configured model.
 `reasoning_levels` and `reasoning_default` appear only on models with [reasoning levels](../configuration/models.md#reasoning-levels).
 `selection.override` and each `inherited[].model` are catalog keys; when the chosen reference is `key@level`, a `reasoning` field beside them carries the level, and it is absent otherwise.
 This explains what resetting the thread will use, including different defaults across agents and teams.

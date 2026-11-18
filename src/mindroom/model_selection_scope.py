@@ -25,10 +25,15 @@ __all__ = ["ModelPickerScope", "validate_model_picker_scope"]
 
 @dataclass(frozen=True, slots=True)
 class ModelPickerScope:
-    """Currently joined agents and requester-visible responding entities."""
+    """Currently joined agents and requester-visible responding entities, each with its account's Matrix ID."""
 
     agent_user_ids: tuple[str, ...]
-    entity_names: tuple[str, ...]
+    entity_user_ids: tuple[tuple[str, str], ...]
+
+    @property
+    def entity_names(self) -> tuple[str, ...]:
+        """The responding entities' names, in the order of their accounts."""
+        return tuple(name for name, _ in self.entity_user_ids)
 
 
 async def _joined_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
@@ -110,4 +115,5 @@ async def validate_model_picker_scope(  # noqa: PLR0911
         if (name := registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)) is not None
     )
     agents = tuple(user_id for user_id, name in entities if name in config.agents)
-    return ModelPickerScope(agents, tuple(name for _, name in entities)) if agents else "no_addressable_agent"
+    entity_user_ids = tuple((name, user_id) for user_id, name in entities)
+    return ModelPickerScope(agents, entity_user_ids) if agents else "no_addressable_agent"

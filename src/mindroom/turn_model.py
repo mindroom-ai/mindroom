@@ -101,17 +101,20 @@ def _requested_model(config: Config, runtime_paths: RuntimePaths, scope: ModelSc
     return requested, source in ("explicit", "thread", "room")
 
 
-def inherited_model_source(
+def resolve_inherited_model(
     config: Config,
     runtime_paths: RuntimePaths,
     entity: str,
     room_id: str,
-) -> InheritedModelSource:
-    """Name what chooses the model ``entity`` inherits in a room: the room's override, its `room_models` entry, or its own."""
-    _, source = _requested_choice(config, runtime_paths, ModelScope(entity=entity, room_id=room_id))
+) -> tuple[str, InheritedModelSource]:
+    """Return the model ``entity`` runs in a room without a thread choice, and what chose it, from one read.
+
+    The source is the room's saved override, its authored `room_models` entry, or the entity's own model.
+    """
+    model_name, source = _requested_choice(config, runtime_paths, ModelScope(entity=entity, room_id=room_id))
     # A scope without a thread or an explicit choice never names either.
     assert source not in ("explicit", "thread")
-    return source
+    return model_name, source
 
 
 def _budgeted(config: Config, runtime_paths: RuntimePaths, model_name: str, budget: TurnBudget | None) -> str:

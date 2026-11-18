@@ -24,7 +24,7 @@ from mindroom.matrix.olm_to_device import (
 from mindroom.model_catalog import ModelCatalog
 from mindroom.model_selection_scope import validate_model_picker_scope
 from mindroom.thread_models import resolve_thread_model_override
-from mindroom.turn_model import ModelScope, inherited_model_source, resolve_turn_model
+from mindroom.turn_model import resolve_inherited_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -206,24 +206,15 @@ class _Receiver:
         # One reported override must govern every entity in the picker, never only some of them.
         shared_overrides = {thread_overrides.get(name) for name in scope.entity_names}
         override = shared_overrides.pop() if len(shared_overrides) == 1 else None
-        inherited = {
-            name: resolve_turn_model(
-                config,
-                self.paths,
-                ModelScope(entity=name, room_id=request.room_id),
-                None,
-            ).model_name
-            for name in scope.entity_names
-        }
+        inherited = [
+            (name, user_id, *resolve_inherited_model(config, self.paths, name, request.room_id))
+            for name, user_id in scope.entity_user_ids
+        ]
         return {
             **_model_choice("override", override),
             "inherited": [
-                {
-                    "entity": name,
-                    **_model_choice("model", model),
-                    "source": inherited_model_source(config, self.paths, name, request.room_id),
-                }
-                for name, model in inherited.items()
+                {"entity": name, "user_id": user_id, **_model_choice("model", model), "source": source}
+                for name, user_id, model, source in inherited
             ],
         }
 
