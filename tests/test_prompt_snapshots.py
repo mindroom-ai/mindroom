@@ -29,6 +29,7 @@ def _send(
     tools: str = "tools-1",
     memory_path: str | None = "/workspace/MEMORY.md",
     memory: str = "",
+    turn: str | None = None,
     now: float = 0.0,
     ttl: float = HOUR,
     store: Path = STORE,
@@ -39,6 +40,7 @@ def _send(
         agent,
         ConversationRef(session, (summary, None)),
         FreshPrompt(system, model=model, tools=tools, memory_path=memory_path, memory_body=memory),
+        turn=turn,
         ttl=ttl,
         now=now,
     )
@@ -62,6 +64,22 @@ def test_warm_conversation_keeps_its_prompt_and_hears_each_change_once() -> None
     assert "-AGENTS v2" in changes
     assert "+AGENTS v3" in changes
     assert "v1" not in changes
+
+
+def test_a_turn_prepared_again_hears_its_changes_again() -> None:
+    """A first attempt that failed stored no note, so the attempt that replaces it must carry the same one."""
+    _send("v1", turn="$first")
+    _, told = _send("v2", turn="$second", now=10)
+    assert "+v2" in told
+    assert _send("v2", turn="$second", now=20) == (("v1",), told)
+    # What changed between the attempts follows what the first one was told.
+    _, retold = _send("v3", turn="$second", now=30)
+    assert retold.startswith(told)
+    assert "+v3" in retold
+    assert _send("v3", turn="$third", now=40) == (("v1",), "")
+    # A turn nothing identifies is never taken for another one.
+    _send("v4", now=50)
+    assert _send("v4", now=60) == (("v1",), "")
 
 
 def test_unchanged_prompt_tells_nothing() -> None:

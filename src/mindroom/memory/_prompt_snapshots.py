@@ -2,8 +2,8 @@
 
 The system prompt precedes the conversation, so a changed one makes the provider read the whole conversation again.
 A conversation therefore keeps the system texts it last sent while its cache may be warm, and hears what changed in
-them since, such as an edited AGENTS.md, a new MEMORY.md entry, or the date, once, as a diff at its tail. It takes the
-fresh prompt when the cache is gone or misses anyway: idle past the model's cache lifetime, compacted history,
+them since, such as an edited AGENTS.md, a new MEMORY.md entry, or the date, once, as a diff at its tail; a turn that
+is prepared again, whose first attempt may have stored nothing, hears its diff again. It takes the fresh prompt when the cache is gone or misses anyway: idle past the model's cache lifetime, compacted history,
 another model, or other tool definitions. An edited or deleted MEMORY.md line also takes it at once, so a memory the
 user asked to forget is not shown again.
 
@@ -62,11 +62,15 @@ class FreshPrompt:
 
 @dataclass(frozen=True)
 class _Kept:
-    """The system texts a conversation sends, and ``known``, the newest fresh prompt it has been told about."""
+    """The system texts a conversation sends, and ``known``, the newest fresh prompt it has been told about.
+
+    ``told`` is the turn that was last told of changes, and the diff it was told.
+    """
 
     system: tuple[str, ...]
     known: FreshPrompt
     compaction: tuple[str | None, str | None]
+    told: tuple[str | None, str] = (None, "")
 
 
 def prompt_cache_ttl_seconds(*, extended_cache_time: bool) -> int:
@@ -92,6 +96,7 @@ def _load(path: Path, now: float) -> tuple[_Kept, float] | None:
         data = json.loads(path.read_text(encoding="utf-8"))
         known = data["known"]
         summary, checkpoint = data["compaction"]
+        told_turn, told = data["told"]
         kept = _Kept(
             tuple(map(str, data["system"])),
             FreshPrompt(
@@ -102,6 +107,7 @@ def _load(path: Path, now: float) -> tuple[_Kept, float] | None:
                 str(known["memory_body"]),
             ),
             (summary, checkpoint),
+            (told_turn, str(told)),
         )
     except (OSError, ValueError, TypeError, KeyError):
         return None
@@ -126,6 +132,7 @@ def held_system_prompt(
     conversation: ConversationRef,
     fresh: FreshPrompt,
     *,
+    turn: str | None,
     ttl: float,
     now: float,
 ) -> tuple[tuple[str, ...], str]:
@@ -133,6 +140,8 @@ def held_system_prompt(
 
     The texts are the ones the conversation last sent while its prompt cache may be warm and would still match, and
     ``fresh.system`` otherwise; the diff is ``""`` when nothing changed or the fresh texts are sent.
+    ``turn`` identifies the turn across its attempts, so a later attempt is told what an earlier one was; None for a
+    turn nothing identifies.
     ``ttl`` is the model's cache lifetime and ``now`` wall-clock seconds, so idle times count across restarts.
     Comparing ``memory_path`` keeps one requester's private memory out of another requester's turns.
     """
@@ -152,7 +161,11 @@ def held_system_prompt(
             and (known.model, known.tools, known.memory_path) == (fresh.model, fresh.tools, fresh.memory_path)
             and _only_added_lines(known.memory_body, fresh.memory_body)
         ):
-            kept, changes, saved = replace(previous, known=fresh), _changes(known.system, fresh.system), known == fresh
+            new = _changes(known.system, fresh.system)
+            repeated = previous.told[1] if turn is not None and previous.told[0] == turn else ""
+            changes = "\n".join(part for part in (repeated, new) if part)
+            told = (turn, changes) if new else previous.told
+            kept, saved = replace(previous, known=fresh, told=told), known == fresh
     with suppress(OSError):
         if not saved:
             store.mkdir(parents=True, exist_ok=True)

@@ -732,7 +732,11 @@ async def _held_system_messages(
     if conversation is None:
         return fresh, ""
     model = build.spec.model
-    definitions = sorted((asdict(function.definition()) for function in build.spec.functions.values()), key=str)
+    # Requests send the definitions sorted by name, so only a changed definition changes the key.
+    definitions = sorted(
+        (asdict(function.definition()) for function in build.spec.functions.values()),
+        key=lambda definition: definition["name"],
+    )
     system, changes = await asyncio.to_thread(
         held_system_prompt,
         _prompt_snapshots(runtime_paths),
@@ -745,6 +749,7 @@ async def _held_system_messages(
             memory_path=memory.entrypoint_path,
             memory_body=memory.entrypoint_body,
         ),
+        turn=ctx.reply_to_event_id,
         ttl=prompt_cache_ttl_seconds(extended_cache_time=bool(model.model_params.get("extended_cache_time"))),
         now=time.time(),
     )
