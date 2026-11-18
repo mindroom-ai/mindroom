@@ -190,8 +190,6 @@ class StewardDuties:
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Refresh responder presentation, the room's MindRoom accounts and the welcome, and emit human membership hooks."""
-        if not self.is_steward(room.room_id):
-            return
         registry = self.deps.hook_context.registry
         runtime = self.deps.runtime
         if event.membership != event.prev_membership and event.state_key in prepared_entity_names_by_user_id(
@@ -224,7 +222,7 @@ class StewardDuties:
         )
 
     async def _emit_member_joined(self, join: RoomMemberJoin) -> None:
-        """Emit room:member_joined for one live human Matrix room join, unless another steward took the event."""
+        """Emit room:member_joined for one live human Matrix room join, where this bot holds the event's claim."""
         if not await self._claims(join.room_id, join.event_id, "member_joined"):
             return
         await self.deps.personal_rooms.baseline_join(join)
@@ -232,15 +230,21 @@ class StewardDuties:
             await self._emit_member_change(EVENT_ROOM_MEMBER_JOINED, RoomMemberJoinedContext, join)
 
     async def _emit_member_left(self, leave: RoomMemberLeave) -> None:
-        """Emit room:member_left for one live human Matrix room self-leave, unless another steward took the event."""
+        """Emit room:member_left for one live human Matrix room self-leave, where this bot holds the event's claim."""
         if await self._claims(leave.room_id, leave.event_id, "member_left"):
             await self._emit_member_change(EVENT_ROOM_MEMBER_LEFT, RoomMemberLeftContext, leave)
 
     async def _claims(self, room_id: str, event_id: str, purpose: str) -> bool:
-        """Take the event's claim as this bot and return whether it holds it, so a retry runs and a second steward does not."""
+        """Claim the event for the room's steward now, unless it is claimed, and return whether this bot holds the claim.
+
+        The first bot to dispatch the event decides, so the claim's holder runs the hook when its own copy arrives,
+        on each retry and after a handover, and no other bot does.
+        """
         name = self.deps.hook_context.agent_name
-        store = self.deps.runtime.orchestrator.event_journal_store()
-        return await store.claim_room_event(room_id, event_id, purpose, name) == name
+        orchestrator = self.deps.runtime.orchestrator
+        steward = orchestrator.room_steward(room_id)
+        owner = name if steward is None else steward.agent_name
+        return await orchestrator.event_journal_store().claim_room_event(room_id, event_id, purpose, owner) == name
 
     async def _emit_member_change(
         self,

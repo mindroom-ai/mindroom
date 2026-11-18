@@ -592,3 +592,88 @@ async def test_same_steward_retry_still_runs(tmp_path: Path) -> None:
     await _dispatch_member(bot, room, event)
 
     assert attempts == 2
+
+
+_CHANGES = pytest.mark.parametrize(
+    ("event_name", "membership", "prev_membership"),
+    [(EVENT_ROOM_MEMBER_JOINED, "join", "leave"), (EVENT_ROOM_MEMBER_LEFT, "leave", "join")],
+)
+
+
+def _recording(bot: AgentBot, event_name: str) -> list[str]:
+    """Register a hook for one membership event and return the names of the entities that ran it."""
+    seen: list[str] = []
+
+    @hook(event_name)
+    async def changed(ctx: RoomMemberJoinedContext | RoomMemberLeftContext) -> None:
+        seen.append(ctx.agent_name)
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [changed])])
+    return seen
+
+
+@pytest.mark.asyncio
+@_CHANGES
+async def test_hook_runs_on_the_steward_elected_when_the_event_was_first_dispatched(
+    tmp_path: Path,
+    event_name: str,
+    membership: str,
+    prev_membership: str,
+) -> None:
+    """Another bot that dispatches the event first claims it for the steward, which runs it even after a handover."""
+    steward = _steward_bot(tmp_path)
+    other = _other_bot(steward)
+    seen = _recording(steward, event_name)
+    room = cast("nio.MatrixRoom", _room())
+    event = _room_member_event(event_id="$change", membership=membership, prev_membership=prev_membership)
+
+    await _dispatch_member(other, room, event)
+    assert seen == []
+    steward.orchestrator.steward = other.agent_name
+    await _dispatch_member(steward, room, event)
+    await _dispatch_member(other, room, event)
+
+    assert seen == [_STEWARD]
+
+
+@pytest.mark.asyncio
+async def test_claimed_hook_cancelled_before_it_ran_is_retried_by_its_owner_after_a_handover(tmp_path: Path) -> None:
+    """The bot that holds an event's claim runs the hook on its retry, though another bot is the steward by then."""
+    attempts: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        attempts.append(ctx.agent_name)
+        if len(attempts) == 1:
+            raise asyncio.CancelledError
+
+    steward = _steward_bot(tmp_path)
+    other = _other_bot(steward)
+    steward.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    room = cast("nio.MatrixRoom", _room())
+    event = _room_member_event(event_id="$retry")
+
+    with pytest.raises(asyncio.CancelledError):
+        await _dispatch_member(steward, room, event)
+    steward.orchestrator.steward = other.agent_name
+    await _dispatch_member(other, room, event)
+    await _dispatch_member(steward, room, event)
+
+    assert attempts == [_STEWARD, _STEWARD]
+
+
+@pytest.mark.asyncio
+async def test_rejoin_after_a_handover_does_not_run_the_join_hook_again(tmp_path: Path) -> None:
+    """A bot that saw a user's first join as a bystander does not announce the user's rejoin once it is the steward."""
+    steward = _steward_bot(tmp_path)
+    other = _other_bot(steward)
+    seen = _recording(steward, EVENT_ROOM_MEMBER_JOINED)
+    room = cast("nio.MatrixRoom", _room())
+    first_join = _room_member_event(event_id="$join1")
+
+    await _dispatch_member(other, room, first_join)
+    await _dispatch_member(steward, room, first_join)
+    steward.orchestrator.steward = other.agent_name
+    await _dispatch_member(other, room, _room_member_event(event_id="$join2"))
+
+    assert seen == [_STEWARD]
