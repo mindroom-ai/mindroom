@@ -1063,6 +1063,13 @@ async def test_team_keyword_hits_share_the_recall_token_budget(config: Config, m
     assert sorted(injected[1:]) == sorted(team_memories[1:])
 
 
+def test_each_added_hit_is_charged_against_the_recall_budget() -> None:
+    """Two hits of more than half the budget each: only the first fits."""
+    load_o200k()
+    half = {"memory": " ".join(["paint"] * 500)}
+    assert file_backend_module._add_within_recall_budget([], [half, half]) == [half]
+
+
 class _StubReranker:
     """Returns fixed ``scores``, after ``delay`` seconds; ``failing`` raises instead."""
 
