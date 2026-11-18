@@ -211,11 +211,11 @@ async def run_ingestion_pump(
         if facts is None:
             await wait_for_work()
         else:
-            # Only a new actionable event gives the dispatcher anything to find.
-            # A replay may be acknowledging work committed before the prior pump
-            # could notify it, so a replay wakes too. Any other batch (an edit,
-            # a receipt, an empty sync) changes nothing the dispatcher reads, and
-            # waking on it re-read every pending row once per sync.
+            # Only a newly admitted actionable event gives the dispatcher anything
+            # new to find. Any other batch (the bot's own streaming edits, a sync
+            # with nothing in its timeline, a redelivered event) would only make
+            # it read the same pending rows again. A replay wakes too: it may be
+            # acknowledging work committed before the prior pump could notify it.
             if facts.semantic_event_new or not facts.receipt_new:
                 wake_semantic_dispatch()
             if after_ack is not None:
