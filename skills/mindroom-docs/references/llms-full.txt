@@ -7491,6 +7491,7 @@ A reply that already started finishes on its model, so the reply that reaches th
 ## Over-Budget Replies
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
+A reply that already names the fallback model at one of its [reasoning levels](https://docs.mindroom.chat/configuration/models/#reasoning-levels), such as `luna@high` when `fallback_model` is `luna` or `luna@low`, keeps that level.
 This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
 The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.
