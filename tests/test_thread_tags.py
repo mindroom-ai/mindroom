@@ -43,6 +43,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable
 
 
+_ROOT_IDS_PAGE = "mindroom.matrix.room_history_reads._thread_root_ids_page"
+
+
 def _tag_record_content(
     *,
     set_by: str = "@user:localhost",
@@ -1605,7 +1608,7 @@ async def test_enumerate_room_thread_root_ids_fetches_all_pages() -> None:
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
                 (["$thread-one:localhost"], "A"),
@@ -1629,7 +1632,7 @@ async def test_enumerate_room_thread_root_ids_skips_blank_event_ids() -> None:
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             return_value=(
                 ["", "$root:localhost"],
@@ -1649,7 +1652,7 @@ async def test_enumerate_room_thread_root_ids_truncates_empty_page_with_next_tok
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
                 ([], "next_token_1"),
@@ -1671,7 +1674,7 @@ async def test_enumerate_room_thread_root_ids_exact_cap_on_final_page_is_not_tru
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
                 (["$thread-one:localhost", "$thread-two:localhost"], "A"),
@@ -1705,7 +1708,7 @@ async def test_enumerate_room_thread_root_ids_truncates_at_cap() -> None:
         pages.append((roots, f"token-{page_index}"))
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(side_effect=pages),
     ) as mock_get_page:
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
@@ -1723,7 +1726,7 @@ async def test_enumerate_room_thread_root_ids_repeated_token_guard_truncates() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
                 (["$thread-one:localhost"], "A"),
@@ -1743,7 +1746,7 @@ async def test_enumerate_room_thread_root_ids_zero_new_roots_guard_truncates() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
                 (["$thread-one:localhost"], "A"),
@@ -1763,7 +1766,7 @@ async def test_enumerate_room_thread_root_ids_duplicate_final_page_completes() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
                 (["$thread-one:localhost", "$thread-two:localhost"], "A"),
@@ -1782,7 +1785,7 @@ async def test_enumerate_room_thread_root_ids_cap_below_one_truncates_without_fe
     """A thread-root cap below one reports truncation without asking the homeserver."""
     client = AsyncMock()
 
-    with patch("mindroom.matrix.room_history_reads._thread_root_ids_page", new=AsyncMock()) as mock_get_page:
+    with patch(_ROOT_IDS_PAGE, new=AsyncMock()) as mock_get_page:
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost", max_thread_roots=0)
 
     assert thread_root_ids == []
@@ -1797,7 +1800,7 @@ async def test_enumerate_room_thread_root_ids_truncates_at_page_cap() -> None:
     pages = [([f"$thread-{index}:localhost"], f"token-{index}") for index in range(_MAX_THREAD_ENUMERATION_PAGES + 1)]
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(side_effect=pages),
     ) as mock_get_page:
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
@@ -1816,7 +1819,7 @@ async def test_list_tagged_threads_include_untagged_propagates_room_threads_page
 
     with (
         patch(
-            "mindroom.matrix.room_history_reads._thread_root_ids_page",
+            _ROOT_IDS_PAGE,
             new=AsyncMock(side_effect=error),
         ),
         pytest.raises(RoomThreadsPageError) as exc_info,
@@ -2195,7 +2198,7 @@ async def test_enumerate_room_thread_root_ids_roots_past_the_cap_on_the_final_pa
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads._thread_root_ids_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             return_value=([f"$thread-{index}:localhost" for index in range(3)], None),
         ),

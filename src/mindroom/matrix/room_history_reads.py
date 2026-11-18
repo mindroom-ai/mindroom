@@ -393,18 +393,16 @@ async def _room_threads_page[R: (RoomThreadsResponse, _RoomThreadRootIds)](
 
 
 def _append_unique_thread_root_ids(
-    thread_roots: Iterable[str],
+    page_root_ids: Iterable[str],
     thread_root_ids: list[str],
     seen_thread_root_ids: set[str],
     *,
     max_thread_roots: int,
 ) -> tuple[int, bool]:
-    """Append unseen thread roots up to the cap and report discarded roots."""
+    """Append a page's unseen root IDs up to the cap and report discarded ones."""
     new_root_count = 0
-    for thread_root_id in thread_roots:
-        if not thread_root_id:
-            continue
-        if thread_root_id in seen_thread_root_ids:
+    for thread_root_id in page_root_ids:
+        if not thread_root_id or thread_root_id in seen_thread_root_ids:
             continue
         if len(thread_root_ids) >= max_thread_roots:
             return new_root_count, True
@@ -433,16 +431,16 @@ async def enumerate_room_thread_root_ids(
     pages_fetched = 0
 
     while True:
-        thread_roots, next_token = await _thread_root_ids_page(
+        page_root_ids, next_token = await _thread_root_ids_page(
             client,
             room_id,
             limit=page_size,
             page_token=page_token,
         )
         pages_fetched += 1
-        if thread_roots:
+        if page_root_ids:
             new_root_count, discarded_due_to_cap = _append_unique_thread_root_ids(
-                thread_roots,
+                page_root_ids,
                 thread_root_ids,
                 seen_thread_root_ids,
                 max_thread_roots=max_thread_roots,
