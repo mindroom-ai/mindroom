@@ -12,7 +12,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import pytest
+from structlog.testing import capture_logs
 
+from mindroom.agent_loop import run as agent_loop_run
 from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
@@ -135,6 +137,7 @@ class _Conversation:
         with self.monkeypatch.context() as patch:
             if not settle:
                 patch.setattr(delegation_execution, "interrupt_stopped_child", _leave_child)
+                patch.setattr(agent_loop_run, "_store_interrupted", _leave_run)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -173,6 +176,10 @@ class _Conversation:
 
 async def _leave_child(_child: object, **_kwargs: object) -> None:
     """Stand in for the settlement a process that dies never runs."""
+
+
+async def _leave_run(*_args: object, **_kwargs: object) -> None:
+    """Stand in for the terminal store a process that dies never runs: the run's row stays as its last save."""
 
 
 def _held_child() -> tuple[asyncio.Event, list]:
@@ -304,6 +311,12 @@ def _hang(call_id: str) -> list:
     return calls(tool_call("run_shell_command", call_id, cmd="sleep 60"))
 
 
+def _declined(logs: list) -> list[tuple[str, str]]:
+    """Return the job and reason of each log line that says a stopped subagent job ends instead of continuing."""
+    event = "Subagent job ends instead of continuing after a restart"
+    return [(log["job_id"], log["reason"]) for log in logs if log["event"] == event]
+
+
 def _sent(request: object) -> list[tuple[str, object, str | None]]:
     return [(m.role, m.content, m.tool_call_id) for m in request.messages if m.role != "system"]  # type: ignore[attr-defined]
 
@@ -348,6 +361,56 @@ async def test_a_subagent_a_restart_stopped_continues_from_its_own_calls_and_its
             result = str(answer_of(read, "wait").content)
             assert result.startswith("Continued")
             assert f"Subagent ID: {handle['subagent_id']}" in result
+        finally:
+            await conversation.close()
+
+
+@pytest.mark.asyncio
+@_STOPS
+@pytest.mark.parametrize("gated", ["run_shell_command", "dangerous"])
+async def test_a_subagent_stopped_after_an_approval_resumed_it_continues_from_its_own_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop: str,
+    gated: str,
+) -> None:
+    """A child an approval resumed saves its run as a fresh one does, so a crash keeps its work.
+
+    The crash lands in the shell call: the call the approval let run, or one the child made after its approved call.
+    """
+    rule = ApprovalRuleConfig(match=gated, action="require_approval")
+    config = delegating_config(child_tools=[PROBE_TOOL], rules=[rule])
+    before = (
+        tool_call("dangerous", "danger", value=1) if gated == "dangerous" else tool_call("read_file", "read", path="a")
+    )
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=config)
+        await conversation.open(calls(before), _hang("shell"), answer("Continued"))
+        cards = JobApprovalCards(asyncio.get_running_loop().create_future(), conversation.runtime.journal)
+        cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+        monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+        try:
+            record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
+            # The shell call runs after the approval: the job works again, and the pause stored its child's run last.
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            assert [tool for _run_id, _call_id, tool in cards.requested] == [gated]
+            assert (await conversation.job(job_id)).status == "running"
+            await _stop(conversation, stop)
+            await wait_for_status(conversation.runtime, job_id, "completed")
+            job = await conversation.job(job_id)
+            assert str(job.result).startswith("Continued")
+            assert job.adapter["restart_continuations"] == 1
+            _first, cut_short, continued = conversation.agents.models["code"].requests
+            sent, replayed = _sent(cut_short), _sent(continued)
+            assert replayed[: len(sent)] == sent
+            assert [(role, call_id) for role, _content, call_id in replayed[len(sent) :]] == [
+                ("assistant", None),
+                ("tool", "shell"),
+                ("user", None),
+            ]
+            assert replayed[-2][1] == INTERRUPTED_CALL_RESULT
+            assert SUBAGENT_RESTART_CONTINUATION_PROMPT in str(replayed[-1][1])
         finally:
             await conversation.close()
 
@@ -484,10 +547,12 @@ async def test_a_subagent_that_waited_for_its_own_subagent_is_not_continued_afte
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
         job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
         await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
-        await conversation.restart()
+        with capture_logs() as logs:
+            await conversation.restart()
         job = await conversation.job(job_id)
         assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
         assert [len(conversation.agents.models[name].requests) for name in ("code", "helper")] == [1, 1]
+        assert _declined(logs) == [(job_id, "its turn's run was left paused, which history never replays")]
     finally:
         await conversation.close()
 
@@ -511,9 +576,11 @@ async def test_a_subagent_that_restarts_keep_cutting_short_stops_continuing(
                 job = await conversation.job(job_id)
                 assert (job.status, job.adapter["restart_continuations"]) == ("running", continuations)
             await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
-            await conversation.restart()
+            with capture_logs() as logs:
+                await conversation.restart()
             job = await conversation.job(job_id)
             assert (job.status, job.result) == ("interrupted", RESTART_INTERRUPTION_REASON)
+            assert _declined(logs) == [(job_id, "restarts already cut it short 3 times")]
             assert len(conversation.agents.models["code"].requests) == 3
         finally:
             await conversation.close()

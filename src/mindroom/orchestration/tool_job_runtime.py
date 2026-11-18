@@ -366,6 +366,11 @@ class ToolJobRuntimeCoordinator:
                     except Exception:
                         logger.exception("Subagent job could not continue after a restart", job_id=job.job_id)
                         spec = None
+                    if isinstance(spec, str):
+                        logger.info(
+                            "Subagent job ends instead of continuing after a restart", job_id=job.job_id, reason=spec
+                        )
+                        spec = None
                     await runtime.continue_stopped(job.job_id, spec)
             except Exception:
                 logger.exception("Subagent job a restart stopped was not settled; retrying", job_id=job.job_id)

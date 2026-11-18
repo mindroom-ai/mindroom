@@ -29,8 +29,8 @@ _CONTINUATIONS_KEY = "restart_continuations"
 _RESTART_CONTINUATION_LIMIT = 2
 
 
-async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) -> JobSpec | None:
-    """Return what subagent job ``job`` runs on as after a restart cut its child's turn short, or None when it ends.
+async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) -> JobSpec | str:
+    """Return what subagent job ``job`` runs on as after a restart cut its child's turn short, or why it ends instead.
 
     Called in the tool context of the job's conversation, as a reply's ``continue_subagent`` call is. The child's
     handle is settled first, so this writes state. The job continues only from a turn the restart settled: a turn
@@ -43,14 +43,17 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     config, runtime_paths, owner = context.current_config, context.runtime_paths, job.owner
     continuations = job.adapter.get(_CONTINUATIONS_KEY, 0)
     if continuations >= _RESTART_CONTINUATION_LIMIT:
-        return None
+        return f"restarts already cut it short {continuations + 1} times"
     child = await _stopped_turn(job, config, runtime_paths)
-    prompt = None if child is None else await _continuation_prompt(child, config, runtime_paths)
-    if child is None or prompt is None:
-        return None
+    if isinstance(child, str):
+        return child
+    prompt = await _continuation_prompt(child, config, runtime_paths)
+    if prompt is None:
+        return "its turn's run was left paused, which history never replays"
     tools = config_plugins(config, runtime_paths).tools
-    if follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth) is not None:
-        return None
+    refusal = follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth)
+    if refusal is not None:
+        return refusal
     authorized = authorize_delegation(
         owner.agent_name,
         child.child_agent_name,
@@ -62,7 +65,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         grant=delegation_grant(child),
     )
     if isinstance(authorized, str):
-        return None
+        return authorized
     follow_up = prepare_child_turn(
         owner.agent_name,
         child.child_agent_name,
@@ -95,14 +98,13 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         runtime_paths=runtime_paths,
         refresh_scheduler=None if orchestrator is None else orchestrator.knowledge_refresh_scheduler,
     )
-    if isinstance(spec, str):
-        return None
-    spec.adapter[_CONTINUATIONS_KEY] = continuations + 1
+    if not isinstance(spec, str):
+        spec.adapter[_CONTINUATIONS_KEY] = continuations + 1
     return spec
 
 
-async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: RuntimePaths) -> DelegationChild | None:
-    """Return the settled child turn a restart cut short under ``job``, or None when no such turn is its current one."""
+async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: RuntimePaths) -> DelegationChild | str:
+    """Return the settled child turn a restart cut short under ``job``, or why no such turn is its current one."""
     saved = delegation_child(job)
     try:
         child = await settled_subagent(
@@ -112,12 +114,12 @@ async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: Runti
             runtime_paths=runtime_paths,
             depth=job.depth,
         )
-    except SubagentSessionError:
-        return None
+    except SubagentSessionError as error:
+        return str(error)
     # The handle names the turn the job ran, or the turn a continuation saved before a second restart was prepared from.
     if child.delegation_id not in {saved.delegation_id, saved.previous_delegation_id}:
-        return None
-    return child if interrupted_by_restart(child) else None
+        return "its subagent is on another turn than the one the job ran"
+    return child if interrupted_by_restart(child) else f"its turn ended {child.status} before the restart settled it"
 
 
 async def _continuation_prompt(child: DelegationChild, config: Config, runtime_paths: RuntimePaths) -> str | None:

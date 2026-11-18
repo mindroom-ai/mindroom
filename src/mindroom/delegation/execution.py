@@ -384,6 +384,9 @@ async def _execute_child(
         model_name=child.model_name,
         storage=RunStorage(store, session, child_scope(child)),
         user_id=identity.requester_id,
+        # A job asks for its child's approvals and resumes each paused row once, so nothing settles from that row and
+        # the resume checkpoints as the child's fresh run does: a crash then keeps its work for its continuation.
+        checkpoints=job_owns_execution(),
     )
     with tool_runtime_context(child_context):
         response = await _continue_child(

@@ -48,6 +48,8 @@ if TYPE_CHECKING:
 
     from agno.run import RunContext as AgnoRunContext
 
+    from mindroom.agent_loop.model_loop import LoopState
+    from mindroom.agent_loop.tools import PlannedCall
     from mindroom.tool_system.invocation import ToolCall, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolkitClose
 
@@ -1193,6 +1195,29 @@ async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_con
     assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1", "c2"]
     assert record.metrics is not None
     assert record.metrics.tokens.total_tokens == 6
+
+
+@pytest.mark.asyncio
+async def test_a_resume_announces_its_approved_calls_before_the_first_runs() -> None:
+    """``before_dispatch`` sees a resume's approved calls while none has run, as it sees a batch's; a denial has none."""
+    log: list[object] = []
+
+    async def before_dispatch(state: LoopState, planned: Sequence[PlannedCall]) -> None:
+        log.append(([call.execution.tool_call_id for call in planned], state.messages[-1].role))
+
+    async def observe(call: ToolCall, call_next: ToolNext) -> object:
+        log.append(call.function.name)
+        return await call_next(call.arguments)
+
+    hooks = LoopHooks(before_dispatch=before_dispatch, tool_middleware=(observe,))
+    agent = spec(ScriptedModel([answer("Three.")]), gated(add))
+    await _resume(agent, _paused_record(_gated_add()), approved=[_approval("c1", "add", {"a": 1, "b": 2})], hooks=hooks)
+    assert log == [(["c1"], "assistant"), "add"]
+
+    log.clear()
+    agent = spec(ScriptedModel([answer("Skipped.")]), gated(add))
+    await _resume(agent, _paused_record(_gated_add()), denied={"c1": "No."}, hooks=hooks)
+    assert log == []
 
 
 @pytest.mark.asyncio

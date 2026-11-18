@@ -112,6 +112,8 @@ A bot that left a room cannot clear its jobs state there, so clients ignore jobs
 A running job its call still waits for enters its room's jobs state only after it has run 5 seconds, at the worker's next periodic pass, normally within about 5 seconds, because every call of a reply is a job, most end within seconds, and clients keep every state event; a job awaiting approval or a cancel, one its call left running in the background, and one already listed are listed at once.
 A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.
 A subagent job is not continued, and ends interrupted for a follow-up to continue its child, when the restart found its child waiting for an approval or for a subagent of its own, whose paused run history never replays, or stopped it before its child's first turn was reserved.
+A crash in the moment between an approval's decision and the checkpoint that precedes the approved calls also finds the paused run, so that job ends interrupted too; none of the approved calls had started.
+A job that ends instead of continuing logs why, with its job ID.
 A continued subagent job is no longer linked to the reply that started it, so a later Stop of that reply does not refuse its child's approvals; it stays cancellable from the jobs bar.
 A continued child's rows in the Sub-agents panel carry no tool previews, because the conversation's rebuilt tool context does not know whether the reply that started it showed tool calls.
 A subagent job waits to continue until its bot has a Matrix client and its requester's access is resolved, so a job of a bot that never starts stays running.
