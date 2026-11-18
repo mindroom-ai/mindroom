@@ -386,6 +386,9 @@ Second question:
             (["2", "2"], ["1️⃣", "2️⃣"]),
             (["❶", "❷"], ["❶", "❷"]),
             (["🛟", "🛟", "2️⃣ ", " "], ["🛟", "🔹", "2️⃣", "❓"]),
+            (["🛟", "🛟", "2\u20e3 \ufe0f"], ["🛟", "🔹", "2\u20e3 \ufe0f"]),
+            (["2\ufe0e", "✅"], ["1️⃣", "✅"]),
+            (["2\ufe0f", "✅"], ["1️⃣", "✅"]),
         ],
     )
     def test_parse_and_format_interactive_treats_lookalike_and_digit_emojis_as_taken(

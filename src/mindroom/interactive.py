@@ -315,10 +315,10 @@ def _with_distinct_emojis(options: list[dict[str, str]]) -> list[dict[str, str]]
     """
 
     def look(emoji: str) -> str:
-        return emoji.replace("\ufe0f", "").replace("\ufe0e", "")
+        return emoji.replace("\ufe0f", "").replace("\ufe0e", "").strip()
 
     def is_number(emoji: str) -> bool:
-        return emoji.isascii() and emoji.isdigit()
+        return look(emoji).isascii() and look(emoji).isdigit()
 
     used = {look(opt["emoji"]) for opt in options if not is_number(opt["emoji"])}
     seen: set[str] = set()
