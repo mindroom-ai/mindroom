@@ -91,9 +91,10 @@ class ChildRunObservation:
     audit: ChildAudit
     parent: ChildRunObservation | None = None
     response: RunRecord | None = None
-    # The live record of the child's run that last reached a request, in which the loop counts each request that ends,
-    # a cut-off one too; what an attempt that hands over no terminal record, such as a cancelled one, used is read here.
-    running: AnyRunRecord | None = None
+    # The live record of the child's own run that last reached a request, in which the loop counts each request that
+    # ends, a cut-off one too; what an attempt that hands over no terminal record, such as a cancelled one, used is
+    # read here. Another run's loop in this context, such as a turn one of the child's tools runs, never replaces it.
+    running: RunRecord | None = None
     # The tail of what the child said and which tools it called, reported as its caller's progress.
     activity: str = ""
     # The ID the child's turn carries in its hooks and tool calls, also across a continuation that starts a new run.
@@ -331,14 +332,14 @@ def child_usage_hook(config: Config) -> BeforeRequestHook:
 
     The loop has counted every request that ended by then in the run's record, so a request's usage shows once the
     tool calls it made have ended; the last request's shows when the attempt ends, however it ends
-    (``child_run_context``). The hook does nothing outside a child's run, and a failure to publish is logged and never
-    reaches the run.
+    (``child_run_context``). The hook does nothing outside a child's run, or for a run the child does not own, and a
+    failure to publish is logged and never reaches the run.
     """
 
     async def publish_usage(state: LoopState) -> SendRequest:
-        observation = _CHILD_RUN.get()
-        if observation is not None:
-            observation.running = state.record
+        observation, record = _CHILD_RUN.get(), state.record
+        if observation is not None and observation.owns(record):
+            observation.running = record
             _publish_usage(observation, config)
         return SendRequest()
 
@@ -346,7 +347,7 @@ def child_usage_hook(config: Config) -> BeforeRequestHook:
 
 
 def _publish_usage(observation: ChildRunObservation, config: Config) -> None:
-    """Publish what the child's turn has used as its live record counts it, unless that record is another run's."""
+    """Publish what the child's turn has used as its live record counts it, unless the child has moved to a new run."""
     record = observation.running
     if observation.owns(record):
         _publish(observation.child.delegation_id, lambda feed: feed.usage(*_own_usage(record, config)))

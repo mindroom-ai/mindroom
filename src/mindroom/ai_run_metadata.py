@@ -17,6 +17,7 @@ from mindroom.model_usage import (
     uncached_input_tokens_from_counts,
 )
 from mindroom.providers.identity import model_identity
+from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -243,7 +244,8 @@ def prompt_input_tokens(metrics: RunMetrics, *, provider: str | None, model_id: 
     configured = {}
     for model_config in config.models.values():
         identity = model_identity(model_config)
-        configured[identity.provider, identity.id] = model_config.provider
+        # The route, since the cache rule compares the canonical name, not every spelling the config accepts.
+        configured[identity.provider, identity.id] = provider_route(model_config.provider)
     entries = [entry for entries in (metrics.details or {}).values() for entry in entries]
     counted = [(entry.tokens, entry.provider, entry.id) for entry in entries] or [(metrics.tokens, provider, model_id)]
     return sum(

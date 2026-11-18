@@ -964,10 +964,15 @@ async def test_subagent_usage_prices_the_run_model(
             ModelConfig(provider="vertexai_claude", id="custom-sonnet"),
             usage(100, 10, cache_read_tokens=900, cache_write_tokens=50),
         ),
+        # However the config spells that provider.
+        (
+            ModelConfig(provider="VertexAI-Claude", id="custom-sonnet"),
+            usage(100, 10, cache_read_tokens=900, cache_write_tokens=50),
+        ),
         # OpenRouter counts them in it.
         (ModelConfig(provider="openrouter", id="anthropic/claude-opus-5.5"), usage(1_050, 10, cache_read_tokens=900)),
     ],
-    ids=["anthropic", "vertex_claude_custom_id", "openrouter"],
+    ids=["anthropic", "vertex_claude_custom_id", "vertex_claude_spelled_otherwise", "openrouter"],
 )
 async def test_subagent_usage_counts_cached_input_on_every_provider(
     tmp_path: Path,
@@ -1024,6 +1029,52 @@ async def test_a_child_stopped_during_a_tool_call_ends_with_the_usage_of_its_end
     assert last is seen.snapshots[-1]
     cost = pytest.approx(100 * 1e-6 + 10 * 2e-6)
     assert last.usage == {"input_tokens": 100, "output_tokens": 10, "tool_calls": 1, "cost_usd": cost}
+
+
+@pytest.mark.asyncio
+async def test_a_turn_a_childs_tool_runs_does_not_erase_the_usage_of_the_stopped_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """Another agent's turn that a child's tool runs in the child's context leaves the child's usage as it was.
+
+    The child is stopped after that turn ended and before its own next request, so its end names its own request.
+    """
+    running = asyncio.Event()
+
+    async def add(_self: object, a: float, b: float) -> str:  # noqa: ARG001
+        """Run a turn of another agent in this context, then never return."""
+        helper = replace(
+            make_turn_context("grandchild", session_id="helper-session", run_id="helper-run"),
+            prompt="Help",
+            execution_identity=replace(_identity(), agent_name="grandchild", session_id="helper-session"),
+        )
+        helped = await ai_response(helper, paths, config)
+        assert helped.text == "Helped"
+        running.set()
+        await asyncio.Event().wait()
+        return ""
+
+    monkeypatch.setattr(CalculatorTools, "add", add)
+    turn, runtime, paths, config = _delegating_turn(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("add", "add", a=1, b=2), metrics=usage(100, 10))],
+        grandchild_turns=[answer("Helped", usage(7, 3))],
+    )
+
+    with tool_runtime_context(runtime):
+        reply = asyncio.create_task(ai_response(turn, paths, config))
+        async with asyncio.timeout(5):
+            await running.wait()
+        reply.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reply
+
+    last = await seen.wait_for_status("cancelled")
+    assert last is seen.snapshots[-1]
+    assert last.usage == {"input_tokens": 100, "output_tokens": 10, "tool_calls": 1}
 
 
 @pytest.mark.asyncio

@@ -93,6 +93,7 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   - `usage`: what the run has used so far, as `input_tokens`, the whole prompts with cache reads and writes included on every provider, and `output_tokens`, both summed over the run's model requests that ended, `tool_calls`, every call the run started, the ones whose rows the caps removed included, and `cost_usd`, those tokens at the deployment's prices, left out when none of them is of a priced model.
     The tokens include what the turn's earlier runs used, before a pause or a restart, and leave out what the run's own sub-agents used, as the cost does.
     A request's tokens are added once the tool calls it made have ended, the last request's at the run's end, however it ends, and they are zero until then.
+    Known limit: a call denied at an approval never completes, so a later call that reuses its ID is not counted in `tool_calls`.
     New usage alone sends no frame; it goes out with the run's next frame, the 10-second snapshot at the latest.
     Old clients ignore the key, and a client must show a frame without it.
   - A snapshot's `meta` also carries `task` (at most 1,000 characters) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
@@ -112,7 +113,8 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   How many older items the caps removed is not part of the frame.
 - Size: a frame must fit the 60,000-byte limit as nio sends it (compact JSON with ASCII escapes, so a character outside ASCII takes 6 bytes; in an encrypted room the Megolm ciphertext, padding, base64, and envelope are counted as well).
   A snapshot that does not fit drops the tool previews first, then cuts the oldest text from the front by the least that fits.
-  The usage in `meta` never costs the previews: a snapshot that would fit with them without the usage keeps both and cuts that much of the oldest text.
+  A snapshot that would fit with its previews without the usage in `meta` keeps both and cuts that much of the oldest text.
+  Known limit: a snapshot with too little text to cut, such as one of tool rows alone, drops its previews when the usage pushes it over the limit; the tool names stay.
   A fitted frame is always a snapshot, and later deltas keep its fit, so they stay appends.
   A delta that does not fit is replaced by a fitted snapshot.
 - A frame never carries an empty delta: when only `meta` changed, such as a status, the frame is a snapshot.
