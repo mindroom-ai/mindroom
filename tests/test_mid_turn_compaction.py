@@ -1767,10 +1767,8 @@ async def test_cancellation_during_the_summary_call_writes_nothing_and_propagate
 
     assert summary_calls.inputs
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
-    assert [type(event).__name__ for event in lifecycle.events] == [
-        "CompactionLifecycleStart",
-        "CompactionLifecycleFailure",
-    ]
+    # Cut short, not failed: the automatic compaction reports no failure, so the reply's entry stays running.
+    assert [type(event).__name__ for event in lifecycle.events] == ["CompactionLifecycleStart"]
 
 
 @pytest.mark.asyncio

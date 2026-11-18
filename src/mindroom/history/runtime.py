@@ -379,7 +379,9 @@ async def _run_scope_compaction_with_lifecycle(
     try:
         outcome = await compact(_progress if lifecycle is not None else None, _complete)
     except asyncio.CancelledError as error:
-        if not completed_successfully:
+        # A cancel cuts the compaction short; it did not fail. An automatic one rides on its reply, whose ending
+        # already tells it was cut short, so its entry stays running. A manual notice has no other ending.
+        if not completed_successfully and mode == "manual":
             await _fail("failed", failure_text(error))
         raise
     except Exception as error:

@@ -34,7 +34,13 @@ from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, SILENT_S
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.history.interrupted_replay import render_stopped_attempt
-from mindroom.history.types import CompactionLifecycleStart
+from mindroom.history.runtime import _run_scope_compaction_with_lifecycle
+from mindroom.history.types import (
+    CompactionLifecycleStart,
+    CompactionOutcome,
+    HistoryScope,
+    ResolvedHistoryExecutionPlan,
+)
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
 from mindroom.live_frames.transport import LiveSendOutcome
 from mindroom.llm.events import ReportedCall, ToolStarted
@@ -329,6 +335,21 @@ async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: 
     assert not await bot._reply_runtime.store.is_pending("$event")
 
 
+_COMPACTION_PLAN = ResolvedHistoryExecutionPlan(
+    automatic_compaction=True,
+    text_compaction_available=True,
+    explicit_compaction_model=True,
+    compaction_model_name="summary-model",
+    replay_window_tokens=128_000,
+    trigger_threshold_tokens=90_000,
+    reserve_tokens=4_000,
+    trigger_tokens=90_000,
+    limit_tokens=100_000,
+    summary_input_budget_tokens=60_000,
+    compaction_timeout_seconds=60,
+)
+
+
 def _last_content(bot: AgentBot) -> dict[str, object]:
     """Return what the bot's last message write shows, following an edit into its replacement."""
     content = bot.client.room_send.await_args_list[-1].kwargs["content"]
@@ -337,13 +358,13 @@ def _last_content(bot: AgentBot) -> dict[str, object]:
 
 @pytest.mark.parametrize("ending", ["stop", "error"])
 @pytest.mark.parametrize(("first_chunk", "phase"), [(None, "pre_turn"), ("Partial", "mid_turn")])
-async def test_a_note_that_ends_a_compacting_reply_carries_its_running_compaction(
+async def test_a_note_that_ends_a_compacting_reply_carries_its_compaction(
     tmp_path: Path,
     ending: str,
     first_chunk: str | None,
     phase: str,
 ) -> None:
-    """A Stop or error during a compaction ends the reply with a note whose event still lists that compaction."""
+    """A Stop during a compaction leaves it running on the reply's note; a compaction that failed lists its reason."""
     bot = await _streaming_bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     compacting = asyncio.Event()
@@ -355,23 +376,28 @@ async def test_a_note_that_ends_a_compacting_reply_carries_its_running_compactio
         else:
             # Before any progress edit: only the placeholder shows.
             await _wait_until_sent(bot, "Thinking...")
-        assert ctx.compaction_lifecycle is not None
-        await ctx.compaction_lifecycle.start(
-            CompactionLifecycleStart(
-                mode="auto",
-                session_id="session-1",
-                scope="agent:test_agent",
-                summary_model="summary-model",
-                before_tokens=30_000,
-                history_budget_tokens=100_000,
-                runs_before=20,
-            ),
+
+        async def summarize(*_args: object) -> CompactionOutcome:
+            if ending == "error":
+                msg = "summary model failed"
+                raise RuntimeError(msg)
+            compacting.set()
+            await asyncio.Event().wait()
+            raise AssertionError
+
+        await _run_scope_compaction_with_lifecycle(
+            mode="auto",
+            session_id="session-1",
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            execution_plan=_COMPACTION_PLAN,
+            history_budget=100_000,
+            current_history_tokens=30_000,
+            runs_before=20,
+            compaction_lifecycle=ctx.compaction_lifecycle,
+            compact=summarize,
         )
-        if ending == "error":
-            msg = "model failed"
-            raise RuntimeError(msg)
-        compacting.set()
-        await asyncio.Event().wait()
+        msg = "model failed"
+        raise RuntimeError(msg)
         yield "never"
 
     with patch_response_runner_module(
@@ -390,9 +416,14 @@ async def test_a_note_that_ends_a_compacting_reply_carries_its_running_compactio
 
     note = _last_content(bot)
     assert note[STREAM_STATUS_KEY] == ("cancelled" if ending == "stop" else "error")
-    # The client shows a running entry on a finished reply as interrupted.
     [entry] = note[COMPACTIONS_CONTENT_KEY]
-    assert (entry["status"], entry["phase"]) == ("running", phase)
+    if ending == "stop":
+        # Cut short, not failed: the client shows a running entry on a finished reply as interrupted.
+        assert (entry["status"], entry["phase"]) == ("running", phase)
+        assert "failure_reason" not in entry
+        assert "duration_ms" not in entry
+    else:
+        assert (entry["status"], entry["phase"], entry["failure_reason"]) == ("failed", phase, "summary model failed")
 
 
 async def test_a_stop_note_too_large_for_one_event_keeps_its_compactions_in_preview_and_sidecar(
