@@ -15,7 +15,7 @@ from nio import crypto
 from nio.durable.transport import HttpError, ResponseTooLarge, Transport
 from nio.http import TransportResponse
 
-from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
+from mindroom.constants import RETAINED_MEDIA_MAX_BYTES, SUBMISSION_CONTENT_KEY
 from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_file import encrypted_file_content
@@ -408,6 +408,22 @@ def extract_media_caption(
     if isinstance(filename, str) and filename and isinstance(body, str) and body and filename != body:
         return body
     return default
+
+
+def carried_media_content(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> dict[str, Any]:
+    """Return what a text event rebuilt from this media event keeps of its content.
+
+    That is its mentions, its relation, and its composer submission marker, copied
+    unchanged; ``coalescing.policy.submission_marker`` validates the marker.
+    """
+    source = event.source
+    content = source.get("content") if isinstance(source, dict) else None
+    if not isinstance(content, dict):
+        return {}
+    carried = {key: content[key] for key in ("m.mentions", "m.relates_to") if isinstance(content.get(key), dict)}
+    if SUBMISSION_CONTENT_KEY in content:
+        carried[SUBMISSION_CONTENT_KEY] = content[SUBMISSION_CONTENT_KEY]
+    return carried
 
 
 def decrypt_media_bytes(encrypted_bytes: bytes, *, key: str, sha256: str, iv: str) -> bytes:

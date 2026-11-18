@@ -6232,10 +6232,11 @@ MindRoom Chat marks each event of such a submission so MindRoom does not have to
 ```
 
 - `more: true` says the client sends another event of this submission without the person doing anything, so MindRoom waits up to 10 seconds after that event for the next one instead of `debounce_ms`, which covers sync delays between the events.
-- The submission's last event carries `more: false`, read as `false` when missing, and MindRoom replies at once, even when that event is a file.
+- The submission's last event carries `more: false`, and MindRoom replies at once, even when that event is a file.
 - When the last event never arrives, MindRoom answers what did after those 10 seconds; shutdown never waits for an open submission.
 - A text-only message carries no marker.
-  A marker that is not an object with a non-empty string `id` and a boolean `more` is ignored, so other clients, bridges, and older app builds keep the `debounce_ms` behavior.
+  MindRoom Chat always writes both fields; MindRoom reads a missing `more` as `false`.
+  A marker that is not an object with a non-empty string `id`, or whose `more` is present but not a boolean, is ignored, so other clients, bridges, and older app builds keep the `debounce_ms` behavior.
 
 The wait only holds the sender's own submission, and only while no response to its conversation is already running.
 
