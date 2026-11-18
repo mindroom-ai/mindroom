@@ -7378,12 +7378,14 @@ async def test_finished_agent_reply_with_tool_markers_runs_its_command_once_for_
     """An agent's finished reply for a human that ends in a command runs it once, as that human, under its alias."""
     config = bind_runtime_paths(
         Config(
-            agents={"general": AgentConfig(display_name="General"), "research": AgentConfig(display_name="Research")},
-            router={"access": {"current_room_members": False, "members_of_rooms": [], "users": [_OWNER]}},
+            agents={
+                "general": AgentConfig(display_name="General", access=ResponderAccessConfig(users=[_OWNER])),
+                "research": AgentConfig(display_name="Research"),
+            },
         ),
         test_runtime_paths(tmp_path / "runtime"),
     )
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    harness = _build_harness(config, tmp_path, agent_name="general")
     room = _joined_room(config, ROUTER_AGENT_NAME, "general", "research")
     placeholder_id = "$placeholder:localhost"
     _admit_placeholder(harness, placeholder_id)

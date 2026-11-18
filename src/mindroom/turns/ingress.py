@@ -270,9 +270,6 @@ class TurnIngress:
         requester_user_id = facts.lane_requester_id
         if (
             self.deps.agent_name != ROUTER_AGENT_NAME
-            or command_for(facts, dispatch_prompt_for_event(event)) is not None
-            # A long text's preview is not its text yet, so it may hide a command.
-            or is_v2_sidecar_text_preview(event.source)
             # A caption for an upload still waiting in this sender's burst must join that upload's
             # turn, or the router routes the upload alone while the named agent answers the caption.
             or any(
