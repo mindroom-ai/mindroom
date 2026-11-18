@@ -260,8 +260,12 @@ class ReactionDispatcher:
                 room.room_id,
                 event,
                 # A reaction this bot already took as a confirmation is one, whatever the config says now.
+                # Only an agent or team sends previews; one the owner account sent before is not read.
                 enabled=semantic_consumer is SemanticConsumer.CONFIG_CONFIRMATION
-                or self.deps.runtime.config.authorization.config_command_enabled,
+                or (
+                    self.deps.runtime.config.authorization.config_command_enabled
+                    and self.deps.agent_name in {*self.deps.runtime.config.agents, *self.deps.runtime.config.teams}
+                ),
             )
             if semantic_consumer in {None, SemanticConsumer.CONFIG_CONFIRMATION}
             else None

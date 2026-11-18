@@ -1078,9 +1078,10 @@ class AgentBot:
     async def _restore_joined_room(self, room_id: str) -> None:
         """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime.
 
-        The config previews this bot sent there wait for their reactions again.
+        The config previews this agent or team sent there wait for their reactions again.
         """
-        if self.client is not None and self.config.authorization.config_command_enabled:
+        answers = self.agent_name in {*self.config.agents, *self.config.teams}
+        if self.client is not None and answers and self.config.authorization.config_command_enabled:
             await config_confirmation.restore_pending_changes(self.client, room_id)
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)

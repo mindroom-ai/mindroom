@@ -1333,7 +1333,8 @@ async def test_preview_reaction_resolved_by_its_sender_only(monkeypatch: pytest.
 async def test_sender_restores_own_pending_preview_after_join(monkeypatch: pytest.MonkeyPatch) -> None:
     """Any bot that joins a room restores the previews it sent there, and no other bot's."""
     pending = _pending_config_change()
-    bot = MagicMock()
+    bot = MagicMock(agent_name="agent")
+    bot.config.agents, bot.config.teams = {"agent": MagicMock()}, {}
     bot.orchestrator.scheduled_tasks.restore_room = AsyncMock()
     bot.orchestrator.thread_snooze.restore_room = AsyncMock()
     bot.client = _pending_state_client(pending, state_key="$preview", sender="@agent:example.org")

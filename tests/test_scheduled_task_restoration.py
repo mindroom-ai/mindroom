@@ -60,7 +60,7 @@ def _bot_with_scheduled_task_runtime(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_name", [ROUTER_AGENT_NAME, "general"])
 async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, agent_name: str) -> None:
-    """Every bot restores the schedules it owns and the config previews it sent; only the owner account welcomes."""
+    """Every bot restores the schedules it owns; agents restore their config previews, the owner account welcomes."""
     config = _bind_runtime(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "role": "General assistant", "rooms": ["lobby"]}},
@@ -92,7 +92,8 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
 
     mock_join.assert_awaited_once_with(bot.client, "lobby")
     restore_room.assert_awaited_once_with(bot, "lobby")
-    mock_restore_configs.assert_awaited_once_with(bot.client, "lobby")
+    # The owner account sends no config preview, and one it sent before it stopped answering is not restored.
+    assert mock_restore_configs.await_count == int(agent_name != ROUTER_AGENT_NAME)
     assert mock_welcome.await_count == int(agent_name == ROUTER_AGENT_NAME)
 
 
@@ -125,5 +126,5 @@ async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: P
 
     mock_join.assert_not_awaited()
     restore_room.assert_awaited_once_with(bot, "lobby")
-    mock_restore_configs.assert_awaited_once_with(bot.client, "lobby")
+    mock_restore_configs.assert_not_awaited()
     mock_welcome.assert_awaited_once_with("lobby")

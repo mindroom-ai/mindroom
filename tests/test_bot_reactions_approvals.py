@@ -662,6 +662,36 @@ class TestAgentBot(AgentBotTestBase):
         resolve_pending.assert_awaited_once_with(bot.client, room.room_id, event, enabled=True)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_owner_account", [True, False])
+    async def test_owner_account_reads_no_config_preview_for_a_reaction(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        is_owner_account: bool,
+    ) -> None:
+        """Only an agent or team sends config previews, so the owner account reads none, also one it sent before."""
+        config = self._config_for_storage(tmp_path)
+        config.authorization.config_command_enabled = True
+        user = (
+            replace(mock_agent_user, agent_name=ROUTER_AGENT_NAME, user_id="@mindroom_router:localhost")
+            if is_owner_account
+            else mock_agent_user
+        )
+        bot = make_test_agent_bot(user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        _install_reaction_recorder(bot)
+        room = MagicMock(room_id="!test:localhost")
+        event = _reaction_event("✅", "$reaction")
+
+        with patch(
+            "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
+            new=AsyncMock(return_value=None),
+        ) as resolve_pending:
+            await _dispatch_reaction(bot, room, event)
+
+        resolve_pending.assert_awaited_once_with(bot.client, room.room_id, event, enabled=not is_owner_account)
+
+    @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_fresh_config_confirmation_waits_for_reload_and_rechecks_authorization(
         self,
