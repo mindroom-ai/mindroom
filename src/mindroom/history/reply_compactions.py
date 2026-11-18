@@ -8,6 +8,7 @@ compaction runs; a requested (manual) compaction keeps its separate notice.
 from __future__ import annotations
 
 import copy
+import json
 import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -28,6 +29,8 @@ _TERMINAL_STATUSES = frozenset({"success", "failed", "timeout"})
 _FAILURE_REASON_MAX_CHARS = 300
 # Every write repeats the list too, so a long tool loop that compacts again and again shows only its newest ones.
 MAX_REPLY_COMPACTIONS = 8
+# ...and within this many bytes as Matrix sends them (ASCII escapes), since an edit carries the list twice.
+MAX_REPLY_COMPACTIONS_BYTES = 8 * 1024
 
 
 def _short_reason(reason: str) -> str:
@@ -86,7 +89,10 @@ class ReplyCompactions:
         """Return a copy of the newest entries for the reply's content and frames, or ``None`` when there are none."""
         if not self._entries:
             return None
-        return copy.deepcopy(self._entries[-MAX_REPLY_COMPACTIONS:])
+        entries = self._entries[-MAX_REPLY_COMPACTIONS:]
+        while len(entries) > 1 and len(json.dumps(entries)) > MAX_REPLY_COMPACTIONS_BYTES:
+            entries = entries[1:]
+        return copy.deepcopy(entries)
 
 
 class ReplyCompactionLifecycle:

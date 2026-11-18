@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -9,7 +10,12 @@ import nio
 import pytest
 
 from mindroom.constants import COMPACTIONS_CONTENT_KEY
-from mindroom.history.reply_compactions import MAX_REPLY_COMPACTIONS, ReplyCompactionLifecycle, ReplyCompactions
+from mindroom.history.reply_compactions import (
+    MAX_REPLY_COMPACTIONS,
+    MAX_REPLY_COMPACTIONS_BYTES,
+    ReplyCompactionLifecycle,
+    ReplyCompactions,
+)
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
@@ -189,8 +195,15 @@ async def test_a_verbose_failure_reason_is_capped_so_a_short_answer_edit_still_f
 
 
 @pytest.mark.asyncio
-async def test_a_reply_writes_only_its_newest_compactions_so_a_short_answer_edit_fits_encrypted() -> None:
-    """A long tool loop that compacts again and again writes its newest 8 entries, so a short edit still fits."""
+@pytest.mark.parametrize(("reason_char", "kept"), [("x", MAX_REPLY_COMPACTIONS), ("\U0001f600", 2)])
+async def test_a_reply_writes_only_its_newest_compactions_so_a_short_answer_edit_fits_encrypted(
+    reason_char: str,
+    kept: int,
+) -> None:
+    """A long tool loop that compacts again and again writes its newest entries, so a short edit still fits.
+
+    Matrix sends JSON with ASCII escapes, so an emoji reason costs 12 bytes per character and fewer entries fit.
+    """
     recorder = ReplyCompactions()
     lifecycle = _lifecycle(recorder)
     entry_ids = []
@@ -198,14 +211,15 @@ async def test_a_reply_writes_only_its_newest_compactions_so_a_short_answer_edit
         entry_id = await lifecycle.start(_start())
         assert entry_id is not None
         await lifecycle.complete_failure(
-            replace(_failure(entry_id, "failed"), failure_reason="provider said: " + "x" * 400),
+            replace(_failure(entry_id, "failed"), failure_reason="provider said: " + reason_char * 400),
         )
         entry_ids.append(entry_id)
 
     content = recorder.content()
     assert content is not None
     assert MAX_REPLY_COMPACTIONS == 8
-    assert [entry["id"] for entry in content] == entry_ids[-MAX_REPLY_COMPACTIONS:]
+    assert [entry["id"] for entry in content] == entry_ids[-kept:]
+    assert len(json.dumps(content)) <= MAX_REPLY_COMPACTIONS_BYTES
     edit = {
         "msgtype": "m.text",
         "body": "* Short answer.",
@@ -221,7 +235,22 @@ async def test_a_reply_writes_only_its_newest_compactions_so_a_short_answer_edit
         sidecar_required=True,
     )
     assert prepared["m.new_content"]["body"] == "Short answer."
-    assert len(prepared[COMPACTIONS_CONTENT_KEY]) == MAX_REPLY_COMPACTIONS
+    assert len(prepared[COMPACTIONS_CONTENT_KEY]) == kept
+
+
+@pytest.mark.asyncio
+async def test_one_worst_case_entry_fits_the_byte_budget() -> None:
+    """A failed entry with the longest reason, all escaped emoji, still fits, so the newest entry is never dropped."""
+    recorder = ReplyCompactions()
+    lifecycle = _lifecycle(recorder)
+    entry_id = await lifecycle.start(_start())
+    await lifecycle.progress(_progress(entry_id))
+    await lifecycle.complete_failure(replace(_failure(entry_id, "failed"), failure_reason="\U0001f600" * 400))
+
+    content = recorder.content()
+    assert content is not None
+    assert len(content) == 1
+    assert len(json.dumps(content)) <= MAX_REPLY_COMPACTIONS_BYTES
 
 
 @pytest.mark.asyncio
