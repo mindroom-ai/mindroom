@@ -156,6 +156,7 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.agent import RoomReplyMode
     from mindroom.config.personal_agents import PersonalAgentRoster
+    from mindroom.room_reply_modes import ReplyModeRead
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -1708,9 +1709,17 @@ class Config(BaseModel):
         member_modes = {resolve_agent_thread_mode(self.agents[name], room_id, runtime_paths) for name in member_names}
         return next(iter(member_modes)) if len(member_modes) == 1 else "thread"
 
-    def get_room_reply_mode(self, runtime_paths: RuntimePaths, room_id: str) -> RoomReplyMode:
-        """Return one room's reply mode: its `!reply_mode` override, else its `rooms` entry, else `auto`."""
-        runtime_room_override = resolve_room_reply_mode_override(runtime_paths, room_id)
+    def get_room_reply_mode(
+        self,
+        runtime_paths: RuntimePaths,
+        room_id: str,
+        read: ReplyModeRead | None = None,
+    ) -> RoomReplyMode:
+        """Return one room's reply mode: its `reply_mode` room setting, else its `rooms` entry, else `auto`.
+
+        ``read`` is the setting a refresh just found, to decide by; without it, the runtime's copy of the setting.
+        """
+        runtime_room_override = resolve_room_reply_mode_override(runtime_paths, room_id) if read is None else read.mode
         if runtime_room_override is not None:
             return runtime_room_override
         room = resolve_room_scoped_value(self.rooms, room_id, runtime_paths)
