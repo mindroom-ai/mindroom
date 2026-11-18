@@ -150,6 +150,7 @@ async def _run(
     edits: _Edits,
     *,
     placeholder_event_id: str | None = None,
+    existing_answer_event_id: str | None = None,
     show_tool_calls: bool = True,
     compactions: ReplyCompactions | None = None,
     resumed: UnfinishedStreamedReply | None = None,
@@ -163,7 +164,7 @@ async def _run(
             config,
             runtime_paths_for(config),
             stream,
-            existing_event_id=placeholder_event_id,
+            existing_event_id=placeholder_event_id or existing_answer_event_id,
             adopt_existing_placeholder=placeholder_event_id is not None,
             show_tool_calls=show_tool_calls,
             compactions=compactions,
@@ -502,7 +503,7 @@ async def test_compaction_in_a_resumed_reply_anchors_after_the_resumed_tools(tmp
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("frames")
 @pytest.mark.parametrize("approved", [False, True], ids=["declined", "approved"])
-async def test_compaction_before_the_participation_decision_creates_no_reply(tmp_path: Path, approved: bool) -> None:  # noqa: FBT001
+async def test_compaction_before_the_participation_decision_creates_no_reply(tmp_path: Path, approved: bool) -> None:
     """A compaction before the turn may become visible sends nothing: a declined turn leaves no reply.
 
     An approved one's placeholder, sent once the decision allows it, carries the entry.
@@ -542,6 +543,33 @@ async def test_compaction_before_the_participation_decision_creates_no_reply(tmp
     assert create.content is not None
     assert create.content["body"] == PROGRESS_PLACEHOLDER
     assert [entry["status"] for entry in create.content[COMPACTIONS_CONTENT_KEY]] == ["success"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("frames")
+@pytest.mark.parametrize("live_frames", [False, True], ids=["edits", "frames"])
+async def test_a_regenerations_compaction_never_blanks_the_answer_it_replaces(
+    tmp_path: Path,
+    live_frames: bool,
+) -> None:
+    """A compaction before a regeneration's first text leaves the prior answer; its first real write carries it."""
+    records, edits, recorder = _records(), _Edits(), ReplyCompactions()
+    compaction = _Compaction(recorder)
+    stream = _stream(compaction.start, 0.15, compaction.succeed, 0.15, "New answer.", 0.03)
+    await _run(
+        _config(tmp_path, update_interval=0.05, live_frames=live_frames),
+        stream,
+        records,
+        edits,
+        existing_answer_event_id="$prior_answer",
+        compactions=recorder,
+    )
+
+    assert PROGRESS_PLACEHOLDER not in [content["body"] for content in edits.contents]
+    shown = [content for content in edits.contents if COMPACTIONS_CONTENT_KEY in content]
+    assert all(content["body"] == "New answer." for content in shown)
+    [entry] = _terminal(records)[COMPACTIONS_CONTENT_KEY]
+    assert entry["status"] == "success"
 
 
 @pytest.mark.asyncio
@@ -611,8 +639,11 @@ async def test_compaction_on_placeholder_earns_a_checkpoint_with_live_frames(tmp
     assert [entry["status"] for entry in _live_compactions(frames.sent)] == ["running"]
 
 
-def test_compaction_change_is_uncommitted_once_the_reply_has_an_event(tmp_path: Path) -> None:
-    """A change the reply's event does not show yet is uncommitted; before the event exists, its first write shows it."""
+def test_compaction_change_is_uncommitted_once_an_event_shows_the_stream(tmp_path: Path) -> None:
+    """A change the stream's event does not show yet is uncommitted; before one shows it, its first write does.
+
+    An earlier answer a regeneration writes over does not show the stream.
+    """
     recorder = ReplyCompactions()
     config = _config(tmp_path)
     streaming = StreamingResponse(
@@ -625,7 +656,11 @@ def test_compaction_change_is_uncommitted_once_the_reply_has_an_event(tmp_path: 
     _Compaction(recorder).start()
     assert not streaming.has_uncommitted_presentation()
 
-    streaming.event_id = "$placeholder"
+    streaming.event_id = "$prior_answer"
+    assert not streaming.has_uncommitted_presentation()
+
+    # As an adopted placeholder, or the stream's own first write, makes it.
+    streaming._shows_stream = True
     assert streaming.has_uncommitted_presentation()
 
 

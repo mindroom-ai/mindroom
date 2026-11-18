@@ -744,9 +744,13 @@ class StreamingResponse:
 
     @property
     def _compactions_unshown(self) -> bool:
-        """Whether the reply's event lacks a compaction change; with no event yet, the first write carries it."""
+        """Whether the event showing this stream lacks a compaction change; before one does, its first write carries it.
+
+        An earlier answer a regeneration replaces does not show the stream, so a compaction alone never edits it.
+        """
         return (
             self.compactions is not None
+            and self._shows_stream
             and self.event_id is not None
             and self.compactions.version != self._last_delivered_compactions_version
         )
@@ -2278,10 +2282,11 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         live_task = _start_live_frames(client, streaming, delivery_queue)
         if compactions is not None:
             # A compaction anchors after the tool calls shown so far, and each change is shown at once, like a
-            # worker's progress, even over the placeholder. It never creates the reply: one not yet visible may wait
-            # for its participation decision, and its first write carries the entries.
+            # worker's progress, even over the placeholder. It only edits an event that shows this stream: a reply
+            # not yet visible may wait for its participation decision, and an earlier answer a regeneration replaces
+            # stays until replacement text arrives. The stream's first write carries the entries.
             def _compaction_changed() -> None:
-                if streaming.event_id is None:
+                if not streaming._shows_stream:
                     return
                 _queue_delivery_request(
                     delivery_queue,
