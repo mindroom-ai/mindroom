@@ -74,6 +74,9 @@ class _PendingConfigChange:
     config_path: str
     new_value: Any
     requester: str  # User who requested the change
+    # The bot that sent the preview, which alone resolves it; the bots of one process share this memory.
+    # Room state names it as the state event's sender.
+    sender: str | None = None
     # Room state is readable by every member and never end-to-end encrypted, so a new value
     # that display redaction would mask is withheld from it and kept only in this process.
     # So is a value room state cannot carry, since Matrix canonical JSON rejects floats.
@@ -294,6 +297,8 @@ async def _resolve_pending_change(
     """Resolve one pending change from memory or its bot-authored Matrix state."""
     pending_change = _get_pending_change(event_id)
     if pending_change is not None:
+        if pending_change.sender != client.user_id:
+            return None
         return await _unexpired_pending_change(client, room_id, event_id, pending_change)
 
     response = await client.room_get_state_event(
@@ -328,8 +333,11 @@ async def resolve_reaction_pending_change(
     *,
     enabled: bool,
 ) -> _PendingConfigChange | None:
-    """Resolve config state only for confirmation-shaped router reactions."""
-    if not enabled or event.key not in {"✅", "❌"}:
+    """Resolve config state only for confirmation-shaped reactions to a preview this bot sent.
+
+    Every bot sees every reaction, so room state is read only while config commands are ``enabled``.
+    """
+    if event.key not in {"✅", "❌"} or not (enabled or _get_pending_change(event.reacts_to)):
         return None
     return await _resolve_pending_change(client, room_id, event.reacts_to)
 
@@ -369,7 +377,7 @@ async def _restore_pending_change(
         client,
         room_id,
         event_id,
-        _PendingConfigChange.from_dict(content),
+        replace(_PendingConfigChange.from_dict(content), sender=client.user_id),
     )
     if pending_change is None:
         return None
@@ -567,6 +575,7 @@ async def ensure_pending_change(
             config_path=config_path,
             new_value=new_value,
             requester=requester,
+            sender=client.user_id,
             new_value_withheld=new_value_withheld,
         )
         await _commit_checkpoint(client, event_id, pending_change)

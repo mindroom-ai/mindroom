@@ -733,7 +733,6 @@ path = "mindroom.reaction_dispatch"
 depends_on = [
     "mindroom.approval.inbound",
     "mindroom.commands.config_confirmation",
-    "mindroom.constants",
     "mindroom.dispatch_callback_outcome",
     "mindroom.entity_resolution",
     "mindroom.event_journal",

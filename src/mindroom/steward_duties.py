@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.background_tasks import create_background_task
-from mindroom.commands import config_confirmation
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.hooks import (
@@ -132,19 +131,9 @@ class StewardDuties:
             task.cancel()
 
     async def room_joined(self, room_id: str) -> None:
-        """Restore pending config confirmations in a room the owner account joined, then welcome an empty room."""
-        if not self._is_owner:
-            return
-        client = self.deps.runtime.client
-        assert client is not None
-        restored_configs = await config_confirmation.restore_pending_changes(client, room_id)
-        if restored_configs > 0:
-            self.deps.logger.info(
-                "restored_pending_config_changes",
-                room_id=room_id,
-                restored_config_count=restored_configs,
-            )
-        await self.deps.room_lifecycle.send_welcome_message_if_empty(room_id)
+        """Welcome an empty room the owner account joined."""
+        if self._is_owner:
+            await self.deps.room_lifecycle.send_welcome_message_if_empty(room_id)
 
     def mark_joined_for_room_state(self, room_id: str) -> None:
         """Publish the state of a room this bot joined or left by any path, once a sync frame carries its members."""

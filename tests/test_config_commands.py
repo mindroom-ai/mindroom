@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from mindroom import constants as constants_mod
+from mindroom.bot import AgentBot
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import (
     _format_value,
@@ -81,13 +82,14 @@ def _pending_config_change(
     room_id: str = "!room:example.org",
     requester: str = "@admin:example.org",
 ) -> config_confirmation._PendingConfigChange:
-    """Return one typed pending config change for reaction tests."""
+    """Return one typed pending config change of the tests' bot for reaction tests."""
     return config_confirmation._PendingConfigChange(
         room_id=room_id,
         thread_id=None,
         config_path="defaults.markdown",
         new_value=False,
         requester=requester,
+        sender="@router:example.org",
     )
 
 
@@ -1237,6 +1239,7 @@ async def test_resolve_pending_change_loads_exact_matrix_state_before_room_resto
         config_path="defaults.markdown",
         new_value=False,
         requester="@admin:example.org",
+        sender="@router:example.org",
     )
     client = _pending_state_client(pending_change, state_key=event_id, sender="@router:example.org")
     monkeypatch.setattr(config_confirmation, "_pending_changes", {})
@@ -1303,6 +1306,48 @@ async def test_pending_change_state_written_by_another_member_is_ignored(
 
 
 @pytest.mark.asyncio
+async def test_preview_reaction_resolved_by_its_sender_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every bot in the room sees a reaction to a preview; only the bot that sent the preview resolves it."""
+    pending = _pending_config_change()
+    sender = _pending_state_client(pending, state_key="$preview", sender="@agent:example.org")
+    sender.user_id = "@agent:example.org"
+    other = _pending_state_client(pending, state_key="$preview", sender="@agent:example.org")
+    reaction = MagicMock(spec=nio.ReactionEvent, key="✅", reacts_to="$preview")
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {})
+
+    async def resolve(client: AsyncMock) -> object:
+        return await config_confirmation.resolve_reaction_pending_change(
+            client,
+            pending.room_id,
+            reaction,
+            enabled=True,
+        )
+
+    assert await resolve(other) is None
+    assert await resolve(sender) is not None
+    # The bots of one process share its memory of pending previews.
+    assert await resolve(other) is None
+
+
+@pytest.mark.asyncio
+async def test_sender_restores_own_pending_preview_after_join(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any bot that joins a room restores the previews it sent there, and no other bot's."""
+    pending = _pending_config_change()
+    bot = MagicMock()
+    bot.orchestrator.scheduled_tasks.restore_room = AsyncMock()
+    bot.orchestrator.thread_snooze.restore_room = AsyncMock()
+    bot.client = _pending_state_client(pending, state_key="$preview", sender="@agent:example.org")
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {})
+
+    await AgentBot._restore_joined_room(bot, pending.room_id)
+    assert config_confirmation._pending_changes == {}
+
+    bot.client.user_id = "@agent:example.org"
+    await AgentBot._restore_joined_room(bot, pending.room_id)
+    assert config_confirmation._pending_changes["$preview"].sender == "@agent:example.org"
+
+
+@pytest.mark.asyncio
 async def test_confirmation_send_failure_keeps_replay_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1317,6 +1362,7 @@ async def test_confirmation_send_failure_keeps_replay_state(
         config_path="defaults.markdown",
         new_value=False,
         requester="@admin:example.org",
+        sender="@router:example.org",
     )
     monkeypatch.setattr(config_confirmation, "_pending_changes", {event_id: pending_change})
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
@@ -1482,6 +1528,7 @@ async def test_confirmation_recovery_adopts_untracked_visible_response(
         config_path="defaults.markdown",
         new_value=False,
         requester="@admin:example.org",
+        sender="@router:example.org",
     )
     monkeypatch.setattr(config_confirmation, "_pending_changes", {event_id: pending_change})
     bot = SimpleNamespace(
@@ -1794,6 +1841,9 @@ def _write_config_with_secrets(tmp_path: Path, **extra_sections: object) -> Path
     return config_path
 
 
+_ROUTER_ID = "@router:example.org"
+
+
 def _empty_pending_state_client() -> AsyncMock:
     """Return a Matrix client whose room state starts empty and accepts every write."""
     client = AsyncMock(spec=nio.AsyncClient)
@@ -2010,6 +2060,7 @@ async def test_expired_in_memory_config_change_is_discarded() -> None:
         config_path="defaults.markdown",
         new_value=False,
         requester="@admin:example.org",
+        sender="@router:example.org",
         created_at=datetime.now(UTC) - timedelta(hours=25),
     )
     client = _empty_pending_state_client()
@@ -2075,7 +2126,7 @@ async def test_withheld_config_change_restored_after_restart_asks_to_rerun(tmp_p
         requester="@admin:example.org",
         new_value_withheld=True,
     )
-    restored = config_confirmation._PendingConfigChange.from_dict(withheld.to_dict())
+    restored = replace(config_confirmation._PendingConfigChange.from_dict(withheld.to_dict()), sender=_ROUTER_ID)
     assert restored.new_value is None
     assert restored.new_value_lost is True
 
