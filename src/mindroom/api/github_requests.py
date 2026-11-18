@@ -376,7 +376,12 @@ async def delete_github_token(request: Request) -> dict[str, object] | JSONRespo
     if context is not None:
         # Waits for a save under way, which would otherwise publish its token after this removal.
         async with _token_lock(presented_session(request).user_id):
-            await asyncio.to_thread(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
+            try:
+                await asyncio.to_thread(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
+            except (OSError, ValueError) as exc:
+                # As on save, a `ValueError` is the store's path guards refusing its directory.
+                logger.warning("github_token_delete_failed", error_type=type(exc).__name__)
+                return _error(503, _UNAVAILABLE)
     return await _status(context)
 
 

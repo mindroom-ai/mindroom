@@ -1732,3 +1732,35 @@ def test_a_removal_during_a_tokens_check_waits_for_it_and_then_removes_it(
     assert (removed.status_code, removed.json()) == (200, {"connected": False})
     assert stored_token(paths, ALICE) is None
     assert ALICE not in github_requests._token_locks
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError("disk full"), ValueError("Path must stay within its authorized root.")],
+    ids=["os-error", "path-guard"],
+)
+def test_a_removal_the_store_fails_is_a_sanitized_unavailable(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    """A store that fails to remove the token answers 503 naming nothing of it, and the token stays."""
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
+
+    def fail(*_args: object) -> NoReturn:
+        raise error
+
+    monkeypatch.setattr(credentials_manager.CredentialsManager, "delete_credentials", fail)
+
+    with capture_logs() as logs:
+        removed = client.delete("/api/github/token", headers=session(app, ALICE))
+
+    assert (removed.status_code, removed.json()) == (503, {"error": "github_connection_unavailable"})
+    assert str(error) not in removed.text
+    assert str(error) not in repr(logs)
+    assert ALICE_PAT not in repr(logs)
+    assert stored_token(paths, ALICE) == {"token": ALICE_PAT, "login": "pat-gh"}
