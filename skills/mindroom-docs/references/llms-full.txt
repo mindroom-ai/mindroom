@@ -2897,9 +2897,12 @@ Then:
 2. If the thread requires explicit targeting, the router stays silent; eligible individual agents already in the thread may still use opt-in [adaptive participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation).
 3. If exactly one eligible responder remains, it answers directly without an AI routing call.
 4. If several remain, the router reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
-5. The router posts a message mentioning the chosen agent or team (for example "@code could you help with this?"), and that entity answers in the thread.
+5. The router tells the chosen agent or team with a hidden event, and that entity answers the message in the thread.
+   No routing message appears in the room.
 
-If routing fails, for example because of a model error or an invalid choice, the router replies "Please try mentioning an agent or team directly with @ or rephrase your request."
+In a room without the router, the MindRoom account with the highest power level there routes the same way, and answers itself when it is the best match.
+If the routing call fails, for example because of a model error or an invalid choice, the candidate with the lowest Matrix ID answers.
+If no candidate fits the message, nobody answers; mention an agent or team to get an answer.
 Mentioning an agent or team with `@name` always bypasses routing, but the entity still answers only if it is in the room, listed for that room in its `rooms` when the room is configured, and allowed by its `access`.
 An entity invited into a configured room that does not list it posts a note when it joins, and repeats that note instead of answering when it alone is mentioned there: the room's agents are managed in the MindRoom configuration, so talk to the entity in a new room it is invited to.
 A request that mentions several entities gets the same explanation when every entity it cannot use is such an invited, unlisted entity.
@@ -2909,7 +2912,7 @@ See [Multi-Human Thread Protection](https://docs.mindroom.chat/configuration/thr
 ### Mentioning the router
 
 The router is not a conversational agent.
-A message that mentions only the router gets a short rules-of-engagement reply instead of an answer.
+A message that mentions only the router gets no answer.
 Mention a specific agent or team to get an answer, or several agents for an ad-hoc collaboration.
 
 ## Responder Selection Judgments
@@ -3017,7 +3020,6 @@ Set it with `rooms.<key>.reply_mode` (see [Room policy](https://docs.mindroom.ch
 
 - `auto` (default): the router or the room's only agent or team answers such a message, as described in [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/#how-routing-works) and [Multi-Human Thread Protection](#multi-human-thread-protection).
 - `mentions`: neither the router nor any agent or team answers such a message, unless it is in a thread an agent or team already replied in or is still answering, where the rules below apply as in `auto`.
-  The router still shows the transcript, or the fallback text, of such a voice message ([router echo](https://docs.mindroom.chat/voice/#voice-message-processing)) unless `voice.visible_router_echo` is `false`.
 
 ```yaml
 rooms:
@@ -5558,7 +5560,7 @@ Without `api_key` or `credentials_service`, MindRoom sends a non-secret placehol
 | Field | Default | Description |
 |-------|---------|-------------|
 | `voice.enabled` | `false` | Transcribe voice messages; when `false`, voice messages use the [raw-audio fallback](#voice-fallback-no-stt-available). |
-| `voice.visible_router_echo` | `true` | Let the router show transcription progress and the transcript in the room; see [Voice Message Processing](#voice-message-processing). |
+| `voice.visible_router_echo` | `true` | Post the transcript of a voice message before the reply; see [Voice Message Processing](#voice-message-processing). |
 | `voice.stt.provider` | `openai` | `openai` or `openai_compatible`. |
 | `voice.stt.model` | `gpt-transcribe` | STT model name. |
 | `voice.stt.host` | none | Service root or `/v1` base URL; must be an HTTP(S) URL. Required for `openai_compatible`. |
@@ -5577,23 +5579,19 @@ On timeout or service error, the message uses the raw-audio fallback.
 What appears in the room depends on whether the router is present and whether the responder is already clear.
 Voice messages follow the same mention, thread, and access rules as text from the original sender.
 
-**Router echo.**
-With `voice.enabled: true` and `voice.visible_router_echo: true`, the router immediately posts `Router agent is transcribing…` and then replaces it with the cleaned transcript, or with the fallback text if transcription failed.
-With `voice.enabled: false`, the router posts the fallback text directly instead.
-The echo is display-only: agents answer the original voice message, not the echo.
-The echo appears only when the router is in the room and allowed to reply to the sender.
-Set `voice.visible_router_echo: false` to hide it; this does not change who answers.
-The echo also appears in a room whose [reply mode](https://docs.mindroom.chat/configuration/threads/#reply-mode) is `mentions`, even for a voice message nobody answers there.
+**Transcript.**
+With `voice.visible_router_echo: true`, the agent or team that answers a voice message posts its transcript just before its reply.
+No transcript appears for a voice message nobody answers, or for one that could not be transcribed.
 
 **Responder already clear.**
 If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly without a router handoff.
 
 **Router must choose.**
-If several agents or teams can respond and none is targeted, the router routes on the transcript and posts a normal handoff such as `@home could you help with this?`.
-The chosen responder answers that handoff and still receives the original audio attachment.
+If several agents or teams can respond and none is targeted, the router routes on the transcript and tells the chosen responder with a hidden event, so no handoff message appears in the room.
+The chosen responder answers the voice message and still receives the original audio attachment.
 
 **No router, or router cannot reply to the sender.**
-Agents and teams handle the voice message directly with the same rules as text, and no router echo appears.
+Agents and teams handle the voice message directly with the same rules as text.
 If several responders remain and none is targeted, nobody answers until the user mentions an agent or team.
 
 ## Transcript Normalization
@@ -13146,6 +13144,16 @@ room_thread_summary_models:
 
 `defaults.thread_summary_temperature` (default `0.2`, `null` for provider defaults) applies when the provider supports a temperature override.
 These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
+
+A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
+MindRoom Chat sets them from the room settings dialog; any client can send the `io.mindroom.room_settings` state event with state key `thread_summary_instructions` and content `{"value": "<rules>"}`.
+The event falls under the room's `state_default` power level (normally 50), so only moderators and admins can change it, and agent tools cannot write it.
+Every automatic title, including the provisional title and retitles, reads the setting right before generating and appends it to the title instructions under a room rules section.
+Those rules win over conflicting built-in rules such as length, style, or emoji, but not over the rule to treat thread messages as untrusted text.
+Precedence, lowest to highest: the built-in `THREAD_SUMMARY_INSTRUCTIONS`, its `prompts:` override, the room setting; override `THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE` (placeholders `{instructions}` and `{room_instructions}`) to change how the two are joined.
+Values are trimmed and cut to 2,000 characters.
+To clear the setting, send `{}`; a missing event, `{}`, a non-string or blank `value`, or a failed read all mean the normal instructions, and a failed read never skips the title.
+Titles already set keep their wording until the next refresh.
 
 The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags.
 Later summaries never change tags, so tags someone removed are not re-added.

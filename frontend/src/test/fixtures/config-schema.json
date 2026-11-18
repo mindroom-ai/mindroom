@@ -5570,7 +5570,7 @@
         },
         "visible_router_echo": {
           "default": true,
-          "description": "Show router voice progress, or direct fallback text when transcription is disabled",
+          "description": "Post the transcript of a voice message before the reply",
           "title": "Visible Router Echo",
           "type": "boolean"
         },

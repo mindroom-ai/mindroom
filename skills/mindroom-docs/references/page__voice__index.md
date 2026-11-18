@@ -53,7 +53,7 @@ Without `api_key` or `credentials_service`, MindRoom sends a non-secret placehol
 | Field | Default | Description |
 |-------|---------|-------------|
 | `voice.enabled` | `false` | Transcribe voice messages; when `false`, voice messages use the [raw-audio fallback](#voice-fallback-no-stt-available). |
-| `voice.visible_router_echo` | `true` | Let the router show transcription progress and the transcript in the room; see [Voice Message Processing](#voice-message-processing). |
+| `voice.visible_router_echo` | `true` | Post the transcript of a voice message before the reply; see [Voice Message Processing](#voice-message-processing). |
 | `voice.stt.provider` | `openai` | `openai` or `openai_compatible`. |
 | `voice.stt.model` | `gpt-transcribe` | STT model name. |
 | `voice.stt.host` | none | Service root or `/v1` base URL; must be an HTTP(S) URL. Required for `openai_compatible`. |
@@ -72,23 +72,19 @@ On timeout or service error, the message uses the raw-audio fallback.
 What appears in the room depends on whether the router is present and whether the responder is already clear.
 Voice messages follow the same mention, thread, and access rules as text from the original sender.
 
-**Router echo.**
-With `voice.enabled: true` and `voice.visible_router_echo: true`, the router immediately posts `Router agent is transcribing…` and then replaces it with the cleaned transcript, or with the fallback text if transcription failed.
-With `voice.enabled: false`, the router posts the fallback text directly instead.
-The echo is display-only: agents answer the original voice message, not the echo.
-The echo appears only when the router is in the room and allowed to reply to the sender.
-Set `voice.visible_router_echo: false` to hide it; this does not change who answers.
-The echo also appears in a room whose [reply mode](https://docs.mindroom.chat/configuration/threads/#reply-mode) is `mentions`, even for a voice message nobody answers there.
+**Transcript.**
+With `voice.visible_router_echo: true`, the agent or team that answers a voice message posts its transcript just before its reply.
+No transcript appears for a voice message nobody answers, or for one that could not be transcribed.
 
 **Responder already clear.**
 If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly without a router handoff.
 
 **Router must choose.**
-If several agents or teams can respond and none is targeted, the router routes on the transcript and posts a normal handoff such as `@home could you help with this?`.
-The chosen responder answers that handoff and still receives the original audio attachment.
+If several agents or teams can respond and none is targeted, the router routes on the transcript and tells the chosen responder with a hidden event, so no handoff message appears in the room.
+The chosen responder answers the voice message and still receives the original audio attachment.
 
 **No router, or router cannot reply to the sender.**
-Agents and teams handle the voice message directly with the same rules as text, and no router echo appears.
+Agents and teams handle the voice message directly with the same rules as text.
 If several responders remain and none is targeted, nobody answers until the user mentions an agent or team.
 
 ## Transcript Normalization
