@@ -1000,8 +1000,8 @@ class TestAgentBot(AgentBotTestBase):
         mock_relay.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_router_replies_with_guidance_when_only_router_is_mentioned(self, tmp_path: Path) -> None:
-        """Mentioning only the router should explain that users must tag routable entities."""
+    async def test_a_mention_of_only_the_owner_account_gets_no_message(self, tmp_path: Path) -> None:
+        """The owner account posts no guidance: a message that mentions only it gets nothing from it."""
         agent_user = AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
@@ -1043,16 +1043,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
-        bot.client.room_send.assert_awaited_once()
-        content = bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"].startswith("🧭")
-        assert "router is not a conversational AI agent" in content["body"]
-        assert "mention a specific agent or team" in content["body"]
-        assert "one human and one agent or team are already talking in a thread" in content["body"]
-        assert "eligible ad-hoc team of participating individual agents" in content["body"]
-        assert "In multi-human threads, explicitly tag who should answer" in content["body"]
-        assert "adaptive participation, but teams do not form automatically" in content["body"]
-        assert "automatic routing can still choose an agent or team" in content["body"]
+        bot.client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_agent_receives_images_from_thread_root_after_routing(

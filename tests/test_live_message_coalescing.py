@@ -7889,8 +7889,8 @@ async def test_router_early_skip_only_honors_joined_non_agent_mentions(
 
 
 @pytest.mark.asyncio
-async def test_router_early_skip_keeps_a_question_to_the_router_itself(tmp_path: Path) -> None:
-    """A message mentioning only the router reaches its dispatch plan, which answers it with guidance."""
+async def test_router_early_skip_drops_a_message_that_mentions_only_the_owner_account(tmp_path: Path) -> None:
+    """The owner account answers nobody, so a message mentioning only it is dropped like one for anyone else."""
     bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     room.add_member(bot.matrix_id.full_id, "Router", None)
@@ -7908,7 +7908,7 @@ async def test_router_early_skip_keeps_a_question_to_the_router_itself(tmp_path:
         thread_id=None,
     )
 
-    assert should_skip is False
+    assert should_skip is True
 
 
 @pytest.mark.asyncio

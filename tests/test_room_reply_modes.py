@@ -252,8 +252,8 @@ _WHO_ANSWERS = [
     ),
     pytest.param(
         _Turn(agents=_BOTH, mention=ROUTER_AGENT_NAME),
-        {ROUTER_AGENT_NAME: "reject"},
-        {ROUTER_AGENT_NAME: "reject"},
+        {},
+        {},
         id="mentions-only-the-router",
     ),
     pytest.param(
@@ -396,42 +396,6 @@ async def test_mentions_room_flow_from_a_mention_to_an_admin_switching_back(tmp_
     assert resolve_room_reply_mode_override(runtime_paths_for(config), ROOM_ID) == "auto"
     assert await _answers(config, two_agents) == {ROUTER_AGENT_NAME: "route"}
     assert await _answers(config, followed) == {"general": "individual"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "says"),
-    [
-        ("auto", "In a new untagged message, automatic routing can still choose an agent or team"),
-        ("mentions", "In this room, a new message gets an answer only when it mentions an agent or team."),
-    ],
-)
-async def test_router_only_mention_guidance_follows_the_reply_mode(
-    tmp_path: Path,
-    mode: RoomReplyMode,
-    says: str,
-) -> None:
-    """A person who mentions only the router learns how a new message gets an answer in this room."""
-    turn = _Turn(agents=_BOTH, mention=ROUTER_AGENT_NAME)
-    config = _config(tmp_path, reply_mode=mode)
-    room = _room_with_members(SENDER, *(_entity_id(config, agent).full_id for agent in turn.agents))
-    dispatch = _dispatch(
-        _context(mentioned=[_entity_id(config, ROUTER_AGENT_NAME)], am_i_mentioned=True),
-        agent_name=ROUTER_AGENT_NAME,
-    )
-
-    plan = await _policy_for(config, ROUTER_AGENT_NAME).plan_turn(
-        room,
-        _text_event("hello router"),
-        dispatch,
-        has_active_response_for_target=lambda _target: False,
-    )
-
-    assert plan.response_action.kind == "reject"
-    assert says in plan.response_action.rejection_message
-    assert plan.response_action.rejection_message.endswith(
-        "The router is not a conversational AI agent you can tag directly.",
-    )
 
 
 # Who acts on what a person sends, driven through each bot's ingress: the agents that answer, how many times each,

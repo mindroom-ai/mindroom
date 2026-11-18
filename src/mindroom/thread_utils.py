@@ -10,7 +10,6 @@ from mindroom import authorization
 from mindroom.constants import (
     COPIED_MENTIONS_KEY,
     EXACT_MENTIONS_KEY,
-    ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     WAKE_MENTIONED_KEY,
 )
@@ -126,22 +125,6 @@ def _listed_or_found_user_ids(
     if isinstance(body, str):
         return resolve_mentioned_user_ids_from_text(body, config, runtime_paths)
     return []
-
-
-def is_router_only_agent_mention(
-    mentioned_agents: Sequence[MatrixID],
-    *,
-    has_non_agent_mentions: bool,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether the message only targeted the router managed account."""
-    if has_non_agent_mentions or not mentioned_agents:
-        return False
-
-    registry = entity_identity_registry(config, runtime_paths)
-    mentioned_agent_names = {registry.current_entity_name_for_user_id(agent.full_id) for agent in mentioned_agents}
-    return mentioned_agent_names == {ROUTER_AGENT_NAME}
 
 
 def check_agent_mentioned(

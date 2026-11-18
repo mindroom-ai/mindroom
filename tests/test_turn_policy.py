@@ -720,17 +720,16 @@ async def test_router_ignores_message_with_explicit_agent_mention(config: Config
 
 
 @pytest.mark.asyncio
-async def test_router_only_mention_returns_rules_of_engagement_rejection(config: Config) -> None:
-    """Tagging only the router yields the guidance rejection instead of routing."""
+async def test_a_mention_of_only_the_owner_account_gets_no_answer(config: Config) -> None:
+    """The owner account answers nobody, so a message that mentions only it is neither answered nor routed."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
     context = _context(mentioned=[_entity_id(config, ROUTER_AGENT_NAME)])
 
     plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
 
-    assert plan.kind == "respond"
-    assert plan.response_action.kind == "reject"
-    assert "Rules of engagement" in plan.response_action.rejection_message
+    assert plan.kind == "ignore"
+    assert plan.response_action is None
 
 
 @pytest.mark.asyncio
@@ -765,25 +764,6 @@ async def test_router_ignores_thread_with_unavailable_policy_history(config: Con
 
     assert plan.kind == "ignore"
     assert plan.ignore_reason == "router"
-
-
-@pytest.mark.asyncio
-async def test_router_only_mention_gets_guidance_even_when_thread_policy_history_degraded(config: Config) -> None:
-    """A question to the router itself needs no thread policy history, so degraded history does not drop it."""
-    policy = _policy_for(config, ROUTER_AGENT_NAME)
-    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
-    context = _context(
-        mentioned=[_entity_id(config, ROUTER_AGENT_NAME)],
-        thread_id="$thread:localhost",
-        thread_history=[make_visible_message(sender=_SENDER, body="earlier")],
-        full_history=False,
-    )
-    assert context.planning_thread_history_unavailable
-
-    plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
-
-    assert plan.kind == "respond"
-    assert plan.response_action.kind == "reject"
 
 
 def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:
@@ -1173,12 +1153,12 @@ async def test_router_does_not_recruit_when_current_sender_is_second_human(confi
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mentioned", "pre_ingress_skip"),
-    [("general", True), (ROUTER_AGENT_NAME, False), (None, None)],
+    [("general", True), (ROUTER_AGENT_NAME, True), (None, False)],
 )
 async def test_router_pre_ingress_mention_rule_is_its_dispatch_plan_rule(
     config: Config,
     mentioned: str | None,
-    pre_ingress_skip: bool | None,
+    pre_ingress_skip: bool,
 ) -> None:
     """The router drops a message before ingress work only where its dispatch plan would ignore it."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
@@ -1195,10 +1175,7 @@ async def test_router_pre_ingress_mention_rule_is_its_dispatch_plan_rule(
 
     assert policy.router_mention_skips(room, source) is pre_ingress_skip
     plan = await _plan(policy, room, _dispatch(_context(mentioned=mentioned_ids), agent_name=ROUTER_AGENT_NAME))
-    if pre_ingress_skip:
-        assert plan.kind == "ignore"
-    elif pre_ingress_skip is False:
-        assert plan.kind == "respond"
+    assert plan.kind == ("ignore" if pre_ingress_skip else "route")
 
 
 @pytest.mark.asyncio

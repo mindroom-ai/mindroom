@@ -284,9 +284,8 @@ class TurnIngress:
         ):
             return False
 
-        mention_skips = self.deps.turn_policy.router_mention_skips(room, event.source)
-        if mention_skips is not None:
-            return mention_skips
+        if self.deps.turn_policy.router_mention_skips(room, event.source):
+            return True
         if thread_id is None:
             return False
 
