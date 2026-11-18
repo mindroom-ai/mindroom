@@ -284,6 +284,7 @@ If the reranker fails, the search returns its results in the merged order and lo
 
 Each provider scores a chunk from 0 to 1, and a chunk missing from the response ranks last.
 `sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
+It truncates each query and chunk pair to 1024 tokens, so a long chunk cannot need tens of GiB of memory.
 The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
 
 #### Judgment rerankers

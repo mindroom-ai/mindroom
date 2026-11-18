@@ -3091,7 +3091,12 @@ Show or switch the reply mode of the current Matrix room.
 `!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 [Plugin routes](https://docs.mindroom.chat/plugins/#http-routes) change the override as this command does, for room admins only.
-The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
+The override is the room's `reply_mode` setting: the `io.mindroom.room_settings` state event with state key `reply_mode` and content `{"value": "auto"}` or `{"value": "mentions"}`, where `{}` clears it.
+MindRoom Chat sets it from the room settings dialog, and any client may send the event; it falls under the room's `state_default` power level (normally 50), so moderators and admins can change it there.
+The router writes it for the command, so the command answers ❌ when the room does not let the router send that state.
+It lives in the room, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
+Agents take a change as soon as their sync shows it, and read the setting again at least every ten minutes.
+An override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
 The router answers `!reply_mode`, so in a room without the router, such as a direct-message room with one agent, set the mode with a `rooms` entry keyed by the room's `!` room ID instead, for example `rooms: {"!abc123:example.com": {reply_mode: mentions}}`; the router then also joins that room when it can.
 
 ## Threading (MSC3440)
@@ -3815,6 +3820,7 @@ On three sets of real conversation turns (132 to 1,247 held-out turns each), jud
 | `openai_decisions` | +2.0 to +4.8 points | 1.46 to 2.22 times | 410 to 528 | 290 ms / 578 ms | $0.00060 to $0.00088 |
 
 Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking; a second judge model gave gains of the same sign on that set and on the largest one.
+A local `BAAI/bge-reranker-v2-m3` with `sentence_transformers` did not improve recall over recall without a reranker, and its scores bunch near 0, so the default threshold `0.5` makes recall add nothing for most turns; if you turn on `memory.search.rerank` with a local cross-encoder, set `reranker.threshold: 0`.
 
 **Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before.
 `memory.search.rerank: false` stops reranking in recall and `search_memories`, but `search_knowledge_base` still reranks the agent's semantic file-memory hits with the root reranker.
@@ -4236,6 +4242,7 @@ If the reranker fails, the search returns its results in the merged order and lo
 
 Each provider scores a chunk from 0 to 1, and a chunk missing from the response ranks last.
 `sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
+It truncates each query and chunk pair to 1024 tokens, so a long chunk cannot need tens of GiB of memory.
 The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
 
 #### Judgment rerankers
@@ -7479,15 +7486,18 @@ models:
     provider: openai
     id: gpt-6-astra
     pricing:
-      input: 5.0
-      output: 30.0
-      cache_read: 0.5
+      input: 10.0
+      output: 50.0
+      cache_read: 1.0
+      cache_write: 12.5
   luna:
     provider: openai
     id: gpt-6-luna
     pricing:
-      input: 0.2
-      output: 1.25
+      input: 0.1
+      output: 0.5
+      cache_read: 0.01
+      cache_write: 0.125
 
 budgets:
   monthly_limit_usd: 20
@@ -19563,7 +19573,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
 | `await terminals(workspace, *, create=False)` | The agent's terminals for an `AgentWorkspace` that `agents()` or `agent()` returned, or `None` while its `terminal` is `none`; see [An agent's terminals](#an-agents-terminals) |
-| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
+| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply` (the room's `reply_mode` setting as the runtime last read it), each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 | `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
 
