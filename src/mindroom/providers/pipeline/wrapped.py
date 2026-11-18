@@ -65,8 +65,9 @@ class RequestProjection:
     """How a stage rewrites every request before its inner provider is sent it, which its ``stream`` applies too.
 
     ``rewrite`` keeps the request's messages one for one, or keeps each message after the system prompt as the object
-    it is and adds messages between them. ``inputs`` returns what the rewrite reads besides the request, such as the
-    media kinds a route learned its model rejects, so a request's identity changes when they do.
+    it is and adds messages between them; the messages it adds, and those it replaces then, are part of the request's
+    identity. ``inputs`` returns what the rewrite reads besides the request, such as the media kinds a route learned
+    its model rejects, so a request's identity changes when they do.
     """
 
     rewrite: Callable[[ModelProvider, ModelRequest], ModelRequest]
@@ -115,12 +116,21 @@ class WrappedProvider:
         return self.inner.request_tokens(projected, start=start)
 
     def context_key(self, request: ModelRequest) -> str:
-        """Identify the request the wrapped provider is sent, with what the projection reads besides it."""
-        key = self.inner.context_key(self._projected(request))
-        if self.projection is None or self.projection.inputs is None:
-            return key
-        inputs = stable_serialize(self.projection.inputs(self.inner))
-        return hashlib.sha256(f"{key}\0{inputs}".encode("utf-8", "surrogatepass")).hexdigest()
+        """Identify the request the wrapped provider is sent, with what the projection reads besides it or adds to it.
+
+        So usage a provider reported for a request sent with added messages never sizes one sent without them.
+        """
+        projected = self._projected(request)
+        pieces = [self.inner.context_key(projected)]
+        if self.projection is not None and self.projection.inputs is not None:
+            pieces.append(stable_serialize(self.projection.inputs(self.inner)))
+        if len(projected.messages) != len(request.messages):
+            own = {id(message) for message in request.messages}
+            added = [[at, message.content] for at, message in enumerate(projected.messages) if id(message) not in own]
+            pieces.append(stable_serialize(added))
+        if len(pieces) == 1:
+            return pieces[0]
+        return hashlib.sha256("\0".join(pieces).encode("utf-8", "surrogatepass")).hexdigest()
 
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Run the stage around the wrapped provider's stream."""

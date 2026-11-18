@@ -382,8 +382,9 @@ def _populate_azure_env(extra_kwargs: dict[str, Any], runtime: ProviderRuntime) 
 def _sends_system_updates(route_key: str, model_id: str, base_url: str, settings: ChatSettings) -> bool:
     """Return whether every request of this route reaches a model proven to take a system prompt update.
 
-    That was proven for the listed models behind OpenRouter's own endpoint. A request another gateway answers, or one
-    whose settings let OpenRouter pick another model or upstream provider, may send the update as the user's text.
+    That was proven for the listed models behind OpenRouter's own endpoint, with the system prompt cached for an hour.
+    A request another gateway answers, or one whose settings let OpenRouter pick another model or upstream provider,
+    may send the update as the user's text, and without that cache there is no prefix an update would keep.
     """
     request_params = settings.request_params or {}
     bodies = (request_params, settings.extra_body or {}, request_params.get("extra_body") or {})
@@ -391,6 +392,8 @@ def _sends_system_updates(route_key: str, model_id: str, base_url: str, settings
         route_key == "openrouter"
         and model_id in OPENROUTER_SYSTEM_UPDATE_MODELS
         and base_url.rstrip("/") == OPENROUTER_BASE_URL_DEFAULT
+        and settings.cache_system_prompt
+        and settings.extended_cache_time
         and not settings.models
         and not any(key in body for body in bodies for key in _REROUTING_KEYS)
     )

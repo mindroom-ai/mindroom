@@ -236,8 +236,9 @@ def _fork(
         messages=[*request.messages, Message(role="user", content=_review_prompt(config, catalog, runnable))],
         definitions=tuple(request.tools),
         tools=functions,
-        # The loop sends its own messages and tools with the response's request settings.
-        settings=replace(request, messages=(), tools=()),
+        # The loop sends its own messages and tools with the response's request settings. It only reads the system
+        # prompt the conversation holds, for the cached prefix: the conversation may have moved on.
+        settings=replace(request, messages=(), tools=(), prompt_hold_read_only=True),
         forked=True,
     )
 

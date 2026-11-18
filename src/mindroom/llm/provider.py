@@ -176,7 +176,8 @@ class ModelRequest:
     as headers, query parameters, or timeouts; the request log sets it.
     ``prompt_hold`` is the file that holds the system prompt of the request's conversation, which the pipeline sends
     in place of the request's own while the conversation's prompt cache is warm (``providers/pipeline/prompt_hold.py``);
-    None sends the request's own.
+    None sends the request's own. A ``prompt_hold_read_only`` request, such as a fork or a resumed run, never writes
+    that file: only the conversation's own turns start a hold or add an update to it.
     """
 
     messages: Sequence[Message]
@@ -189,6 +190,7 @@ class ModelRequest:
     native_compaction: NativeCompactionReplay | None = None
     on_send: Callable[[Mapping[str, Any]], Awaitable[None]] = _unobserved
     prompt_hold: Path | None = None
+    prompt_hold_read_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)

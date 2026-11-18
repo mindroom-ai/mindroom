@@ -9,7 +9,7 @@ after its delegations calls ``resume_from_session`` with its own plan.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Protocol
 
@@ -21,6 +21,7 @@ from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
 from mindroom.llm.request_context import RequestAttribution
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
+from mindroom.providers.pipeline.prompt_hold import prompt_hold_path
 from mindroom.response_turn import stream_with_llm_request_log_context
 from mindroom.run_storage import TerminalRecord, persist_into
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -255,6 +256,11 @@ class ResumeRunner:
         """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` as ``resume_agent``'s does."""
         build = self.build
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.storage.session)
+        template = with_native_history(build.request_template, native)
+        if self.storage.store is not None and build.spec.model.capabilities.system_updates:
+            # The paused run was sent the system prompt its conversation held; the resume sends it again, read only.
+            hold = prompt_hold_path(self.storage.store.path, self.storage.session.session_id)
+            template = replace(template, prompt_hold=hold, prompt_hold_read_only=True)
         if decisions.approved or decisions.denied:
             add_approval_receipt_reader(paused.run_id)
         events = resume_from_session(
@@ -269,7 +275,7 @@ class ResumeRunner:
             # A failed or cancelled resume stores its terminal row over the paused run on purpose: the resume ends its
             # approval anyway (``_store_interrupted`` in ``agent_loop/run.py``).
             persist=persist_into(None, self.storage),
-            request_template=with_native_history(build.request_template, native),
+            request_template=template,
             model_name=self.model_name,
         )
         return with_resumed_turn_log_context(events)

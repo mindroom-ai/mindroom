@@ -1,7 +1,7 @@
 """Keep sending a conversation's system prompt unchanged while its prompt cache can be reused.
 
 The system prompt leads every request, so a changed one makes the provider read the whole conversation again. A
-request that names its conversation's hold file (``ModelRequest.prompt_hold``) to a route that takes a system prompt
+request that names its conversation's hold (``ModelRequest.prompt_hold``) to a route that takes a system prompt
 update (``Capabilities.system_updates``) is therefore sent the system prompt the conversation last sent, and a change
 to its stable first system message, such as an edited ``AGENTS.md``, as a system prompt update: a system message
 after the newest user message, which every later request sends again in the same place.
@@ -13,8 +13,12 @@ request's messages. Any other request is sent exactly as it was built, and the h
 whose conversation a compaction or a history limit rewrote sends its own prompt, and one that replays the same
 messages, such as a retry or a resumed run, sends the same held prompt and updates.
 
+Only a conversation's own turns write its file. A read-only request (``ModelRequest.prompt_hold_read_only``), such
+as a skill review's fork or an approval resumed after its turn, is sent what the file holds when it continues it as
+it is, and its own request otherwise.
+
 The file lies in the agent's state root, so a restart keeps it and one requester's private prompt stays out of
-another's; its modification time is the conversation's last request.
+another's; its modification time is the last request of one of the conversation's own turns.
 """
 
 from __future__ import annotations
@@ -27,12 +31,11 @@ import time
 from contextlib import suppress
 from dataclasses import asdict, replace
 from difflib import SequenceMatcher
-from itertools import takewhile
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
 from mindroom.file_locks import advisory_file_lock
-from mindroom.llm.messages import PROMPT_UPDATE_KEY, Message, stable_serialize
+from mindroom.llm.messages import PROMPT_UPDATE_KEY, Message, is_queued_notice_message, stable_serialize
 from mindroom.llm.request_identity import message_digest
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.yaml_io import write_text_atomic
@@ -45,15 +48,16 @@ if TYPE_CHECKING:
 
 __all__ = ["held_request", "prompt_hold_path", "prompt_hold_stream"]
 
-# The messages a request sends, and what its conversation's file holds once it sent them.
-type _Plan = tuple[Sequence[Message], dict[str, Any]]
+# What a conversation's file holds; and the messages a request sends with what the file holds once it sent them.
+type _State = dict[str, Any]
+type _Plan = tuple[Sequence[Message], _State]
 
 # A hold no request continues any more is deleted once it has been idle this long.
 _PRUNE_IDLE_SECONDS = 24 * 3600
-# A change larger than this, or one more update than this many, reads better as a new prompt.
-_MAX_UPDATE_LINES = 200
+# A longer update reads better as a new prompt.
 _MAX_UPDATE_CHARS = 8000
-_MAX_UPDATES = 8
+# The unchanged lines an update quotes around each change.
+_CONTEXT_LINES = 2
 _UPDATE_HEADER = (
     "MindRoom system prompt update. Your system prompt changed since this conversation began. This message replaces "
     "every earlier system prompt update in this conversation; where it and the system prompt differ, this message "
@@ -74,52 +78,47 @@ def prompt_hold_path(database: Path, session_id: str) -> Path:
 
 
 def _update_text(held: str, fresh: str) -> str | None:
-    """Return the update that tells a model sent the ``held`` text what ``fresh`` says, or None when none may.
+    """Return the update that tells a model sent the ``held`` text that ``fresh`` is in force, or None when none may.
 
-    It states the whole difference, so the newest update alone says what is in force. Each changed run of lines is
-    named by the inlined file and the heading above it and quotes the lines that no longer hold, which the prompt the
-    model was sent still shows. So a change to an inlined ``MEMORY.md`` is never told: a memory the user asked to
-    forget would stay in every later request.
+    It states the whole difference, so the newest update alone says what is in force: each changed passage, quoted
+    with the lines around it, and the lines that replace it. Every quoted passage stands exactly once in ``held``,
+    so the update and ``held`` give ``fresh`` and no other text; a change that cannot be told so is not told.
+    Nor is any change to a prompt that inlines a ``MEMORY.md``, whose every preloaded file follows a heading of its
+    path: an update quotes lines and is sent again, so it would keep a memory the user asked to forget.
     """
     if held == fresh:
         return _UPDATE_WITHDRAWN
+    old, new = held.split("\n"), fresh.split("\n")
+    if any(line.startswith("### ") and line.lower().endswith("/memory.md") for line in (*old, *new)):
+        return None
     parts = [_UPDATE_HEADER]
-    changed = 0
-    old, new = held.splitlines(), fresh.splitlines()
-    for tag, old_start, old_end, new_start, new_end in SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
-        removed = [line for line in old[old_start:old_end] if line.strip()]
-        added = [line for line in new[new_start:new_end] if line.strip()]
-        if tag == "equal" or not (removed or added):
-            continue
-        changed += len(removed) + len(added)
-        # The headings above the change, within its own section: nothing after the role stands under the role's.
-        above = list(takewhile(lambda line: line != "</your_role>", reversed(old[:old_start])))
-        file = next((line for line in above if line.startswith("### /")), None)
-        if any(line.startswith("### /") and line.endswith("/MEMORY.md") for line in (file, *removed, *added) if line):
+    for group in SequenceMatcher(None, old, new, autojunk=False).get_grouped_opcodes(_CONTEXT_LINES):
+        before, after = old[group[0][1] : group[-1][2]], new[group[0][3] : group[-1][4]]
+        if sum(old[start : start + len(before)] == before for start in range(len(old) - len(before) + 1)) != 1:
             return None
-        heading = next((line for line in above if line.startswith("#")), None)
-        where = " > ".join(f'"{line}"' for line in dict.fromkeys((file, heading)) if line) or "the system prompt"
-        parts.append(f"In {where}:")
-        if removed:
-            parts.append("No longer in force (ignore these lines of the system prompt):")
-            parts.extend(f"- {line}" for line in removed)
-        if added:
-            parts.append("In force now:")
-            parts.extend(f"+ {line}" for line in added)
+        parts += ["Replace these lines of the system prompt:", *(f"| {line}" for line in before)]
+        parts += ["with these lines:", *(f"| {line}" for line in after)]
     text = "\n".join(parts)
-    return None if changed > _MAX_UPDATE_LINES or len(text) > _MAX_UPDATE_CHARS else text
+    return text if len(text) <= _MAX_UPDATE_CHARS else None
 
 
 def _anchors(messages: Sequence[Message], lengths: Sequence[int]) -> list[str | None]:
     """Return, for each of the ascending ``lengths``, the digest of what the first that many ``messages`` send.
 
-    None for a length they do not reach, or one whose messages hold content unknown here (``message_digest``).
+    None for a length they do not reach, or one whose messages hold content unknown here (``message_digest``). A
+    queued-message notice counts by its text, which the request sends, though the identity of a request leaves it out.
     """
     digest = hashlib.sha256()
     anchors: list[str | None] = []
     done = 0
     for length in lengths:
-        while done < min(length, len(messages)) and (piece := message_digest(messages[done])) is not None:
+        while done < min(length, len(messages)):
+            message = messages[done]
+            piece = message_digest(
+                replace(message, provider_data=None) if is_queued_notice_message(message) else message,
+            )
+            if piece is None:
+                break
             digest.update(piece)
             done += 1
         anchors.append(digest.hexdigest() if done == length else None)
@@ -136,7 +135,7 @@ def _may_stand(messages: Sequence[Message], position: int) -> bool:
     )
 
 
-def _read(path: Path, now: float) -> dict[str, Any] | None:
+def _read(path: Path, now: float) -> _State | None:
     """Return the state ``path`` holds, or None for a missing or unreadable file or one idle past the cache lifetime."""
     with suppress(OSError, ValueError):
         if now - path.stat().st_mtime < PROMPT_CACHE_IDLE_SECONDS:
@@ -145,12 +144,7 @@ def _read(path: Path, now: float) -> dict[str, Any] | None:
     return None
 
 
-def _continued(
-    state: dict[str, Any],
-    route: list[Any],
-    system: Sequence[Message],
-    rest: Sequence[Message],
-) -> _Plan | None:
+def _continued(state: _State, route: object, system: Sequence[Message], rest: Sequence[Message]) -> _Plan | None:
     """Return the plan of a request that continues the hold ``state``, or None when the hold must start over."""
     fresh = [message.content for message in system]
     held, updates = state["system"], state["updates"]
@@ -168,16 +162,10 @@ def _continued(
     ):
         return None
     if fresh[0] != state["current"]:
-        # A change the model was not told yet: it is told after the newest user message, or the hold starts over.
+        # It is told after the newest user message, which no earlier update follows, or not at all.
         text = _update_text(held[0], fresh[0])
         anchor = _anchors(rest, [len(rest)])[0]
-        if (
-            text is None
-            or anchor is None
-            or not _may_stand(rest, len(rest))
-            or len(rest) <= max(lengths, default=0)
-            or len(updates) >= _MAX_UPDATES
-        ):
+        if text is None or anchor is None or not _may_stand(rest, len(rest)) or len(rest) <= max(lengths, default=0):
             return None
         updates = [*updates, [len(rest), anchor, text]]
         state = {**state, "current": fresh[0], "updates": updates}
@@ -192,24 +180,30 @@ def _continued(
     return (*sent, *rest[start:]), state
 
 
-def _plan(inner: ModelProvider, request: ModelRequest, state: dict[str, Any] | None) -> _Plan | None:
-    """Return the plan of ``request`` for a conversation whose file holds ``state``.
+def _plan(inner: ModelProvider, request: ModelRequest, state: _State | None) -> _Plan | None:
+    """Return the plan of ``request`` for a conversation whose file holds ``state``, None to send it as it was built.
 
-    None for a request that holds no prompt: one to a route that takes no update, or without a leading system text
-    and a message after it.
+    That is a request that holds no prompt: one to a route that takes no update, one that turns its prompt cache off,
+    one without a leading system text and a message after it, or a read-only one that does not continue the hold.
     """
     messages = request.messages
     count = next((index for index, message in enumerate(messages) if message.role != "system"), len(messages))
     system, rest = messages[:count], messages[count:]
     texts = [message.content for message in system]
-    if not (inner.capabilities.system_updates and texts and rest and all(isinstance(text, str) for text in texts)):
+    holds = inner.capabilities.system_updates and request.overrides.prompt_cache
+    if not (holds and texts and rest and all(isinstance(text, str) for text in texts)):
         return None
-    tools = hashlib.sha256(stable_serialize([asdict(tool) for tool in request.tools]).encode()).hexdigest()
-    route = [inner.identity.id, inner.identity.endpoint, tools]
+    # What the wire sends of the tools: a deferred one is left out, or loaded by a search.
+    tools = [*map(asdict, request.tools), sorted(request.deferred_tools.names), request.deferred_tools.portable]
+    route = [inner.identity.id, inner.identity.endpoint, hashlib.sha256(stable_serialize(tools).encode()).hexdigest()]
     if state is not None:
         with suppress(KeyError, TypeError, ValueError, IndexError):
-            if (continued := _continued(state, route, system, rest)) is not None:
+            continued = _continued(state, route, system, rest)
+            # A read-only request continues the hold only as it is, without an update it would have to add.
+            if continued is not None and (continued[1] is state or not request.prompt_hold_read_only):
                 return continued
+    if request.prompt_hold_read_only:
+        return None
     first = _anchors(rest, [1])[0]
     return messages, {"route": route, "system": texts, "current": texts[0], "first": first, "updates": []}
 
@@ -222,9 +216,11 @@ def held_request(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
     return replace(request, messages=request.messages if plan is None else plan[0], prompt_hold=None)
 
 
-def _commit(inner: ModelProvider, request: ModelRequest, path: Path) -> ModelRequest:
+def _commit(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
     """Return ``request`` as it is sent, storing the hold it continues or starts; requests of one agent take turns."""
     now = time.time()
+    path = request.prompt_hold
+    assert path is not None
     sent = replace(request, prompt_hold=None)
     try:
         with advisory_file_lock(path.parent / ".lock"):
@@ -244,9 +240,9 @@ def _commit(inner: ModelProvider, request: ModelRequest, path: Path) -> ModelReq
 
 
 async def prompt_hold_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-    """Stream ``request`` with its conversation's held system prompt, recording what the conversation now holds."""
-    if (path := request.prompt_hold) is not None:
-        request = await asyncio.to_thread(_commit, inner, request, path)
+    """Stream ``request`` with its conversation's held system prompt, which only a request that may write it records."""
+    if request.prompt_hold is not None:
+        request = await asyncio.to_thread(held_request if request.prompt_hold_read_only else _commit, inner, request)
     events = inner.stream(request)
     async with closing_async_stream(events):
         async for event in events:

@@ -17,15 +17,17 @@ from mindroom.ai import ai_response
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.models import ModelConfig
+from mindroom.history.request_size import RequestSizer
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks import EnrichmentItem
-from mindroom.llm.messages import PROMPT_UPDATE_KEY, system_text
-from mindroom.llm.provider import Capabilities, ModelRequest
+from mindroom.llm.messages import PROMPT_UPDATE_KEY, Message, system_text
+from mindroom.llm.provider import Capabilities, ModelRequest, complete
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import compose, prompt_hold
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.approval_continuation_helpers import RECEIPT_CALLS
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context
@@ -234,12 +236,19 @@ async def test_an_edited_file_reaches_a_warm_conversation_as_one_system_message_
     [(index, update)] = _updates(second)
     assert index == len(second["messages"]) - 1
     assert update.splitlines()[1:] == [
-        f'In "### {conversation.workspace / "AGENTS.md"}" > "## Replies":',
-        "No longer in force (ignore these lines of the system prompt):",
-        f"- {_AMBER}",
-        "In force now:",
-        f"+ {_VIOLET}",
-        "+ - Stay brief.",
+        "Replace these lines of the system prompt:",
+        "| ",
+        "| ## Replies",
+        f"| {_AMBER}",
+        "| ",
+        "| ## Tools",
+        "with these lines:",
+        "| ",
+        "| ## Replies",
+        f"| {_VIOLET}",
+        "| - Stay brief.",
+        "| ",
+        "| ## Tools",
     ]
     # The cache ladder marks the held prompt and the newest input, never the update.
     assert second["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
@@ -340,7 +349,7 @@ async def test_a_change_no_update_may_tell_sends_the_current_prompt_without_one(
     [first] = await conversation.turn("First question")
     assert "4711" in _system_texts(first)[1]
 
-    rules = [f"- Rule {number}." for number in range(250)] if change == "oversized" else [_VIOLET]
+    rules = [f"- Rule {number}: {'x' * 40}" for number in range(250)] if change == "oversized" else [_VIOLET]
     conversation.write_rules(*rules)
     context: dict[str, Any] = {}
     if change == "idle":
@@ -362,7 +371,7 @@ async def test_a_change_no_update_may_tell_sends_the_current_prompt_without_one(
     conversation.write_rules(*rules, _GREEN)
     [third] = await conversation.turn("Third question", **context)
     assert [message["role"] for message in _extends(third, second, _assistant())] == ["user", "system"]
-    assert _updates(third)[0][1].splitlines()[-2:] == ["In force now:", f"+ {_GREEN}"]
+    assert f"| {_GREEN}" in _updates(third)[0][1].split("\nwith these lines:\n")[1].splitlines()
 
 
 @pytest.mark.asyncio
@@ -523,13 +532,9 @@ async def test_two_requesters_private_instances_hold_their_prompts_apart(
     await turn("@alice:localhost", "Alice is allergic to peanuts.", "Answer in English.")
     alice = await turn("@alice:localhost", "Alice is allergic to peanuts.", "Answer in Dutch.")
     [(_index, update)] = _updates(alice)
-    assert update.splitlines()[1:] == [
-        "In the system prompt:",
-        "No longer in force (ignore these lines of the system prompt):",
-        "- - Answer in English.",
-        "In force now:",
-        "+ - Answer in Dutch.",
-    ]
+    replaced, by = (part.splitlines() for part in update.split("\nwith these lines:\n"))
+    assert ("| - Answer in English." in replaced, "| - Answer in Dutch." in by) == (True, True)
+    assert "| - Answer in Dutch." not in replaced
 
     bob = await turn("@bob:localhost", "Bob collects stamps.", "Answer in Dutch.")
     assert "Bob collects stamps." in _system_texts(bob)[1]
@@ -577,6 +582,9 @@ def _refuse(*_args: object, **_kwargs: object) -> None:
         {"extra_body": {"provider": {"order": ["google-vertex"]}}},
         {"request_params": {"extra_body": {"route": "fallback"}}},
         {"request_params": {"model": "openai/gpt-5.4"}},
+        # Without the hour-long cache the hold was measured with, there is no warm prefix an update would keep.
+        {"cache_system_prompt": False},
+        {"extended_cache_time": False},
     ],
 )
 async def test_a_route_that_may_reach_another_endpoint_or_model_is_sent_the_current_prompt(
@@ -592,7 +600,8 @@ async def test_a_route_that_may_reach_another_endpoint_or_model_is_sent_the_curr
     [edited] = await conversation.turn("Second question")
     assert _updates(edited) == []
     assert _HEADER not in json.dumps(edited)
-    assert _VIOLET in _system_texts(edited)[0]
+    assert _VIOLET in json.dumps(edited["messages"][0])
+    assert _AMBER not in json.dumps(edited)
 
 
 @pytest.mark.asyncio
@@ -646,7 +655,7 @@ async def test_an_update_follows_what_a_request_hook_adds_after_it(
         )
     [(index, update)] = _updates(deciding)
     assert index == len(deciding["messages"]) - 1
-    assert f"+ {_VIOLET}" in update
+    assert f"| {_VIOLET}" in update
     assert json.dumps(_plain(deciding["messages"][: len(first["messages"])])) == json.dumps(_plain(first["messages"]))
     assert "respond or stay_silent" in json.dumps(deciding["messages"][-2])
     assert "respond or stay_silent" not in json.dumps(replying)
@@ -696,7 +705,7 @@ async def test_a_tool_loop_keeps_its_held_prompt_unless_a_fold_rewrites_what_pre
     _first, opening, after_fold, next_turn = reply.model.requests
     assert "Answer in English." in system_text(opening.messages)
     [update] = _told(opening)
-    assert "+ - Answer in Dutch." in update
+    assert "| - Answer in Dutch." in update
     assert any(is_compaction_summary(message) for message in after_fold.messages) == folds
     if not folds:
         for request in (after_fold, next_turn):
@@ -712,12 +721,15 @@ async def test_a_tool_loop_keeps_its_held_prompt_unless_a_fold_rewrites_what_pre
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("compacted", [False, True])
-async def test_an_approval_resumed_by_a_later_runner_sends_the_prompt_its_run_stored(
+async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_writes_it(
     compacted: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only a turn's own requests name a hold, so an approval resumed after it sends main's request, compacted or not."""
+    """The resume is sent the prompt and update its paused run was, so its signed reasoning follows the same prefix.
+
+    After a compaction its messages no longer match the hold, so it is sent the prompt its run stored, as on main.
+    """
     paths, config = _usage_config(tmp_path)
     # The paused reply runs without background tool jobs, which its tool definitions show: so do the turns before it.
     config.background_tool_jobs.enabled = False
@@ -752,11 +764,24 @@ async def test_an_approval_resumed_by_a_later_runner_sends_the_prompt_its_run_st
         completed = [run.run_id for run in session.runs if run.status.value == "COMPLETED"]
         compact_runs(store, session, completed, "Earlier greetings.")
 
+    [hold] = paths.storage_root.rglob("prompt_holds/*.json")
+    os.utime(hold, (time.time() - 60,) * 2)
+    before = (hold.read_bytes(), hold.stat().st_mtime)
+
     await _approve_add(tmp_path, config, paths, identity, paused, "approved")
     resumed = model.requests[-1]
-    assert "Answer in Dutch." in system_text(resumed.messages)
-    assert "Answer in English." not in system_text(resumed.messages)
-    assert _told(resumed) == []
+    assert resumed.prompt_hold is None
+    assert (hold.read_bytes(), hold.stat().st_mtime) == before
+    if compacted:
+        assert "Answer in Dutch." in system_text(resumed.messages)
+        assert "Answer in English." not in system_text(resumed.messages)
+        assert _told(resumed) == []
+        return
+    assert system_text(resumed.messages) == system_text(pausing.messages)
+    assert _told(resumed) == _told(pausing)
+    sent = len(pausing.messages)
+    assert [message.content for message in resumed.messages[:sent]] == [message.content for message in pausing.messages]
+    assert [message.role for message in resumed.messages[sent:]] == ["assistant", "tool"]
 
 
 @pytest.mark.asyncio
@@ -780,3 +805,88 @@ async def test_a_turn_sizes_its_request_with_the_update_before_it_sends_it(
     [second] = await conversation.turn("Second question")
     assert len(_updates(second)) == 1
     assert any(sized_before_sending)
+
+
+@pytest.mark.asyncio
+async def test_a_memory_file_with_headings_of_its_own_is_never_told_as_an_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A heading inside an inlined ``MEMORY.md`` hides the file from nothing: a fact deleted below it is sent nowhere."""
+    conversation = _Conversation.start(tmp_path, monkeypatch)
+    conversation.config.agents["test_agent"].context_files = ["AGENTS.md", "MEMORY.md"]
+    memory = "# Memory\nFact one.\n### /notes/archive\nArchive starts here.\n"
+    fact = "Forget this fact: CEDAR."
+    conversation.memory.write_text(memory, encoding="utf-8")
+    await conversation.turn("First question")
+    conversation.memory.write_text(f"{memory}{fact}\n", encoding="utf-8")
+    [added] = await conversation.turn("Second question")
+    assert _updates(added) == []
+    conversation.memory.write_text(memory, encoding="utf-8")
+    [deleted] = await conversation.turn("Third question")
+    assert fact not in json.dumps(deleted)
+    assert fact not in conversation.hold.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_skill_review_that_forks_an_earlier_request_late_leaves_the_conversation_s_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fork reads the hold and is sent its own request once the conversation moved on; the next turn stays warm."""
+    conversation = _Conversation.start(tmp_path, monkeypatch)
+    capture = SkillReviewCapture()
+    await conversation.turn("First question", skill_review_capture=capture)
+    captured = capture.latest
+    assert captured is not None
+    # The conversation holds a new prompt after an idle hour, then tells a change to it.
+    conversation.idle(2 * 3600)
+    conversation.write_rules(_VIOLET)
+    [fresh] = await conversation.turn("Second question")
+    conversation.write_rules(_GREEN)
+    [warm] = await conversation.turn("Third question")
+    assert _system_texts(warm) == _system_texts(fresh)
+    assert len(_updates(warm)) == 1
+    before = conversation.hold.read_bytes()
+
+    # The review's request, as ``skill_learning.reviewer._fork`` builds it from the captured one.
+    review = [*captured.request.messages, Message(role="user", content="Review the work.")]
+    await complete(captured.model, replace(captured.request, messages=review, prompt_hold_read_only=True))
+    [forked] = [json.loads(request.content) for request in conversation.wire.requests[conversation.sent :]]
+    conversation.sent = len(conversation.wire.requests)
+    assert _AMBER in _system_texts(forked)[0]
+    assert _updates(forked) == []
+    assert conversation.hold.read_bytes() == before
+    [after] = await conversation.turn("Fourth question")
+    assert [message["role"] for message in _extends(after, warm, _assistant())] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_usage_reported_for_a_held_request_sizes_no_request_sent_another_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request extends an answer's request only when both are sent the same prompt and updates."""
+    billed = {**_chunk({}, "stop"), "usage": {"prompt_tokens": 8500, "completion_tokens": 5, "total_tokens": 8505}}
+    reply = sse_response([_chunk({"role": "assistant", "content": "ok"}), billed, "[DONE]"])
+    conversation = _Conversation.start(tmp_path, monkeypatch, _answer(), reply)
+    capture = SkillReviewCapture()
+    conversation.write_rules("- " + "keep an old copy of these rules. " * 130)
+    await conversation.turn("First question")
+    conversation.write_rules(_VIOLET)
+    [held] = await conversation.turn("Second question", skill_review_capture=capture)
+    assert len(_updates(held)) == 1
+    captured = capture.latest
+    assert captured is not None
+    following = [*captured.request.messages, Message(role="user", content="Third question")]
+    request = replace(captured.request, messages=following)
+    sizer = RequestSizer(captured.model, "openrouter")
+    anchored = sizer.size(request)
+    assert anchored.reported
+    assert anchored.tokens > 8500
+
+    # Once the hold is gone the request is sent the short current prompt, which the long one's usage does not size.
+    conversation.idle(2 * 3600)
+    released = sizer.size(request)
+    assert not released.reported
+    assert released.tokens == captured.model.request_tokens(request) < anchored.tokens - 500

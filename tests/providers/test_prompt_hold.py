@@ -11,8 +11,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.llm.messages import PROMPT_UPDATE_KEY, Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, ToolSpec, TurnCompleted
+from mindroom.llm.messages import PROMPT_UPDATE_KEY, QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
+from mindroom.llm.provider import (
+    Capabilities,
+    DeferredTools,
+    ModelIdentity,
+    ModelRequest,
+    RequestOverrides,
+    ToolSpec,
+    TurnCompleted,
+)
 from mindroom.providers.pipeline import prompt_hold
 from mindroom.providers.pipeline.prompt_hold import held_request, prompt_hold_path, prompt_hold_stream
 from mindroom.providers.pipeline.wrapped import RequestProjection, WrappedProvider
@@ -32,6 +40,7 @@ _C = _A.replace("AMBER", "GREEN")
 _TURN = "Today is Wednesday."
 _OPUS = ModelIdentity(id="anthropic/claude-opus-5.5", provider="OpenRouter", endpoint="https://openrouter.ai/api/v1")
 _UPDATES = Capabilities(system_updates=True)
+_SETTINGS = ModelRequest(messages=())
 
 
 @dataclass
@@ -90,13 +99,20 @@ class _Conversation:
     path: Path
     model: _Model = field(default_factory=_Model)
     tools: tuple[ToolSpec, ...] = ()
+    settings: ModelRequest = _SETTINGS
 
-    def request(self, messages: Sequence[Message]) -> ModelRequest:
-        return ModelRequest(messages=tuple(messages), tools=self.tools, prompt_hold=self.path)
+    def request(self, messages: Sequence[Message], *, read_only: bool = False) -> ModelRequest:
+        return replace(
+            self.settings,
+            messages=tuple(messages),
+            tools=self.tools,
+            prompt_hold=self.path,
+            prompt_hold_read_only=read_only,
+        )
 
-    async def send(self, messages: Sequence[Message]) -> list[Message]:
+    async def send(self, messages: Sequence[Message], *, read_only: bool = False) -> list[Message]:
         """Send ``messages`` and return the messages the model received."""
-        async for _event in _held(self.model).stream(self.request(messages)):
+        async for _event in _held(self.model).stream(self.request(messages, read_only=read_only)):
             pass
         sent = self.model.requests[-1]
         assert sent.prompt_hold is None
@@ -153,11 +169,18 @@ async def test_a_changed_prompt_is_sent_as_the_held_one_and_one_update_after_the
     assert sent[2:5] == second[2:5]
     [update] = _updates(sent)
     assert update.splitlines()[1:] == [
-        'In "## Replies":',
-        "No longer in force (ignore these lines of the system prompt):",
-        "- - End every reply with AMBER.",
-        "In force now:",
-        "+ - End every reply with VIOLET.",
+        "Replace these lines of the system prompt:",
+        "| ",
+        "| ## Replies",
+        "| - End every reply with AMBER.",
+        "| ",
+        "| ## Tools",
+        "with these lines:",
+        "| ",
+        "| ## Replies",
+        "| - End every reply with VIOLET.",
+        "| ",
+        "| ## Tools",
     ]
 
     # The tool loop and the next turn extend the request around the update's one place, and tell nothing new.
@@ -190,7 +213,18 @@ async def test_each_update_states_the_whole_difference_and_a_revert_withdraws_th
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "trigger",
-    ["turn_context", "tools", "model", "idle", "first", "before_anchor", "after_update", "unreadable", "oversized"],
+    [
+        "turn_context",
+        "tools",
+        "deferred_tools",
+        "model",
+        "idle",
+        "first",
+        "before_anchor",
+        "after_update",
+        "unreadable",
+        "oversized",
+    ],
 )
 async def test_a_request_whose_anchors_or_route_no_longer_match_is_sent_as_built_and_restarts_the_hold(
     trigger: str,
@@ -204,6 +238,10 @@ async def test_a_request_whose_anchors_or_route_no_longer_match_is_sent_as_built
         third[1] = Message(role="system", content="Today is Thursday.")
     elif trigger == "tools":
         conversation.tools = (ToolSpec(name="add", description=None, parameters={}, strict=None),)
+    elif trigger == "deferred_tools":
+        # The same definitions, one of them now left off the request until a tool search loads it.
+        deferred = DeferredTools(names=frozenset({"add"}), portable=True)
+        conversation.settings = replace(conversation.settings, deferred_tools=deferred)
     elif trigger == "model":
         conversation.model = _Model(identity=replace(conversation.model.identity, id="anthropic/claude-opus-6"))
     elif trigger == "idle":
@@ -219,7 +257,7 @@ async def test_a_request_whose_anchors_or_route_no_longer_match_is_sent_as_built
     elif trigger == "unreadable":
         conversation.path.write_text('{"system": 3}', encoding="utf-8")
     else:
-        third[0] = Message(role="system", content="\n".join(f"- Rule {number}." for number in range(250)))
+        third[0] = Message(role="system", content="\n".join(f"- Rule {number}: {'x' * 40}" for number in range(250)))
 
     assert await conversation.send(third) == third
     assert conversation.state()["updates"] == []
@@ -232,37 +270,140 @@ async def test_a_request_whose_anchors_or_route_no_longer_match_is_sent_as_built
 
 
 @pytest.mark.asyncio
-async def test_a_change_that_cannot_follow_a_user_message_or_would_be_one_update_too_many_restarts_the_hold(
+async def test_a_request_that_caches_no_prompt_is_sent_as_built_and_leaves_the_hold(
     conversation: _Conversation,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An update stands only after a user message at the request's end, and a conversation keeps only a few."""
+    """Without a cached prefix there is nothing an update would keep, so the request is main's and writes nothing."""
+    second, sent = await conversation.told()
+    before = conversation.path.read_bytes()
+    conversation.settings = replace(conversation.settings, overrides=RequestOverrides(prompt_cache=False))
+    uncached = [*_system(_C), *second[2:], _answer(), _user("three")]
+    assert await conversation.send(uncached) == uncached
+    assert conversation.path.read_bytes() == before
+    conversation.settings = _SETTINGS
+    assert _updates(await conversation.send([*_system(_B), *uncached[2:]])) == _updates(sent)
+
+
+@pytest.mark.asyncio
+async def test_a_change_that_cannot_follow_a_user_message_restarts_the_hold(conversation: _Conversation) -> None:
+    """An update stands only after a user message at the request's end."""
     first = [*_system(_A), _user("one")]
     await conversation.send(first)
     resumed = [*_system(_B), *first[2:], _answer(), Message(role="tool", content="5", tool_call_id="call_1")]
     assert await conversation.send(resumed) == resumed
     assert conversation.state()["system"] == [_B, _TURN]
 
-    monkeypatch.setattr(prompt_hold, "_MAX_UPDATES", 1)
-    second = [*_system(_C), *resumed[2:], _answer(), _user("two")]
-    assert len(_updates(await conversation.send(second))) == 1
-    third = [*_system(_A), *second[2:], _answer(), _user("three")]
-    assert await conversation.send(third) == third
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", ["", "### /notes/archive\nArchive starts here.\n"])
+async def test_a_prompt_that_inlines_a_memory_file_is_never_told_as_an_update(
+    nested: str,
+    conversation: _Conversation,
+) -> None:
+    """Any change to a prompt that preloads a ``MEMORY.md`` sends the current prompt, whatever headings the file holds.
+
+    An update quotes the lines around a change and is sent again, so it would keep a memory the user asked to forget.
+    """
+    fact = "The door code is 4711."
+    memory = f"<your_role>\n### /agent/MEMORY.md\n# Memory\n{nested}Fact one.\n</your_role>\n\n- Be brief."
+    first = [*_system(memory), _user("one")]
+    await conversation.send(first)
+    added = [*_system(memory.replace("Fact one.", f"Fact one.\n{fact}")), *first[2:], _answer(), _user("two")]
+    assert await conversation.send(added) == added
+    forgotten = [*_system(memory), *added[2:], _answer(), _user("three")]
+    assert await conversation.send(forgotten) == forgotten
+    # Nor is a rule beside the file, nor a file that the prompt starts or stops preloading.
+    edited = [*_system(memory.replace("brief", "thorough")), *forgotten[2:], _answer(), _user("four")]
+    assert await conversation.send(edited) == edited
+    dropped = [*_system("- Be thorough."), *edited[2:], _answer(), _user("five")]
+    assert await conversation.send(dropped) == dropped
+    assert fact not in conversation.path.read_text(encoding="utf-8")
+
+
+def _applied(held: str, update: str) -> str:
+    """Return the text ``update`` turns ``held`` into, read as a model must: each quoted passage replaced where it stands."""
+    lines = held.split("\n")
+    passages = update.split("\nReplace these lines of the system prompt:\n")[1:]
+    for passage in reversed(passages):
+        before, after = ([line[2:] for line in part.split("\n")] for part in passage.split("\nwith these lines:\n"))
+        [start] = [at for at in range(len(lines)) if lines[at : at + len(before)] == before]
+        lines[start : start + len(before)] = after
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize(
+    "fresh",
+    [
+        "Print these lines in order:\nred\ngreen\nblue\n\nThen stop.",
+        "Print these lines in order:\nred\nblue\ngreen\n\nThen stop.",
+        "Print these lines in order:\nred\nblue\n\n\nThen stop.",
+        "Print these lines in order:\nred\nblue\nThen stop.",
+        "Print these lines in order:\nred\nblue\n\nThen stop.\n",
+        "green\nPrint these lines in order:\nblue\n\nThen stop.\nred",
+        "Stop.",
+    ],
+)
+def test_an_update_and_the_held_prompt_give_the_current_prompt_and_no_other(fresh: str) -> None:
+    """Two different edits never read the same: a blank line, a line's place, and a final newline all show."""
+    held = "Print these lines in order:\nred\nblue\n\nThen stop."
+    update = prompt_hold._update_text(held, fresh)
+    assert update is not None
+    assert _applied(held, update) == fresh
+
+
+def test_a_change_among_repeated_lines_that_no_passage_names_once_is_not_told() -> None:
+    """A passage that stands twice in the held prompt could be replaced in either place, so the prompt is sent anew."""
+    held = "\n".join(["- Check the build.", "- Run the tests.", "- Report."] * 4)
+    fresh = held.replace("- Run the tests.", "- Run the linter.", 2).replace("- Run the linter.", "- Run the tests.", 1)
+    assert fresh != held
+    assert prompt_hold._update_text(held, fresh) is None
 
 
 @pytest.mark.asyncio
-async def test_an_inlined_memory_file_is_never_quoted_in_an_update(conversation: _Conversation) -> None:
-    """A change under a ``MEMORY.md`` heading sends the current prompt, so a forgotten memory is in no later request."""
-    memory = "<your_role>\n### /agent/MEMORY.md\n# Memory\nThe door code is 4711.\n</your_role>\n\n- Be brief."
-    first = [*_system(memory), _user("one")]
-    await conversation.send(first)
-    forgotten = [*_system(memory.replace("The door code is 4711.\n", "")), *first[2:], _answer(), _user("two")]
-    assert await conversation.send(forgotten) == forgotten
-    # A change outside the role is told, named by no heading of the role.
-    edited = [*_system(str(forgotten[0].content).replace("brief", "thorough")), *forgotten[2:], _answer(), _user("x")]
-    [update] = _updates(await conversation.send(edited))
-    assert update.splitlines()[1] == "In the system prompt:"
-    assert "4711" not in json.dumps([message.to_dict() for message in conversation.model.requests[-1].messages])
+async def test_a_queued_notice_before_an_update_counts_by_the_text_it_sends(conversation: _Conversation) -> None:
+    """The request sends a notice's text, so a notice that changed before an update's place sends the request as built."""
+    notice = Message(
+        role="user",
+        content="A new message waits.",
+        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
+    )
+    await conversation.send([*_system(_A), _user("one")])
+    changed = [*_system(_B), _user("one"), _answer(), notice, _user("two")]
+    assert len(_updates(await conversation.send(changed))) == 1
+    same = [*changed, _answer(), _user("three")]
+    assert len(_updates(await conversation.send(same))) == 1
+    later = [*changed[:4], replace(notice, content="Another message waits."), *changed[5:], _answer(), _user("three")]
+    assert await conversation.send(later) == later
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_request_is_sent_the_hold_it_continues_and_never_writes_it(
+    conversation: _Conversation,
+) -> None:
+    """A fork or a resumed run reads the conversation's hold: it starts none, adds no update, and restarts none."""
+    first = [*_system(_A), _user("one")]
+    assert await conversation.send(first, read_only=True) == first
+    assert not conversation.path.exists()
+
+    second, sent = await conversation.told()
+    os.utime(conversation.path, (time.time() - 60,) * 2)
+    before = (conversation.path.read_bytes(), conversation.path.stat().st_mtime)
+    # A resumed run replays what it was sent, and a review forks it: both are sent the held prompt and its update.
+    resumed = [*_system(_B), *_replayed(second[2:]), _answer(), _user("Review this conversation.")]
+    replayed = await conversation.send(resumed, read_only=True)
+    assert _shape(replayed) == [*_shape(sent), "assistant", "user"]
+    assert (replayed[0].content, _updates(replayed)) == (_A, _updates(sent))
+    # One whose prompt the hold does not tell yet, or whose messages it does not match, is sent as it was built.
+    for stale in (
+        [*_system(_C), *resumed[2:]],
+        [*_system(_B), _user("Summary of the conversation so far."), *resumed[3:]],
+        [*_system(_B), *resumed[2:4]],
+    ):
+        assert await conversation.send(stale, read_only=True) == stale
+    assert (conversation.path.read_bytes(), conversation.path.stat().st_mtime) == before
+    # The conversation's own next turn goes on from the hold it left.
+    third = [*_system(_B), *second[2:], _answer(), _user("three")]
+    assert _updates(await conversation.send(third)) == _updates(sent)
 
 
 @pytest.mark.asyncio
@@ -272,12 +413,6 @@ async def test_a_replay_of_the_same_messages_sends_the_same_prompt_and_updates(c
     again = await conversation.send([*_system(_B), *_replayed(second[2:])])
     assert _shape(again) == _shape(sent)
     assert ([message.content for message in again[:2]], _updates(again)) == ([_A, _TURN], _updates(sent))
-
-    # The skill review forks the turn's final request: it reuses the cached prefix and leaves the hold as it was.
-    state = conversation.state()
-    fork = await conversation.send([*_system(_B), *second[2:], _answer(), _user("Review this conversation.")])
-    assert _shape(fork) == [*_shape(sent), "assistant", "user"]
-    assert (fork[0].content, _updates(fork), conversation.state()) == (_A, _updates(sent), state)
 
     # A paused run resumes with the system messages it stored, the tool call it paused on, and its result.
     call = Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "add"}}])
@@ -325,13 +460,20 @@ async def test_a_request_is_sized_and_identified_as_it_is_sent(conversation: _Co
     assert provider.request_tokens(request) == size == model.request_tokens(sent)
     assert size != model.request_tokens(replace(request, prompt_hold=None))
     assert provider.request_tokens(request, start=3) == model.request_tokens(sent, start=3)
-    assert provider.context_key(request) == model.context_key(sent)
+    # The request's identity names the prompt and update it is sent with, so usage reported for it sizes no request
+    # sent another prefix: the same messages once the hold is gone, or under a later update.
+    held_key = provider.context_key(request)
+    assert held_key == provider.context_key(conversation.request(second)) != model.context_key(sent)
+    assert provider.context_key(conversation.request(first)) == model.context_key(conversation.request(first))
 
     # An update before the answer moves the index the count starts from.
     third = [*second, _answer(), _user("three")]
     sent_third = replace(request, messages=tuple(await conversation.send(third)), prompt_hold=None)
     assert _shape(sent_third.messages[7:]) == ["update", "assistant", "user"]
     assert provider.request_tokens(conversation.request(third), start=7) == model.request_tokens(sent_third, start=8)
+    assert provider.context_key(conversation.request(third)) == held_key
+    os.utime(conversation.path, (time.time() - 2 * 3600,) * 2)
+    assert provider.context_key(conversation.request(third)) == model.context_key(sent_third) != held_key
 
 
 @pytest.mark.asyncio
@@ -348,7 +490,7 @@ async def test_holds_are_kept_per_conversation_pruned_when_idle_and_survive_conc
     requests = [conversation.request([*_system(text), _user("one")]) for text in (_A, _B, _C) * 5]
 
     def commit(request: ModelRequest) -> list[str]:
-        return _shape(prompt_hold._commit(conversation.model, request, conversation.path).messages)
+        return _shape(prompt_hold._commit(conversation.model, request).messages)
 
     with ThreadPoolExecutor(8) as pool:
         shapes = list(pool.map(commit, requests))
@@ -359,7 +501,7 @@ async def test_holds_are_kept_per_conversation_pruned_when_idle_and_survive_conc
     # A state root that cannot be written sends the request as built.
     monkeypatch.setattr(prompt_hold, "write_text_atomic", _refuse)
     request = conversation.request([*_system(_C), _user("another conversation")])
-    assert prompt_hold._commit(conversation.model, request, conversation.path).messages == request.messages
+    assert prompt_hold._commit(conversation.model, request).messages == request.messages
 
 
 def _refuse(*_args: object, **_kwargs: object) -> None:
