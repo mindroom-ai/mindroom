@@ -1554,25 +1554,37 @@ class DeliveryGateway:
                 lambda latest: rl.owed_write_refused(latest, owed, now_ns=time.time_ns()),
             )
 
-    def _with_ui_widgets(
+    async def _draws_widgets(self, reply_id: str) -> bool:
+        """Return whether a write of a reply draws its ``ui`` blocks as widgets.
+
+        Not while the reply's create is still owed: the write is then wrapped into an edit when claimed, with no fit,
+        and a chart's table can be many times its JSON. Such a write goes out as it does without ``ui_widgets``.
+        """
+        if not ui_widgets(self.deps.runtime.config, self.deps.agent_name):
+            return False
+        replies = self.deps.outbox.replies
+        reply = await replies.load(reply_id)
+        return reply is None or reply.event_id is not None or not await replies.has_unresolved_rows(reply_id)
+
+    async def _with_ui_widgets(
         self,
         text: str,
         extra_content: dict[str, Any] | None,
-        shown: Presentation | None,
+        write: ReplyWrite,
     ) -> tuple[str, dict[str, Any] | None]:
         """Return a reply body with its valid ``ui`` blocks as fallback blocks, and its content with their widgets.
 
         A reply's records hold the text as the model wrote it, and notes and multi-span bodies are rendered from
         them, so every write of a reply runs this. An approval pause is written with the text its stream already
-        showed, blocks rendered; its widgets come from ``shown``, the reply's record of that text.
-        An agent without ``ui_widgets`` gets both back as they are.
+        showed, blocks rendered; its widgets come from the write's record of that text.
+        A write that draws no widgets gets both back as they are.
         """
-        if not ui_widgets(self.deps.runtime.config, self.deps.agent_name):
+        if not await self._draws_widgets(write.reply_id):
             return text, extra_content
         rendered = render_ui_widgets(text, in_progress=False)
         content = rendered.content
-        if content is None and shown is not None:
-            content = recorded_ui_widgets(text, render_body(shown)[0])
+        if content is None:
+            content = recorded_ui_widgets(text, render_body(write.shown)[0])
         if content is None:
             return rendered.text, extra_content
         return rendered.text, {**(extra_content or {}), UI_WIDGETS_CONTENT_KEY: content}
@@ -1587,10 +1599,10 @@ class DeliveryGateway:
                 request.tool_trace,
                 request.reply_write.shown,
             )
-            response_text, extra_content = self._with_ui_widgets(
+            response_text, extra_content = await self._with_ui_widgets(
                 response_text,
                 request.extra_content,
-                request.reply_write.shown,
+                request.reply_write,
             )
             request = replace(
                 request,
@@ -1665,7 +1677,7 @@ class DeliveryGateway:
         target = request.target
         if request.reply_write is not None:
             new_text, tool_trace = _reply_body(request.new_text, request.tool_trace, request.reply_write.shown)
-            new_text, extra_content = self._with_ui_widgets(new_text, request.extra_content, request.reply_write.shown)
+            new_text, extra_content = await self._with_ui_widgets(new_text, request.extra_content, request.reply_write)
             request = replace(request, new_text=new_text, tool_trace=tool_trace, extra_content=extra_content)
         # The edit envelope discards any pre-existing relation before adding m.replace.
         content = format_message_with_mentions(
@@ -2050,7 +2062,7 @@ class DeliveryGateway:
             request.response_stream,
             streaming_cls=request.streaming_cls,
             show_tool_calls=request.show_tool_calls,
-            ui_widgets=ui_widgets(config, self.deps.agent_name),
+            ui_widgets=await self._draws_widgets(handle.reply_id),
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
             # A live view, because the caller keeps adding run metadata to its dict while the stream runs.

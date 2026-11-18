@@ -2353,9 +2353,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             sent.append(content)
             if len(sent) == 1:
                 return _failed_delivery()
-            return DeliveredMatrixEvent("$edit" if "m.new_content" in content else "$" + "c" * 43, content)
+            return DeliveredMatrixEvent(f"{created}-edit" if "m.new_content" in content else created, content)
 
         source_event_id = request.identity.response_envelope.source_event_id
+        created = source_event_id.ljust(44, "c")
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
             async with reply_span(alice, source_event_id=source_event_id, room_id=_ROOM_ID) as handle:
                 placeholder = initial_write(handle, Presentation(), placeholder_only=True)
@@ -2365,12 +2366,68 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Completed()
         assert "m.new_content" not in (await _turn_row(alice, DeliveryStage.FINAL, source_event_id)).payload
         envelope = sent[-1]
-        assert envelope["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$" + "c" * 43}
+        assert envelope["m.relates_to"] == {"rel_type": "m.replace", "event_id": created}
         return envelope
 
     @staticmethod
     def _encrypted_size(content: dict[str, Any]) -> int:
         return _calculate_delivery_event_size(content, room_id=_ROOM_ID, room_encrypted=True, device_id="DEVICE")
+
+    async def test_a_final_written_while_its_create_is_owed_goes_out_as_without_the_switch(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """Such a final is wrapped into an edit with no fit, and a chart's table can be many times its JSON.
+
+        So it is written as the model wrote it, the same bytes an agent without the switch sends.
+        """
+        series = [
+            {"name": f"Mean observations from sampling group {group}", "data": [(day + group) % 8 for day in range(40)]}
+            for group in range(8)
+        ]
+        labels = [f"Day {day}" for day in range(1, 41)]
+        chart = json.dumps(
+            {"type": "chart", "kind": "bar", "title": "Observations", "labels": labels, "series": series},
+        )
+        text = f"```ui\n{chart}\n```"
+        assert render_ui_widgets(text, in_progress=False).content is not None
+        gateway = _gateway(tmp_path, alice)
+        claimed: dict[str, dict[str, Any]] = {}
+        for source_event_id, ui_widgets in (("$main", False), ("$here", True)):
+            gateway.deps.runtime.config.agents["agent"].ui_widgets = ui_widgets
+            request = replace(self._final_request(text), identity=_identity(source_event_id=source_event_id))
+            claimed[source_event_id] = await self._final_claimed_after_its_create(gateway, alice, request)
+
+        main, here = claimed["$main"]["m.new_content"], claimed["$here"]["m.new_content"]
+        assert here["body"] == main["body"] == text
+        assert here["formatted_body"] == main["formatted_body"]
+        assert "io.mindroom.ui" not in here
+        assert (
+            self._encrypted_size(claimed["$here"]) <= self._encrypted_size(claimed["$main"]) <= _MATRIX_EVENT_HARD_LIMIT
+        )
+
+    async def test_a_stream_started_while_its_reply_s_create_is_owed_draws_no_widgets(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A stream whose terminal update would be wrapped into an edit with no fit streams as without the switch."""
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.runtime.config.agents["agent"].ui_widgets = True
+        target = MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
+        request = StreamingDeliveryRequest(target=target, response_stream=_empty_stream(), identity=_identity())
+
+        with (
+            patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())),
+            patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream,
+        ):
+            async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID) as handle:
+                placeholder = initial_write(handle, Presentation(), placeholder_only=True)
+                assert await gateway.send_text(SendTextRequest(target, "Thinking...", reply_write=placeholder)) is None
+                await gateway.deliver_stream(request)
+
+        assert stream.await_args.kwargs["ui_widgets"] is False
 
     @pytest.mark.parametrize(
         ("answer", "reasoning_chars", "strategy", "keeps_widget"),
@@ -2394,7 +2451,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         strategy: _LargeMessageStrategy,
         keeps_widget: bool,
     ) -> None:
-        """A final stored while the reply's create is still owed is wrapped into an edit when claimed, with no second fit.
+        """A final rendered with widgets just before its reply's create became owed is still wrapped with no second fit.
 
         So its widgets are fitted, before the row is frozen, against that edit as it is sent: both copies of the
         text and of the reasoning, and the limit an edit has. It then carries them only in the replacement.
@@ -2409,7 +2466,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             extra_content={"io.mindroom.reasoning": {"text": "r" * reasoning_chars}} if reasoning_chars else None,
         )
 
-        envelope = await self._final_claimed_after_its_create(gateway, alice, request)
+        # The write was rendered before the create it now waits for failed.
+        with patch.object(DeliveryGateway, "_draws_widgets", AsyncMock(return_value=True)):
+            envelope = await self._final_claimed_after_its_create(gateway, alice, request)
 
         widgets = render_ui_widgets(f"```ui\n{chart}\n```", in_progress=False).content
         assert widgets is not None
