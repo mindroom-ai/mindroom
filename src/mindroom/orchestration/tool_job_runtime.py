@@ -57,6 +57,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 # How long the worker sleeps between passes without a change, which also sets how soon a running job past its grace is listed.
 _RETRY_SECONDS = 5.0
+# How long a stopped subagent job waits for its requester's access to resolve once its bot has synced.
+_ACCESS_WAIT_SECONDS = 600.0
 
 
 def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
@@ -127,6 +129,8 @@ class ToolJobRuntimeCoordinator:
     journal_provider: Callable[[], EventJournalStore]
     # Whether an entity's bot failed to start for good, so a job that waits for it to continue ends instead.
     entity_unavailable: Callable[[str], bool] = lambda _entity_name: False
+    # When each stopped job's requester's access was first found unresolved under a synced bot, by the loop's clock.
+    _unresolved_since: dict[str, float] = field(default_factory=dict, init=False)
     _instance: ToolJobInstance | None = field(default=None, init=False)
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -358,27 +362,24 @@ class ToolJobRuntimeCoordinator:
 
         One job that fails here is retried on the next pass and does not hold up the others.
         """
-        for job in runtime.awaiting_continuation():
+        jobs = runtime.awaiting_continuation()
+        waiting = {job.job_id for job in jobs}
+        self._unresolved_since = {job_id: at for job_id, at in self._unresolved_since.items() if job_id in waiting}
+        for job in jobs:
             try:
                 await self._continue_stopped_job(runtime, job)
             except Exception:
                 logger.exception("Subagent job a restart stopped was not settled; retrying", job_id=job.job_id)
 
     async def _continue_stopped_job(self, runtime: ToolJobRuntime, job: BackgroundJob) -> None:
-        """Continue one stopped job, end it, or leave it for a later pass while its bot or its access is not ready.
-
-        A bot is ready once it has completed its first sync: by then it has seen the rooms it left while it was down
-        and cancelled their jobs, and room-backed reply grants can resolve, which the first pass runs too early for.
-        A bot that is only late keeps its job waiting; one whose start failed for good ends it.
-        """
-        recipient = job.owner.recipient
+        """Continue one stopped job, end it, or leave it for a later pass while its bot or its access is not ready."""
+        bot = self._ready_bot(job)
+        if bot is None:
+            return
         spec: JobSpec | str
-        if self.entity_unavailable(recipient):
-            spec = f"the bot of {recipient!r} could not start"
+        if isinstance(bot, str):
+            spec = bot
         else:
-            bot = self.bot_provider(recipient)
-            if bot is None or not bot.running or not bot.first_sync_complete or self._grant(job) != "allowed":
-                return
             context = self._conversation_context(bot, job)
             if context is None:
                 return
@@ -390,6 +391,31 @@ class ToolJobRuntimeCoordinator:
                     return
         logger.info("Subagent job ends instead of continuing after a restart", job_id=job.job_id, reason=spec)
         await runtime.continue_stopped(job.job_id, None)
+
+    def _ready_bot(self, job: BackgroundJob) -> AgentBot | str | None:
+        """Return the bot a stopped job continues under, why the job ends instead, or None while the job waits.
+
+        A bot is ready once it has completed its first sync: by then its client holds the rooms it is in, and
+        room-backed reply grants can resolve, which the first pass runs too early for. A bot that is only late keeps
+        its job waiting; one whose start failed for good, or that is no longer in the job's room, ends it. Access
+        that stays unresolved under a synced bot, as a grant room its control client left does, ends the job after a
+        bounded wait; access proven gone is revocation's to cancel.
+        """
+        recipient = job.owner.recipient
+        if self.entity_unavailable(recipient):
+            return f"the bot of {recipient!r} could not start"
+        bot = self.bot_provider(recipient)
+        if bot is None or not bot.running or not bot.first_sync_complete or bot.client is None:
+            return None
+        if job.owner.room_id not in bot.client.rooms:
+            return f"the bot of {recipient!r} is no longer in the job's room"
+        grant = self._grant(job)
+        if grant == "allowed":
+            return bot
+        now = asyncio.get_running_loop().time()
+        if grant == "pending" and now - self._unresolved_since.setdefault(job.job_id, now) >= _ACCESS_WAIT_SECONDS:
+            return "its requester's access stayed unresolved after the bot's first sync"
+        return None
 
     async def _continuation(self, bot: AgentBot, job: BackgroundJob, runtime: ToolJobRuntime) -> JobSpec | str:
         """Return what a stopped job runs on as, or why it ends: a stopped reply's job, or a turn that cannot continue.

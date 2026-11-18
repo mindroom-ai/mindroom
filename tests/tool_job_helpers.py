@@ -761,17 +761,20 @@ def stopped_job_coordinator(
     context: ToolRuntimeContext | None,
     *,
     synced: bool = True,
+    joined: bool = True,
     unavailable: bool = False,
     memberships: AgentReplyMembershipIndex | None = None,
 ) -> ToolJobRuntimeCoordinator:
     """Return a coordinator over ``runtime`` whose one bot is a stand-in with the real journal principal.
 
     ``context`` is the tool context the conversation's bot rebuilds, None for a bot without a Matrix client yet;
-    ``synced`` is whether that bot completed its first sync, and ``unavailable`` whether its start failed for good.
+    ``synced`` is whether that bot completed its first sync, ``joined`` whether it is still in the jobs' rooms, and
+    ``unavailable`` whether its start failed for good.
     Access is the coordinator's own check of ``config`` and ``memberships``.
     """
     bot = MagicMock(running=True, first_sync_complete=synced, admit_job_follow_up=AsyncMock())
     bot.tool_runtime_support.build_context.return_value = context
+    bot.client.rooms.__contains__.return_value = joined
     bot.journal_principal.return_value = runtime.journal.principal(JOB_BOT_PRINCIPAL)
     coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=runtime_paths,
@@ -792,6 +795,7 @@ async def continue_stopped_jobs(
     context: ToolRuntimeContext | None,
     *,
     synced: bool = True,
+    joined: bool = True,
     unavailable: bool = False,
     memberships: AgentReplyMembershipIndex | None = None,
 ) -> None:
@@ -802,6 +806,7 @@ async def continue_stopped_jobs(
         runtime_paths,
         context,
         synced=synced,
+        joined=joined,
         unavailable=unavailable,
         memberships=memberships,
     )

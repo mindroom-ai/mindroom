@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
+from structlog.testing import capture_logs
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -680,6 +681,7 @@ async def test_a_stopped_subagent_job_continues_only_for_a_synced_bot_and_a_prov
     membership = ResolvingMembership()
     job = replace(completed_delegation_job(), status="running", result=None)
     bot = MagicMock(running=True, first_sync_complete=False, admit_job_follow_up=AsyncMock())
+    bot.client.rooms.__contains__.return_value = True
     paths = test_runtime_paths(tmp_path)
     bot.tool_runtime_support.build_context.return_value = _delegate_runtime_context(
         config,
@@ -725,6 +727,53 @@ async def test_a_stopped_subagent_job_continues_only_for_a_synced_bot_and_a_prov
         else:
             await wait_for_status(runtime, job.job_id, "cancelled")
             assert prepared == []
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_subagent_job_whose_requesters_access_stays_unresolved_ends_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Access that a synced bot's rooms never resolve ends the job after a bounded wait, without running it."""
+    config = managed_team_config(tmp_path)
+    for entity in (config.agents["lead"], config.agents["worker"], config.teams["team"]):
+        entity.access = ResponderAccessConfig(current_room_members=True)
+    job = replace(completed_delegation_job(), status="running", result=None)
+    paths = test_runtime_paths(tmp_path)
+    bot = MagicMock(running=True, first_sync_complete=True, admit_job_follow_up=AsyncMock())
+    bot.client.rooms.__contains__.return_value = True
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _: bot,
+        agent_reply_memberships=ResolvingMembership(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
+    )
+    coordinator._publisher = AsyncMock()
+    prepare = AsyncMock()
+    monkeypatch.setattr(runtime_module, "continued_subagent_job", prepare)
+    monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
+    await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(job)))
+    coordinator._runtime = runtime = await tool_job_runtime(
+        tmp_path,
+        grant=coordinator._grant,
+        cancel=coordinator._interrupt,
+        continues=runtime_module._is_subagent_job,
+    )
+    try:
+        await runtime.recover()
+        await coordinator._reconcile()
+        assert [waiting.job_id for waiting in runtime.awaiting_continuation()] == [job.job_id]
+        monkeypatch.setattr(runtime_module, "_ACCESS_WAIT_SECONDS", 0)
+        with capture_logs() as logs:
+            await coordinator._reconcile()
+        assert runtime._entries[job.job_id].job.status == "interrupted"
+        assert [log["reason"] for log in logs if "reason" in log] == [
+            "its requester's access stayed unresolved after the bot's first sync",
+        ]
+        prepare.assert_not_awaited()
     finally:
         await runtime.shutdown()
 

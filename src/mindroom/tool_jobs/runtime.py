@@ -598,7 +598,6 @@ class ToolJobRuntime:
     async def continue_stopped(self, job_id: str, spec: JobSpec | None) -> None:
         """Run a job a restart stopped on as ``spec``, under its own ID, or end it interrupted when ``spec`` is None.
 
-        The job is saved with ``spec``'s adapter before its operation starts, so a later restart finds what it ran.
         A job that was continued, cancelled, or settled since it was listed is left alone. A Stop of its reply that
         arrived meanwhile ends it, and it stays as it is while its requester's access is no longer allowed: revocation
         cancels it, or a later pass continues it.
@@ -611,13 +610,22 @@ class ToolJobRuntime:
             if spec is None or entry.control.reply_stopped:
                 await self._publish_outcome(entry, entry.interruption)
             elif self._grant(entry.job) == "allowed":
-                await run_coroutine_until_complete(self._relaunch(entry, spec))
+                await run_coroutine_until_complete(self._relaunch(entry, spec, entry.interruption))
 
-    async def _relaunch(self, entry: _Entry, spec: JobSpec) -> None:
-        """Save a stopped job with the adapter it continues on, then launch it; callers finish this first."""
+    async def _relaunch(self, entry: _Entry, spec: JobSpec, stopped: BackgroundOutcome) -> None:
+        """Save a stopped job with the adapter it continues on, then launch it; callers finish this first.
+
+        The save comes first, so a later restart finds what the job ran. A Stop of the job's reply marks the job
+        without the runtime lock, so one may land during the save: the job then ends as ``stopped``. No await
+        separates that last check, and the one of the requester's access, from the task's creation, so a Stop either
+        is seen here or finds a job that runs.
+        """
         await self._publish(entry, _updated(entry.job, adapter=spec.adapter))
-        entry.cancel = spec.cancel
-        entry.task = asyncio.create_task(self._run(entry, spec.operation), name=f"tool-job:{entry.job.job_id}")
+        if entry.control.reply_stopped:
+            await self._publish_outcome(entry, stopped)
+        elif self._grant(entry.job) == "allowed":
+            entry.cancel = spec.cancel
+            entry.task = asyncio.create_task(self._run(entry, spec.operation), name=f"tool-job:{entry.job.job_id}")
 
     async def start(
         self,

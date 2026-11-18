@@ -40,7 +40,7 @@ from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import SUBAGENT_BUSY, load_retained_subagent_turn, subagent_recovery_lock
-from mindroom.delegation.state import DelegationState
+from mindroom.delegation.state import DelegationState, child_card_id
 from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -353,7 +353,9 @@ async def test_a_background_subagent_runs_its_child_once(  # noqa: C901, PLR0915
         await asyncio.wait_for(cards.posted.wait(), JOB_TEST_TIMEOUT)
         job_id = the_job().job_id
         await wait_for_status(runtime, job_id, "awaiting_approval")
-        assert cards.requested == [(tool_job_run_id(job_id), "write-once", "write_report")]
+        # The card names the child's turn with its call, under the job.
+        card = child_card_id(delegation_child(the_job()).delegation_id, "write-once")
+        assert cards.requested == [(tool_job_run_id(job_id), card, "write_report")]
         assert reports.effects == []
         if exclude_after_acceptance:
             config.background_tool_jobs.exclude_toolkits.append("delegate")
@@ -366,7 +368,7 @@ async def test_a_background_subagent_runs_its_child_once(  # noqa: C901, PLR0915
             assert await job_card_decision(
                 runtime.journal,
                 tool_job_run_id(job_id),
-                "write-once",
+                card,
             ) == BackgroundApprovalDecision("denied", JOB_ENDED_REASON)
             return
         status = "denied" if approval == "denied" else "approved"
@@ -534,7 +536,8 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
             assert result.status is RunStatus.completed
             handle = json.loads(str(answer_of(result, "first").content))
             assert handle["status"] == "awaiting_approval"
-            assert cards.requested == [(tool_job_run_id(handle["job_id"]), "w", "write_report")]
+            card = child_card_id(delegation_child(runtime._entries[handle["job_id"]].job).delegation_id, "w")
+            assert cards.requested == [(tool_job_run_id(handle["job_id"]), card, "write_report")]
             assert reports.effects == []
         finally:
             await runtime.shutdown()

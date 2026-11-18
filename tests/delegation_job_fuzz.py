@@ -353,7 +353,8 @@ class DelegationFuzzRunner:
             return
         card = pending[step.index % len(pending)]
         if step.approve:
-            self.approved.add(card.call_id)
+            # A card names the child's turn with its call.
+            self.approved.add(card.call_id.rpartition(":")[2])
         status = "approved" if step.approve else "denied"
         card.decision.set_result(BackgroundApprovalDecision(status, None if step.approve else "Not now"))
 

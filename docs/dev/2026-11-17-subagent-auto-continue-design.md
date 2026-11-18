@@ -128,3 +128,28 @@ The fix is one rule: every fact that decides whether a stopped job goes on is re
 
 Estimated source change: about +110 −50 (runtime −5, coordinator +35, continuation +25, loop −6, recovery +5, notices +8, others +5), well under the 250-line stop line, so the round is implemented.
 Measured after implementation: +189 −105 in `src`, net +84.
+
+## Round 3
+
+Two reviews of `87759d6d3` left five items; the identity and the round 2 rule stand, and each fix is at the place the fact is decided.
+
+- **A, a Stop during the save before the launch.**
+  The launch read the Stop mark and the access before it saved the continuation, and the save awaits.
+  It now reads both after the save, with no await before it creates the task.
+  A Stop's effect sets the mark as its first step, without the lock, so the two orders are the only ones: the mark is set before the task exists and the job ends, or the task exists and the Stop finds a working job, which it leaves working as before this change.
+  The reply's record is still read once, by the pass before it prepares the continuation: it holds the Stops of earlier processes, and every Stop of this process sets the mark.
+- **D, a room the bot left, and access that never resolves.**
+  A synced bot's client holds the rooms it is in, so the pass reads the job's room there and ends the job when the bot left it.
+  Unresolved access under a synced bot ends the job after a fixed 10 minutes, counted in the coordinator from the first pass that found it so; a reply waits for such a grant too, and a job without a task cannot wait forever.
+- **E, a one-message history limit.**
+  The prompt states the cut-short turn's own task, bounded, beside the account of its calls.
+  The continued turn keeps that task as its own, so a second restart finds it again without a second copy saved anywhere.
+- **The account in the room.**
+  The turn's task is its label in the job and the Sub-agents panel, so the account can not be part of it: the continued turn's task is the cut-short turn's, and the response envelope sends the prompt in its place.
+  This supersedes the round 2 text that put the account into the turn's task.
+- **G, approval keys.**
+  No longer declined: on main a follow-up is a new job with its own cards, and keeping the job over several child turns removed that boundary.
+  A subagent job's cards name the child's turn with the call (`child_card_id`), under the job as owner, so the job's end still denies them; the child resumes on the provider's own call IDs, since decisions are matched to calls by position.
+  Reuse within one turn is main's behaviour and stays a limit.
+
+Measured: +116 −32 in `src` against `87759d6d3`, net +84.
