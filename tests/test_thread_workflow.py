@@ -10,10 +10,16 @@ from typing import Any
 import nio
 import pytest
 
+from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
-from mindroom.thread_workflow import classify_thread_workflow, room_thread_facts, thread_workflow
+from mindroom.thread_workflow import (
+    classify_thread_workflow,
+    latest_reply_question_ts,
+    room_thread_facts,
+    thread_workflow,
+)
 from tests.scheduling_helpers import SCHEDULE_WRITER_ID, schedule_runtime_paths, scheduled_task_state_event
 
 _CASES = json.loads(
@@ -137,3 +143,52 @@ def test_thread_workflow_counts_only_what_was_asked_after_the_resolve(
 ) -> None:
     """Approvals and questions count only after the resolve, and a question only for seven days."""
     assert thread_workflow(facts, now=10_000, **{"replying": False, **kwargs}) == expected
+
+
+_BOT = "@mindroom_general:localhost"
+_PROMPT = interactive_prompt_content(
+    InteractivePrompt(
+        creator_agent="general",
+        question_text="Pick one",
+        options={"1": "a"},
+        option_labels={"1": "A"},
+        source_event_id="$src",
+    ),
+)
+
+
+def _reply(
+    content: dict[str, object],
+    *,
+    sender: str = _BOT,
+    edit: dict[str, object] | None = None,
+) -> dict[str, object]:
+    reply: dict[str, object] = {"sender": sender, "origin_server_ts": 100, "content": {"body": "x", **content}}
+    if edit is not None:
+        reply["unsigned"] = {"m.relations": {"m.replace": edit}}
+    return {"io.mindroom.latest_reply": reply}
+
+
+def _edit(new_content: dict[str, object], *, sender: str = _BOT) -> dict[str, object]:
+    return {"sender": sender, "origin_server_ts": 200, "content": {"m.new_content": {"body": "x", **new_content}}}
+
+
+@pytest.mark.parametrize(
+    ("thread_metadata", "expected"),
+    [
+        pytest.param(_reply(_PROMPT), 100, id="question in the reply"),
+        pytest.param(_reply({}, edit=_edit(_PROMPT)), 200, id="question added by the newest edit"),
+        pytest.param(_reply(_PROMPT, edit=_edit({})), 200, id="edit keeps the original's question"),
+        pytest.param(_reply({}, edit=_edit(_PROMPT, sender="@mallory:localhost")), None, id="someone else's edit"),
+        pytest.param(_reply(_PROMPT, sender="@user:localhost"), None, id="reply from a person"),
+        pytest.param(
+            _reply({"io.mindroom.interactive": {"question_text": "Pick one"}}),
+            None,
+            id="prompt without options",
+        ),
+        pytest.param({"count": 3}, None, id="no bundle"),
+    ],
+)
+def test_latest_reply_question_ts(thread_metadata: dict[str, Any], expected: int | None) -> None:
+    """A question counts when the bundled newest reply, as its newest own edit shows it, is an agent's prompt."""
+    assert latest_reply_question_ts(thread_metadata, {_BOT}) == expected

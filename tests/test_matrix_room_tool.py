@@ -20,6 +20,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
+from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.room_history_reads import RoomThreadsPageError
 from mindroom.message_target import MessageTarget
@@ -41,6 +42,7 @@ from tests.conftest import (
     serve_media_from_download,
     test_runtime_paths,
 )
+from tests.scheduling_helpers import persist_schedule_writer
 
 _NEXT_BATCH_PAGE_TOKEN = "next_batch"  # noqa: S105
 _THREAD_PAGE_TOKEN = "tok123"  # noqa: S105
@@ -431,6 +433,7 @@ def _thread_event(
     body: str = "Thread root",
     ts: int = 1000,
     reply_count: int = 0,
+    latest_reply: dict[str, object] | None = None,
 ) -> nio.RoomMessageText:
     src: dict[str, object] = {
         "type": "m.room.message",
@@ -439,8 +442,11 @@ def _thread_event(
         "origin_server_ts": ts,
         "content": {"msgtype": "m.text", "body": body},
     }
-    if reply_count:
-        src["unsigned"] = {"m.relations": {"m.thread": {"count": reply_count}}}
+    thread: dict[str, object] = {"count": reply_count} if reply_count else {}
+    if latest_reply is not None:
+        thread["io.mindroom.latest_reply"] = latest_reply
+    if thread:
+        src["unsigned"] = {"m.relations": {"m.thread": thread}}
     return cast("nio.RoomMessageText", nio.RoomMessageText.from_dict(src))
 
 
@@ -1614,3 +1620,87 @@ async def test_threads_state_read_failure_is_an_error(state_read: dict[str, obje
     assert payload["status"] == "error"
     assert payload["action"] == "threads"
     assert "threads" not in payload
+
+
+_APPROVAL_STORE = "mindroom.custom_tools.matrix_room.get_approval_store"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ([], {"workflow": "needs_you", "why": "approval"}),
+        (
+            [_tag_event("$t1", "snoozed", {"until": "2999-01-01T00:00:00Z"})],
+            {"workflow": "needs_you", "why": "approval"},
+        ),
+        ([_tag_event("$t1", "resolved")], {"workflow": "done"}),
+    ],
+)
+async def test_threads_row_waits_on_an_approval(state: list[dict[str, object]], expected: dict[str, object]) -> None:
+    """An open approval card for the requester wins over a snooze; one older than the resolve is answered."""
+    ctx = _workflow_context(state)
+    manager = MagicMock(pending_approval_threads=AsyncMock(return_value={"$t1": 5000}))
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, return_value=([_thread_event("$t1")], None)),
+        patch(_APPROVAL_STORE, return_value=manager),
+    ):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", workflow="all"))
+
+    row = payload["threads"][0]
+    assert {key: row[key] for key in ("workflow", "why") if key in row} == expected
+    call = manager.pending_approval_threads.await_args
+    assert call.kwargs["room_id"] == "!room:localhost"
+    assert "@user:localhost" in call.kwargs["approver_user_ids"]
+
+
+@pytest.mark.asyncio
+async def test_threads_row_waits_on_a_question_only_for_the_thread_starter() -> None:
+    """An agent's question in the newest reply counts only in a thread the requester started."""
+    ctx = _workflow_context([])
+    persist_schedule_writer(ctx.runtime_paths, _AGENT_ID, entity_name="general")
+    prompt = interactive_prompt_content(
+        InteractivePrompt(
+            creator_agent="general",
+            question_text="Pick one",
+            options={"1": "a"},
+            option_labels={"1": "A"},
+            source_event_id="$src",
+        ),
+    )
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    latest_reply = {"sender": _AGENT_ID, "origin_server_ts": now_ms, "content": {"body": "Pick one", **prompt}}
+    roots = [
+        _thread_event("$mine", sender="@user:localhost", latest_reply=latest_reply),
+        _thread_event("$theirs", sender="@alice:localhost", latest_reply=latest_reply),
+    ]
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, return_value=(roots, None)),
+        patch(_APPROVAL_STORE, return_value=None),
+    ):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", workflow="needs_you"))
+
+    assert [(row["thread_id"], row["why"]) for row in payload["threads"]] == [
+        ("$mine", "question"),
+        ("$theirs", "your_turn"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_threads_without_an_approval_store_still_lists() -> None:
+    """Before the approval domain is ready, rows are labelled from their other facts."""
+    ctx = _workflow_context([])
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, return_value=([_thread_event("$t1")], None)),
+        patch(_APPROVAL_STORE, return_value=None),
+    ):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", workflow="all"))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["why"] == "your_turn"

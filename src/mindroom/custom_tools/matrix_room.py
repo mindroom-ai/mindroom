@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 import nio
 from aiohttp import ClientError
 
+from mindroom.approval.manager import get_approval_store
 from mindroom.custom_tools.attachment_helpers import resolve_requested_room_id, room_access_allowed
 from mindroom.custom_tools.matrix_agent_discovery import available_room_agents
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
@@ -26,8 +27,9 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
+from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.thread_summary.state import current_thread_summary
-from mindroom.thread_workflow import room_thread_facts, thread_workflow
+from mindroom.thread_workflow import latest_reply_question_ts, room_thread_facts, thread_workflow
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
@@ -337,6 +339,9 @@ class MatrixRoomTools(Toolkit):
         now = int(time.time() * 1000)
         facts: dict[str, dict[str, Any]] = {}
         replying: set[str | None] = set()
+        approvals: dict[str | None, int] = {}
+        bot_ids: frozenset[str] = frozenset()
+        requester_ids: set[str] = set()
         if workflow is not None:
             state = await context.client.room_get_state(room_id)
             if not isinstance(state, nio.RoomGetStateResponse):
@@ -345,11 +350,23 @@ class MatrixRoomTools(Toolkit):
             facts = room_thread_facts(room_id, state, context.runtime_paths, bot_ids, now)
             bots = context.orchestrator.agent_bots.values() if context.orchestrator is not None else ()
             replying = replying.union(*(bot.active_thread_ids_for_room(room_id) for bot in bots))
+            requester_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
+            if (manager := get_approval_store()) is not None:
+                approvals = await manager.pending_approval_threads(room_id=room_id, approver_user_ids=requester_ids)
         threads_list: list[dict[str, object]] = []
         for event in thread_roots:
             label: dict[str, object] = {}
             if workflow is not None:
-                label = thread_workflow(facts.get(event.event_id, {}), now=now, replying=event.event_id in replying)
+                label = thread_workflow(
+                    facts.get(event.event_id, {}),
+                    now=now,
+                    replying=event.event_id in replying,
+                    approval_ts=approvals.get(event.event_id),
+                    # A question counts only in a thread the requester started (design decision 8).
+                    question_ts=latest_reply_question_ts(self._thread_metadata(event.source), bot_ids)
+                    if event.sender in requester_ids and isinstance(event.source, dict)
+                    else None,
+                )
                 if workflow not in ("all", label["workflow"]):
                     continue
             thread_info = await self._serialize_thread_root(

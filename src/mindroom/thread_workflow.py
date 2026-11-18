@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
+from mindroom.interactive_models import interactive_prompt_from_content
+from mindroom.matrix.client_visible_messages import bundled_replacement_candidates
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.scheduling.tasks import task_records_with_writers
 from mindroom.thread_tags import (
@@ -137,3 +139,17 @@ def thread_workflow(
         and now - question_ts < _QUESTION_WAITS_MS
         and asked_since_resolve(question_ts),
     )
+
+
+def latest_reply_question_ts(thread_metadata: Mapping[str, Any], bot_ids: Collection[str]) -> int | None:
+    """Return when the root's bundled newest reply, as its newest own edit shows it, asked an agent's question."""
+    reply = thread_metadata.get("io.mindroom.latest_reply")
+    if not isinstance(reply, dict) or reply.get("sender") not in bot_ids:
+        return None
+    edit = next((c for c in bundled_replacement_candidates(reply) if c.get("sender") == reply["sender"]), None)
+    shown = edit.get("content", {}).get("m.new_content") if edit is not None else None
+    original = reply.get("content")
+    if not any(isinstance(c, dict) and interactive_prompt_from_content(c) for c in (shown, original)):
+        return None
+    ts = (edit or reply).get("origin_server_ts")
+    return ts if isinstance(ts, int) and not isinstance(ts, bool) else None

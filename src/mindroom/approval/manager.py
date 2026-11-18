@@ -44,7 +44,7 @@ from mindroom.tool_approval_grants import (
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
 
     from mindroom.approval.recovery import ApprovalRecovery
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
@@ -1003,6 +1003,28 @@ class ApprovalManager:
                 and card.expires_at_ns > now_ns
             ],
         )
+
+    async def pending_approval_threads(
+        self,
+        *,
+        room_id: str,
+        approver_user_ids: Collection[str],
+    ) -> dict[str | None, int]:
+        """Map each conversation of a room to the creation time (ms) of its newest card that waits for an approver."""
+        if self.cards is None:
+            return {}
+        now_ns = time.time_ns()
+        # Deny-only and scheduled cards count too: the person is asked about both.
+        return {
+            card.thread_id: card.created_at_ns // 1_000_000
+            async for card in self._pending_cards(self.cards, room_id)
+            if card.card_event_id is not None
+            and not card.decided
+            and card.owner_kind is not None
+            and card.approver_user_id in approver_user_ids
+            and card.expires_at_ns is not None
+            and card.expires_at_ns > now_ns
+        }
 
     async def _expire_stored(self, card: ApprovalCardView, *, reason: str = TIMEOUT_REASON) -> bool:
         if self.cards is None:

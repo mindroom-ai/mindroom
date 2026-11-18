@@ -604,6 +604,7 @@ visibility = [
     "mindroom.event_journal",
     "mindroom.interactive",
     "mindroom.post_response_effects",
+    "mindroom.thread_workflow",
 ]
 
 [[modules]]
@@ -1315,6 +1316,7 @@ visibility = [
     "mindroom.scheduling.tasks",
     "mindroom.tool_jobs.approvals",
     "mindroom.scheduling.runtime",
+    "mindroom.custom_tools.matrix_room",
 ]
 
 [[modules]]
@@ -2674,6 +2676,7 @@ visibility = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"
 depends_on = [
+    "mindroom.approval.manager",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.custom_tools.matrix_helpers",
@@ -4600,6 +4603,7 @@ visibility = [
     "mindroom.room_activity.note",
     "mindroom.routing",
     "mindroom.thread_export.selection",
+    "mindroom.thread_workflow",
     "mindroom.turns.ingress",
 ]
 
@@ -4770,6 +4774,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.thread_workflow"
 depends_on = [
+    "mindroom.interactive_models",
+    "mindroom.matrix.client_visible_messages",
     "mindroom.scheduling.tasks",
     "mindroom.thread_tags",
 ]
@@ -7134,6 +7140,7 @@ from = ["mindroom.matrix.voice_message"]
 [[interfaces]]
 expose = [
     "ResolvedVisibleMessage",
+    "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "is_visible_room_message",
     "message_preview",
