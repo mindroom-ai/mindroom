@@ -486,7 +486,7 @@ async def test_an_ephemeral_attachment_is_named_as_such(
 
     assert json.loads(result) == error_result(
         "send",
-        "Ephemeral attachment att_media can be sent but has no local file.",
+        "Attachment att_media has no stored file and cannot be sent as your owner.",
     )
     assert homeserver.requests == []
 

@@ -313,6 +313,9 @@ def _turn_file(turn: ToolRuntimeContext, attachment_id: str) -> AttachmentRecord
     record = resolve_context_attachment_record(turn, attachment_id)
     if isinstance(record, str):
         record = _conversation_file(turn, attachment_id) or record
+    if isinstance(record, str) and attachment_id.strip() in turn.runtime_media_attachments:
+        # The resolver's text for a file held only in memory says it can be sent, as other tools can send one.
+        record = f"Attachment {attachment_id} has no stored file and cannot be sent as your owner."
     if isinstance(record, str):
         raise MatrixRequestError(record)
     if (problem := _command_problem(record.filename)) is not None:
