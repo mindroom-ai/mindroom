@@ -596,6 +596,22 @@ async def test_stopped_frames_catch_up_at_once(tmp_path: Path, frames: _Frames) 
 
 
 @pytest.mark.asyncio
+async def test_progress_edits_carry_reasoning_once_frames_stop(tmp_path: Path, frames: _Frames) -> None:
+    """Frames that stop for good leave reasoning to the progress edits, so the reply keeps showing it."""
+    frames.outcomes = [LiveSendOutcome.SENT, LiveSendOutcome.STOP]
+    records, edits = _records(), _Edits()
+    stream = _stream("Hello", 0.05, ReasoningDelta("Checking the cache"), 0.1, " world", 0.1, " again", 0.05)
+    await _run(_config(tmp_path), stream, records, edits)
+
+    assert len(frames.sent) == 2
+    assert edits.contents
+    reasoning = edits.contents[-1]["io.mindroom.reasoning"]
+    assert reasoning["text"] == "Checking the cache"
+    assert reasoning["duration_ms"] >= 0
+    assert reasoning["segments"][0]["start"] == 0
+
+
+@pytest.mark.asyncio
 async def test_a_terminal_update_cancelled_before_it_is_recorded_keeps_what_frames_showed(
     tmp_path: Path,
     frames: _Frames,

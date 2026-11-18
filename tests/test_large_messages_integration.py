@@ -13,6 +13,7 @@ import pytest
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    REASONING_CONTENT_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
     RuntimePaths,
@@ -23,6 +24,7 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
+    EDIT_MESSAGE_SIZE_LIMIT,
     calculate_event_size,
     prepare_large_message,
     should_send_oversized_nonterminal_streaming_edit,
@@ -206,6 +208,63 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
     uploaded_payload = json.loads(client.uploads[0].read())
     for key, value in extra_content.items():
         assert uploaded_payload["m.new_content"][key] == value
+
+
+@pytest.mark.asyncio
+async def test_long_reasoning_is_cut_to_keep_an_edit_ordinary() -> None:
+    """A short progress edit with long reasoning goes out as an ordinary edit, its reasoning cut, not as a sidecar."""
+    client = MockClient()
+    content = {
+        "body": "Working on it",
+        "msgtype": "m.notice",
+        "formatted_body": "<p>Working on it</p>",
+        STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+    }
+    reasoning = {"text": "r" * 40000, "duration_ms": 1200, "segments": [{"start": 0, "after_tool": 0}]}
+
+    await edit_message_result(
+        client,
+        "!room:server",
+        "$original",
+        content,
+        "Working on it",
+        extra_content={REASONING_CONTENT_KEY: reasoning},
+    )
+
+    assert client.uploads == []
+    sent_content = client.messages_sent[0][2]
+    assert sent_content["m.new_content"]["body"] == "Working on it"
+    assert REASONING_CONTENT_KEY not in sent_content
+    kept = sent_content["m.new_content"][REASONING_CONTENT_KEY]
+    assert kept["text"].endswith("…")
+    assert 1000 < len(kept["text"]) < 40000
+    assert kept["duration_ms"] == 1200
+    assert calculate_event_size(sent_content) <= EDIT_MESSAGE_SIZE_LIMIT
+
+
+def test_reasoning_alone_does_not_make_a_streaming_edit_oversized() -> None:
+    """The oversized-edit cadence ignores reasoning, which delivery cuts to fit an otherwise ordinary edit."""
+    reasoning = {"text": "r" * 20000, "duration_ms": 1200}
+    edit_content = {
+        "body": "* Working on it",
+        "msgtype": "m.notice",
+        REASONING_CONTENT_KEY: reasoning,
+        "m.new_content": {
+            "body": "Working on it",
+            "msgtype": "m.notice",
+            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+            REASONING_CONTENT_KEY: reasoning,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reasoning-only"},
+    }
+    assert calculate_event_size(edit_content) > EDIT_MESSAGE_SIZE_LIMIT
+
+    for _ in range(3):
+        assert should_send_oversized_nonterminal_streaming_edit(
+            room_id="!room:server",
+            original_event_id="$reasoning-only",
+            edit_content=edit_content,
+        )
 
 
 @pytest.mark.asyncio

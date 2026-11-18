@@ -1167,15 +1167,23 @@ class StreamingResponse:
         )
 
     def _delivery_extra_content(self, *, is_final: bool) -> dict[str, Any]:
-        """Return the extra content of one durable write: the caller's, the live watermark, and the final reasoning."""
+        """Return the extra content of one durable write: the caller's, the live watermark, and the reasoning.
+
+        Reasoning rides the terminal write, and every write made while live frames do not carry the reply's progress
+        (no relay, or frames stopped), so the reply keeps showing its reasoning. A still-open segment counts its time
+        so far.
+        """
         extra_content = dict(deepcopy(self.extra_content)) if self.extra_content is not None else {}
         checkpoint = self.live.checkpoint() if self.live is not None else None
         if checkpoint is not None:
             extra_content[LIVE_CHECKPOINT_KEY] = checkpoint
-        if is_final and self.reasoning_text.strip():
+        if (is_final or not self.live_active) and self.reasoning_text.strip():
+            reasoning_seconds = self._reasoning_seconds
+            if self._reasoning_segment_started_at is not None:
+                reasoning_seconds += time.monotonic() - self._reasoning_segment_started_at
             extra_content[REASONING_CONTENT_KEY] = {
                 "text": self.reasoning_text,
-                "duration_ms": round(self._reasoning_seconds * 1000),
+                "duration_ms": round(reasoning_seconds * 1000),
                 "segments": [dict(segment) for segment in self._reasoning_segments],
             }
         return extra_content
