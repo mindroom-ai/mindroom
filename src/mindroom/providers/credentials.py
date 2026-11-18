@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.config.models import split_model_reference
 from mindroom.config.schema_hints import ENV_PLACEHOLDER_PATTERN
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.environment import get_secret_from_env
@@ -45,8 +46,12 @@ _KEYLESS_ROUTES = frozenset({"bedrock_claude", "codex", "kimi", "synthetic", "ve
 
 
 def dashboard_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
-    """Return the key the dashboard saved for one model config (``model:<name>``), if any."""
-    model_creds = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
+    """Return the key the dashboard saved for one model config (``model:<name>``), if any.
+
+    ``name@level`` uses the key saved for ``name``.
+    """
+    service = f"model:{split_model_reference(model_name)[0]}"
+    model_creds = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(service)
     return model_creds.get("api_key") if model_creds else None
 
 

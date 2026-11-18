@@ -18,8 +18,9 @@ from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, St
 from mindroom.constants import COMPACTIONS_CONTENT_KEY
 from mindroom.history.reply_compactions import ReplyCompactions
 from mindroom.history.types import CompactionLifecycleStart
+from mindroom.live_frames.frames import LIVE_EVENT_TYPE, LiveDocs, fitted_tools
 from mindroom.live_frames.publisher import LivePublisher
-from mindroom.live_frames.transport import LiveSendOutcome
+from mindroom.live_frames.transport import LiveSendOutcome, frame_fits
 from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
@@ -157,10 +158,11 @@ async def _run(
     resumed: UnfinishedStreamedReply | None = None,
     placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
     allow_new_terminal_message: Callable[[], bool] | None = None,
+    client: nio.AsyncClient | None = None,
 ) -> None:
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
         await send_streaming_response(
-            make_matrix_client_mock(user_id="@mindroom_code:localhost"),
+            client or make_matrix_client_mock(user_id="@mindroom_code:localhost"),
             MessageTarget.resolve(_ROOM_ID, None, "$question"),
             config,
             runtime_paths_for(config),
@@ -858,6 +860,156 @@ async def test_hidden_tool_calls_show_no_output(tmp_path: Path, frames: _Frames)
     )
 
     assert all(state == [] for state in _tool_states(frames.sent))
+
+
+def _encrypted_client() -> nio.AsyncClient:
+    client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+    client.rooms[_ROOM_ID].encrypted = True
+    return client
+
+
+def _busy_calls(count: int) -> list[float | ToolStarted | ToolCompleted]:
+    """``count`` completed calls, each with long arguments and a long result."""
+    chunks: list[float | ToolStarted | ToolCompleted] = []
+    for index in range(count):
+        args = {f"arg{key}": f"{index}-{key}-" + "a" * 300 for key in range(4)}
+        call = ReportedCall(tool_call_id=f"call-{index}", tool_name="run_shell_command", tool_args=args)
+        done = ReportedCall(
+            tool_call_id=f"call-{index}",
+            tool_name="run_shell_command",
+            tool_args=args,
+            result=f"{index}: " + "r" * 2000,
+        )
+        chunks += [ToolStarted(call), 0.001, ToolCompleted(done)]
+    return chunks
+
+
+@pytest.mark.asyncio
+async def test_a_tool_heavy_turn_keeps_its_frames_within_the_size_limit(
+    tmp_path: Path,
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hundreds of calls with long previews cut the previews in frames instead of stopping them; writes keep them whole."""
+    monkeypatch.setattr(publisher_module, "_SNAPSHOT_INTERVAL_SECONDS", 0.1)
+    client = _encrypted_client()
+    records, edits = _records(), _Edits()
+    stream = _stream("Working", *_busy_calls(200), 0.05, " done", 0.05)
+    await _run(_config(tmp_path), stream, records, edits, client=client)
+
+    assert all(frame_fits(client, _ROOM_ID, frame, event_type=LIVE_EVENT_TYPE) for frame in frames.sent)
+    assert sum("snapshot" in frame for frame in frames.sent) > 2
+    shown = _tool_states(frames.sent)[-1]
+    assert len(shown) == 200
+    # The oldest calls lost their previews and the newest kept them cut; every changed entry says so.
+    assert "result_preview" not in shown[0]
+    assert shown[-1]["result_preview"].endswith("…")
+    assert len(shown[-1]["result_preview"]) == 200
+    assert all(entry["clipped"] is True for entry in shown)
+    written = [*edits.contents, _terminal(records)]
+    for content in written:
+        events = content["io.mindroom.tool_trace"]["events"]
+        assert all("clipped" not in event and len(event["result_preview"]) > 200 for event in events)
+    assert len(_terminal(records)["io.mindroom.tool_trace"]["events"]) == 200
+
+
+def _entry(index: int) -> dict[str, object]:
+    return {
+        "type": "tool_call_completed",
+        "tool_name": "run_shell_command",
+        "args_preview": f"{index} " + "a" * 1200,
+        "result_preview": f"{index} " + "r" * 500,
+        "tool_call_id": f"call-{index}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_frames_drop_the_oldest_previews_only_at_a_snapshot(
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deltas keep the fit of the last snapshot, so each carries only its new call; a snapshot fits again."""
+    monkeypatch.setattr(publisher_module, "_SNAPSHOT_INTERVAL_SECONDS", float("inf"))
+    client = _encrypted_client()
+    publisher = LivePublisher(client=client, room_id=_ROOM_ID)
+
+    def docs(count: int) -> LiveDocs:
+        return LiveDocs(
+            md="text",
+            reasoning="",
+            tools=tuple(_entry(index) for index in range(count)),
+            status="streaming",
+            activity="",
+        )
+
+    await publisher._send_next("$reply", docs(60))
+    assert publisher.bare == 0
+    for count in range(61, 160):
+        await publisher._send_next("$reply", docs(count))
+        assert [index for index, _ in frames.sent[-1]["delta"]["tools"]["set"]] == [count - 1]
+    assert publisher.bare == 0
+
+    publisher.last_snapshot_at = float("-inf")
+    await publisher._send_next("$reply", docs(160))
+    snapshot = frames.sent[-1]["snapshot"]["tools"]
+    assert publisher.bare > 0
+    assert frame_fits(client, _ROOM_ID, frames.sent[-1], event_type=LIVE_EVENT_TYPE)
+    # The fewest previews dropped: keeping one more would not fit.
+    one_more = {**frames.sent[-1], "snapshot": {**frames.sent[-1]["snapshot"]}}
+    one_more["snapshot"]["tools"] = list(fitted_tools(docs(160).tools, bare=publisher.bare - 1))
+    assert not frame_fits(client, _ROOM_ID, one_more, event_type=LIVE_EVENT_TYPE)
+    assert [("args_preview" in entry) for entry in snapshot] == [False] * publisher.bare + [True] * (
+        160 - publisher.bare
+    )
+
+    bare = publisher.bare
+    await publisher._send_next("$reply", docs(161))
+    assert [index for index, _ in frames.sent[-1]["delta"]["tools"]["set"]] == [160]
+    assert publisher.bare == bare
+
+
+@pytest.mark.asyncio
+async def test_a_delta_too_big_for_the_estimate_becomes_a_fitted_snapshot_or_goes_out_as_is(
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized delta is replaced by a snapshot that fits; when none fits, the delta goes out and the fit stays."""
+    monkeypatch.setattr(publisher_module, "_SNAPSHOT_INTERVAL_SECONDS", float("inf"))
+    publisher = LivePublisher(client=_encrypted_client(), room_id=_ROOM_ID)
+
+    def docs(count: int) -> LiveDocs:
+        return LiveDocs(
+            md="text",
+            reasoning="",
+            tools=tuple(_entry(index) for index in range(count)),
+            status="streaming",
+            activity="",
+        )
+
+    await publisher._send_next("$reply", docs(10))
+    # Deltas look too big; snapshots fit once the oldest five lost their previews.
+    monkeypatch.setattr(
+        publisher,
+        "_fits",
+        lambda frame: "snapshot" in frame and "args_preview" not in frame["snapshot"]["tools"][4],
+    )
+    await publisher._send_next("$reply", docs(11))
+    assert "snapshot" in frames.sent[-1]
+    assert frames.sent[-1]["seq"] == 1
+    assert publisher.bare == 5
+
+    # Nothing fits: the delta goes out as it is, and the fit is not widened by the failed search.
+    monkeypatch.setattr(publisher, "_fits", lambda _frame: False)
+    await publisher._send_next("$reply", docs(12))
+    assert [index for index, _ in frames.sent[-1]["delta"]["tools"]["set"]] == [11]
+    assert publisher.bare == 5
+
+    # A failed send makes the next frame a snapshot.
+    monkeypatch.setattr(publisher, "_fits", lambda _frame: True)
+    frames.outcomes = [LiveSendOutcome.RETRY]
+    await publisher._send_next("$reply", docs(13))
+    await publisher._send_next("$reply", docs(13))
+    assert "snapshot" in frames.sent[-1]
 
 
 @pytest.mark.asyncio

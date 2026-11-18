@@ -16,6 +16,12 @@ from mindroom.matrix.transport_progress import is_transport_progress_source
 
 __all__ = ["consume_one_ingestion_batch", "run_ingestion_pump", "validate_ingestion_batch"]
 
+# The longest a batch that admits nothing new may wait to wake the dispatcher,
+# counted from the last wake, so a busy agent scans at most this often for such
+# batches. Another agent's write can make this agent's pending work runnable
+# without waking it: a departing router fails the paused approvals its cards held.
+_RECHECK_SECONDS = 20.0
+
 
 class _OwnedIngestionSession(Protocol):
     """Public durable session operations needed by the application pump."""
@@ -190,6 +196,17 @@ async def run_ingestion_pump(
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> None:
     """Drain batches, waiting on work or the existing delivery projection barrier."""
+    loop = asyncio.get_running_loop()
+    last_wake = loop.time()
+    recheck: asyncio.TimerHandle | None = None
+
+    def wake_now() -> None:
+        nonlocal last_wake, recheck
+        if recheck is not None:
+            recheck.cancel()
+        last_wake, recheck = loop.time(), None
+        wake_semantic_dispatch()
+
     while True:
         await asyncio.sleep(0)
         try:
@@ -211,8 +228,15 @@ async def run_ingestion_pump(
         if facts is None:
             await wait_for_work()
         else:
-            # A retry may be acknowledging work committed before the prior
-            # pump could notify its dispatcher. The journal decides what runs.
-            wake_semantic_dispatch()
+            # A new actionable event wakes the dispatcher now, and so does a
+            # replay, which may be acknowledging work committed before the prior
+            # pump could notify it. Any other batch (the bot's own streaming
+            # edits, a sync with nothing in its timeline, a redelivered event)
+            # schedules the recheck. One left behind when the pump stops costs a
+            # spare wake at most, which a stopped dispatcher ignores.
+            if facts.semantic_event_new or not facts.receipt_new:
+                wake_now()
+            elif recheck is None:
+                recheck = loop.call_at(last_wake + _RECHECK_SECONDS, wake_now)
             if after_ack is not None:
                 after_ack()

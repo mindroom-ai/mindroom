@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.live_frames.frames import LiveDocs, live_delta, live_frame, new_publisher_id
+from mindroom.live_frames.frames import LiveDocs, fitted_tools, live_delta, live_frame, new_publisher_id
 
 _FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "live-frames-v1.json").read_text(encoding="utf-8"))
 
@@ -86,3 +86,72 @@ def test_live_frames_carry_compactions_in_snapshot_and_delta() -> None:
     finished = {**running, "status": "success", "after_tokens": 4_000}
     after = replace(before, compactions=(finished,))
     assert live_delta(before, after) == {"compactions": [finished]}
+
+
+def test_fitted_tools_cut_long_previews_and_leave_the_oldest_bare() -> None:
+    """Frames cut each preview to the cap, drop the oldest entries' previews, and mark only the entries they changed."""
+    short = {"type": "tool_call_completed", "tool_name": "a", "args_preview": "x", "result_preview": "ok"}
+    long = {"type": "tool_call_completed", "tool_name": "b", "args_preview": "y" * 1200, "truncated": True}
+    running = {"type": "tool_call_started", "tool_name": "c", "args_preview": "z" * 300, "progress": "step"}
+    tools = (short, long, running)
+
+    assert fitted_tools(tools, bare=0) == (
+        short,
+        {
+            "type": "tool_call_completed",
+            "tool_name": "b",
+            "args_preview": "y" * 199 + "…",
+            "truncated": True,
+            "clipped": True,
+        },
+        {
+            "type": "tool_call_started",
+            "tool_name": "c",
+            "args_preview": "z" * 199 + "…",
+            "progress": "step",
+            "clipped": True,
+        },
+    )
+    assert fitted_tools(tools, bare=2)[:2] == (
+        {"type": "tool_call_completed", "tool_name": "a", "clipped": True},
+        {"type": "tool_call_completed", "tool_name": "b", "truncated": True, "clipped": True},
+    )
+    # An entry without previews has nothing to lose.
+    bare = {"type": "tool_call_started", "tool_name": "d"}
+    assert fitted_tools((bare,), bare=1) == (bare,)
+
+
+def test_a_job_handle_result_keeps_its_handle_in_frames() -> None:
+    """Chat reads a background job's status from the result, so a cut or bare entry keeps the handle."""
+    handle = {"job_id": "j" * 64, "tool": "mindroom_dev", "status": "waiting", "summary": "s" * 300}
+    entry = {"type": "tool_call_started", "tool_name": "run_subagent", "result_preview": json.dumps(handle)}
+    minimal = {"job_id": "j" * 64, "tool": "mindroom_dev", "status": "waiting"}
+
+    cut, bare = fitted_tools((entry, entry), bare=1)
+
+    assert json.loads(cut["result_preview"]) == minimal
+    assert json.loads(bare["result_preview"]) == minimal
+    assert cut["clipped"] is True
+    short = {**entry, "result_preview": json.dumps({**minimal, "summary": None})}
+    assert fitted_tools((short,), bare=0) == (short,)
+    (short_bare,) = fitted_tools((short,), bare=1)
+    assert json.loads(short_bare["result_preview"]) == minimal
+
+
+def test_a_bare_entry_is_never_bigger_than_its_cut_form() -> None:
+    """A minimal job handle in another key order stays as it is when its entry goes bare, so frames only shrink."""
+    result = json.dumps({"job_id": "j1", "status": "waiting", "tool": "mindroom_dev"})
+    entry = {"type": "tool_call_completed", "tool_name": "run_subagent", "result_preview": result}
+    sizes = [
+        len(json.dumps(fitted_tools((entry, entry, entry), bare=bare), separators=(",", ":"))) for bare in range(4)
+    ]
+    assert sizes == sorted(sizes, reverse=True)
+    assert fitted_tools((entry,), bare=1) == (entry,)
+
+
+def test_a_bare_entry_compares_by_compact_size() -> None:
+    """Frames go out as compact JSON, so a bare form that saves bytes there is taken even when spaced JSON ties."""
+    result = json.dumps({"job_id": "j1", "tool": "sync", "status": "running", "label": None})
+    entry = {"type": "tool_call_completed", "tool_name": "read_status", "result_preview": result}
+    (bare,) = fitted_tools((entry,), bare=1)
+    assert json.loads(bare["result_preview"]) == {"job_id": "j1", "tool": "sync", "status": "running"}
