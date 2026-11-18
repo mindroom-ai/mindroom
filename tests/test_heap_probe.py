@@ -1,4 +1,4 @@
-"""Opt-in heap type probe behavior."""
+"""Heap freezes, refreezes with their page-in, and the opt-in heap type probe."""
 
 from __future__ import annotations
 
@@ -125,7 +125,8 @@ async def test_an_invalid_interval_fails_before_any_heap_task_exists(env: dict[s
     assert asyncio.all_tasks() == tasks_before
 
 
-def test_refreeze_collects_released_objects_before_freezing_the_survivors(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_refreeze_collects_released_objects_before_freezing_the_survivors(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replaced bots must be collectable again, and garbage must be gone before the survivors are frozen."""
     gc_calls: list[str] = []
     frozen = [12_000]
@@ -144,9 +145,10 @@ def test_refreeze_collects_released_objects_before_freezing_the_survivors(monkey
 
     fake_gc = SimpleNamespace(unfreeze=unfreeze, collect=collect, freeze=freeze, get_freeze_count=lambda: frozen[0])
     monkeypatch.setattr(heap_probe, "gc", fake_gc)
+    monkeypatch.setattr(heap_probe, "_read_swapped_memory_back", lambda: 512)
 
     with capture_logs() as logs:
-        _refreeze_runtime_heap(paged_in_kib=512, page_in_seconds=0.25)
+        await _refreeze_runtime_heap()
 
     assert gc_calls == ["unfreeze", "collect", "freeze"]
     [record] = [entry for entry in logs if entry["event"] == "runtime_heap_refrozen"]
@@ -154,7 +156,7 @@ def test_refreeze_collects_released_objects_before_freezing_the_survivors(monkey
     assert record["collected"] == 4_321
     assert record["collect_seconds"] >= 0
     assert record["paged_in_kib"] == 512
-    assert record["page_in_seconds"] == 0.25
+    assert record["page_in_seconds"] >= 0
 
 
 @pytest.mark.asyncio
@@ -234,18 +236,19 @@ def test_page_in_advises_each_swapped_private_mapping_once(
 ) -> None:
     """Readable private mappings with pages in swap are faulted back in; shared memory and guards are not.
 
-    Tab-separated fields (Linux 5.4) and mapped paths with any bytes are skipped, and swap in a mapping
-    whose advice the kernel rejects is not counted.
+    Tab-separated fields (Linux 5.4) are ignored, a mapped path's bytes never start a new line, and swap in
+    a mapping whose advice the kernel rejects is not counted.
     """
     smaps = tmp_path / "smaps"
     smaps.write_bytes(_SMAPS)
     calls: list[tuple[int, int, int]] = []
+
+    def advise(address: int, length: int, advice: int) -> int:
+        calls.append((address, length, advice))
+        return -1 if address == 0x7F0000600000 else 0
+
     monkeypatch.setattr(heap_probe, "_SMAPS_PATH", smaps)
-    monkeypatch.setattr(
-        heap_probe,
-        "_madvise",
-        lambda: lambda *args: calls.append(args) or (-1 if args[0] == 0x7F0000600000 else 0),
-    )
+    monkeypatch.setattr(heap_probe, "_madvise", lambda: advise)
 
     assert _read_swapped_memory_back() == 124
     assert calls == [

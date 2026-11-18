@@ -251,8 +251,8 @@ async def _run_heap_type_probe(
         _log_heap_type_probe()
 
 
-def _refreeze_runtime_heap(*, paged_in_kib: int, page_in_seconds: float) -> None:
-    """Collect what the frozen heap released, then freeze the survivors again.
+async def _refreeze_runtime_heap() -> None:
+    """Read swapped-out memory back in off the loop, then collect what the frozen heap released and refreeze.
 
     Unfreezing first makes objects frozen earlier collectable, such as bots a
     config reload replaced; collecting before freezing keeps garbage out of
@@ -260,8 +260,11 @@ def _refreeze_runtime_heap(*, paged_in_kib: int, page_in_seconds: float) -> None
     such as a reply in flight, wait for the next refreeze together with
     everything they reference. The collection walks the whole heap once,
     including the import-time heap frozen at startup, so it pauses the loop a
-    little longer than one full collection did before.
+    little longer than a full collection of the unfrozen heap.
     """
+    started = time.perf_counter()
+    paged_in_kib = await asyncio.to_thread(_read_swapped_memory_back)
+    page_in_seconds = time.perf_counter() - started
     started = time.perf_counter()
     gc.unfreeze()
     collected = gc.collect()
@@ -277,13 +280,6 @@ def _refreeze_runtime_heap(*, paged_in_kib: int, page_in_seconds: float) -> None
     )
 
 
-async def _page_in_and_refreeze() -> None:
-    """Read swapped-out memory back in off the loop, then refreeze on it."""
-    started = time.perf_counter()
-    paged_in_kib = await asyncio.to_thread(_read_swapped_memory_back)
-    _refreeze_runtime_heap(paged_in_kib=paged_in_kib, page_in_seconds=time.perf_counter() - started)
-
-
 async def _run_heap_refreeze(
     interval_seconds: float,
     *,
@@ -292,11 +288,11 @@ async def _run_heap_refreeze(
 ) -> None:
     """Refreeze once the runtime is ready, then after each interval until cancelled."""
     await ready()
-    await _page_in_and_refreeze()
+    await _refreeze_runtime_heap()
     _raise_full_collection_threshold()
     while True:
         await sleep(interval_seconds)
-        await _page_in_and_refreeze()
+        await _refreeze_runtime_heap()
 
 
 def _raise_full_collection_threshold() -> None:
