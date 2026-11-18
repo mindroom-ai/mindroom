@@ -26,7 +26,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from glob import has_magic
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Optional, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation, TypeAdapter, ValidationError
 
@@ -62,6 +62,8 @@ _MAX_HINT_CHARS = 200
 _MAX_LISTED_RANGES = 10
 _EDITS_SHAPE = 'Pass edits=[{"old_text": "...", "new_text": "..."}].'
 _NO_CHANGES = "\nNo changes written."
+# The default of edit_file's edits, so a call that leaves them out differs from one that sends null.
+_OMITTED: Any = cast("Any", object())
 
 
 @dataclass
@@ -301,7 +303,7 @@ def _find_all_matches(content: str, old_text: str) -> list[_MatchResult]:
             break
         norm_end = idx + len(norm_old)
         orig_start = _norm_to_orig_offset(idx, norm_offsets, orig_offsets, line_maps, len(content))
-        orig_end = _norm_to_orig_offset(norm_end, norm_offsets, orig_offsets, line_maps, len(content))
+        orig_end = _norm_to_orig_offset(norm_end, norm_offsets, orig_offsets, line_maps, len(content), end=True)
         matches.append(
             _MatchResult(
                 start=orig_start,
@@ -328,8 +330,10 @@ def _norm_to_orig_offset(
     orig_offsets: list[int],
     line_maps: list[_NormalizedLineMap],
     content_len: int,
+    *,
+    end: bool = False,
 ) -> int:
-    """Map a character offset in normalized text to the original text.
+    """Map a character offset in normalized text to the original text; an ``end`` at a line boundary stays there.
 
     Uses line boundaries and per-line maps that account for NFC normalization,
     quote/dash translation, BOM removal, and trailing-whitespace stripping.
@@ -341,8 +345,8 @@ def _norm_to_orig_offset(
     line_idx = max(0, min(line_idx, len(line_maps) - 1))
 
     char_in_norm_line = norm_offset - norm_offsets[line_idx]
-    if char_in_norm_line <= 0:
-        # A line boundary maps to itself, never past the stripped whitespace of the line it starts.
+    if end and char_in_norm_line <= 0:
+        # An exclusive end at a line boundary must not take the stripped whitespace of the line it starts.
         return orig_offsets[line_idx]
     line_map = line_maps[line_idx]
     char_in_norm_line = max(0, min(char_in_norm_line, line_map.norm_len))
@@ -375,15 +379,19 @@ _EDITS = TypeAdapter(list[_Edit])
 
 @contextmanager
 def _directory_lock(resolved: Path) -> Iterator[None]:
-    """Hold an exclusive ``flock`` on the directory of ``resolved`` (its nearest existing ancestor).
+    """Hold an exclusive ``flock`` on the nearest existing directory of ``resolved``, which threads and processes share.
 
-    Each call opens its own descriptor, so calls in other threads and in other processes, such as each worker
-    request's own, wait alike; the lock survives the file's atomic replacement and leaves no lock file behind.
+    Each call opens its own descriptor; the lock survives the file's atomic replacement and leaves no lock file.
     """
     directory = resolved.parent
     while not directory.is_dir():
         directory = directory.parent
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    except PermissionError:
+        # A directory the caller may enter but not read holds no lock; such a call runs unlocked, as before.
+        yield
+        return
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
@@ -407,7 +415,7 @@ def _line_ranges(text: str, spans: list[tuple[int, int]]) -> str:
         previous = merged[-1][1] if merged else None
         if first is not None and previous is not None and first <= previous + 1:
             merged[-1][1] = max(previous, last or first)
-        else:
+        elif first is not None or merged[-1:] != [[None, None]]:
             merged.append([first, last])
     words = [
         "end of file" if first is None else str(first) if first == last else f"{first}-{last}"
@@ -435,13 +443,13 @@ def _edits_argument(edits: object, legacy: dict[str, object]) -> list[_Edit] | s
     """Return the edits a call asked for, a call in the old flat shape as one edit, or why not."""
     if legacy:
         # Calls written for the old flat shape send one old_text and new_text, which the schema no longer shows.
-        if edits is not None or set(legacy) != {"old_text", "new_text"}:
+        if edits is not _OMITTED or set(legacy) != {"old_text", "new_text"}:
             return f"edit_file takes path and edits, not {', '.join(sorted(legacy))}. {_EDITS_SHAPE}"
         edits = [legacy]
     if isinstance(edits, str):
         with suppress(ValueError):
             edits = json.loads(edits)
-    if not edits:
+    if not edits or edits is _OMITTED:
         return f"edits is empty. {_EDITS_SHAPE}"
     try:
         return _EDITS.validate_python(edits)
@@ -451,26 +459,15 @@ def _edits_argument(edits: object, legacy: dict[str, object]) -> list[_Edit] | s
         return f"edits{where}: {error['msg']}. {_EDITS_SHAPE}"
 
 
-def _splits_crlf(content: str, offset: int) -> bool:
-    return 0 < offset < len(content) and content[offset - 1 : offset + 1] == "\r\n"
-
-
 def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult, int]] | str:
-    """Match every edit against ``content`` and return its spans in file order, each with its edit's index, or why not.
-
-    A match that would start or end between the CR and LF of a line ending is not taken.
-    """
+    """Match every edit against ``content`` and return its spans in file order, each with its edit's index, or why not."""
     many = len(edits) > 1
     spans: list[tuple[_MatchResult, int]] = []
     for index, edit in enumerate(edits):
         who = f"edits[{index}]" if many else "old_text"
         if not edit.old_text:
             return f"{f'edits[{index}].' if many else ''}old_text is empty."
-        matches = [
-            match
-            for match in _find_all_matches(content, edit.old_text)
-            if not _splits_crlf(content, match.start) and not _splits_crlf(content, match.end)
-        ]
+        matches = _find_all_matches(content, edit.old_text)
         if not matches:
             return f"{who} not found in the file.{_closest_line_hint(content, edit.old_text)}"
         if len(matches) > 1 and not edit.replace_all:
@@ -491,24 +488,19 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
 def _apply_edits(content: str, edits: list[_Edit]) -> tuple[str, int, str] | str:
     """Apply every edit to ``content`` as it is, returning the new content, its replacements and their lines, or why not.
 
-    A byte order mark is kept out of matching and always kept. A file whose every line ends in CRLF is edited with
-    LF endings, which old_text and new_text may use either way, and gets its CRLF back; a file with mixed endings is
-    edited as it is.
+    A byte order mark, in the file or copied into an edit, is kept out of matching, and the file's is kept. A file
+    whose every line ends in CRLF is edited with LF endings, which the edits may use either way, and gets its CRLF
+    back, unless an edit holds a lone CR; any other file is edited as it is.
     """
     bom = "\ufeff" if content.startswith("\ufeff") else ""
     text = content.removeprefix(bom)
-    crlf = text.count("\r\n") > 0 and text.count("\r") == text.count("\n") == text.count("\r\n")
-    if crlf:
-        text = text.replace("\r\n", "\n")
-        edits = [
-            edit.model_copy(
-                update={
-                    "old_text": edit.old_text.replace("\r\n", "\n"),
-                    "new_text": edit.new_text.replace("\r\n", "\n"),
-                },
-            )
-            for edit in edits
-        ]
+    pieces = [text, *(edit.old_text for edit in edits), *(edit.new_text for edit in edits)]
+    crlf = text.count("\n") == text.count("\r\n") > 0 and all(p.count("\r") == p.count("\r\n") for p in pieces)
+    text = text.replace("\r\n", "\n") if crlf else text
+    for edit in edits:
+        for field in ("old_text", "new_text"):
+            value = getattr(edit, field).removeprefix("\ufeff")
+            setattr(edit, field, value.replace("\r\n", "\n") if crlf else value)
     spans = _matched_spans(text, edits)
     if isinstance(spans, str):
         return spans
@@ -788,7 +780,7 @@ class CodingTools(Toolkit):
     def edit_file(
         self,
         path: str,
-        edits: Optional[_Edits] = None,  # noqa: UP045 - Optional, unlike `| None`, keeps null out of the schema.
+        edits: Optional[_Edits] = _OMITTED,  # noqa: UP045 - Optional, unlike `| None`, keeps null out of the schema.
         **legacy: object,
     ) -> str:
         """Replace exact text in one file. Read it first.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import multiprocessing
+import os
 import re
 import subprocess
 import threading
@@ -398,12 +399,28 @@ class TestEditFile:
         assert result == "Applied 1 edit (2 replacements) to mixed.txt: lines 1, 3."
         assert (tmp_base / "mixed.txt").read_bytes() == b"c\r\nb\nc\r\n"
 
-    def test_mixed_endings_match_never_splits_a_pair(self, tools: CodingTools, tmp_base: Path) -> None:
-        """In a mixed file, a match that would start between CR and LF is not taken."""
-        (tmp_base / "mixed.txt").write_bytes(b"x\r\ny\nz\n")
-        result = tools.edit_file("mixed.txt", _one("\ny", "\nY"))
-        assert result.startswith("Error: old_text not found in the file.")
-        assert (tmp_base / "mixed.txt").read_bytes() == b"x\r\ny\nz\n"
+    def test_mixed_endings_are_matched_as_they_are(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A mixed file is matched byte for byte, as origin/main matched it, so both LF pairs count."""
+        (tmp_base / "mixed.txt").write_bytes(b"A\r\n\n\nB\n\nC")
+        result = tools.edit_file("mixed.txt", _one("\n\n", "!"))
+        assert result.startswith("Error: old_text matches 2 places")
+        assert (tmp_base / "mixed.txt").read_bytes() == b"A\r\n\n\nB\n\nC"
+
+    def test_lone_cr_in_an_edit_edits_a_crlf_file_as_it_is(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An edit carrying a lone CR is applied byte for byte, so no CR is added beside it."""
+        (tmp_base / "win.txt").write_bytes(b"a\r\nb\r\n")
+        assert tools.edit_file("win.txt", _one("a", "z\r")) == "Applied 1 edit to win.txt: line 1."
+        assert (tmp_base / "win.txt").read_bytes() == b"z\r\r\nb\r\n"
+        (tmp_base / "win.txt").write_bytes(b"a\r\nb\r\n")
+        assert tools.edit_file("win.txt", _one("a\r", "c")) == "Applied 1 edit to win.txt: line 1."
+        assert (tmp_base / "win.txt").read_bytes() == b"c\nb\r\n"
+
+    def test_identity_edit_copying_the_bom_is_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An old_text and new_text that both copy the byte order mark change nothing, and the mark stays single."""
+        (tmp_base / "bom.txt").write_bytes("\ufeffa\n".encode())
+        result = tools.edit_file("bom.txt", _one("\ufeffa", "\ufeffa"))
+        assert result.startswith("Error: the edits leave the file identical")
+        assert (tmp_base / "bom.txt").read_bytes() == b"\xef\xbb\xbfa\n"
 
     def test_fuzzy_match_keeps_the_bom(self, tools: CodingTools, tmp_base: Path) -> None:
         """A fuzzy match at the start of the file leaves the byte order mark in place."""
@@ -423,6 +440,12 @@ class TestEditFile:
         (tmp_base / "ws.txt").write_text("foo   \n   \nZ")
         tools.edit_file("ws.txt", _one("foo\n", "X\n"))
         assert (tmp_base / "ws.txt").read_bytes() == b"X\n   \nZ"
+
+    def test_fuzzy_start_keeps_a_blank_line_s_whitespace(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A fuzzy match starting at the newline after a whitespace-only line leaves that whitespace, as on main."""
+        (tmp_base / "ws.txt").write_text("foo\n   \n\u201cZ\u201d\n")
+        tools.edit_file("ws.txt", _one('\n"Z"', "\nW"))
+        assert (tmp_base / "ws.txt").read_bytes() == b"foo\n   \nW\n"
 
     def test_many_replacements_merge_into_one_range(self, tools: CodingTools, tmp_base: Path) -> None:
         """Adjacent replaced lines merge into one range, and the result counts the replacements."""
@@ -448,6 +471,9 @@ class TestEditFile:
         assert tools.edit_file("del.txt", _one("bar\n", "")) == "Applied 1 edit to del.txt: line 2."
         assert tools.edit_file("del.txt", _one("baz\n", "")) == "Applied 1 edit to del.txt: end of file."
         assert (tmp_base / "del.txt").read_text() == "foo\n"
+        (tmp_base / "eof.txt").write_text("z\naabb")
+        two = tools.edit_file("eof.txt", [{"old_text": "aa", "new_text": ""}, {"old_text": "bb", "new_text": ""}])
+        assert two == "Applied 2 edits to eof.txt: end of file."
 
     def test_lines_follow_read_file(self, tools: CodingTools, tmp_base: Path) -> None:
         """Lines are numbered as read_file numbers them, so a lone CR ends a line too."""
@@ -478,6 +504,14 @@ class TestEditFile:
         result = call(path="hello.py", edits=_one("print('hello')", "x"), old_text="print('world')", new_text="y")
         assert result.startswith("Error: edit_file takes path and edits, not new_text, old_text. Pass edits=[")
         assert result.endswith("No changes written.")
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
+
+    def test_null_edits_with_flat_fields_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Only a call that leaves edits out uses the flat fields; an explicit null with them is refused."""
+        result = validated_entrypoint(tools.edit_file)(
+            path="hello.py", edits=None, old_text="print('hello')", new_text="x",
+        )
+        assert result.startswith("Error: edit_file takes path and edits, not new_text, old_text.")
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
     def test_unknown_top_level_argument_gets_the_shape(self, tools: CodingTools) -> None:
@@ -641,6 +675,22 @@ class TestEditFileConcurrency:
 
         assert sorted(result.split()[0] for result in results) == ["Applied", "Wrote"], results
         assert target.read_text() == "new\n"
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+    def test_unreadable_directory_is_edited_without_the_lock(self, tmp_path: Path) -> None:
+        """A directory the caller may enter but not list still takes edits and writes, as before the lock."""
+        base_dir, locked = tmp_path / "base", tmp_path / "locked"
+        base_dir.mkdir()
+        locked.mkdir()
+        (locked / "f.txt").write_text("old\n")
+        tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted")
+        locked.chmod(0o300)
+        try:
+            assert tools.edit_file(str(locked / "f.txt"), _one("old", "new")).startswith("Applied 1 edit")
+            assert tools.write_file(str(locked / "f.txt"), "newer\n").startswith("Wrote")
+        finally:
+            locked.chmod(0o700)
+        assert (locked / "f.txt").read_text() == "newer\n"
 
     def test_edits_in_different_directories_run_in_parallel(
         self,
