@@ -231,7 +231,7 @@ class StewardDuties:
             if leave is not None:
                 await self._emit_member_left(leave)
                 return
-        if not registry.has_hooks(EVENT_ROOM_MEMBER_JOINED) and not self.deps.personal_rooms.observes_onboarding_joins:
+        if not (registry.has_hooks(EVENT_ROOM_MEMBER_JOINED) or self.deps.personal_rooms.onboards_from(room.room_id)):
             return
         await emit_room_member_join_at_least_once(
             room,

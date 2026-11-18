@@ -285,8 +285,9 @@ async def test_onboarding_join_observed_by_room_steward(coordination: Coordinati
     lifecycle.agent_name = "helper"
     lifecycle.is_steward = lambda room_id: room_id == "!other:localhost"
     assert not lifecycle.observes_onboarding_joins
-    await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
-    coordination.owner.ensure.assert_not_awaited()
+    # Every bot in a configured onboarding room enters its joins into their claim, whoever stewards it.
+    assert lifecycle.onboards_from("!lobby:localhost")
+    assert not lifecycle.onboards_from("!other:localhost")
     lifecycle.is_steward = lambda room_id: room_id == "!lobby:localhost"
     assert lifecycle.observes_onboarding_joins
     join = RoomMemberJoin("!lobby:localhost", "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
@@ -314,7 +315,7 @@ async def test_agent_steward_onboards_through_the_rooms_poster_and_the_owner_acc
 
 @pytest.mark.asyncio
 async def test_reconciliation_leaves_an_onboarding_room_to_its_own_steward(coordination: Coordination) -> None:
-    """A pass neither reads nor settles the candidates of an onboarding room that another bot stewards."""
+    """A pass neither reads nor settles another bot's onboarding room, except for a trigger this bot took there."""
     lifecycle = coordination.lifecycle
     config = lifecycle.runtime.config
     config.rooms["other"] = config.rooms["lobby"].model_copy()
@@ -324,18 +325,44 @@ async def test_reconciliation_leaves_an_onboarding_room_to_its_own_steward(coord
     state.add_room("other", "!other:localhost", "#other:localhost", "Other")
     save_matrix_state(state, lifecycle.runtime_paths)
     lifecycle.is_steward = lambda room_id: room_id == "!lobby:localhost"
-    lifecycle._retry_candidates[("@bob:localhost", "!other:localhost")] = False
+    write_personal_room(
+        personal_room_record_path(lifecycle.runtime_paths, "helper", "@bob:localhost"),
+        PersonalRoomRecord(
+            user_id="@bob:localhost",
+            alias="#personal_bob:localhost",
+            source_room_id="!other:localhost",
+        ),
+    )
+    lifecycle._retry_candidates[("@carol:localhost", "!other:localhost")] = False
 
     await lifecycle._reconcile()
 
     assert call("!other:localhost") not in lifecycle.runtime.client.joined_members.await_args_list
-    assert lifecycle._completed_candidates == {("@alice:localhost", "!lobby:localhost")}
+    assert lifecycle._completed_candidates == {
+        ("@alice:localhost", "!lobby:localhost"),
+        ("@carol:localhost", "!other:localhost"),
+    }
+    assert coordination.owner.ensure.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_claimed_baseline_join_onboards_and_retries_without_stewardship(coordination: Coordination) -> None:
+    """The bot that holds a join's claim onboards it after losing the room, and its own pass retries a failure."""
+    lifecycle = coordination.lifecycle
+    lifecycle.is_steward = lambda _room_id: False
+    coordination.owner.ensure.side_effect = [RuntimeError("Personal-room invite failed"), None]
+
+    await lifecycle.baseline_join(_ALICE_JOIN)
     coordination.owner.ensure.assert_awaited_once()
+    await lifecycle._reconcile()
+
+    assert coordination.owner.ensure.await_count == 2
+    assert lifecycle._reconciled
 
 
 @pytest.mark.asyncio
 async def test_non_steward_never_routes_onboarding(coordination: Coordination) -> None:
-    """Only the onboarding room's steward selects and invokes the target service."""
+    """A bot that stewards no onboarding room and took no trigger selects and invokes no target service."""
     lifecycle = coordination.lifecycle
     lifecycle.is_steward = lambda _room_id: False
     lifecycle.runtime.config.personal_rooms.backfill = True
@@ -345,7 +372,7 @@ async def test_non_steward_never_routes_onboarding(coordination: Coordination) -
         command(),
         "@alice:localhost",
     )
-    await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
+    await lifecycle.member_event(LOBBY, lobby_rejoin())
     await lifecycle._reconcile()
     coordination.lookup.assert_not_called()
     coordination.owner.ensure.assert_not_awaited()

@@ -106,7 +106,7 @@ class PersonalRoomLifecycle:
     config_reload: ConfigReloadLifecycle
     # Tells every bot that a membership event (room_id, event_id) changed a room, which may unblock a roster.
     report_membership_change: Callable[[str, str], None]
-    # Whether this bot is a room's steward now; an onboarding room's steward observes its joins.
+    # Whether this bot is a room's steward now; an onboarding room's steward takes its commands and known rejoins.
     is_steward: Callable[[str], bool]
     # The client that posts in a room for no agent; a retry names its first sender and gets that account or none.
     poster_client: Callable[[str, tuple[str | None, str] | None], nio.AsyncClient | None]
@@ -137,11 +137,16 @@ class PersonalRoomLifecycle:
 
     @property
     def observes_onboarding_joins(self) -> bool:
-        """Whether this bot stewards an onboarding room, whose baseline joins need durable admission for this feature."""
+        """Whether this bot stewards an onboarding room, whose recorded intent and backfill its passes settle."""
         settings = self.runtime.config.personal_rooms
         return settings is not None and any(
             self.is_steward(room_id) for room_id in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
         )
+
+    def onboards_from(self, room_id: str) -> bool:
+        """Whether the room is a configured onboarding room, whose joins every bot there enters into their claim."""
+        settings = self.runtime.config.personal_rooms
+        return settings is not None and room_id in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
 
     def config_changed(self) -> None:
         """Revisit existing records and optional backfill after a configuration reload."""
@@ -205,7 +210,7 @@ class PersonalRoomLifecycle:
         """Start at most one maintenance pass without delaying durable sync admission."""
         if (
             self._reconciled
-            or not self.observes_onboarding_joins
+            or not (self.observes_onboarding_joins or self._retry_candidates)
             or self._reconciliation_task is not None
             or monotonic() < self._next_reconciliation_at
         ):
@@ -255,7 +260,7 @@ class PersonalRoomLifecycle:
         *,
         reinvite_departed_owner: bool = False,
     ) -> None:
-        """Forward a trusted observation by the onboarding room's steward; unavailable owners leave it retryable.
+        """Forward a trusted observation of an onboarding room, which each caller gates; unavailable owners leave it retryable.
 
         When personal_rooms.agent names a template, the requester's own agent
         serves the room: a missing one is provisioned only while the requester
@@ -268,7 +273,6 @@ class PersonalRoomLifecycle:
         if (
             settings is None
             or source_room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
-            or not self.is_steward(source_room_id)
             or not is_human_requester_id(user_id, self.runtime.config, self.runtime_paths)
         ):
             return
@@ -478,7 +482,7 @@ class PersonalRoomLifecycle:
             )
 
     async def baseline_join(self, join: RoomMemberJoin) -> None:
-        """Onboard unknown prior membership only after the existing durable baseline gate."""
+        """Onboard unknown prior membership after the durable baseline gate, as the join claim's holder, steward or not."""
         if join.prev_membership is None:
             await self._onboard_live(join.user_id, join.room_id)
 
@@ -552,7 +556,7 @@ class PersonalRoomLifecycle:
         """
         revision = self._config_revision
         settings = self.runtime.config.personal_rooms
-        if self._reconciled or not self.observes_onboarding_joins or settings is None:
+        if self._reconciled or not (self.observes_onboarding_joins or self._retry_candidates) or settings is None:
             return
         if not self._reconciliation_ready(settings):
             return
@@ -561,9 +565,9 @@ class PersonalRoomLifecycle:
             backfill, backfill_failed = await self._backfill_candidates(settings.onboarding_rooms)
             candidates.update(backfill)
             failed |= backfill_failed
-        candidates.update(self._retry_candidates)
-        # An onboarding room that another bot stewards is that bot's to read and settle.
+        # An onboarding room that another bot stewards is that bot's to read and settle, but not a trigger this bot took.
         candidates = {candidate for candidate in candidates if self.is_steward(candidate[1])}
+        candidates.update(self._retry_candidates)
         if not failed:
             # Forget what requesters whose intent is gone last reported.
             self._roster_mismatches = {key: seen for key, seen in self._roster_mismatches.items() if key in candidates}

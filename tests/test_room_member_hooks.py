@@ -6,7 +6,7 @@ import asyncio
 import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -14,6 +14,7 @@ import pytest
 import mindroom.hooks as hook_api
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.personal_rooms import PersonalRoomsConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
@@ -26,6 +27,7 @@ from mindroom.hooks import (
     RoomMemberLeftContext,
     hook,
 )
+from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.users import AgentMatrixUser
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -677,3 +679,27 @@ async def test_rejoin_after_a_handover_does_not_run_the_join_hook_again(tmp_path
     await _dispatch_member(other, room, _room_member_event(event_id="$join2"))
 
     assert seen == [_STEWARD]
+
+
+@pytest.mark.asyncio
+async def test_onboarding_join_runs_on_the_claims_saved_owner_after_a_handover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lobby join first dispatched by a bystander is onboarded once, by the steward of then, with no hook registered."""
+    steward = _steward_bot(tmp_path)
+    other = _other_bot(steward)
+    steward.config.personal_rooms = PersonalRoomsConfig(agent="helper", onboarding_rooms=["!lobby:localhost"])
+    ensure = AsyncMock(return_value=None)
+    monkeypatch.setattr(PersonalRoomService, "ensure", ensure)
+    room = cast("nio.MatrixRoom", _room())
+    join = _room_member_event(event_id="$join", prev_membership=None)
+
+    await _dispatch_member(other, room, join)
+    ensure.assert_not_awaited()
+    steward.orchestrator.steward = other.agent_name
+    await _dispatch_member(steward, room, join)
+    ensure.assert_awaited_once()
+    await _dispatch_member(other, room, join)
+
+    assert [attempt.args for attempt in ensure.await_args_list] == [("@alice:localhost", room.room_id, steward.client)]
