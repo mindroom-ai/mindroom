@@ -289,7 +289,7 @@ Edits must not overlap, and when one fails none is written: the error names the 
 On success it returns the lines each edit changed in the new file, numbered as `read_file()` numbers them, not a diff.
 In a file whose lines all end in CRLF, `old_text` and `new_text` may use LF or CRLF and the file keeps CRLF, unless the file or an edit holds a lone CR; then, as with mixed endings, the file is matched and edited byte for byte.
 A byte order mark stays in the file once, also when an edit that starts at it copies it into `old_text` or `new_text`; any other U+FEFF is ordinary text.
-In the primary, `edit_file()` and `write_file()` calls on the same resolved path run one after another, so no edit is lost to another call's write.
+In the primary, `edit_file()` and `write_file()` calls on the same resolved path run one after another, so they never interleave; a later `write_file()` still replaces the whole file, an earlier edit included.
 In a worker, calls serialize only when they lock the same stable, readable directory; one that waits too long for that lock returns a busy error without changing the file, and a directory the agent may enter but not read cannot hold the lock, so calls there run unlocked.
 Primary and worker calls do not serialize with each other, with another primary, or with other writers such as shell commands.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.

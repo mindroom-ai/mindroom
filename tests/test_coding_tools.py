@@ -667,11 +667,17 @@ def _write_while_holding(base_dir: str, held: Any, release: Any) -> None:  # noq
 
 
 def _reap(processes: list[Any]) -> None:
+    """Join every child that started, terminating and then killing one that does not exit."""
     for process in processes:
+        if process.pid is None:
+            continue
         process.join(timeout=10)
         if process.is_alive():
             process.terminate()
             process.join(timeout=10)
+        if process.is_alive():
+            process.kill()
+            process.join()
 
 
 def _no_directory_lock(resolved: Path) -> None:
@@ -721,6 +727,12 @@ class TestEditFileConcurrency:
         runner.start()
         try:
             assert held.wait(timeout=60)
+            probe = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(probe)
             assert tools.edit_file("b.txt", _one("old", "edited")) == "Applied 1 edit to b.txt: line 1."
             assert tools.write_file("b.txt", "written\n").startswith("Wrote")
             assert (tmp_path / "b.txt").read_text() == "written\n"
@@ -743,31 +755,50 @@ class TestEditFileConcurrency:
         target = base_dir / "race.txt" if where == "inside" else tmp_path / "race.txt"
         target.write_text("AAAA\nBBBB\n")
         file_access = "workspace" if where == "inside" else "unrestricted"
-        barrier = threading.Barrier(2)
-        read = coding_module.read_resolved_file
+        first_read, contended = threading.Event(), threading.Event()
+        free_mutexes: list[Path] = []
+        read, lock = coding_module.read_resolved_file, coding_module._primary_file_lock
 
         def read_then_wait(base: Path, resolved: Path) -> bytes:
             content = read(base, resolved)
-            with contextlib.suppress(threading.BrokenBarrierError):
-                barrier.wait(timeout=0.5)
+            if not first_read.is_set():
+                first_read.set()
+                assert contended.wait(timeout=30), "the second edit never contended for the lock"
             return content
 
+        def probed_lock(resolved: Path) -> AbstractContextManager[None]:
+            if first_read.is_set() and not contended.is_set():
+                # The second edit: the shared mutex of this path must be held by the paused first edit.
+                mutex = coding_module._PRIMARY_LOCKS.get(resolved)
+                if mutex is None or mutex.acquire(blocking=False):
+                    free_mutexes.append(resolved)
+                    if mutex is not None:
+                        mutex.release()
+                contended.set()
+            return lock(resolved)
+
+        def second_edit() -> None:
+            assert first_read.wait(timeout=30)
+            results.append(
+                CodingTools(base_dir=str(base_dir), file_access=file_access).edit_file(str(target), _one("BBBB", "b")),
+            )
+
         monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
+        monkeypatch.setattr(coding_module, "_primary_file_lock", probed_lock)
         monkeypatch.setattr(coding_module, "_directory_lock", _no_directory_lock)
         results: list[str] = []
+        first = CodingTools(base_dir=str(base_dir), file_access=file_access)
         threads = [
-            threading.Thread(
-                target=lambda e=edit: results.append(
-                    CodingTools(base_dir=str(base_dir), file_access=file_access).edit_file(str(target), _one(*e)),
-                ),
-            )
-            for edit in (("AAAA", "A" * 50), ("BBBB", "b"))
+            threading.Thread(target=lambda: results.append(first.edit_file(str(target), _one("AAAA", "A" * 50)))),
+            threading.Thread(target=second_edit),
         ]
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(timeout=30)
+            thread.join(timeout=60)
 
+        assert contended.is_set()
+        assert not free_mutexes, "the second edit found the path's mutex free while the first edit was paused"
         assert all(result.startswith("Applied") for result in results), results
         assert target.read_text() == "A" * 50 + "\nb\n"
 
@@ -797,6 +828,10 @@ class TestEditFileConcurrency:
 
         assert all(report.startswith("Applied") for report in reports), reports
         assert target.read_text() == "A" * 50 + "\nb\n"
+
+    def test_reap_skips_a_child_that_never_started(self) -> None:
+        """Cleanup after a failed start joins only started children, so the start error is the one reported."""
+        _reap([multiprocessing.get_context("spawn").Process(target=print)])
 
     def test_runner_lock_wait_is_bounded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A runner request that cannot get the directory lock fails with a busy error and changes nothing."""
