@@ -13,7 +13,7 @@ import asyncio
 import json
 import math
 import re
-from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, override
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypeIs, override
 from urllib.parse import unquote
 
 import httpx
@@ -95,6 +95,10 @@ _RESOURCE = re.compile(r"[a-z][a-z_-]{0,31}")
 _PATH = re.compile(rf"(/graphql|/repos(?:/{_PCHAR}+){{2,}})(?:\?(?:{_PCHAR}|[/?])*)?")
 # The user's own personal access token, beside their GitHub App connection; never the `github` tool's shared token.
 _TOKEN_SERVICE = "github_user_token"  # noqa: S105
+# 1 to 512 visible ASCII characters, checked on every token sent to save and every saved token read.
+_TOKEN_SHAPE = re.compile(r"[!-~]{1,512}")
+# Letters, digits, and hyphens, plus the `_shortcode` an enterprise managed user's login ends with.
+_LOGIN_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}")
 _TOKEN_CHECK_TIMEOUT_SECONDS = 10.0
 # GitHub's `/user` answer is a few kilobytes; a larger one is not the answer the check expects.
 _MAX_TOKEN_CHECK_BYTES = 64 * 1024
@@ -122,7 +126,7 @@ class GitHubToken(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    token: str = Field(min_length=1, max_length=512, pattern=r"^[!-~]+$")
+    token: str = Field(pattern=rf"^{_TOKEN_SHAPE.pattern}$")
 
 
 def _path_kind(path: str) -> str | None:
@@ -223,16 +227,21 @@ def _token_store(context: OAuthCredentialContext) -> CredentialsManager:
 def _read_token(context: OAuthCredentialContext) -> dict[str, str] | None:
     """Return the user's saved `{token, login}`, None when they saved none; blocks on the filesystem.
 
-    Raises ``CredentialsUnreadableError`` for a saved document that cannot be read or holds no token and login.
+    Raises ``CredentialsUnreadableError`` for a saved document that cannot be read or holds no token and login of
+    the shapes a save checks.
     """
     document = _token_store(context).read_saved_credentials(_TOKEN_SERVICE)
     if document is None:
         return None
     token, login = document.get("token"), document.get("login")
-    if isinstance(token, str) and token and isinstance(login, str):
+    if _shaped(token, _TOKEN_SHAPE) and _shaped(login, _LOGIN_SHAPE):
         return {"token": token, "login": login}
     msg = f"Stored credentials for {_TOKEN_SERVICE} hold no token and login"
     raise CredentialsUnreadableError(msg)
+
+
+def _shaped(value: object, shape: re.Pattern[str]) -> TypeIs[str]:
+    return isinstance(value, str) and shape.fullmatch(value) is not None
 
 
 async def _stored_token(context: OAuthCredentialContext | None) -> dict[str, str] | None:
@@ -301,7 +310,7 @@ async def _token_login(token: str) -> str | JSONResponse:
         logger.info("github_token_rejected", status=response.status_code)
         return _error(400, "github_token_rejected")
     login = body.get("login") if isinstance(body, dict) else None
-    if not isinstance(login, str) or not login:
+    if not _shaped(login, _LOGIN_SHAPE):
         logger.warning("github_token_check_failed", status=response.status_code)
         return _error(502, "github_unreachable")
     return login

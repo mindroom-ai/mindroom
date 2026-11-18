@@ -1237,6 +1237,7 @@ def test_a_global_or_shared_token_document_is_never_the_users(
         httpx.Response(301, headers={"location": "https://evil.example/user"}),
         httpx.Response(200, json={"id": 1}),
         httpx.Response(200, text="not json"),
+        httpx.Response(200, json={"login": "not a login"}),
     ],
 )
 def test_a_token_check_without_a_login_is_a_bad_gateway(
@@ -1421,8 +1422,30 @@ def damage_token(paths: RuntimePaths, user_id: str, payload: bytes) -> None:
 
 DAMAGED_TOKENS = pytest.mark.parametrize(
     "payload",
-    [b"not json", b"MINDROOM-CREDENTIALS-V1\nsealed", b'["ghp_listed"]', b'{"token": 5, "login": "x"}', b"{}"],
-    ids=["broken", "encrypted-without-key", "not-an-object", "token-not-text", "empty-object"],
+    [
+        b"not json",
+        b"MINDROOM-CREDENTIALS-V1\nsealed",
+        b'["ghp_listed"]',
+        b'{"token": 5, "login": "x"}',
+        b"{}",
+        b'{"token": "ghp_with space", "login": "x"}',
+        '{"token": "ghp_é", "login": "x"}'.encode(),
+        json.dumps({"token": "a" * 513, "login": "x"}).encode(),
+        b'{"token": "ghp_ok", "login": ""}',
+        b'{"token": "ghp_ok", "login": "not a login"}',
+    ],
+    ids=[
+        "broken",
+        "encrypted-without-key",
+        "not-an-object",
+        "token-not-text",
+        "empty-object",
+        "token-with-space",
+        "token-not-ascii",
+        "token-too-long",
+        "login-empty",
+        "login-malformed",
+    ],
 )
 
 
