@@ -275,3 +275,6 @@ def test_latest_reply_question_ts_skips_a_question_to_someone_else(asker: str, e
     """A question whose reply acts for another person waits on that person, not on the thread's starter."""
     metadata = _reply({**_PROMPT, "com.mindroom.acting_requester": asker})
     assert latest_reply_question_ts(metadata, {_BOT}, {"@alice:localhost"}) == expected
+    # A streamed reply: the placeholder has neither, its edit carries the question and the acting requester.
+    streamed = _reply({}, edit=_edit({**_PROMPT, "com.mindroom.acting_requester": asker}))
+    assert latest_reply_question_ts(streamed, {_BOT}, {"@alice:localhost"}) == (None if expected is None else 200)

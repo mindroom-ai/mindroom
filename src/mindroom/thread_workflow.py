@@ -174,7 +174,9 @@ def latest_reply_question_ts(
     # As the client's readInteractiveQuestion: the shown content's prompt, else the original's.
     payloads = [c.get("io.mindroom.interactive") for c in (shown, reply.get("content")) if isinstance(c, dict)]
     prompt = next((payload for payload in payloads if payload is not None), None)
-    asker = reply["content"].get(ACTING_REQUESTER_KEY) if isinstance(reply.get("content"), dict) else None
+    # A streamed reply names its acting requester in the edit that replaces its placeholder.
+    askers = [c.get(ACTING_REQUESTER_KEY) for c in (shown, reply.get("content")) if isinstance(c, dict)]
+    asker = next((a for a in askers if a is not None), None)
     if requester_ids and isinstance(asker, str) and asker not in requester_ids and asker not in bot_ids:
         return None
     options = prompt.get("options") if isinstance(prompt, dict) else None
