@@ -4550,6 +4550,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.room_history_reads"
 depends_on = [
+    "mindroom.constants",
     "mindroom.matrix.event_info",
 ]
 visibility = [

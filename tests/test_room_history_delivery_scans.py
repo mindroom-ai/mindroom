@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
+from mindroom.constants import ROUTE_EVENT_TYPE
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.room_history_reads import (
     _MAX_EXACT_DELIVERY_SCAN_PAGES,
@@ -252,6 +253,47 @@ async def test_response_recovery_scan_ignores_thread_fallback_relation() -> None
     )
 
     assert response_event_ids == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_response_recovery_scan_finds_the_hidden_route_that_names_a_source() -> None:
+    """A steward's route has no relation, so a scan finds it by the messages its content names, and asks for its type."""
+    source_event_id = "$source:localhost"
+
+    def route(event_id: str, sender: str, event_ids: object) -> nio.Event:
+        return raw_nio_event(
+            {
+                "type": ROUTE_EVENT_TYPE,
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": 2000,
+                "content": {ROUTE_EVENT_TYPE: {"entity": "@agent:localhost", "event_ids": event_ids}},
+            },
+        )
+
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [
+                route("$route:localhost", "@bot:localhost", ["$earlier:localhost", source_event_id]),
+                route("$other-route:localhost", "@bot:localhost", ["$other:localhost"]),
+                route("$their-route:localhost", "@other-bot:localhost", [source_event_id]),
+                route("$malformed-route:localhost", "@bot:localhost", {"not": "a list"}),
+                _message_event(source_event_id, "question", timestamp=1000),
+            ],
+            end=None,
+        ),
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=(source_event_id,),
+    )
+
+    assert response_event_ids == frozenset({"$route:localhost"})
+    assert ROUTE_EVENT_TYPE in client.room_messages.await_args.kwargs["message_filter"]["types"]
 
 
 @pytest.mark.asyncio

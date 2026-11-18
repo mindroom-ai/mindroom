@@ -108,6 +108,29 @@ async def _responder_ready(deps: _RouterRelaySupport, entity_name: str, turn: Tu
     return readiness is True
 
 
+async def _earlier_attempt_outcome(deps: _RouterRelaySupport, room_id: str, event_id: str) -> bool | None:
+    """Return what an earlier attempt at this turn decided, or None when it decided nothing that still holds.
+
+    A replay keeps that decision and selects nobody anew. True means that attempt selected this steward, which
+    answers again. False means it sent its route and stopped before it recorded it, and the route is adopted.
+    """
+    earlier = await deps.turn_store.get_turn_record(event_id)
+    if earlier is None or earlier.completed or earlier.response_owner is None:
+        return None
+    if earlier.history_scope is not None:
+        return True
+    sent_route = await deps.visible_responses.recovered_response_event_id(
+        earlier,
+        room_id=room_id,
+        # The router's own voice echoes are publication, never the route this turn still owes.
+        excluded_event_ids=await deps.turn_store.finalized_visible_echoes(earlier.source_event_ids),
+    )
+    if sent_route is None:
+        return None
+    await deps.turn_store.record_responded_turn(canonicalize_turn_record(earlier, response_event_id=sent_route))
+    return False
+
+
 async def _still_steward(deps: _RouterRelaySupport, room_id: str, turn: TurnRecord) -> bool:
     """Return whether this bot is still the room's steward, which it was when it planned to route.
 
@@ -222,6 +245,9 @@ async def execute_router_relay(  # noqa: PLR0911
     Nobody answers a turn that no candidate fits.
     """
     source_turn = handled_turn or TurnRecord.create([event.event_id])
+    replayed = await _earlier_attempt_outcome(deps, room.room_id, event.event_id)
+    if replayed is not None:
+        return replayed
     suggested_entity = await _select_responder(
         deps,
         room,
@@ -267,23 +293,16 @@ async def execute_router_relay(  # noqa: PLR0911
         extra_content=routed_extra_content,
     )
 
-    (
-        tracked_handled_turn,
-        recovered_response_event_id,
-    ) = await deps.visible_responses.prepare_visible_delivery_turn(
-        source_turn,
-        requester_id=requester_user_id,
-        target=resolved_target,
-        # The router's own voice echoes are publication, never the relay this turn still owes.
-        excluded_event_ids=await deps.turn_store.finalized_visible_echoes(source_turn.source_event_ids),
+    pending_turn = await deps.turn_store.record_pending_turn(
+        deps.turn_store.attach_response_context(
+            canonicalize_turn_record(source_turn, requester_id=requester_user_id),
+            history_scope=None,
+            conversation_target=resolved_target,
+        ),
     )
-    if tracked_handled_turn is None:
+    if pending_turn is None or await deps.visible_responses.settle_deleted_sources(pending_turn, room_id=room.room_id):
         return False
-    if recovered_response_event_id is not None:
-        await deps.turn_store.record_responded_turn(
-            canonicalize_turn_record(tracked_handled_turn, response_event_id=recovered_response_event_id),
-        )
-        return False
+    tracked_handled_turn = pending_turn.record
     # The responder may have stopped or restarted, and this bot may have lost the room, while the route was prepared.
     if not await _responder_ready(deps, suggested_entity, tracked_handled_turn) or not await _still_steward(
         deps,

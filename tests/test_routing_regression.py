@@ -28,6 +28,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTE_EVENT_TYPE, SOURCE_KIN
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.journal_dispatch import _route_as_message
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -42,6 +43,7 @@ from mindroom.routing import ResponderSelection, suggest_responder_for_message
 from mindroom.teams.formation import TeamOutcome, TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, _ResponderAvailability
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
@@ -767,6 +769,98 @@ class TestRoutingRegression:
 
         healthy_bot.client.room_send.assert_not_awaited()
         assert settle.await_args.args[0].source_event_ids == ("$lost-before-answering",)
+
+    @pytest.mark.asyncio
+    @patch("mindroom.response_runner.stream_agent_response")
+    @patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock)
+    async def test_a_crash_between_a_routes_send_and_its_record_routes_and_answers_once(
+        self,
+        mock_suggest_responder: AsyncMock,
+        mock_stream_agent_response: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """A replay adopts the route its crashed attempt sent, though the selector would now name someone else."""
+        router_bot, healthy_bot, stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+        stuck_bot._first_sync_done = True
+        mock_suggest_responder.side_effect = [ResponderSelection("healthy"), ResponderSelection("stuck")]
+        mock_stream_agent_response.side_effect = streamed_answer(AsyncMock(return_value="Here you go."))
+        router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+            {"event_id": "$route"},
+            room_id=room.room_id,
+        )
+        for bot in (healthy_bot, stuck_bot):
+            bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+                {"event_id": f"${bot.agent_name}-answer"},
+                room_id=room.room_id,
+            )
+
+        with (
+            patch.object(
+                router_bot._turn_store, "record_placeholder", side_effect=RuntimeError("crash after the send")
+            ),
+            pytest.raises(RuntimeError, match="crash after the send"),
+        ):
+            await _router_relay(router_bot, room, "$crash-after-send")
+
+        route_event = nio.Event.parse_event(
+            {
+                "type": ROUTE_EVENT_TYPE,
+                "event_id": "$route",
+                "sender": router_bot.client.user_id,
+                "origin_server_ts": 1_001,
+                "content": router_bot.client.room_send.await_args.kwargs["content"],
+            },
+        )
+        assert isinstance(route_event, nio.UnknownEvent)
+        router_bot.client.room_messages.return_value = nio.RoomMessagesResponse(
+            room_id=room.room_id,
+            chunk=[route_event, _router_readiness_event("$crash-after-send")],
+            start="",
+            end=None,
+        )
+
+        assert await _router_relay(router_bot, room, "$crash-after-send") is False
+
+        # Exactly one route: the replay sent nothing and selected nobody new.
+        router_bot.client.room_send.assert_awaited_once()
+        mock_suggest_responder.assert_awaited_once()
+        record = await router_bot._turn_store.get_turn_record("$crash-after-send")
+        assert record is not None
+        assert (record.completed, record.response_event_id) == (True, "$route")
+
+        # Exactly one answer: only the responder that one route names answers it.
+        for bot in (healthy_bot, stuck_bot):
+            await bot._on_message(room, _route_as_message(route_event))
+            await drain_coalescing(bot)
+        mock_stream_agent_response.assert_called_once()
+        healthy_bot.client.room_send.assert_awaited()
+        stuck_bot.client.room_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock)
+    async def test_a_steward_that_had_selected_itself_answers_again_without_selecting_anew(
+        self,
+        mock_suggest_responder: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A replay of a turn its steward had begun to answer itself is answered by that steward again."""
+        _router_bot, healthy_bot, _stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+        _make_steward(healthy_bot, room.room_id, power=101)
+        mock_suggest_responder.return_value = ResponderSelection("stuck")
+        turn_store = healthy_bot._turn_store
+        # As the steward's crashed attempt left the turn once it had selected itself: pending, with its own history.
+        await turn_store.record_pending_turn(
+            turn_store.attach_response_context(
+                TurnRecord.create(["$answering-itself"], completed=False, requester_id="@user:localhost"),
+                history_scope=HistoryScope(kind="agent", scope_id="healthy"),
+                conversation_target=MessageTarget.resolve(room.room_id, None, "$answering-itself"),
+            ),
+        )
+
+        assert await _router_relay(healthy_bot, room, "$answering-itself") is True
+
+        mock_suggest_responder.assert_not_awaited()
+        healthy_bot.client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(

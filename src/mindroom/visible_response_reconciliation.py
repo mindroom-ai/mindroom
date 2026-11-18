@@ -281,7 +281,6 @@ class VisibleResponseReconciler:
         *,
         requester_id: str,
         target: MessageTarget,
-        excluded_event_ids: Collection[str] = (),
     ) -> tuple[TurnRecord | None, str | None]:
         """Persist one non-model delivery intent and recover any visible event."""
         tracked_turn = self.deps.turn_store.attach_response_context(
@@ -296,11 +295,7 @@ class VisibleResponseReconciler:
         if pending_turn is None or await self.settle_deleted_sources(pending_turn, room_id=target.room_id):
             return None, None
         recovered_response_event_id = (
-            await self.recovered_response_event_id(
-                pending_turn.record,
-                room_id=target.room_id,
-                excluded_event_ids=excluded_event_ids,
-            )
+            await self.recovered_response_event_id(pending_turn.record, room_id=target.room_id)
             if pending_turn.resumes_response
             else None
         )
