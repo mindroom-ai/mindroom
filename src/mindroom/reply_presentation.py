@@ -76,8 +76,6 @@ class Segment:
     # A team document's restorable state; ``text`` is its rendered body.
     team_state: Mapping[str, object] | None = None
     note: NoteKind | None = None
-    # The ``io.mindroom.compactions`` entries the answer showed, so a replay keeps showing them.
-    compactions: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         """Reject segments that mix answer and note fields."""
@@ -215,15 +213,6 @@ def _shown_work(possibly_shown: Presentation) -> Segment | None:
     return _cut_short(Segment(kind="answer", text=text, tool_trace=trace))
 
 
-def shown_compactions(presentation: Presentation) -> tuple[dict[str, object], ...]:
-    """Return the compaction entries the reply's answers showed, each once, in start order, in its newest state."""
-    entries: dict[object, dict[str, object]] = {}
-    for segment in presentation.segments:
-        for entry in segment.compactions:
-            entries[entry.get("id")] = dict(entry)
-    return tuple(entries.values())
-
-
 def after_restart(possibly_shown: Presentation) -> Presentation:
     """Return what a replay continues below: the shown work and the restart note, or nothing.
 
@@ -284,8 +273,6 @@ def _encode_segment(segment: Segment) -> dict[str, object]:
         encoded["team_state"] = dict(segment.team_state)
     if segment.note is not None:
         encoded["note"] = segment.note.value
-    if segment.compactions:
-        encoded["compactions"] = [dict(entry) for entry in segment.compactions]
     return encoded
 
 
@@ -300,7 +287,6 @@ def _decode_segment(raw: object) -> Segment:
     trace = item.get("tool_trace", [])
     team_state = item.get("team_state")
     note = item.get("note")
-    compactions = item.get("compactions", [])
     if (
         kind not in {"answer", "note"}
         or not isinstance(text, str)
@@ -308,8 +294,6 @@ def _decode_segment(raw: object) -> Segment:
         or not isinstance(trace, list)
         or (team_state is not None and not isinstance(team_state, dict))
         or (note is not None and not isinstance(note, str))
-        or not isinstance(compactions, list)
-        or not all(isinstance(entry, dict) for entry in compactions)
     ):
         msg = "Stored reply segment is malformed"
         raise TypeError(msg)
@@ -320,7 +304,6 @@ def _decode_segment(raw: object) -> Segment:
         tool_trace=tuple(deserialize_tool_trace(cast("list[Mapping[str, object]]", trace))),
         team_state=cast("dict[str, object] | None", team_state),
         note=NoteKind(note) if note is not None else None,
-        compactions=tuple(cast("list[dict[str, object]]", compactions)),
     )
 
 

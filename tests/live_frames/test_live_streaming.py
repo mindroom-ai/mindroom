@@ -545,30 +545,6 @@ async def test_compaction_before_the_participation_decision_creates_no_reply(tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("frames")
-async def test_a_restarted_reply_keeps_its_earlier_compaction(tmp_path: Path) -> None:
-    """A replay's recorder starts with the entry the stopped attempt finished, which every later write keeps."""
-    records, edits = _records(), _Edits()
-    done = {"id": "c1", "phase": "pre_turn", "mode": "auto", "after_tool": 0, "status": "success"}
-    recorder = ReplyCompactions((done,))
-    resumed = UnfinishedStreamedReply(visible_text="Half of the report", tool_trace=())
-    stream = _stream(0.05, " and the rest.", 0.15, " Done.", 0.03)
-    await _run(
-        _config(tmp_path, update_interval=0.05),
-        stream,
-        records,
-        edits,
-        placeholder_event_id="$reply",
-        compactions=recorder,
-        resumed=resumed,
-    )
-
-    assert edits.contents
-    assert all(content.get(COMPACTIONS_CONTENT_KEY) == [done] for content in edits.contents)
-    assert _terminal(records)[COMPACTIONS_CONTENT_KEY] == [done]
-
-
-@pytest.mark.asyncio
 async def test_compaction_start_on_placeholder_sends_progress_edit(tmp_path: Path) -> None:
     """A compaction that starts while only the placeholder shows edits the placeholder at once to show it."""
     records, edits, recorder = _records(), _Edits(), ReplyCompactions()

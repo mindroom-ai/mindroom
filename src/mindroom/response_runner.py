@@ -214,17 +214,6 @@ def _resumed_reply() -> UnfinishedStreamedReply | None:
     return None if handle is None else handle.resumed
 
 
-def _reply_compactions() -> ReplyCompactions:
-    """Return the recorder of the reply's compactions, holding those a stopped attempt showed, bound to its span."""
-    handle = current_span()
-    if handle is None:
-        return ReplyCompactions()
-    compactions = ReplyCompactions(handle.prior_compactions)
-    # The span's records then note the entries each write shows, for a later replay.
-    handle.compactions = compactions.content
-    return compactions
-
-
 def _shows_placeholder(request: ResponseRequest) -> bool:
     """Return whether the event this response writes over is a placeholder rather than an answer."""
     return existing_event(request)[1]
@@ -1941,7 +1930,7 @@ class ResponseRunner:
         request = turn.request
         active_event_ids = await self._active_response_event_ids(request.room_id)
         # The automatic compactions this reply runs, which its writes carry.
-        compactions = _reply_compactions()
+        compactions = ReplyCompactions()
         compaction_lifecycle = self._build_compaction_lifecycle(
             target=turn.runtime.tool_context.target,
             request=request,

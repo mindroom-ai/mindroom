@@ -24,7 +24,6 @@ from mindroom.reply_presentation import (
     note_segment,
     render,
     render_body,
-    shown_compactions,
     with_answer,
     with_trailing_note,
 )
@@ -76,39 +75,6 @@ def test_codec_round_trips_every_field() -> None:
     assert restored == presentation
     assert restored.segments[0].tool_trace[0].tool_call_id == "call-1"
     assert restored.segments[0].tool_trace[0].member_id == "member"
-
-
-def _entry(entry_id: str, status: str, after_tool: int = 0) -> dict[str, object]:
-    return {"id": entry_id, "phase": "pre_turn", "mode": "auto", "after_tool": after_tool, "status": status}
-
-
-def test_codec_round_trips_an_answers_compactions_and_reads_older_rows_without_them() -> None:
-    """An answer keeps the compaction entries it showed; a row stored before they existed reads as none."""
-    answer = Segment(kind="answer", text="Thinking...", span_id="span-1", compactions=(_entry("c1", "success", 1),))
-    presentation = Presentation(segments=(answer,))
-
-    assert decode_presentation(encode_presentation(presentation)) == presentation
-    older = '{"version": 1, "segments": [{"kind": "answer", "text": "hi"}], "placeholder": "x", "show_tool_calls": true}'
-    assert decode_presentation(older).segments[0].compactions == ()
-
-
-def test_shown_compactions_lists_every_segments_entries_once_in_start_order() -> None:
-    """A later segment's copy of an entry is its newer state, kept where the entry first appeared."""
-    shown = Presentation(
-        segments=(
-            Segment(kind="answer", text="a", span_id="span-1", compactions=(_entry("c1", "running"),)),
-            note_segment(NoteKind.RESTART),
-            Segment(
-                kind="answer",
-                text="b",
-                span_id="span-2",
-                compactions=(_entry("c1", "success"), _entry("c2", "failed", 2)),
-            ),
-        ),
-    )
-
-    assert shown_compactions(shown) == (_entry("c1", "success"), _entry("c2", "failed", 2))
-    assert shown_compactions(Presentation()) == ()
 
 
 def test_codec_rejects_unknown_versions_and_malformed_segments() -> None:
