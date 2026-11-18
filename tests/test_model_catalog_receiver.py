@@ -15,7 +15,7 @@ from nio.crypto.device import TrustState
 from PIL import Image
 from structlog.testing import capture_logs
 
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ReasoningConfig
 from mindroom.model_catalog_receiver import _MAX_USER_REQUESTS, _Receiver, register_model_catalog_receiver
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import set_thread_model_override
@@ -433,6 +433,36 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
     await callback(event)
     assert "thread_id" not in sent.call_args.kwargs["content"]
     assert sent.call_args.kwargs["content"]["selection"]["override"] is None
+
+
+@pytest.mark.asyncio
+async def test_selection_reports_model_keys_and_their_reasoning_levels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An override or inherited model at a level reports its catalog key and the level beside it."""
+    callback, _, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    config = current[0]
+    paths = runtime_paths_for(config)
+    reasoning = ReasoningConfig(levels=["low", "high"], default="low")
+    config.models["room"] = ModelConfig(provider="openai", id="room-model", reasoning=reasoning)
+    config.models["thread"] = ModelConfig(provider="openai", id="thread-model", reasoning=reasoning)
+    set_room_model_override(paths, room_id=ROOM, model_name="room@high")
+    set_thread_model_override(
+        paths,
+        thread_id="$root",
+        model_name="thread@high",
+        entity_names=("helper",),
+        config=config,
+    )
+
+    await callback(request())
+
+    assert sent.call_args.kwargs["content"]["selection"] == {
+        "override": "thread",
+        "reasoning": "high",
+        "inherited": [{"entity": "helper", "model": "room", "reasoning": "high"}],
+    }
 
 
 @pytest.mark.asyncio
