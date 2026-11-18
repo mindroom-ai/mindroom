@@ -83,7 +83,8 @@ async def reconcile_room_router_binding(
             current = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
             if isinstance(current, nio.RoomGetStateEventResponse):
                 bound = current.content.get("user_id")
-                if isinstance(bound, str) and bound.startswith("@") and ":" in bound:
+                localpart, _, server = bound[1:].partition(":") if isinstance(bound, str) else ("", "", "")
+                if isinstance(bound, str) and bound.startswith("@") and localpart and server:
                     if bound != client.user_id:
                         logger.debug("room_router_binding_held_by_other", room_id=room_id, router_user_id=bound)
                     return True

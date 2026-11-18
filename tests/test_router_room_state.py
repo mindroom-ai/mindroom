@@ -291,7 +291,18 @@ async def test_a_room_that_refuses_the_routers_state_is_no_warning(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("existing", [None, {}, {"user_id": 7}, {"user_id": ""}, {"user_id": "router"}])
+@pytest.mark.parametrize(
+    "existing",
+    [
+        None,
+        {},
+        {"user_id": 7},
+        {"user_id": ""},
+        {"user_id": "router"},
+        {"user_id": "@router:"},
+        {"user_id": "@:server"},
+    ],
+)
 async def test_router_binding_claims_an_absent_or_malformed_binding_once(
     room_state: RoomState,
     existing: dict[str, object] | None,
