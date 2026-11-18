@@ -121,7 +121,8 @@ class ThreadModelTools(Toolkit):
         context, thread_id = resolved
         # The turn runs on its own config while live reloads move on: a model removed since must not be saved for
         # later turns, and this turn cannot continue on one added since.
-        switchable = context.config.models.keys() & context.current_config.models.keys()
+        current = context.current_config
+        switchable = context.config.models.keys() & current.models.keys()
         if model_name not in switchable:
             return self._payload(
                 "error",
@@ -136,8 +137,11 @@ class ThreadModelTools(Toolkit):
             entity_names=self._addressable_entities(context),
             config=context.config,
         )
+        # A switch reads the config it takes effect in: the turn's own for the current response, the current one for
+        # later turns.
+        config = context.config if when == "after-toolcall" else current
         budgeted_model_name = resolve_turn_model(
-            context.config,
+            config,
             context.runtime_paths,
             ModelScope(entity=context.agent_name, explicit=model_name),
             # Only a switch for the current response chooses a reply model now.
@@ -181,8 +185,7 @@ class ThreadModelTools(Toolkit):
             )
         else:
             note = "The new model applies from the next message in this thread."
-        # Later turns run the entry the current config holds for the name.
-        model = context.current_config.models[model_name]
+        model = config.models[model_name]
         return self._payload(
             "ok",
             action="switch",

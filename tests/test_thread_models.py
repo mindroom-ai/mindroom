@@ -1019,6 +1019,22 @@ async def test_a_next_turn_switch_reports_the_model_later_turns_will_run(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_a_next_turn_switch_measures_the_budget_as_later_turns_will(tmp_path: Path) -> None:
+    """A live reload that prices a model shows in whether the switch promises it to a requester over budget."""
+    context = _make_tool_context(tmp_path)
+    context.config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
+    context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
+    current = context.config.model_copy(deep=True)
+    current.models["large"].pricing = ModelPricing(input=5, output=30)
+
+    with tool_runtime_context(replace(context, config_provider=lambda: current)):
+        payload = json.loads(await ThreadModelTools().switch_thread_model("large"))
+
+    assert payload["model"] == "large"
+    assert "`cheap`" in payload["note"]
+
+
+@pytest.mark.asyncio
 async def test_thread_model_tool_reports_stale_override_as_inactive(tmp_path: Path) -> None:
     """An override naming a removed model must not be reported as active."""
     context = _make_tool_context(tmp_path)
