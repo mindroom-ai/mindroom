@@ -78,3 +78,50 @@ One backend PR: the runtime keeps and relaunches stopped jobs, `delegation/conti
 - The third restart of one job ends it as before; a restart between the adapter save and the reservation neither loses nor doubles the continuation.
 - The resumed parent turn's job note names the continued job.
 - `tests/test_delegation_job_fuzz.py` models continuation: a restart-stopped running child may run again only as a continuation, effects still run at most once, and every job settles.
+
+## Round 2 plan
+
+Three reviews of `e327acb2b` found about ten defects; this section groups them by cause and says what changes.
+The identity stays: all three reviews keep "the same job stays running", its saved count, the serial worker pass, and the reservation against the settled turn.
+
+### Root cause of groups A to D
+
+A stopped job that stays `running` has no task for a while, and round 0 let four facts about that state live in places a restart loses or a later step does not read.
+The fix is one rule: every fact that decides whether a stopped job goes on is read from a durable record at the moment the job would go on, and the runtime and the worker pass share one predicate each for "may stay running" and "may launch now".
+
+- **A, a Stop.**
+  The reply record already holds a Stop durably and is the authority for it (reply-messages I-S1); the saved `reply_stopped` mark was a second copy written after the Stop's commit, so a crash between the two lost it, and a restored job no longer knew its reply.
+  The job now saves the reply that started it (`reply_id`) and the Stop that reply had recorded by then (`reply_stop_order`), and the saved mark is deleted.
+  The worker pass reads the reply before it launches a continuation and ends the job when a Stop was recorded since the job began; a reply stopped and regenerated before the job began does not count.
+  In the process that receives a Stop, the job's control carries it as before: shutdown ends such a job instead of keeping it, a job waiting to continue ends at once, and a launch that races the Stop is refused under the runtime's lock.
+  A continued job is linked to its reply again, so a Stop refuses its approvals as before a restart.
+- **B, the subagent handle.**
+  The fallback to the previous turn exists for one window, after a continuation saved its prepared child and before it reserved the turn, so it now applies only to a job that saved a continuation count; a manual follow-up's job stopped before it reserved its turn ends interrupted, as the design says.
+  A follow-up is refused as busy while any unfinished job holds the subagent, by the subagent's stable ID instead of the attempt's, which also covers a job that waits to continue.
+- **C, a job waiting for a person.**
+  A wait for a human decision that its task's cancellation unwinds leaves the job saved as `awaiting_approval`, as an approval-card wait already does, so shutdown, teardown and a crash all read the same status and none continues it.
+  With that, `_settle` needs no `keep` flag: it applies the one predicate.
+- **D, readiness.**
+  The pass launches only when the job's bot runs and has completed its first sync, which is when it has processed the leaves it missed and cancelled the jobs of rooms it left, and when the grant is `allowed`; the runtime checks the grant again under its lock at the launch.
+  A bot whose start failed for good (`EntityFleet.is_disabled`) is the terminal case: its job ends interrupted with a logged reason.
+  A removed agent or revoked access was already cancelled by the pass's revocation step, which runs first; a bot that is only late keeps the job waiting, which is the temporary case.
+  Each job is handled inside its own guard, so one job that raises does not stop the pass.
+
+### The other groups
+
+- **E, history limits.**
+  The continuation prompt carries a bounded account of the cut-short run's calls, rendered by the formatter a top-level replay's prompt uses (`render_stopped_attempt`), from previews, so a child whose history limits leave the recovered run out still reads which calls finished and which was cut short.
+  History treats the recovered run as before; the cache claim becomes "the stored history is unchanged and the prompt adds one user message".
+- **F, a resumed batch.**
+  A resume saves its checkpoint before each approved call instead of once, since approved calls run one after another: the calls before it hold their results, and recovery keeps them.
+  Recovery answers a call its approval denied with the denial the run recorded.
+  This removes the precomputed plan round 1 added to the loop.
+- **G, approval keys.** Declined, see the report: the key is the job's and the call's on main too, where one child turn that pauses twice on a reused call ID already shares it, and the fix is a pause-unique card identity for every job, not a rule for continuations.
+- **Minors.**
+  The job note reads the continuing jobs before the ended ones and drops those that ended meanwhile, and lists only jobs whose access is allowed and that no cancel was requested for.
+  Shutdown's last publication leaves the kept jobs out of the rooms' state, since the next start may have jobs off.
+  The continued child's lost turn attachments are documented.
+
+### Size
+
+Estimated source change: about +110 −50 (runtime −5, coordinator +35, continuation +25, loop −6, recovery +5, notices +8, others +5), well under the 250-line stop line, so the round is implemented.
