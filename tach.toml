@@ -4773,6 +4773,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.thread_workflow"
 depends_on = [
+    "mindroom.constants",
     "mindroom.matrix.client_visible_messages",
     "mindroom.scheduling.tasks",
     "mindroom.thread_tags",

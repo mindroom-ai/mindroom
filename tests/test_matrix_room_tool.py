@@ -1666,7 +1666,7 @@ async def test_threads_row_waits_on_an_approval(state: list[dict[str, object]], 
 
 @pytest.mark.asyncio
 async def test_threads_row_waits_on_a_question_only_for_the_thread_starter() -> None:
-    """An agent's question in the newest reply counts only in a thread the requester started."""
+    """An agent's question in the newest reply counts only in a thread the requester started, when it asks them."""
     ctx = _workflow_context([])
     persist_schedule_writer(ctx.runtime_paths, _AGENT_ID, entity_name="general")
     prompt = interactive_prompt_content(
@@ -1680,9 +1680,11 @@ async def test_threads_row_waits_on_a_question_only_for_the_thread_starter() -> 
     )
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     latest_reply = {"sender": _AGENT_ID, "origin_server_ts": now_ms, "content": {"body": "Pick one", **prompt}}
+    to_bob = {**latest_reply, "content": {**latest_reply["content"], "com.mindroom.acting_requester": "@bob:localhost"}}
     roots = [
         _thread_event("$mine", sender="@user:localhost", latest_reply=latest_reply),
         _thread_event("$theirs", sender="@alice:localhost", latest_reply=latest_reply),
+        _thread_event("$to_bob", sender="@user:localhost", latest_reply=to_bob),
     ]
 
     with (
@@ -1695,6 +1697,7 @@ async def test_threads_row_waits_on_a_question_only_for_the_thread_starter() -> 
     assert [(row["thread_id"], row["why"]) for row in payload["threads"]] == [
         ("$mine", "question"),
         ("$theirs", "your_turn"),
+        ("$to_bob", "your_turn"),
     ]
 
 

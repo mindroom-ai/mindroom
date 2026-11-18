@@ -317,7 +317,7 @@ class MatrixRoomTools(Toolkit):
                 replying=event.event_id in replying,
                 approval_ts=approvals.get(event.event_id),
                 # A question counts only in a thread the requester started (design decision 8).
-                question_ts=latest_reply_question_ts(self._thread_metadata(event.source), bot_ids)
+                question_ts=latest_reply_question_ts(self._thread_metadata(event.source), bot_ids, requester_ids)
                 if event.sender in requester_ids and isinstance(event.source, dict)
                 else None,
             )

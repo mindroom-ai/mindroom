@@ -261,3 +261,17 @@ def _edit(new_content: dict[str, object], *, sender: str = _BOT) -> dict[str, ob
 def test_latest_reply_question_ts(thread_metadata: dict[str, Any], expected: int | None) -> None:
     """A question counts when the bundled newest reply, as its newest own edit shows it, asks one the client shows."""
     assert latest_reply_question_ts(thread_metadata, {_BOT}) == expected
+
+
+@pytest.mark.parametrize(
+    ("asker", "expected"),
+    [
+        pytest.param("@alice:localhost", 100, id="asks the requester"),
+        pytest.param("@bob:localhost", None, id="asks another person"),
+        pytest.param(_BOT, 100, id="acting requester is an agent"),
+    ],
+)
+def test_latest_reply_question_ts_skips_a_question_to_someone_else(asker: str, expected: int | None) -> None:
+    """A question whose reply acts for another person waits on that person, not on the thread's starter."""
+    metadata = _reply({**_PROMPT, "com.mindroom.acting_requester": asker})
+    assert latest_reply_question_ts(metadata, {_BOT}, {"@alice:localhost"}) == expected

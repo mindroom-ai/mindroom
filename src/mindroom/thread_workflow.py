@@ -9,6 +9,7 @@ import re
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.constants import ACTING_REQUESTER_KEY
 from mindroom.matrix.client_visible_messages import bundled_replacement_candidates
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.scheduling.tasks import task_records_with_writers
@@ -150,8 +151,15 @@ def thread_workflow(
     return classify_thread_workflow(status, now)
 
 
-def latest_reply_question_ts(thread_metadata: Mapping[str, Any], bot_ids: Collection[str]) -> int | None:
-    """Return when the root's bundled newest reply, as its newest own edit shows it, asked an agent's question."""
+def latest_reply_question_ts(
+    thread_metadata: Mapping[str, Any],
+    bot_ids: Collection[str],
+    requester_ids: Collection[str] = (),
+) -> int | None:
+    """Return when the root's bundled newest reply, as its newest own edit shows it, asked the requester a question.
+
+    A reply that names another person as its acting requester asks that person, as the client skips it.
+    """
     reply = thread_metadata.get("io.mindroom.latest_reply")
     sender = reply.get("sender") if isinstance(reply, dict) else None
     if not isinstance(reply, dict) or not isinstance(sender, str) or sender not in bot_ids:
@@ -166,6 +174,9 @@ def latest_reply_question_ts(thread_metadata: Mapping[str, Any], bot_ids: Collec
     # As the client's readInteractiveQuestion: the shown content's prompt, else the original's.
     payloads = [c.get("io.mindroom.interactive") for c in (shown, reply.get("content")) if isinstance(c, dict)]
     prompt = next((payload for payload in payloads if payload is not None), None)
+    asker = reply["content"].get(ACTING_REQUESTER_KEY) if isinstance(reply.get("content"), dict) else None
+    if requester_ids and isinstance(asker, str) and asker not in requester_ids and asker not in bot_ids:
+        return None
     options = prompt.get("options") if isinstance(prompt, dict) else None
     # A question the client shows: text, and an option keyed by the reaction that picks it, not only by number.
     if not (
