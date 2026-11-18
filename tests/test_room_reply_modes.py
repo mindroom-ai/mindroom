@@ -168,8 +168,17 @@ def test_room_reply_mode_defaults_to_auto_and_rejects_unknown_modes() -> None:
         RoomConfig(reply_mode="never")
 
 
-def _setting_event(content: dict[str, str]) -> dict[str, object]:
-    return {"type": ROOM_SETTINGS_EVENT_TYPE, "state_key": "reply_mode", "content": content}
+_event_clock = iter(range(1_700_000_000_000, 1_800_000_000_000))
+
+
+def _setting_event(content: dict[str, str], ts: int | None = None) -> dict[str, object]:
+    """A live `reply_mode` event, sent after every one made before unless ``ts`` says when."""
+    return {
+        "type": ROOM_SETTINGS_EVENT_TYPE,
+        "state_key": "reply_mode",
+        "content": content,
+        "origin_server_ts": next(_event_clock) if ts is None else ts,
+    }
 
 
 async def _set_room_setting(runtime_paths: RuntimePaths, mode: RoomReplyMode | None) -> None:
@@ -216,40 +225,83 @@ async def test_the_override_is_the_rooms_reply_mode_setting(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_a_late_copy_of_an_older_change_never_replaces_a_newer_setting(tmp_path: Path) -> None:
-    """A bot whose sync delivers an older change after a newer write only makes the runtime read the room again."""
+async def test_a_live_change_applies_at_once_and_a_late_older_copy_changes_nothing(tmp_path: Path) -> None:
+    """A change sync brings is the room's value until a read confirms it; a slower bot's older copy is dropped."""
     runtime_paths = test_runtime_paths(tmp_path)
     homeserver = _Homeserver()
     client = homeserver.client()
-    assert await write_room_reply_mode(client, runtime_paths, ROOM_ID, "mentions")
+    older = _setting_event({"value": "auto"})
+    newer = _setting_event({"value": "mentions"})
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "mentions"}
 
-    observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "auto"}))
+    observe_room_settings_event(runtime_paths, ROOM_ID, older)
+    observe_room_settings_event(runtime_paths, ROOM_ID, newer)
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+    observe_room_settings_event(runtime_paths, ROOM_ID, older)
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
     assert await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
-    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+
+    # After the runtime's own write, a late copy of a change older than one it saw changes nothing either.
+    assert await write_room_reply_mode(client, runtime_paths, ROOM_ID, "auto")
+    reads = client.room_get_state_event.await_count
+    observe_room_settings_event(runtime_paths, ROOM_ID, newer)
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "auto"
+    assert await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
+    assert client.room_get_state_event.await_count == reads
 
 
 @pytest.mark.asyncio
-async def test_a_change_sync_brings_during_a_read_is_read_again(tmp_path: Path) -> None:
-    """A read that may have started before a change keeps its answer for now and the next refresh reads again."""
+@pytest.mark.parametrize("during", ["read", "write"])
+async def test_a_change_sync_brings_during_a_read_or_write_is_read_again(tmp_path: Path, during: str) -> None:
+    """A read or write that overlapped a change confirms nothing: the change's value stays and the next refresh reads."""
     runtime_paths = test_runtime_paths(tmp_path)
     homeserver = _Homeserver()
     client = homeserver.client()
     homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "auto"}
-    read = client.room_get_state_event.side_effect
+    request = client.room_get_state_event if during == "read" else client.room_put_state
+    original = request.side_effect
 
-    async def read_then_change(*args: object, **kwargs: object) -> object:
-        response = await read(*args, **kwargs)
+    async def then_change(*args: object, **kwargs: object) -> object:
+        response = await original(*args, **kwargs)
         homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "mentions"}
         observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "mentions"}))
         return response
 
-    client.room_get_state_event.side_effect = read_then_change
-    assert not await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
-    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "auto"
-    client.room_get_state_event.side_effect = read
-    assert await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
+    request.side_effect = then_change
+    if during == "read":
+        assert not await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
+    else:
+        assert await write_room_reply_mode(client, runtime_paths, ROOM_ID, "auto")
+    request.side_effect = original
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+    reads = client.room_get_state_event.await_count
+    assert await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
+    assert client.room_get_state_event.await_count == reads + 1
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+
+
+@pytest.mark.asyncio
+async def test_bots_reading_the_room_at_once_all_settle_the_copy(tmp_path: Path) -> None:
+    """Every bot in a room reads the setting for the same message; their reads leave the copy fresh for the next one."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    homeserver = _Homeserver()
+    client = homeserver.client()
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "mentions"}
+    read = client.room_get_state_event.side_effect
+
+    async def slow_read(*args: object, **kwargs: object) -> object:
+        await asyncio.sleep(0)
+        return await read(*args, **kwargs)
+
+    client.room_get_state_event.side_effect = slow_read
+    assert await asyncio.gather(*(refresh_room_reply_mode(client, runtime_paths, ROOM_ID) for _ in range(3))) == [
+        True,
+        True,
+        True,
+    ]
+    reads = client.room_get_state_event.await_count
+    assert await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
+    assert client.room_get_state_event.await_count == reads
 
 
 def _write_legacy_overrides(runtime_paths: RuntimePaths, modes: dict[str, str]) -> Path:
@@ -319,7 +371,9 @@ async def test_two_rooms_moving_at_once_both_leave_the_file(tmp_path: Path) -> N
         write = client.room_put_state.side_effect
 
         async def slow_write(
-            *args: object, write: Callable[..., Awaitable[object]] = write, **kwargs: object
+            *args: object,
+            write: Callable[..., Awaitable[object]] = write,
+            **kwargs: object,
         ) -> object:
             await asyncio.sleep(0)
             return await write(*args, **kwargs)
@@ -411,6 +465,28 @@ async def test_reply_mode_command_shows_sets_and_resets_the_override(tmp_path: P
     homeserver.events[setting] = {"value": "mentions"}
     assert "override removed" in await _run_reply_mode_command(context, ADMIN, "reset")
     assert homeserver.events[setting] == {}
+
+
+@pytest.mark.asyncio
+async def test_reply_mode_command_says_when_it_cannot_read_the_room(tmp_path: Path) -> None:
+    """`/reply_mode show` claims no mode it could not read, and reset still clears the room's setting."""
+    homeserver = _Homeserver()
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "mentions"}
+    context = _command_context(_config(tmp_path), homeserver)
+    read = context.client.room_get_state_event.side_effect
+
+    async def settings_unreadable(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == ROOM_SETTINGS_EVENT_TYPE:
+            return nio.RoomGetStateEventError("unavailable", "M_UNKNOWN")
+        return await read(room_id, event_type, state_key)
+
+    context.client.room_get_state_event.side_effect = settings_unreadable
+
+    assert await _run_reply_mode_command(context, SENDER, "show") == (
+        "❌ Could not read this room's reply mode setting. Try again."
+    )
+    assert "override removed" in await _run_reply_mode_command(context, ADMIN, "reset")
+    assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] == {}
 
 
 @pytest.mark.asyncio

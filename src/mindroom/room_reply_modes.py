@@ -1,8 +1,9 @@
 """A room's reply mode override: the `reply_mode` room setting, set by `!reply_mode`, plugin routes, or a client.
 
 The setting is the room's `io.mindroom.room_settings` state with state key `reply_mode` and content `{"value": mode}`;
-`{}` or no event leaves it unset. The runtime keeps the value it last read or wrote per room, so checks that cannot wait
-for the homeserver use it, and reads the state again when its copy is missing, old, or a change arrived in sync.
+`{}` or no event leaves it unset. The runtime keeps the newest value it read, wrote, or saw arrive in sync per room, so
+checks that cannot wait for the homeserver use it, and reads the state again when its copy is missing, old, or a change
+arrived in sync.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, cast, get_args
+from typing import TYPE_CHECKING, NamedTuple, cast, get_args
 
 from mindroom.config.agent import RoomReplyMode
 from mindroom.constants import tracking_dir
@@ -38,8 +39,21 @@ _REQUEST_TIMEOUT_SECONDS = 5.0
 _LEGACY_FILENAME = "room_reply_modes.json"
 _STALE = float("-inf")
 
-# Per room: the mode and when it was read or written, _STALE once a change arrived in sync.
-_known: dict[tuple[Path, str], tuple[RoomReplyMode | None, float]] = {}
+
+class _Copy(NamedTuple):
+    """What the runtime knows of one room's setting.
+
+    ``mode`` is the newest value it knows: from the newest live event by server time, or from its own read or write.
+    ``read_at`` is when a read or write that no other change overlapped confirmed it, ``_STALE`` otherwise, so the next
+    refresh reads the room. ``event_ts`` is the server time of the newest live event taken, to drop older copies.
+    """
+
+    mode: RoomReplyMode | None
+    read_at: float
+    event_ts: int | None
+
+
+_known: dict[tuple[Path, str], _Copy] = {}
 _changes: defaultdict[tuple[Path, str], int] = defaultdict(int)
 
 
@@ -53,23 +67,44 @@ def _mode_from_content(content: object) -> RoomReplyMode | None:
 
 
 def resolve_room_reply_mode_override(runtime_paths: RuntimePaths, room_id: str) -> RoomReplyMode | None:
-    """Return the room's reply mode setting as the runtime last read or wrote it, None while unset or never read."""
+    """Return the room's reply mode setting as the runtime last knew it, None while unset or never read."""
     known = _known.get(_key(runtime_paths, room_id))
-    return None if known is None else known[0]
+    return None if known is None else known.mode
 
 
 def observe_room_settings_event(runtime_paths: RuntimePaths, room_id: str, source: Mapping[str, object]) -> None:
-    """Have the next refresh read the room's setting again after a live `reply_mode` event; ignore any other event.
+    """Take a live `reply_mode` event's value until the next refresh reads the room; ignore any other event.
 
-    Each bot's sync delivers the event on its own schedule, so a late copy of an older change must not replace a newer
-    value: only a read of the room's state decides it.
+    Each bot's sync delivers the event on its own schedule, so a copy no newer than one already taken changes nothing,
+    and only a read of the room's state makes the value fresh again.
     """
     if source.get("type") != ROOM_SETTINGS_EVENT_TYPE or source.get("state_key") != _SETTING_KEY:
         return
     key = _key(runtime_paths, room_id)
+    known = _known.get(key)
+    ts = source.get("origin_server_ts")
+    ts = ts if isinstance(ts, int) else None
+    if known is not None and known.event_ts is not None and (ts is None or ts <= known.event_ts):
+        return
     _changes[key] += 1
-    if (known := _known.get(key)) is not None:
-        _known[key] = (known[0], _STALE)
+    _known[key] = _Copy(_mode_from_content(source.get("content")), _STALE, ts)
+
+
+def _confirm(key: tuple[Path, str], mode: RoomReplyMode | None, changes: int, *, wrote: bool) -> bool:
+    """Keep what a read or write found, fresh only if no change or write came in while it was in flight.
+
+    When one did, which of the two is newer is unknown: the copy stays as it is, stale, and the next refresh reads.
+    A write counts as a change for reads still in flight; reads of the same state do not unsettle each other.
+    Returns whether the copy is fresh.
+    """
+    known = _known.get(key)
+    if _changes[key] != changes:
+        _known[key] = _Copy(mode, _STALE, None) if known is None else known._replace(read_at=_STALE)
+        return False
+    if wrote:
+        _changes[key] += 1
+    _known[key] = _Copy(mode, time.monotonic(), None if known is None else known.event_ts)
+    return True
 
 
 async def refresh_room_reply_mode(
@@ -79,7 +114,7 @@ async def refresh_room_reply_mode(
     *,
     force: bool = False,
 ) -> bool:
-    """Read the room's reply mode setting unless the copy is recent; return whether the copy is current.
+    """Read the room's reply mode setting unless the copy is fresh; return whether the copy is confirmed current.
 
     ``force`` reads it whatever the copy's age. A failed read keeps the copy.
     """
@@ -87,7 +122,7 @@ async def refresh_room_reply_mode(
 
     key = _key(runtime_paths, room_id)
     known = _known.get(key)
-    if not force and known is not None and time.monotonic() - known[1] < _REREAD_AFTER_SECONDS:
+    if not force and known is not None and time.monotonic() - known.read_at < _REREAD_AFTER_SECONDS:
         return True
     changes = _changes[key]
     try:
@@ -99,17 +134,16 @@ async def refresh_room_reply_mode(
     if isinstance(response, nio.RoomGetStateEventResponse):
         mode = _mode_from_content(response.content)
     elif isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
-        mode = await _move_legacy_override(client, runtime_paths, room_id)
+        # A room without the setting takes the override an older runtime stored on disk, which then leaves the file.
+        # While the room refuses the write, the stored override still applies and the next read tries again.
+        mode = _legacy_override(runtime_paths, room_id)
+        if mode is not None and await write_room_reply_mode(client, runtime_paths, room_id, mode):
+            _drop_legacy_override(runtime_paths, room_id)
+            return _known[key].read_at != _STALE
     else:
         logger.warning("room_reply_mode_read_failed", room_id=room_id, error=str(response))
         return False
-    if _changes[key] != changes:
-        # A change arrived in sync or was written during the read, which may or may not have seen it: read again next.
-        if (known := _known.get(key)) is None or known[1] == _STALE:
-            _known[key] = (mode, _STALE)
-        return False
-    _known[key] = (mode, time.monotonic())
-    return True
+    return _confirm(key, mode, changes, wrote=False)
 
 
 async def write_room_reply_mode(
@@ -121,6 +155,8 @@ async def write_room_reply_mode(
     """Set the room's reply mode setting, or clear it given None, as ``client``; return whether the room took it."""
     import nio  # noqa: PLC0415 - config reads the copy above without loading the Matrix client
 
+    key = _key(runtime_paths, room_id)
+    changes = _changes[key]
     content = {} if mode is None else {"value": mode}
     try:
         async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
@@ -131,33 +167,26 @@ async def write_room_reply_mode(
     if not isinstance(response, nio.RoomPutStateResponse):
         logger.warning("room_reply_mode_write_failed", room_id=room_id, error=str(response))
         return False
-    key = _key(runtime_paths, room_id)
-    _changes[key] += 1
-    _known[key] = (mode, time.monotonic())
+    _confirm(key, mode, changes, wrote=True)
     return True
 
 
-async def _move_legacy_override(
-    client: nio.AsyncClient,
-    runtime_paths: RuntimePaths,
-    room_id: str,
-) -> RoomReplyMode | None:
-    """Return the override an older runtime stored for a room without the setting, moving it into the room's state.
-
-    While the room refuses the write, the stored override still applies and the next read tries again.
-    """
-    path = tracking_dir(runtime_paths) / _LEGACY_FILENAME
-    record = load_cached_override_records(path, _is_legacy_record).get(room_id)
-    if record is None:
-        return None
-    mode = cast("RoomReplyMode", record["mode"])
-    if await write_room_reply_mode(client, runtime_paths, room_id, mode):
-        # Read the file again: another room's move may have rewritten it during the write.
-        overrides = load_cached_override_records(path, _is_legacy_record)
-        if overrides.pop(room_id, None) is not None:
-            write_override_records(path, overrides)
-    return mode
+def _legacy_path(runtime_paths: RuntimePaths) -> Path:
+    return tracking_dir(runtime_paths) / _LEGACY_FILENAME
 
 
 def _is_legacy_record(_room_id: str, record: dict[object, object]) -> bool:
     return record.get("mode") in ROOM_REPLY_MODES
+
+
+def _legacy_override(runtime_paths: RuntimePaths, room_id: str) -> RoomReplyMode | None:
+    record = load_cached_override_records(_legacy_path(runtime_paths), _is_legacy_record).get(room_id)
+    return None if record is None else cast("RoomReplyMode", record["mode"])
+
+
+def _drop_legacy_override(runtime_paths: RuntimePaths, room_id: str) -> None:
+    # Read the file now, not before the write: another room's move may have rewritten it meanwhile.
+    path = _legacy_path(runtime_paths)
+    overrides = load_cached_override_records(path, _is_legacy_record)
+    if overrides.pop(room_id, None) is not None:
+        write_override_records(path, overrides)

@@ -61,6 +61,8 @@ async def handle_reply_mode_command(  # noqa: PLR0911 - one answer per outcome
     # A command reads the room's state itself, so it never trusts a copy that missed a change.
     current = await refresh_room_reply_mode(client, runtime_paths, room_id, force=True)
     if not requested or requested in _LIST_ARGUMENTS:
+        if not current:
+            return "❌ Could not read this room's reply mode setting. Try again."
         return _show_room_reply_mode(config, runtime_paths, room_id)
 
     if requested not in ROOM_REPLY_MODES and requested not in _RESET_ARGUMENTS:
