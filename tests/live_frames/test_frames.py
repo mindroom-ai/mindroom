@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.live_frames.frames import LiveDocs, live_delta, live_frame, new_publisher_id
+from mindroom.live_frames.frames import LiveDocs, fitted_tools, live_delta, live_frame, new_publisher_id
 
 _FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "live-frames-v1.json").read_text(encoding="utf-8"))
 
@@ -74,3 +74,36 @@ def test_publisher_ids_order_by_start_time() -> None:
     second = new_publisher_id()
     assert len(first.split("-")[0]) == 13
     assert first.split("-")[0] <= second.split("-")[0]
+
+
+def test_fitted_tools_cut_long_previews_and_leave_the_oldest_bare() -> None:
+    """Frames cut each preview to the cap, drop the oldest entries' previews, and mark only the entries they changed."""
+    short = {"type": "tool_call_completed", "tool_name": "a", "args_preview": "x", "result_preview": "ok"}
+    long = {"type": "tool_call_completed", "tool_name": "b", "args_preview": "y" * 1200, "truncated": True}
+    running = {"type": "tool_call_started", "tool_name": "c", "args_preview": "z" * 300, "progress": "step"}
+    tools = (short, long, running)
+
+    assert fitted_tools(tools, bare=0) == (
+        short,
+        {
+            "type": "tool_call_completed",
+            "tool_name": "b",
+            "args_preview": "y" * 199 + "…",
+            "truncated": True,
+            "clipped": True,
+        },
+        {
+            "type": "tool_call_started",
+            "tool_name": "c",
+            "args_preview": "z" * 199 + "…",
+            "progress": "step",
+            "clipped": True,
+        },
+    )
+    assert fitted_tools(tools, bare=2)[:2] == (
+        {"type": "tool_call_completed", "tool_name": "a", "clipped": True},
+        {"type": "tool_call_completed", "tool_name": "b", "truncated": True, "clipped": True},
+    )
+    # An entry without previews has nothing to lose.
+    bare = {"type": "tool_call_started", "tool_name": "d"}
+    assert fitted_tools((bare,), bare=1) == (bare,)

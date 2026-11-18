@@ -9,6 +9,9 @@ from dataclasses import dataclass
 LIVE_EVENT_TYPE = "io.mindroom.live"
 LIVE_CHECKPOINT_KEY = "io.mindroom.live_checkpoint"
 FRAME_VERSION = 1
+# Each tool preview a frame shows at most, so a long tool-heavy turn's trace fits; durable edits keep whole previews.
+_FRAME_PREVIEW_CHARACTERS = 200
+_PREVIEW_KEYS = ("args_preview", "result_preview")
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,29 @@ class LiveDocs:
 def new_publisher_id() -> str:
     """Return a publisher id whose string order is its start order: zero-padded start milliseconds, then random hex."""
     return f"{time.time_ns() // 1_000_000:013d}-{secrets.token_hex(4)}"
+
+
+def fitted_tools(tools: tuple[dict[str, object], ...], *, bare: int) -> tuple[dict[str, object], ...]:
+    """Return the tool entries a frame shows: previews cut to the frame cap, and none on the oldest ``bare`` entries.
+
+    An entry that lost any of its previews says ``clipped``, so a client can take them from the durable trace.
+    """
+    fitted: list[dict[str, object]] = []
+    for index, entry in enumerate(tools):
+        previews = {key: text for key in _PREVIEW_KEYS if isinstance(text := entry.get(key), str)}
+        kept = {} if index < bare else {key: _clipped(text) for key, text in previews.items()}
+        if kept == previews:
+            fitted.append(entry)
+            continue
+        others = {key: value for key, value in entry.items() if key not in previews}
+        fitted.append({**others, **kept, "clipped": True})
+    return tuple(fitted)
+
+
+def _clipped(text: str) -> str:
+    if len(text) <= _FRAME_PREVIEW_CHARACTERS:
+        return text
+    return f"{text[: _FRAME_PREVIEW_CHARACTERS - 1]}…"
 
 
 def utf16_length(text: str) -> int:

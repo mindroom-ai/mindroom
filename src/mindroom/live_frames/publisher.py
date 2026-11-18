@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from bisect import bisect_left
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from mindroom.live_frames.frames import LiveDocs, live_delta, live_frame, new_publisher_id
-from mindroom.live_frames.transport import RETRY_BACKOFF_SECONDS, LiveSendOutcome, send_live_frame
+from mindroom.live_frames.frames import (
+    LIVE_EVENT_TYPE,
+    LiveDocs,
+    fitted_tools,
+    live_delta,
+    live_frame,
+    new_publisher_id,
+)
+from mindroom.live_frames.transport import RETRY_BACKOFF_SECONDS, LiveSendOutcome, frame_fits, send_live_frame
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -37,6 +45,9 @@ class LivePublisher:
     last_snapshot_at: float = 0.0
     # False once frames stopped for this reply; durable edits then keep their ordinary cadence.
     running: bool = True
+    # How many of the oldest tool entries frames show without previews, so snapshots fit the size limit. Only a
+    # snapshot raises it, so the deltas between snapshots stay small.
+    bare: int = 0
 
     def checkpoint(self) -> dict[str, object] | None:
         """Return the watermark a durable write carries: every frame up to it is no newer than that write."""
@@ -48,16 +59,21 @@ class LivePublisher:
         """Send one frame when the documents changed or a snapshot is due; return the outcome, None when none was due."""
         now = time.monotonic()
         snapshot_due = self.last_sent is None or now - self.last_snapshot_at >= _SNAPSHOT_INTERVAL_SECONDS
-        if not snapshot_due and docs == self.last_sent:
+        shown = replace(docs, tools=fitted_tools(docs.tools, bare=self.bare))
+        if not snapshot_due and shown == self.last_sent:
             return None
         self.seq += 1
-        frame = live_frame(
-            reply_event_id=reply_event_id,
-            publisher_id=self.publisher_id,
-            seq=self.seq,
-            snapshot=docs if snapshot_due else None,
-            delta=None if snapshot_due or self.last_sent is None else live_delta(self.last_sent, docs),
-        )
+        frame = None
+        if not snapshot_due and self.last_sent is not None:
+            frame = live_frame(
+                reply_event_id=reply_event_id,
+                publisher_id=self.publisher_id,
+                seq=self.seq,
+                delta=live_delta(self.last_sent, shown),
+            )
+        if frame is None or not self._fits(frame):
+            snapshot_due = True
+            frame, shown = self._fitted_snapshot(reply_event_id, docs)
         outcome = await send_live_frame(
             self.client,
             self.room_id,
@@ -65,7 +81,7 @@ class LivePublisher:
             transaction_id=f"{self.publisher_id}.{self.seq}",
         )
         if outcome is LiveSendOutcome.SENT:
-            self.last_sent = docs
+            self.last_sent = shown
             if snapshot_due:
                 self.last_snapshot_at = now
         elif outcome is LiveSendOutcome.RETRY:
@@ -73,6 +89,33 @@ class LivePublisher:
         else:
             self.running = False
         return outcome
+
+    def _fits(self, frame: dict[str, object]) -> bool:
+        return frame_fits(self.client, self.room_id, frame, event_type=LIVE_EVENT_TYPE)
+
+    def _fitted_snapshot(self, reply_event_id: str, docs: LiveDocs) -> tuple[dict[str, object], LiveDocs]:
+        """Return a snapshot frame within the size limit, without the previews of the fewest more oldest tool entries.
+
+        When even no previews do not fit, as when the Markdown alone is too big, the transport refuses the frame and
+        frames stop.
+        """
+
+        def built(bare: int) -> tuple[dict[str, object], LiveDocs]:
+            shown = replace(docs, tools=fitted_tools(docs.tools, bare=bare))
+            frame = live_frame(
+                reply_event_id=reply_event_id,
+                publisher_id=self.publisher_id,
+                seq=self.seq,
+                snapshot=shown,
+            )
+            return frame, shown
+
+        count = len(docs.tools)
+        self.bare = min(self.bare, count)
+        if not self._fits(built(self.bare)[0]):
+            fitting = bisect_left(range(count + 1), True, lo=self.bare + 1, key=lambda bare: self._fits(built(bare)[0]))
+            self.bare = min(fitting, count)
+        return built(self.bare)
 
     async def run(
         self,
