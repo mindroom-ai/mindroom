@@ -30,14 +30,16 @@ _A = "# Rules\n\n## Replies\n- End every reply with AMBER.\n\n## Tools\n- Prefer
 _B = _A.replace("AMBER", "VIOLET")
 _C = _A.replace("AMBER", "GREEN")
 _TURN = "Today is Wednesday."
+_OPUS = ModelIdentity(id="anthropic/claude-opus-5.5", provider="OpenRouter", endpoint="https://openrouter.ai/api/v1")
+_UPDATES = Capabilities(system_updates=True)
 
 
 @dataclass
 class _Model(PlainRequestSizing):
     """A route that takes system prompt updates and records the requests it is sent."""
 
-    identity: ModelIdentity = ModelIdentity(id="anthropic/claude-opus-5.5", provider="OpenRouter", endpoint="https://x")
-    capabilities: Capabilities = Capabilities(system_updates=True)
+    identity: ModelIdentity = _OPUS
+    capabilities: Capabilities = _UPDATES
     native_history_route: None = None
     token_counter: TokenCounter = field(default_factory=fake_token_counter)
     model_params: dict[str, object] = field(default_factory=dict)
@@ -113,6 +115,7 @@ class _Conversation:
 
 @pytest.fixture
 def conversation(tmp_path: Path) -> _Conversation:
+    """A conversation whose hold file lies in the test's state root."""
     return _Conversation(prompt_hold_path(tmp_path / "sessions" / "agent.db", "session-1"))
 
 
