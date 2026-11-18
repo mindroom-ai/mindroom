@@ -13,14 +13,14 @@ from mindroom.authorization import (
     is_sender_allowed_for_agent_reply_in_room,
     is_sender_allowed_for_responder,
 )
-from mindroom.commands.desktop_commands import chat_pairing_desktop_error
+from mindroom.commands.desktop_commands import desktop_room_agent
 from mindroom.commands.parsing import CommandType
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.contacts.turns import contact_room, unmentioned_message_answerer
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
-from mindroom.matrix.room_membership import cached_joined_member_ids, room_has_only
+from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
@@ -574,11 +574,8 @@ class TurnPolicy:
             for candidate in await self.responder_candidates_for_room(room, requester_user_id)
             if candidate.full_id in joined
         ]
-        if (
-            command.type is CommandType.DESKTOP
-            and chat_pairing_desktop_error(config, self.deps.agent_name) is None
-            and room_has_only(config, room, {requester_user_id, room.own_user_id})
-        ):
+        desktop_agent = desktop_room_agent(config, self.deps.runtime_paths, room, requester_user_id)
+        if command.type is CommandType.DESKTOP and desktop_agent == self.deps.agent_name:
             aimed_at = [me]
         elif mentioned_agents:
             aimed_at = [candidate for candidate in candidates if candidate in mentioned_agents]

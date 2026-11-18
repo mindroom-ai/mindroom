@@ -715,6 +715,7 @@ async def test_schedule_command_reuses_failed_boundary_membership_snapshot(tmp_p
     [
         ("private", "classic", None),
         ("extra_member", "classic", "private room"),
+        ("extra_agent", "classic", "private room"),
         ("failed_refresh", "classic", "try again"),
         ("unseen_invite", "classic", "private room"),
         # Sliding sync loads members lazily, so a refresh without the server's counts proves nothing about invites.
@@ -742,6 +743,7 @@ async def test_desktop_command_resolves_exact_agent_from_room_candidates(
                     "role": "Writes code",
                     "tools": ["desktop"],
                 },
+                "notes": {"display_name": "Notes", "role": "Takes notes"},
             },
         },
         runtime_paths,
@@ -749,12 +751,16 @@ async def test_desktop_command_resolves_exact_agent_from_room_candidates(
     persist_entity_accounts(
         config,
         runtime_paths,
-        usernames={"router": "mindroom_router", "code": "mindroom_code"},
+        usernames={"router": "mindroom_router", "code": "mindroom_code", "notes": "mindroom_notes"},
     )
-    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    # In a room with a second agent, that agent may be the one answering.
+    own_user_id = "@mindroom_notes:localhost" if room_shape == "extra_agent" else "@mindroom_code:localhost"
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=own_user_id)
     joined_user_ids = ["@mindroom_router:localhost", "@mindroom_code:localhost", "@alice:localhost"]
     if room_shape == "extra_member":
         joined_user_ids.append("@bob:localhost")
+    if room_shape == "extra_agent":
+        joined_user_ids.append("@mindroom_notes:localhost")
     for user_id in joined_user_ids:
         room.add_member(user_id, None, None)
     if room_shape == "unseen_invite":
@@ -774,7 +780,7 @@ async def test_desktop_command_resolves_exact_agent_from_room_candidates(
         room_shape != "failed_refresh"
     )
     send_response = AsyncMock(return_value="$desktop")
-    candidate_resolver = AsyncMock(return_value=[MatrixID.parse("@mindroom_code:localhost")])
+    candidate_resolver = AsyncMock(return_value=[MatrixID.parse(user_id) for user_id in joined_user_ids[1:]])
     controller_identity = MagicMock()
     desktop_handler = MagicMock(return_value="desktop status")
     monkeypatch.setattr("mindroom.commands.handler.handle_desktop_command", desktop_handler)
@@ -985,17 +991,22 @@ def _router_access_denies_everyone(tmp_path: Path, **general: Any) -> Config:  #
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_desktop_rule_unchanged(tmp_path: Path) -> None:
-    """A Desktop agent alone with the requester runs `/desktop` whatever else decides commands."""
+@pytest.mark.parametrize("owner_account_joined", [False, True])
+async def test_desktop_rule_unchanged(tmp_path: Path, owner_account_joined: bool) -> None:
+    """A Desktop agent alone with the requester runs `/desktop` whatever else decides commands.
+
+    The owner account answers nobody, so it is no party to the room.
+    """
     config = _router_access_denies_everyone(tmp_path, tools=["desktop"])
-    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id)
+    entities = ("general", ROUTER_AGENT_NAME) if owner_account_joined else ("general",)
+    room = _room_with_members(_SENDER, *(_entity_id(config, name).full_id for name in entities))
     client = AsyncMock()
     client.joined_members.return_value = nio.JoinedMembersResponse(
         members=[nio.RoomMember(user_id, None, None) for user_id in room.users],
         room_id=room.room_id,
     )
     assert await ensure_room_membership_synced(client, room, sender_id=_SENDER)
-    room.update_summary(nio.RoomSummary(invited_member_count=0, joined_member_count=2))
+    room.update_summary(nio.RoomSummary(invited_member_count=0, joined_member_count=len(room.users)))
 
     assert await _command_owners(config, "!desktop status", {"general": room}) == ["general"]
     assert await _command_owners(config, "!help", {"general": room}) == []

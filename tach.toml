@@ -5299,6 +5299,8 @@ depends_on = [
     "mindroom.desktop.identity",
     "mindroom.desktop.pairing",
     "mindroom.desktop.protocol",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.room_membership",
 ]
 visibility = [
     "mindroom.commands.handler",
