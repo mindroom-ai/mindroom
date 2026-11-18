@@ -76,14 +76,8 @@ class MatrixRoomTools(Toolkit):
         thread_metadata = relations.get("m.thread") if isinstance(relations, dict) else None
         return thread_metadata if isinstance(thread_metadata, dict) else {}
 
-    async def _serialize_thread_root(
-        self,
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        event: nio.Event,
-        trusted_sender_ids: frozenset[str],
-    ) -> dict[str, object] | None:
+    def _thread_row(self, room_id: str, event: nio.Event) -> dict[str, object] | None:
+        """Return a well-formed root's row from its bundled metadata; its `body_preview` is read later."""
         event_id = event.event_id
         sender = event.sender
         timestamp = event.server_timestamp
@@ -101,14 +95,6 @@ class MatrixRoomTools(Toolkit):
                 event_type=type(event).__name__,
             )
             return None
-        body_preview = await thread_root_body_preview(
-            event,
-            client=context.client,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            trusted_sender_ids=trusted_sender_ids,
-        )
-
         thread_metadata = self._thread_metadata(source)
         reply_count = thread_metadata.get("count")
         latest_event = thread_metadata.get("latest_event")
@@ -117,7 +103,7 @@ class MatrixRoomTools(Toolkit):
             "thread_id": event_id,
             "sender": sender,
             "timestamp": timestamp,
-            "body_preview": body_preview,
+            "body_preview": "",
             "reply_count": reply_count if isinstance(reply_count, int) and not isinstance(reply_count, bool) else 0,
         }
         if isinstance(latest_activity_ts, int) and not isinstance(latest_activity_ts, bool):
@@ -139,7 +125,7 @@ class MatrixRoomTools(Toolkit):
             async with reads:
                 current_summary = await current_thread_summary(
                     context.client,
-                    room_id,
+                    cast("str", thread.get("room_id", room_id)),
                     cast("str", thread["thread_id"]),
                     config=context.config,
                     runtime_paths=context.runtime_paths,
@@ -175,47 +161,6 @@ class MatrixRoomTools(Toolkit):
         detail = str(exc).strip()
         suffix = f": {detail}" if detail else ""
         return f"Matrix request failed ({type(exc).__name__}){suffix}."
-
-    async def _dispatch_action(
-        self,
-        context: ToolRuntimeContext,
-        *,
-        action: str,
-        room_id: str,
-        limit: int | None,
-        event_type: str | None,
-        state_key: str | None,
-        page_token: str | None,
-        include_summaries: bool,
-        workflow: str | None,
-    ) -> str:
-        if action == "room-info":
-            return await self._room_info(context, room_id=room_id)
-        if action == "members":
-            return await self._members(context, room_id=room_id)
-        if action == "agents":
-            agents = await available_room_agents(context, room_id)
-            return self._payload(
-                "ok",
-                action="agents",
-                room_id=room_id,
-                agents=[asdict(agent) for agent in agents],
-            )
-        if action == "threads":
-            return await self._threads(
-                context,
-                room_id=room_id,
-                limit=self._thread_limit(limit),
-                page_token=(page_token or "").strip() or None,
-                include_summaries=include_summaries,
-                workflow=workflow,
-            )
-        return await self._state(
-            context,
-            room_id=room_id,
-            event_type=(event_type or "").strip() or None,
-            state_key=(state_key or "").strip(),
-        )
 
     async def _room_info(
         self,
@@ -319,65 +264,107 @@ class MatrixRoomTools(Toolkit):
             members=members_list,
         )
 
-    async def _room_threads(
+    @staticmethod
+    def _labelling_identities(context: ToolRuntimeContext) -> tuple[int, frozenset[str], set[str]]:
+        """Return the clock, this runtime's configured bot accounts and the requester's own IDs, read once per call."""
+        config, paths = context.config, context.runtime_paths
+        bot_ids = persisted_bot_user_ids(paths) & trusted_visible_sender_ids(config, paths)
+        return int(time.time() * 1000), bot_ids, equivalent_requester_ids(context.requester_id, config, paths)
+
+    async def _thread_labels(
         self,
         context: ToolRuntimeContext,
+        room_id: str,
+        thread_roots: list[nio.Event],
+        identities: tuple[int, frozenset[str], set[str]] | None,
+    ) -> dict[str, dict[str, object]] | None:
+        """Label each root from one room-state read, the bots' running replies and the approval journal."""
+        if identities is None:
+            return None
+        now, bot_ids, requester_ids = identities
+        try:
+            state = await context.client.room_get_state(room_id)
+        except (ClientError, TimeoutError) as exc:
+            raise RoomThreadsPageError(response=f"{type(exc).__name__}: {exc}") from exc
+        if not isinstance(state, nio.RoomGetStateResponse):
+            raise RoomThreadsPageError(
+                response=f"Failed to fetch room state: {state}",
+                errcode=getattr(state, "status_code", None),
+                retry_after_ms=getattr(state, "retry_after_ms", None),
+            )
+        facts = room_thread_facts(room_id, state, context.runtime_paths, bot_ids, now)
+        bots = context.orchestrator.agent_bots.values() if context.orchestrator is not None else ()
+        replying = set[str | None]().union(*(bot.active_thread_ids_for_room(room_id) for bot in bots))
+        manager = get_approval_store()
+        approvals = (
+            {}
+            if manager is None
+            else await manager.pending_approval_threads(room_id=room_id, approver_user_ids=requester_ids)
+        )
+        return {
+            event.event_id: thread_workflow(
+                facts.get(event.event_id, {}),
+                now=now,
+                replying=event.event_id in replying,
+                approval_ts=approvals.get(event.event_id),
+                # A question counts only in a thread the requester started (design decision 8).
+                question_ts=latest_reply_question_ts(self._thread_metadata(event.source), bot_ids)
+                if event.sender in requester_ids and isinstance(event.source, dict)
+                else None,
+            )
+            for event in thread_roots
+        }
+
+    def _thread_rows(
+        self,
+        room_id: str,
+        thread_roots: list[nio.Event],
+        labels: dict[str, dict[str, object]] | None,
+        workflow: str | None,
+    ) -> list[tuple[dict[str, object], nio.Event]]:
+        """Return each well-formed root of the asked group as its labelled row, beside the event to preview."""
+        rows: list[tuple[dict[str, object], nio.Event]] = []
+        for event in thread_roots:
+            label = {} if labels is None else labels.get(event.event_id, {})
+            if workflow in (None, "all", label.get("workflow")) and (row := self._thread_row(room_id, event)):
+                rows.append((row | label, event))
+        return rows
+
+    async def _threads_payload(
+        self,
+        context: ToolRuntimeContext,
+        rows: list[tuple[dict[str, object], nio.Event]],
         *,
         room_id: str,
-        limit: int,
-        page_token: str | None,
-        workflow: str | None,
-        trusted_sender_ids: frozenset[str],
-    ) -> tuple[list[dict[str, object]], str | None]:
-        """Read one page of a room's thread roots; with `workflow`, label them and keep that group's rows."""
-        thread_roots, next_token = await get_room_threads_page(
-            context.client,
-            room_id,
-            limit=limit,
-            page_token=page_token,
-        )
-        now = int(time.time() * 1000)
-        facts: dict[str, dict[str, Any]] = {}
-        replying: set[str | None] = set()
-        approvals: dict[str | None, int] = {}
-        bot_ids: frozenset[str] = frozenset()
-        requester_ids: set[str] = set()
-        if workflow is not None:
-            state = await context.client.room_get_state(room_id)
-            if not isinstance(state, nio.RoomGetStateResponse):
-                raise RoomThreadsPageError(response=f"Failed to fetch room state: {state}")
-            bot_ids = persisted_bot_user_ids(context.runtime_paths)
-            facts = room_thread_facts(room_id, state, context.runtime_paths, bot_ids, now)
-            bots = context.orchestrator.agent_bots.values() if context.orchestrator is not None else ()
-            replying = replying.union(*(bot.active_thread_ids_for_room(room_id) for bot in bots))
-            requester_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
-            if (manager := get_approval_store()) is not None:
-                approvals = await manager.pending_approval_threads(room_id=room_id, approver_user_ids=requester_ids)
-        threads_list: list[dict[str, object]] = []
-        for event in thread_roots:
-            label: dict[str, object] = {}
-            if workflow is not None:
-                label = thread_workflow(
-                    facts.get(event.event_id, {}),
-                    now=now,
-                    replying=event.event_id in replying,
-                    approval_ts=approvals.get(event.event_id),
-                    # A question counts only in a thread the requester started (design decision 8).
-                    question_ts=latest_reply_question_ts(self._thread_metadata(event.source), bot_ids)
-                    if event.sender in requester_ids and isinstance(event.source, dict)
-                    else None,
-                )
-                if workflow not in ("all", label["workflow"]):
-                    continue
-            thread_info = await self._serialize_thread_root(
-                context,
-                room_id=room_id,
-                event=event,
+        include_summaries: bool,
+        **listing: object,
+    ) -> str:
+        """Read the previews, and with `include_summaries` the summaries, of the rows to return, and list them."""
+        trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
+        for row, event in rows:
+            row["body_preview"] = await thread_root_body_preview(
+                event,
+                client=context.client,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
                 trusted_sender_ids=trusted_sender_ids,
             )
-            if thread_info is not None:
-                threads_list.append(thread_info | label)
-        return threads_list, next_token
+        threads_list = [row for row, _event in rows]
+        if include_summaries:
+            await self._add_current_summaries(
+                context,
+                room_id=room_id,
+                threads=threads_list,
+                trusted_sender_ids=trusted_sender_ids,
+            )
+        return self._payload(
+            "ok",
+            action="threads",
+            room_id=room_id,
+            count=len(threads_list),
+            threads=threads_list,
+            **listing,
+        )
 
     async def _threads(
         self,
@@ -389,16 +376,15 @@ class MatrixRoomTools(Toolkit):
         include_summaries: bool,
         workflow: str | None,
     ) -> str:
-        trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
         try:
-            threads_list, next_token = await self._room_threads(
-                context,
-                room_id=room_id,
+            thread_roots, next_token = await get_room_threads_page(
+                context.client,
+                room_id,
                 limit=limit,
                 page_token=page_token,
-                workflow=workflow,
-                trusted_sender_ids=trusted_sender_ids,
             )
+            identities = None if workflow is None else self._labelling_identities(context)
+            labels = await self._thread_labels(context, room_id, thread_roots, identities)
         except RoomThreadsPageError as exc:
             error_payload: dict[str, object] = {
                 "action": "threads",
@@ -410,28 +396,12 @@ class MatrixRoomTools(Toolkit):
             if exc.retry_after_ms is not None:
                 error_payload["retry_after_ms"] = exc.retry_after_ms
             return self._payload("error", **error_payload)
-        except (ClientError, TimeoutError) as exc:
-            return self._payload(
-                "error",
-                action="threads",
-                room_id=room_id,
-                message=self._transport_error_message(exc),
-            )
 
-        if include_summaries:
-            await self._add_current_summaries(
-                context,
-                room_id=room_id,
-                threads=threads_list,
-                trusted_sender_ids=trusted_sender_ids,
-            )
-
-        return self._payload(
-            "ok",
-            action="threads",
+        return await self._threads_payload(
+            context,
+            self._thread_rows(room_id, thread_roots, labels, workflow),
             room_id=room_id,
-            count=len(threads_list),
-            threads=threads_list,
+            include_summaries=include_summaries,
             next_token=next_token,
             has_more=next_token is not None,
         )
@@ -445,65 +415,52 @@ class MatrixRoomTools(Toolkit):
         include_summaries: bool,
         workflow: str | None,
     ) -> str:
-        """List one page of threads of every room the requester shares with the agent, waiting rows first."""
+        """List one page of threads of every room the requester is joined to and shares with you, waiting rows first."""
         message = self._check_rate_limit(context, context.room_id)
         if message is None and (page_token or "").strip():
             message = "page_token cannot be used with room_id='all'; name one room to page through it."
         if message is not None:
             return self._payload("error", action="threads", room_id="all", message=message)
-        trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
+        identities = self._labelling_identities(context) if workflow is not None else None
         reads = asyncio.Semaphore(self._SUMMARY_READ_CONCURRENCY)
-        failed_room_ids: list[str] = []
-        more = False
 
-        async def read_room(room_id: str) -> list[dict[str, object]]:
-            nonlocal more
+        async def read_room(room_id: str) -> tuple[list[tuple[dict[str, object], nio.Event]], bool, bool]:
+            """Return a shared room's rows, whether it has older threads, and whether reading it failed."""
             async with reads:
+                # Privacy boundary: a room is read only once the requester is proven joined to it now.
                 try:
-                    # Privacy boundary: a room the requester is not joined to is never read.
-                    if not await room_access_allowed(context, room_id, contact_room_ok=True):
-                        return []
-                    rows, next_token = await self._room_threads(
-                        context,
-                        room_id=room_id,
-                        limit=limit,
-                        page_token=None,
-                        workflow=workflow,
-                        trusted_sender_ids=trusted_sender_ids,
-                    )
-                except (RoomThreadsPageError, ClientError, TimeoutError):
-                    failed_room_ids.append(room_id)
-                    return []
-            more = more or next_token is not None
-            return [{"room_id": room_id, **row} for row in rows]
+                    shared = await room_access_allowed(context, room_id, contact_room_ok=True, require_membership=True)
+                except (ClientError, TimeoutError):
+                    shared = False
+                if not shared:
+                    return [], False, False
+                try:
+                    roots, next_token = await get_room_threads_page(context.client, room_id, limit=limit)
+                    labels = await self._thread_labels(context, room_id, roots, identities)
+                except Exception:  # One unreadable room must not hide the others.
+                    logger.warning("matrix_room_threads_room_unreadable", room_id=room_id, exc_info=True)
+                    return [], False, True
+            rows = self._thread_rows(room_id, roots, labels, workflow)
+            return [({"room_id": room_id, **row}, event) for row, event in rows], next_token is not None, False
 
-        room_rows = await asyncio.gather(*(read_room(room_id) for room_id in list(context.client.rooms)))
+        room_ids = list(context.client.rooms)
+        results = await asyncio.gather(*(read_room(room_id) for room_id in room_ids))
         rows = sorted(
-            (row for rows in room_rows for row in rows),
+            (row for room_rows, _more, _failed in results for row in room_rows),
             key=lambda row: (
-                row.get("why") not in ("approval", "question"),
-                -cast("int", row.get("latest_activity_ts", row["timestamp"])),
+                row[0].get("why") not in ("approval", "question"),
+                -cast("int", row[0].get("latest_activity_ts", row[0]["timestamp"])),
             ),
         )
-        threads_list = rows[:limit]
-        if include_summaries:
-            for room_id in dict.fromkeys(row["room_id"] for row in threads_list):
-                await self._add_current_summaries(
-                    context,
-                    room_id=cast("str", room_id),
-                    threads=[row for row in threads_list if row["room_id"] == room_id],
-                    trusted_sender_ids=trusted_sender_ids,
-                )
-        failed = {"failed_room_ids": sorted(failed_room_ids)} if failed_room_ids else {}
-        return self._payload(
-            "ok",
-            action="threads",
+        failed_room_ids = [room_id for room_id, (_rows, _more, failed) in zip(room_ids, results, strict=True) if failed]
+        return await self._threads_payload(
+            context,
+            rows[:limit],
             room_id="all",
-            count=len(threads_list),
-            threads=threads_list,
+            include_summaries=include_summaries,
             next_token=None,
-            has_more=more or len(rows) > limit,
-            **failed,
+            has_more=len(rows) > limit or any(more for _rows, more, _failed in results),
+            **({"failed_room_ids": sorted(failed_room_ids)} if failed_room_ids else {}),
         )
 
     async def _state(
@@ -594,7 +551,7 @@ class MatrixRoomTools(Toolkit):
             events=state_events,
         )
 
-    async def matrix_room(
+    async def matrix_room(  # noqa: PLR0911
         self,
         action: Literal["room-info", "members", "agents", "threads", "state"] = "room-info",
         room_id: str | None = None,
@@ -661,14 +618,30 @@ class MatrixRoomTools(Toolkit):
                 message=limit_error,
             )
 
-        return await self._dispatch_action(
+        if action == "room-info":
+            return await self._room_info(context, room_id=resolved_room_id)
+        if action == "members":
+            return await self._members(context, room_id=resolved_room_id)
+        if action == "agents":
+            agents = await available_room_agents(context, resolved_room_id)
+            return self._payload(
+                "ok",
+                action="agents",
+                room_id=resolved_room_id,
+                agents=[asdict(agent) for agent in agents],
+            )
+        if action == "threads":
+            return await self._threads(
+                context,
+                room_id=resolved_room_id,
+                limit=self._thread_limit(limit),
+                page_token=(page_token or "").strip() or None,
+                include_summaries=include_summaries,
+                workflow=workflow,
+            )
+        return await self._state(
             context,
-            action=action,
             room_id=resolved_room_id,
-            limit=limit,
-            event_type=event_type,
-            state_key=state_key,
-            page_token=page_token,
-            include_summaries=include_summaries,
-            workflow=workflow,
+            event_type=(event_type or "").strip() or None,
+            state_key=(state_key or "").strip(),
         )

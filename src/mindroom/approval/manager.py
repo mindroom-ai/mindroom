@@ -977,6 +977,22 @@ class ApprovalManager:
             if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
                 return
 
+    async def _waiting_cards(self, room_id: str) -> AsyncIterator[ApprovalCardView]:
+        """Yield one room's published, unanswered and unexpired cards whose call still exists."""
+        if self.cards is None:
+            return
+        now_ns = time.time_ns()
+        # A card past its deadline expires when answered, until the deadline sweep retires it.
+        async for card in self._pending_cards(self.cards, room_id):
+            if (
+                card.card_event_id is not None
+                and not card.decided
+                and card.owner_kind is not None
+                and card.expires_at_ns is not None
+                and card.expires_at_ns > now_ns
+            ):
+                yield card
+
     async def pending_card_event_ids(
         self,
         *,
@@ -985,22 +1001,14 @@ class ApprovalManager:
         approver_user_id: str,
     ) -> tuple[str, ...]:
         """Return the unexpired, unanswered, approvable cards one approver has in one conversation, scheduled calls aside."""
-        if self.cards is None:
-            return ()
-        now_ns = time.time_ns()
-        # A card past its deadline expires when answered, until the deadline sweep retires it.
         return tuple(
             [
-                card.card_event_id
-                async for card in self._pending_cards(self.cards, room_id)
-                if card.card_event_id is not None
-                and not card.decided
-                and card.owner_kind not in {None, "scheduled"}
+                cast("str", card.card_event_id)
+                async for card in self._waiting_cards(room_id)
+                if card.owner_kind != "scheduled"
                 and card.thread_id == thread_id
                 and card.approver_user_id == approver_user_id
                 and card.approvable
-                and card.expires_at_ns is not None
-                and card.expires_at_ns > now_ns
             ],
         )
 
@@ -1011,19 +1019,11 @@ class ApprovalManager:
         approver_user_ids: Collection[str],
     ) -> dict[str | None, int]:
         """Map each conversation of a room to the creation time (ms) of its newest card that waits for an approver."""
-        if self.cards is None:
-            return {}
-        now_ns = time.time_ns()
         # Deny-only and scheduled cards count too: the person is asked about both.
         return {
             card.thread_id: card.created_at_ns // 1_000_000
-            async for card in self._pending_cards(self.cards, room_id)
-            if card.card_event_id is not None
-            and not card.decided
-            and card.owner_kind is not None
-            and card.approver_user_id in approver_user_ids
-            and card.expires_at_ns is not None
-            and card.expires_at_ns > now_ns
+            async for card in self._waiting_cards(room_id)
+            if card.approver_user_id in approver_user_ids
         }
 
     async def _expire_stored(self, card: ApprovalCardView, *, reason: str = TIMEOUT_REASON) -> bool:

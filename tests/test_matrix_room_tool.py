@@ -19,6 +19,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -1518,8 +1519,12 @@ def _tag_event(thread_id: str, tag: str, data: dict[str, object] | None = None) 
         "type": "com.mindroom.thread.tags",
         "state_key": json.dumps([thread_id, tag], separators=(",", ":")),
         "sender": "@user:localhost",
+        "origin_server_ts": _RESOLVED_AT_MS,
         "content": {"set_by": "@user:localhost", "set_at": "2026-01-01T00:00:00+00:00", "data": data or {}},
     }
+
+
+_RESOLVED_AT_MS = int(datetime(2026, 1, 1, tzinfo=UTC).timestamp() * 1000)
 
 
 _SNOOZE_END_MS = int(datetime(2999, 1, 1, tzinfo=UTC).timestamp() * 1000)
@@ -1668,8 +1673,8 @@ async def test_threads_row_waits_on_a_question_only_for_the_thread_starter() -> 
         InteractivePrompt(
             creator_agent="general",
             question_text="Pick one",
-            options={"1": "a"},
-            option_labels={"1": "A"},
+            options={"👍": "a", "1": "a"},
+            option_labels={"👍": "A", "1": "A"},
             source_event_id="$src",
         ),
     )
@@ -1726,18 +1731,26 @@ def _joined(*user_ids: str) -> MagicMock:
     return response
 
 
-def _all_rooms_context(shared_members: object = None) -> ToolRuntimeContext:
-    """The agent is in three rooms; the requester is in the current room and `!shared`, not in `!private`."""
+def _all_rooms_context(shared_members: object = None, **members: object) -> ToolRuntimeContext:
+    """The agent is in three rooms; the requester is in the current room and `!shared`, not in `!private`.
+
+    `members` adds or replaces rooms by their localpart, as their joined-member answer (an exception is raised).
+    """
     ctx = _workflow_context([])
-    ctx.client.rooms = {
-        room_id: MagicMock() for room_id in ("!room:localhost", "!shared:localhost", "!private:localhost")
-    }
-    members = {
+    joined = {
         "!room:localhost": _joined("@user:localhost", _AGENT_ID),
         "!shared:localhost": shared_members or _joined("@user:localhost", _AGENT_ID),
         "!private:localhost": _joined(_AGENT_ID),
+        **{f"!{name}:localhost": answer for name, answer in members.items()},
     }
-    ctx.client.joined_members = AsyncMock(side_effect=lambda room_id: members[room_id])
+    ctx.client.rooms = {room_id: MagicMock() for room_id in joined}
+
+    async def joined_members(room_id: str) -> object:
+        if isinstance(answer := joined[room_id], Exception):
+            raise answer
+        return answer
+
+    ctx.client.joined_members = AsyncMock(side_effect=joined_members)
     ctx.client.room_get_state = AsyncMock(
         side_effect=lambda room_id: nio.RoomGetStateResponse(events=[], room_id=room_id),
     )
@@ -1757,7 +1770,7 @@ def _pages(pages: dict[str, object]) -> AsyncMock:
 
 
 def _read_rooms(mock: AsyncMock) -> set[str]:
-    return {call.args[0] for call in mock.await_args_list}
+    return {call.args[1] for call in mock.await_args_list}
 
 
 _ONE_ROOT_EACH = {
@@ -1930,3 +1943,153 @@ async def test_threads_all_rooms_counts_one_rate_limited_action() -> None:
     assert first["status"] == "ok"
     assert second["status"] == "error"
     assert "Rate limit exceeded" in second["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_membership")
+@pytest.mark.parametrize("workflow", [None, "all"])
+async def test_threads_all_rooms_reads_the_invoking_room_only_while_the_requester_is_joined(
+    workflow: str | None,
+) -> None:
+    """The room the request came from is listed only if its member list still holds the requester."""
+    ctx = _all_rooms_context(room=_joined(_AGENT_ID))
+    pages = _pages(_ONE_ROOT_EACH)
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, new=pages):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", room_id="all", workflow=workflow))
+
+    assert [row["room_id"] for row in payload["threads"]] == ["!shared:localhost"]
+    read = _read_rooms(pages) | {call.args[0] for call in ctx.client.room_get_state.await_args_list}
+    assert read <= {"!shared:localhost"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_membership")
+@pytest.mark.parametrize("workflow", [None, "all"])
+async def test_threads_all_rooms_skips_a_contact_room_its_owner_has_not_joined(workflow: str | None) -> None:
+    """A contact room open to its invited owner by name is not listed until the owner joins it."""
+    ctx = _all_rooms_context(contact=_joined(_AGENT_ID))
+    record = MagicMock()
+    record.party.return_value.owner = "@user:localhost"
+    pages = _pages({"!contact:localhost": ([_thread_event("$contact")], None)})
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, new=pages),
+        patch(
+            "mindroom.custom_tools.attachment_helpers.contact_room",
+            side_effect=lambda _config, _paths, room_id, _agent: (
+                (record, "a") if room_id == "!contact:localhost" else None
+            ),
+        ),
+    ):
+        assert await room_access_allowed(ctx, "!contact:localhost", contact_room_ok=True)
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", room_id="all", workflow=workflow))
+
+    assert payload["threads"] == []
+    assert "!contact:localhost" not in _read_rooms(pages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_membership")
+async def test_threads_all_rooms_omits_a_room_whose_membership_read_times_out() -> None:
+    """A room whose membership cannot be proven is left out silently, never named as failed."""
+    ctx = _all_rooms_context(shared_members=TimeoutError("slow"))
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, new=_pages(_ONE_ROOT_EACH)):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", room_id="all", workflow="all"))
+
+    assert [row["thread_id"] for row in payload["threads"]] == ["$here"]
+    assert "failed_room_ids" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_membership")
+async def test_threads_all_rooms_skips_bad_records_and_fails_only_the_room_that_broke() -> None:
+    """Malformed state records are skipped; a room whose approval journal read fails is named, the others listed."""
+    ctx = _all_rooms_context()
+    garbage = ["not an event", {"type": "com.mindroom.thread.tags", "state_key": ["$here"], "content": []}]
+    states = {
+        "!room:localhost": [*garbage, _tag_event("$here", "resolved")],
+        "!shared:localhost": [],
+    }
+    ctx.client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: nio.RoomGetStateResponse(events=states[room_id], room_id=room_id),
+    )
+
+    async def approvals(*, room_id: str, **_kwargs: object) -> dict[str | None, int]:
+        if room_id == "!shared:localhost":
+            msg = "journal unavailable"
+            raise RuntimeError(msg)
+        return {}
+
+    manager = MagicMock(pending_approval_threads=AsyncMock(side_effect=approvals))
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, new=_pages(_ONE_ROOT_EACH)),
+        patch(_APPROVAL_STORE, return_value=manager),
+    ):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", room_id="all", workflow="all"))
+
+    assert [(row["thread_id"], row["workflow"]) for row in payload["threads"]] == [("$here", "done")]
+    assert payload["failed_room_ids"] == ["!shared:localhost"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_membership")
+async def test_threads_all_rooms_reads_previews_only_for_returned_rows() -> None:
+    """Rows are ranked and cut across rooms before any preview is read."""
+    ctx = _all_rooms_context()
+    pages = _pages(
+        {
+            "!room:localhost": ([_thread_event("$a", ts=3000), _thread_event("$b", ts=1000)], None),
+            "!shared:localhost": ([_thread_event("$c", ts=2000)], None),
+        },
+    )
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, new=pages),
+        patch(
+            "mindroom.custom_tools.matrix_room.thread_root_body_preview",
+            new=AsyncMock(return_value="preview"),
+        ) as mock_preview,
+    ):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", room_id="all", limit=2))
+
+    assert [row["thread_id"] for row in payload["threads"]] == ["$a", "$c"]
+    assert [call.args[0].event_id for call in mock_preview.await_args_list] == ["$a", "$c"]
+
+
+@pytest.mark.asyncio
+async def test_threads_state_read_keeps_the_homeservers_retry_hint() -> None:
+    """A rate-limited state read reports its errcode and retry time as a rate-limited page read does."""
+    ctx = _workflow_context([])
+    ctx.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateError(message="slow down", status_code="M_LIMIT_EXCEEDED", retry_after_ms=5000),
+    )
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$a")], None)):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="threads", workflow="needs_you"))
+
+    assert payload["status"] == "error"
+    assert payload["errcode"] == "M_LIMIT_EXCEEDED"
+    assert payload["retry_after_ms"] == 5000
+
+
+@pytest.mark.asyncio
+async def test_threads_without_workflow_lets_a_preview_transport_error_through() -> None:
+    """Without `workflow` a listing fails as before: a transport error while reading a preview is not caught."""
+    ctx = _make_context()
+
+    with (
+        tool_runtime_context(ctx),
+        patch(_MOCK_TARGET, return_value=([_thread_event("$a")], None)),
+        patch(
+            "mindroom.custom_tools.matrix_room.thread_root_body_preview",
+            new=AsyncMock(side_effect=ClientError("down")),
+        ),
+        pytest.raises(ClientError),
+    ):
+        await MatrixRoomTools().matrix_room(action="threads")
+    ctx.client.room_get_state.assert_not_awaited()

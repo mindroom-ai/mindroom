@@ -1,16 +1,14 @@
-"""A thread's workflow group as MindRoom Chat's Threads page computes it: needs you, working, later or done.
+"""A thread's workflow group as MindRoom Chat's Threads page computes it (`threadWorkflow.ts`, `threadGroups.ts`).
 
-Ports `isWaitingOnYou`, `classifyThreadWorkflow` and `threadReturnTs` (mindroom-chat
-`src/app/event-store/threads/threadWorkflow.ts`), combined as `src/app/threads/page/threadGroups.ts` does.
 Both repositories run `tests/fixtures/thread-workflow-cases.json` against their implementation.
 """
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.interactive_models import interactive_prompt_from_content
 from mindroom.matrix.client_visible_messages import bundled_replacement_candidates
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.scheduling.tasks import task_records_with_writers
@@ -25,88 +23,109 @@ from mindroom.thread_tags import (
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
-    from datetime import datetime
 
     import nio
 
     from mindroom.constants import RuntimePaths
+    from mindroom.thread_tags import ThreadTagRecord
 
 # The client's QUESTION_WAITS_MS: an unanswered question stops counting after seven days.
 _QUESTION_WAITS_MS = 7 * 24 * 60 * 60 * 1000
+_JOB_FIELDS = ("job_id", "kind", "tool", "status", "started_at")
 
 
-def _ms(value: datetime) -> int:
-    return int(value.timestamp() * 1000)
-
-
-def classify_thread_workflow(  # noqa: PLR0911
-    *,
-    now: int,
-    is_resolved: bool = False,
-    snoozed_until_ts: int | None = None,
-    is_streaming: bool = False,
-    has_background_job: bool = False,
-    has_background_approval: bool = False,
-    scheduled_task_count: int = 0,
-    next_scheduled_ts: int | None = None,
-    pending_approval: bool = False,
-    pending_question: bool = False,
-) -> dict[str, object]:
-    """Return a thread's group, with `why` on needs-you rows and `back_at` (ms) on later rows when known."""
-    if pending_approval or (has_background_approval and not is_resolved):
+def classify_thread_workflow(status: Mapping[str, Any], now: int) -> dict[str, object]:  # noqa: PLR0911
+    """Group a thread by the case file's status keys (absent: false, 0 or unknown), with `why` or known `back_at`."""
+    if status.get("pending_approval") or (status.get("has_background_approval") and not status.get("is_resolved")):
         return {"workflow": "needs_you", "why": "approval"}
-    if pending_question:
+    if status.get("pending_question"):
         return {"workflow": "needs_you", "why": "question"}
-    if is_resolved:
+    if status.get("is_resolved"):
         return {"workflow": "done"}
-    if snoozed_until_ts is not None and snoozed_until_ts > now:
+    if (snoozed_until_ts := status.get("snoozed_until_ts")) is not None and snoozed_until_ts > now:
         return {"workflow": "later", "back_at": snoozed_until_ts}
-    if is_streaming or has_background_job:
+    if status.get("is_streaming") or status.get("has_background_job"):
         return {"workflow": "working"}
-    if scheduled_task_count > 0:
-        return (
-            {"workflow": "later"} if next_scheduled_ts is None else {"workflow": "later", "back_at": next_scheduled_ts}
-        )
+    if status.get("scheduled_task_count", 0) > 0:
+        next_ts = status.get("next_scheduled_ts")
+        return {"workflow": "later"} if next_ts is None else {"workflow": "later", "back_at": next_ts}
     return {"workflow": "needs_you", "why": "your_turn"}
 
 
-def room_thread_facts(  # noqa: C901
+def _lifecycle_tags(events: list[dict[str, Any]]) -> dict[tuple[str, str], tuple[ThreadTagRecord, object]]:
+    """Each thread's tags and their event's server time; per-tag events override or (`{}`) remove legacy tags."""
+    legacy: dict[tuple[str, str], tuple[ThreadTagRecord, object]] = {}
+    per_tag: dict[tuple[str, str], tuple[ThreadTagRecord | None, object]] = {}
+    for event in events:
+        content, state_key, ts = event.get("content"), event.get("state_key"), event.get("origin_server_ts")
+        if event.get("type") != THREAD_TAGS_EVENT_TYPE or not isinstance(content, dict):
+            continue
+        if (key := parse_thread_tag_state_key(state_key)) is not None:
+            record = parse_thread_tag_record(key[1], content) if content else None
+            if record is not None or not content:
+                per_tag[key] = (record, ts)
+        elif isinstance(state_key, str) and isinstance(tags := content.get("tags"), dict):
+            for tag, value in tags.items():
+                if isinstance(tag, str) and (record := parse_thread_tag_record(tag, value)) is not None:
+                    legacy[state_key, tag] = (record, ts)
+    return {key: (record, ts) for key, (record, ts) in (legacy | per_tag).items() if record is not None}
+
+
+def _published_jobs(events: list[dict[str, Any]], bot_ids: Collection[str]) -> list[dict[str, Any]]:
+    """The well-formed jobs that a bot still joined published about itself, as the client's `agentRoomState` reads."""
+    joined = {
+        event.get("state_key")
+        for event in events
+        if event.get("type") == "m.room.member"
+        and isinstance(event.get("state_key"), str)
+        and isinstance(event.get("content"), dict)
+        and event["content"].get("membership") == "join"
+    }
+    return [
+        job
+        for event in events
+        if event.get("type") == BACKGROUND_JOBS_EVENT_TYPE
+        and isinstance(publisher := event.get("state_key"), str)
+        and publisher == event.get("sender")
+        and publisher in bot_ids
+        and publisher in joined
+        and isinstance(content := event.get("content"), dict)
+        and isinstance(jobs := content.get("jobs"), list)
+        for job in jobs
+        if isinstance(job, dict)
+        and all(isinstance(job.get(field), str) for field in _JOB_FIELDS)
+        and isinstance(job.get("thread_id"), str)
+    ]
+
+
+def room_thread_facts(
     room_id: str,
     state: nio.RoomGetStateResponse,
     runtime_paths: RuntimePaths,
     bot_ids: Collection[str],
     now: int,
 ) -> dict[str, dict[str, Any]]:
-    """Read each thread's resolve time, snooze end, pending runs and published jobs from one room-state response."""
+    """Read each thread's classifier inputs, and `resolved_ts`, from one room-state response; bad records are skipped."""
+    events = [event for event in state.events if isinstance(event, dict)]
     facts: defaultdict[str, dict[str, Any]] = defaultdict(dict)
-    for event in state.events:
-        content = event.get("content")
-        if event.get("type") == THREAD_TAGS_EVENT_TYPE:
-            parsed = parse_thread_tag_state_key(event.get("state_key"))
-            if parsed is None or parsed[1] not in (RESOLVED_THREAD_TAG, SNOOZED_THREAD_TAG):
-                continue
-            if (record := parse_thread_tag_record(parsed[1], content)) is None:
-                continue
-            if parsed[1] == RESOLVED_THREAD_TAG:
-                facts[parsed[0]]["resolved_ts"] = _ms(record.set_at)
-            elif (until := snooze_until(record)) is not None:
-                facts[parsed[0]]["snoozed_until_ts"] = _ms(until)
-        elif (
-            event.get("type") == BACKGROUND_JOBS_EVENT_TYPE
-            and event.get("sender") == event.get("state_key")
-            and event.get("sender") in bot_ids
-            and isinstance(content, dict)
-            and isinstance(jobs := content.get("jobs"), list)
-        ):
-            for job in jobs:
-                if isinstance(job, dict) and isinstance(thread_id := job.get("thread_id"), str):
-                    waits = job.get("status") == "awaiting_approval"
-                    facts[thread_id]["has_background_approval" if waits else "has_background_job"] = True
+    for (thread_id, tag), (record, ts) in _lifecycle_tags(events).items():
+        if tag == RESOLVED_THREAD_TAG:
+            facts[thread_id]["resolved_ts"] = ts if isinstance(ts, int) else 0
+        elif tag == SNOOZED_THREAD_TAG and (until := snooze_until(record)) is not None:
+            facts[thread_id]["snoozed_until_ts"] = int(until.timestamp() * 1000)
+    for job in _published_jobs(events, bot_ids):
+        waits = job["status"] == "awaiting_approval"
+        facts[job["thread_id"]]["has_background_approval" if waits else "has_background_job"] = True
+    runs: defaultdict[str, list[int | None]] = defaultdict(list)
     for task, _writer in task_records_with_writers(room_id, state, runtime_paths):
         workflow = task.workflow
-        execute_at = None if workflow.execute_at is None else _ms(workflow.execute_at)
+        execute_at = None if workflow.execute_at is None else int(workflow.execute_at.timestamp() * 1000)
         if workflow.thread_id and not workflow.new_thread and (execute_at is None or execute_at > now):
-            facts[workflow.thread_id].setdefault("runs", []).append(execute_at)
+            runs[workflow.thread_id].append(execute_at)
+    for thread_id, times in runs.items():
+        facts[thread_id]["scheduled_task_count"] = len(times)
+        if None not in times:
+            facts[thread_id]["next_scheduled_ts"] = min(time for time in times if time is not None)
     return dict(facts)
 
 
@@ -120,36 +139,37 @@ def thread_workflow(
 ) -> dict[str, object]:
     """Label one thread from its `room_thread_facts` entry; a request older than the resolve counts as answered."""
     resolved_ts = facts.get("resolved_ts")
-    runs = facts.get("runs", [])
-
-    def asked_since_resolve(ts: int | None) -> bool:
-        return ts is not None and (resolved_ts is None or ts > resolved_ts)
-
-    return classify_thread_workflow(
-        now=now,
-        is_resolved=resolved_ts is not None,
-        snoozed_until_ts=facts.get("snoozed_until_ts"),
-        is_streaming=replying,
-        has_background_job=facts.get("has_background_job", False),
-        has_background_approval=facts.get("has_background_approval", False),
-        scheduled_task_count=len(runs),
-        next_scheduled_ts=min(runs) if runs and None not in runs else None,
-        pending_approval=asked_since_resolve(approval_ts),
-        pending_question=question_ts is not None
-        and now - question_ts < _QUESTION_WAITS_MS
-        and asked_since_resolve(question_ts),
-    )
+    cutoff = float("-inf") if resolved_ts is None else resolved_ts
+    status = {
+        **facts,
+        "is_resolved": resolved_ts is not None,
+        "is_streaming": replying,
+        "pending_approval": approval_ts is not None and approval_ts > cutoff,
+        "pending_question": question_ts is not None and question_ts > max(cutoff, now - _QUESTION_WAITS_MS),
+    }
+    return classify_thread_workflow(status, now)
 
 
 def latest_reply_question_ts(thread_metadata: Mapping[str, Any], bot_ids: Collection[str]) -> int | None:
     """Return when the root's bundled newest reply, as its newest own edit shows it, asked an agent's question."""
     reply = thread_metadata.get("io.mindroom.latest_reply")
-    if not isinstance(reply, dict) or reply.get("sender") not in bot_ids:
+    sender = reply.get("sender") if isinstance(reply, dict) else None
+    if not isinstance(reply, dict) or not isinstance(sender, str) or sender not in bot_ids:
         return None
-    edit = next((c for c in bundled_replacement_candidates(reply) if c.get("sender") == reply["sender"]), None)
-    shown = edit.get("content", {}).get("m.new_content") if edit is not None else None
-    original = reply.get("content")
-    if not any(isinstance(c, dict) and interactive_prompt_from_content(c) for c in (shown, original)):
+    edit = next((c for c in bundled_replacement_candidates(reply) if c.get("sender") == sender), None)
+    edit_content = edit.get("content") if edit is not None else None
+    shown = edit_content.get("m.new_content") if isinstance(edit_content, dict) else None
+    # As the client's readInteractiveQuestion: the shown content's prompt, else the original's.
+    payloads = [c.get("io.mindroom.interactive") for c in (shown, reply.get("content")) if isinstance(c, dict)]
+    prompt = next((payload for payload in payloads if payload is not None), None)
+    options = prompt.get("options") if isinstance(prompt, dict) else None
+    # A question the client shows: text, and an option keyed by the reaction that picks it, not only by number.
+    if not (
+        isinstance(options, dict)
+        and isinstance(text := cast("dict[str, object]", prompt).get("question_text"), str)
+        and text
+        and any(isinstance(value, str) and not re.fullmatch("[0-9]+", str(key)) for key, value in options.items())
+    ):
         return None
     ts = (edit or reply).get("origin_server_ts")
     return ts if isinstance(ts, int) and not isinstance(ts, bool) else None

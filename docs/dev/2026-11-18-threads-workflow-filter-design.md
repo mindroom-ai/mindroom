@@ -58,15 +58,17 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    The tool description says so in one sentence, so an agent asked "what needs me?" leads with the approvals and questions.
 5. **Resolved, snoozed, scheduled and background jobs come from one room-state read.**
    The read is `client.room_get_state`, once per room and call; the existing tag and task parsers read its events, and a few lines read the jobs.
-   A thread is resolved when it has a `resolved` tag, at the tag's `set_at`; the client uses the tag event's server time, which differs by the write's latency.
+   Tags are merged as the client merges them: per-tag events over a thread's legacy `{"tags": ...}` event, `{}` removing a tag; a thread is resolved at its `resolved` tag event's server time (`origin_server_ts`), as in the client, not at the writer-supplied `set_at`.
+   Known limit: like the client, tag events are not checked for the writer's power level, so any member who may write them can resolve or snooze a thread.
    A scheduled task counts when a MindRoom account of this runtime wrote it, it is pending, it names an existing thread, and it is not a one-time task whose time has passed.
-   A jobs event counts when its sender is its state key and a MindRoom account of this runtime.
+   A jobs event counts when its sender is its state key, a configured MindRoom bot of this runtime, and still joined (the client ignores state of an agent that left); a listed job counts only with the fields the client requires.
+   A malformed record is skipped; the other records still count.
    A call whose state read fails returns an error instead of unlabelled rows, because a filter over unknown groups would hide threads silently.
 6. **A reply in progress comes from the runtime's own record of running replies.**
    Each bot already knows the threads of a room in which it holds an active reply (`ResponseLifecycleCoordinator.active_thread_ids_for_room`, `src/mindroom/response_lifecycle.py:490`); the tool asks every bot of its orchestrator.
    This covers every agent, team and router of the MindRoom runtime the calling agent runs in, from the moment a turn starts, in encrypted rooms too, and it cannot go stale after a crash.
    It does not cover an agent that another MindRoom runtime hosts in a shared room, and a tool call outside an orchestrator sees no running reply; such a thread is then classified by its other facts.
-   A background job of any runtime in the room still makes the thread `working`, because jobs are read from state.
+   A background job makes the thread `working` only when one of this runtime's bots published it (decision 5); another runtime's jobs are not seen.
 7. **A pending approval comes from the approval journal, not from the thread's events.**
    The journal holds every request card this runtime published, with its room, thread, approver, deadline and creation time (`ApprovalCardView`, `src/mindroom/event_journal/approval_cards.py:82`).
    A card counts when it is published, undecided, not past its deadline, its call still exists, and its approver is the requester or one of the requester's aliases.
@@ -74,7 +76,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    When the thread is resolved, the card counts only if it was created after the resolve.
    Divergence: a card of another runtime's agent is not seen.
 8. **A pending question is read from the root's bundled latest reply, which costs no request.**
-   It counts when all of these hold: the requester started the thread; the bundled `io.mindroom.latest_reply` is from a MindRoom account of this runtime; its content as its newest same-sender edit shows it carries a complete `io.mindroom.interactive` prompt; it was asked less than seven days ago; and the thread was not resolved since.
+   It counts when all of these hold: the requester started the thread; the bundled `io.mindroom.latest_reply` is from a MindRoom account of this runtime; its content as its newest same-sender edit shows it carries an `io.mindroom.interactive` prompt with question text and at least one option keyed by its reaction, not only by number (the client's `readInteractiveQuestion`); it was asked less than seven days ago; and the thread was not resolved since.
    The client instead scans the newest 40 messages; the bundle agrees with it whenever the question is still the thread's newest event apart from title notices, which is the case until someone answers.
    Divergences, each of which turns a `question` row into the row its other facts give, most often `your_turn`:
    - a room that is encrypted, or a homeserver without the bundle, yields no question;
@@ -86,7 +88,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
    The backend test calls the port; the client test calls `isWaitingOnYou`, `classifyThreadWorkflow` and `threadReturnTs` and combines them as `threadGroups.ts:38-50` does.
    A rule change in either repository fails that repository's test until the file and the other side follow.
 10. **`room_id="all"` lists the rooms the requester and the agent share, and no others.**
-    The candidates are the rooms the agent's client has joined; each one passes the same check a named room passes today (`room_access_allowed`, `src/mindroom/custom_tools/attachment_helpers.py:46`), which requires that the requester may talk to this agent there and is a joined member now.
+    The candidates are the rooms the agent's client has joined; each one passes the same check a named room passes today (`room_access_allowed`, `src/mindroom/custom_tools/attachment_helpers.py:46`), which requires that the requester may talk to this agent there; a listing also requires a fresh joined-member match in every candidate, the invoking room and contact rooms included (`require_membership=True`), one membership read per room.
     This is a privacy boundary: a thread of a room the requester is not in is never returned, whatever the agent itself can read, and a room whose membership cannot be read counts as not shared.
     Each row of such a call also has `room_id`.
     The literal `all` is taken before room names are resolved, for the `threads` action only.
@@ -94,7 +96,8 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
     Each shared room contributes its newest `limit` thread roots; the matching rows are merged, the rows that wait on an approval or a question first and then the newest activity first, and cut to `limit`.
     `has_more` is true when rows were cut or a room has older threads, and `page_token` with `all` is an error; to go further the agent names one room and pages there.
     A cursor across rooms would need one token per room in a value the model must copy back.
-    A room whose state or thread list cannot be read is left out and named in `failed_room_ids`.
+    A room whose state, thread list or approval journal cannot be read is left out and named in `failed_room_ids`; a room whose membership cannot be read is left out silently, since its access is unproven.
+    Rows are ranked and cut from their bundled metadata first; previews and summaries are read only for the rows returned.
     In one room, `limit` and `page_token` keep their meaning: a page of `limit` roots is read and filtered, so a filtered page can hold fewer rows, even none, while `has_more` is true.
 12. **Scope and automations are not mirrored.**
     The tool answers for every thread with replies in the rooms, which is what `/threads` lists and what the client's own eligibility rule keeps (`isCrossRoomThreadEntryEligible`, `crossRoomThreadOrder.ts:7-8`).
@@ -104,8 +107,8 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
 13. **Cost.**
     One room: one `/threads` request and one state request, plus the membership request a named other room already costs; approvals and running replies are read from memory and the local journal.
     This adds the state request to every `threads` call, also an unfiltered one, because every row is labelled.
-    `all` with N rooms the agent is in, M of them shared: N-1 membership requests, M state requests and M `/threads` requests, at most 3N-1, six at a time.
-    `include_summaries` reads each returned thread as today, after the cut.
+    `all` with N rooms the agent is in, M of them shared: N membership requests, M state requests and M `/threads` requests, at most 3N, six rooms at a time.
+    Previews (which may download a sidecar) and `include_summaries` read only the returned threads, after the cut.
 
 ## Rejected
 
