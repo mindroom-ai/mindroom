@@ -1199,14 +1199,19 @@ class DeliveryGateway:
     ) -> str | None:
         """Send one rendered reply row as an edit of the reply's event, or as its create.
 
-        Raises ``ReplyWriteRefusedError`` when the reply's rule writes no row.
+        Raises ``ReplyWriteRefusedError`` when the reply's rule writes no row. A running span's note keeps listing
+        the compactions its answer ran, a running one included, which the client shows as interrupted.
         """
+        extra_content: dict[str, Any] = {constants.STREAM_STATUS_KEY: rendered.stream_status}
+        compactions = write.handle.compactions.content() if write.handle is not None else None
+        if compactions is not None:
+            extra_content[constants.COMPACTIONS_CONTENT_KEY] = compactions
         return await self._send_reply_write(
             write,
             target,
             text=rendered.body,
             tool_trace=list(rendered.tool_trace) or None,
-            extra_content={constants.STREAM_STATUS_KEY: rendered.stream_status},
+            extra_content=extra_content,
             event_id=event_id,
         )
 

@@ -586,6 +586,7 @@ depends_on = ["mindroom.reply_lifecycle", "mindroom.streaming", "mindroom.tool_s
 path = "mindroom.reply_scope"
 depends_on = [
     "mindroom.event_journal",
+    "mindroom.history.reply_compactions",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
     "mindroom.response_sources",
@@ -3090,7 +3091,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.reply_compactions"
 depends_on = []
-visibility = ["mindroom.response_runner"]
+visibility = ["mindroom.reply_scope", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.history.turn_recorder"

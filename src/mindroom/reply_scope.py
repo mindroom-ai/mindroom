@@ -31,6 +31,7 @@ from mindroom.event_journal.replies import (
     WakeApproval,
 )
 from mindroom.final_delivery import Cancelled, Failed, FailureCause
+from mindroom.history.reply_compactions import ReplyCompactions
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.reply_presentation import (
@@ -86,6 +87,8 @@ class SpanHandle:
     unconfirmed_progress: rl.ProgressConfirmation | None = None
     # Set once the reply shows an event in the room, which the span's Stop button goes on.
     reply_shown: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+    # The automatic compactions this span's answer ran, which every write of it carries, its terminal note included.
+    compactions: ReplyCompactions = field(default_factory=ReplyCompactions, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Know from the start whether the claimed reply already shows an event."""

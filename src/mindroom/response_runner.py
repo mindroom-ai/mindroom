@@ -1941,8 +1941,10 @@ class ResponseRunner:
         """Run the turn's stream into its reply: streamed as it grows, or collected and delivered whole."""
         request = turn.request
         active_event_ids = await self._active_response_event_ids(request.room_id)
-        # The automatic compactions this reply runs, which its writes carry.
-        compactions = ReplyCompactions()
+        handle = current_span()
+        assert handle is not None, "a turn delivers once its reply is claimed"
+        # The automatic compactions this reply runs, which its writes carry; the span keeps them for its ending note.
+        compactions = handle.compactions
         compaction_lifecycle = self._build_compaction_lifecycle(
             target=turn.runtime.tool_context.target,
             request=request,
