@@ -318,6 +318,7 @@ class TurnDispatcher:
                 turn.facts.run_requester_id,
                 turn.room.room_id,
                 unanswered=prepared.handled_turn.source_event_ids,
+                or_routed=True,
             ) as allowed:
                 if not allowed:
                     return
@@ -434,7 +435,11 @@ class TurnDispatcher:
         event = prepared.turn.event
         visible_responses = self.deps.visible_responses
         if prepared.turn.command is not None:
-            command_owned = await self.deps.command_executor.execute_if_owned(
+            # A steward that only routes this requester's messages runs no command of theirs.
+            command_owned = self.deps.turn_policy.can_reply_to_sender_in_room(
+                requester_user_id,
+                room.room_id,
+            ) and await self.deps.command_executor.execute_if_owned(
                 room=room,
                 event=event,
                 requester_user_id=requester_user_id,
@@ -774,6 +779,7 @@ class TurnDispatcher:
             envelope.requester_id,
             room.room_id,
             unanswered=handled_turn.source_event_ids,
+            or_routed=True,
         ) as allowed:
             if not allowed:
                 return True

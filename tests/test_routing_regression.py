@@ -1717,6 +1717,100 @@ class TestRoutingRegression:
         ]
 
     @pytest.mark.asyncio
+    @patch("mindroom.response_runner.stream_agent_response")
+    @patch("mindroom.router.relay.suggest_responder_for_message")
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    async def test_a_steward_routes_for_a_person_it_may_not_answer_itself(
+        self,
+        mock_suggest_responder: AsyncMock,
+        mock_stream_agent_response: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Permission to route is not permission to reply: a steward whose own access denies a person still routes.
+
+        The room has no owner account. Its steward answers only Alice, and the two other agents answer Bob, so
+        Bob's message is routed among those two and one of them answers it.
+        """
+        room_id = "!no-owner:localhost"
+        bob_only = ResponderAccessConfig(current_room_members=False, users=["@bob:localhost"])
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "alpha": AgentConfig(
+                        display_name="Alpha",
+                        rooms=[room_id],
+                        access=ResponderAccessConfig(current_room_members=False, users=["@alice:localhost"]),
+                    ),
+                    "beta": AgentConfig(display_name="Beta", rooms=[room_id], access=bob_only),
+                    "gamma": AgentConfig(display_name="Gamma", rooms=[room_id], access=bob_only),
+                },
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        ids = entity_ids(config, runtime_paths)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
+        bots: dict[str, AgentBot] = {}
+        for name in ("alpha", "beta", "gamma"):
+            user = AgentMatrixUser(name, ids[name].full_id, name.title(), TEST_PASSWORD)
+            bot = bots[name] = setup_test_bot(user, tmp_path, room_id, config=config, orchestrator=orchestrator)
+            bot.running = bot._first_sync_done = True
+            # Nobody holds power here, so the steward is the lowest Matrix ID among the agents: alpha.
+            bot.client.rooms[room_id] = nio.MatrixRoom(room_id, ids[name].full_id)
+            bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+                {"event_id": f"${name}-sent"},
+                room_id=room_id,
+            )
+        room = nio.MatrixRoom(room_id, ids["alpha"].full_id)
+        room.users = {ids[name].full_id: MagicMock() for name in bots} | {"@bob:localhost": MagicMock()}
+        mock_stream_agent_response.side_effect = streamed_answer(AsyncMock(return_value="Here you go."))
+        mock_suggest_responder.return_value = ResponderSelection("beta")
+        message = nio.RoomMessageText.from_dict(
+            {
+                "type": "m.room.message",
+                "event_id": "$bob-asks",
+                "sender": "@bob:localhost",
+                "origin_server_ts": 1_000,
+                "content": {"msgtype": "m.text", "body": "What changed today?"},
+            },
+        )
+
+        for bot in bots.values():
+            await bot._on_message(room, message)
+            await drain_coalescing(bot)
+
+        # The steward routed among the agents that may answer Bob, and nobody answered the message itself.
+        candidates = mock_suggest_responder.call_args.args[1]
+        assert [entity_name_for_id(candidate, config, runtime_paths) for candidate in candidates] == ["beta", "gamma"]
+        bots["alpha"].client.room_send.assert_awaited_once()
+        route_send = bots["alpha"].client.room_send.await_args.kwargs
+        assert route_send["message_type"] == ROUTE_EVENT_TYPE
+        assert route_send["content"][ROUTE_EVENT_TYPE]["entity"] == ids["beta"].full_id
+        mock_stream_agent_response.assert_not_called()
+
+        route_event = nio.Event.parse_event(
+            {
+                "type": ROUTE_EVENT_TYPE,
+                "event_id": "$route",
+                "sender": ids["alpha"].full_id,
+                "origin_server_ts": 1_001,
+                "content": route_send["content"],
+            },
+        )
+        assert isinstance(route_event, nio.UnknownEvent)
+        for bot in bots.values():
+            await bot._on_message(room, _route_as_message(route_event))
+            await drain_coalescing(bot)
+
+        # Only the agent the route names answered, and the steward sent nothing but that route.
+        mock_stream_agent_response.assert_called_once()
+        assert bots["beta"].client.room_send.await_count >= 1
+        bots["gamma"].client.room_send.assert_not_awaited()
+        bots["alpha"].client.room_send.assert_awaited_once()
+
+    @pytest.mark.asyncio
     @patch("mindroom.router.relay.suggest_responder_for_message")
     @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_reply_permissions_block_router_response(

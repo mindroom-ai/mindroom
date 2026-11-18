@@ -73,6 +73,10 @@ class _SenderReplyPolicy(Protocol):
         """Return whether this agent may reply to one requester in a room."""
         ...
 
+    def routes_for_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        """Return whether this agent routes one requester's messages in a room, as its steward."""
+        ...
+
 
 @dataclass(frozen=True)
 class IngressValidatorDeps:
@@ -294,7 +298,11 @@ class IngressValidator:
             return False
 
         # The first gate is where a newcomer's first message meets a router that has not seen the join yet.
-        if not await self._can_reply_once_router_catches_up(facts.run_requester_id, room):
+        # A steward takes a message it may not answer itself, to route it.
+        if not (
+            await self._can_reply_once_router_catches_up(facts.run_requester_id, room)
+            or self.deps.turn_policy.routes_for_sender_in_room(facts.run_requester_id, room.room_id)
+        ):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
             return False
 
@@ -307,8 +315,11 @@ class IngressValidator:
         room_id: str,
         *,
         unanswered: tuple[str, ...],
+        or_routed: bool = False,
     ) -> AsyncIterator[bool]:
         """Hold the admission fence for one decision, and yield whether the requester may still be answered here.
+
+        ``or_routed`` also admits a requester whose messages this agent only routes, as the room's steward.
 
         Authorization is current, never frozen at precheck, so it is checked again
         under the fence a configuration change waits at. A denied decision settles
@@ -320,7 +331,9 @@ class IngressValidator:
         reaches that room only through a send the contact's message policy approved.
         """
         async with self.deps.runtime.admission_fence():
-            if self.deps.turn_policy.can_reply_to_sender_in_room(requester_id, room_id):
+            if self.deps.turn_policy.can_reply_to_sender_in_room(requester_id, room_id) or (
+                or_routed and self.deps.turn_policy.routes_for_sender_in_room(requester_id, room_id)
+            ):
                 contact = contact_room(self.deps.runtime.config, self.deps.runtime_paths, room_id, self.deps.agent_name)
                 with guarded_room(room_id) if contact is not None else nullcontext():
                     yield True

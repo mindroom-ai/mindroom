@@ -246,6 +246,33 @@ async def test_a_reply_decision_settles_what_it_refuses_before_the_fence_opens(t
     validator.deps.turn_policy.can_reply_to_sender_in_room.assert_called_once_with("@user:localhost", "!room:localhost")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routes", [True, False])
+async def test_a_steward_takes_a_message_it_only_routes_past_the_reply_gates(tmp_path: Path, routes: bool) -> None:
+    """Permission to route admits a message to the turn that plans it, and to no decision that only answers."""
+    validator, _ids = _validator(tmp_path)
+    policy = validator.deps.turn_policy
+    policy.can_reply_to_sender_in_room.return_value = False
+    policy.routes_for_sender_in_room.return_value = routes
+    validator.deps.turn_store.is_handled = AsyncMock(return_value=False)
+    validator.deps.turn_store.record_turn = AsyncMock()
+    room = nio.MatrixRoom("!room:localhost", validator.deps.matrix_id.full_id)
+    event = _text("@user:localhost", "hello")
+
+    prechecked = await validator.precheck_event(room, event, validator.classify(event, room_id=room.room_id))
+    async with validator.admitted_reply_decision("@user:localhost", room.room_id, unanswered=("$text",)) as answers:
+        pass
+    async with validator.admitted_reply_decision(
+        "@user:localhost",
+        room.room_id,
+        unanswered=("$text",),
+        or_routed=True,
+    ) as plans:
+        pass
+
+    assert (prechecked, answers, plans) == (routes, False, routes)
+
+
 def _text(sender: str, body: str, **content: object) -> nio.RoomMessageText:
     return nio.RoomMessageText.from_dict(
         {

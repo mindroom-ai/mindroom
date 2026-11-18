@@ -548,10 +548,17 @@ class TurnPolicy:
         steward = self.deps.runtime.orchestrator.room_steward(room_id)
         return steward is not None and steward.agent_name == self.deps.agent_name
 
+    def routes_for_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        """Return whether this bot routes this sender's messages here, which takes no permission to reply to them.
+
+        The room's steward routes for everyone `router.access` admits, and each responder applies its own access.
+        """
+        return self.is_room_steward(room_id) and self._routing_admits(sender_id, room_id)
+
     def _routing_admits(self, requester_user_id: str, room_id: str) -> bool:
         """Return whether this requester's message may be routed: `router.access`, when set, restricts routing.
 
-        Unset, it restricts nothing more: the owner account's ingress applied its default, and each candidate its own.
+        Unset, it restricts nothing: only a responder whose own access admits the requester is a candidate.
         """
         return self.deps.runtime.config.router.access is None or is_sender_allowed_for_agent_reply_in_room(
             requester_user_id,
@@ -634,7 +641,8 @@ class TurnPolicy:
             else:
                 self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
             return DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
-        if not is_router:
+        # A steward that may not answer this requester only routes their message.
+        if not is_router and self.can_reply_to_sender_in_room(dispatch.requester_user_id, room.room_id):
             action = await self._resolve_response_action(
                 dispatch,
                 room,
@@ -693,8 +701,10 @@ class TurnPolicy:
         It is not this agent's when it mentions only other agents or people, or when a `mentions` room leaves it to
         nobody: it mentions no one and is outside any thread, so no agent took part in it and it is no follow-up.
         Ingress asks this so such a message neither asks this agent's running response to wrap up nor shows that it
-        waits for this agent's approval.
+        waits for this agent's approval. Nor does a message of someone this agent may not answer, which it only routes.
         """
+        if not self.can_reply_to_sender_in_room(envelope.requester_id, target.room_id):
+            return True
         mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
             source,
             self.deps.matrix_id,

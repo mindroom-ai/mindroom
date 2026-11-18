@@ -568,6 +568,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
 
     with (
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=False),
+        patch("mindroom.turn_policy.TurnPolicy.routes_for_sender_in_room", return_value=False),
         patch("mindroom.commands.handler.schedule_task", new_callable=AsyncMock) as mock_schedule,
     ):
         assert isinstance(event, nio.RoomMessageFile)

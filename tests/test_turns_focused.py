@@ -422,6 +422,9 @@ class _SpyTurnPolicy:
     async def router_thread_skips(self, room: nio.MatrixRoom, requester_user_id: str, thread_history: Any) -> bool:  # noqa: ANN401
         return await self.inner.router_thread_skips(room, requester_user_id, thread_history)
 
+    def routes_for_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        return self.inner.routes_for_sender_in_room(sender_id, room_id)
+
     def is_room_steward(self, room_id: str) -> bool:
         return self.inner.is_room_steward(room_id)
 
@@ -3912,6 +3915,27 @@ async def test_command_waits_for_config_replacement_and_rechecks_authorization(
     assert harness.gateway.sent == []
     assert harness.ignored_dispatch_sources == []
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("may_answer", [True, False])
+async def test_a_steward_runs_no_command_of_a_person_it_only_routes_for(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    may_answer: bool,
+) -> None:
+    """Permission to route runs no command: a command runs only for a person its owner may answer."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("!help", event_id="$routed-only-command:localhost")
+    monkeypatch.setattr(harness.policy, "can_reply_to_sender_in_room", lambda *_args, **_kwargs: may_answer)
+    monkeypatch.setattr(harness.policy, "routes_for_sender_in_room", lambda *_args: True)
+
+    await harness.deliver(room, event)
+
+    assert len(harness.gateway.sent) == (1 if may_answer else 0)
+    assert harness.ignored_dispatch_sources == ([] if may_answer else [(event.event_id,)])
 
 
 @pytest.mark.asyncio

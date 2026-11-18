@@ -695,6 +695,35 @@ async def test_router_access_restricts_routing_for_every_steward(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_a_steward_only_routes_the_message_of_a_person_it_may_not_answer(tmp_path: Path) -> None:
+    """A steward whose own access denies a person routes their message, and never answers or queues it itself."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(display_name=name.title(), access=ResponderAccessConfig(users=[admitted]))
+                for name, admitted in (("general", "@owner:localhost"), ("research", _SENDER), ("writer", _SENDER))
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    general_id = _entity_id(config, "general")
+    room = _room_with_members(_SENDER, *(_entity_id(config, name).full_id for name in config.agents))
+    steward = _policy_for(config, "general", steward="general")
+    bystander = _policy_for(config, "general", steward="research")
+    mention = _dispatch(_context(mentioned=[general_id], am_i_mentioned=True), agent_name="general")
+    untagged = _dispatch(_context(), agent_name="general")
+    in_thread = MessageTarget.resolve(_ROOM_ID, "$thread:localhost", _EVENT_ID)
+
+    assert not steward.can_reply_to_sender_in_room(_SENDER, _ROOM_ID)
+    assert steward.routes_for_sender_in_room(_SENDER, _ROOM_ID)
+    assert not bystander.routes_for_sender_in_room(_SENDER, _ROOM_ID)
+    assert [(await _plan(steward, room, dispatch)).kind for dispatch in (mention, untagged)] == ["ignore", "route"]
+    # A message it only routes neither asks its running response to wrap up nor steers it.
+    assert steward.not_for_this_agent(room, _text_event("hello agents").source, in_thread, untagged.envelope)
+
+
+@pytest.mark.asyncio
 async def test_router_ignores_untagged_message_with_single_candidate(config: Config) -> None:
     """The router stays out of the way when only one responder candidate exists."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
