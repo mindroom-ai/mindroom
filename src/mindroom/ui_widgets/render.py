@@ -99,10 +99,6 @@ def _fenced(lines: tuple[str, ...], widget_id: str) -> list[str]:
     return [f"{fence}{_MARKER}{widget_id}", *lines, fence]
 
 
-def _fallback_block(widget: Chart, widget_id: str) -> str:
-    return "\n".join(_fenced(_fallback_lines(widget), widget_id))
-
-
 @lru_cache(maxsize=64)
 def _block(json_text: str) -> tuple[str, tuple[str, ...]] | list[str]:
     """The canonical JSON and fallback lines of a valid block, or its errors; kept so a live tick parses a block once."""

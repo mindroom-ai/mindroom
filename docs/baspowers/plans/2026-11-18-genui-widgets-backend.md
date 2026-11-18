@@ -89,8 +89,8 @@ def test_parse_widget_never_raises_and_never_echoes_input() -> None:
 - Produces:
   - `UI_WIDGETS_CONTENT_KEY = "io.mindroom.ui"`
   - `_canonical_widget_json(widget: Chart) -> str`, `_widget_id(canonical: str, taken: Collection[str] = ()) -> str`
-  - `_fallback_block(widget: Chart, widget_id: str) -> str` (the whole fenced block, no trailing newline)
-  - These three are private (only `render.py` and its tests use them; privata rejects a public name nothing else imports), so the test snippets below call them with the underscore.
+  - `_fallback_lines(widget: Chart) -> tuple[str, ...]` and `_fenced(lines, widget_id) -> list[str]` (the block's lines; no `_fallback_block` wrapper, which only a test would call and vulture rejects)
+  - These are private (only `render.py` and its tests use them; privata rejects a public name nothing else imports), so the test snippets below call them with the underscore.
   - `@dataclass(frozen=True, slots=True) class _UiRender: text: str; content: dict[str, object] | None` (private like `interactive._InteractiveResponse`: only `render.py` names it)
   - `render_ui_widgets(text: str, *, in_progress: bool) -> _UiRender`
   - `without_open_ui_fence(text: str) -> str` (the text cut where an open column-0 `ui` fence begins, else the same object)
@@ -109,7 +109,7 @@ def test_canonical_json_and_id_match_the_spec() -> None:
     assert widget_id(canonical, taken={"df4d729a5d"}) == hashlib.sha256((canonical + "#1").encode()).hexdigest()[:10]
 
 def test_chart_fallback_is_the_spec_table() -> None:
-    assert fallback_block(parse_widget(CHART)[0], "df4d729a5d") == BLOCK
+    assert "\n".join(_fenced(_fallback_lines(parse_widget(CHART)[0]), "df4d729a5d")) == BLOCK
 
 def test_rendering_is_idempotent_and_keeps_the_widget_only_for_raw_blocks() -> None:
     raw = f"Before.\n\n```ui\n{CHART}\n```\n\nAfter."
@@ -293,7 +293,7 @@ Generated files (`config-schema.json`, skill references) are not counted.
 Not built now; written here so Stage 1 leaves room for it. No wire change.
 
 - **Schema:** add the form models to `models.py` from the eval's round-2 `schema.py`, with `asks_for_secret` (the negated filter) as it is; `parse_widget` returns `Chart | Form`. Fixture: flip the 5.6 form case to valid, add the form cases of `test_schema.py`, paired negated and unnegated labels, `null` optionals, dates in year 0001 and 0000, slider and date boundaries.
-- **Fallback:** the form text of spec 5.3 in `fallback_block`; the Stage 2 `renders` case becomes a Python test.
+- **Fallback:** the form text of spec 5.3 in `_fallback_lines`; the Stage 2 `renders` case becomes a Python test.
 - **Prompt:** `UI_WIDGETS_PROMPT` becomes `genui-eval/prompt_fenced.md` (v4) verbatim; the bootstrap line and help text say "charts and forms"; `docs/widgets.md` gains the form paragraph.
 - **Nothing else:** every write path, the size rules and the frames already carry any entry.
 - **Estimate:** about 170 source, about 260 tests and fixtures.

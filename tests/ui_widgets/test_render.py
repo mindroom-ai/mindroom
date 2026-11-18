@@ -14,7 +14,8 @@ from mindroom.ui_widgets import render
 from mindroom.ui_widgets.models import parse_widget
 from mindroom.ui_widgets.render import (
     _canonical_widget_json,
-    _fallback_block,
+    _fallback_lines,
+    _fenced,
     _widget_id,
     recorded_ui_widgets,
     render_ui_widgets,
@@ -62,7 +63,7 @@ def test_canonical_json_and_id_agree_with_the_shared_fixture(case: dict[str, obj
 
 def test_chart_fallback_is_the_spec_table() -> None:
     """The fallback of the spec's chart is the spec's block."""
-    assert _fallback_block(parse_widget(CHART)[0], "df4d729a5d") == BLOCK
+    assert "\n".join(_fenced(_fallback_lines(parse_widget(CHART)[0]), "df4d729a5d")) == BLOCK
 
 
 def test_rendering_is_idempotent_and_keeps_the_widget_only_for_raw_blocks() -> None:
