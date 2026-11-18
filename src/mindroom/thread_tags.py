@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from weakref import WeakValueDictionary
 
+import aiohttp
 import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -788,6 +789,11 @@ async def get_thread_tag_content(
         raise ThreadTagsError(msg)
     if not isinstance(response, nio.RoomGetStateEventResponse):
         msg = f"Failed to read thread tag {tag!r} for {thread_root_id} in {room_id}: {response}"
+        raise ThreadTagsError(msg)
+    # nio answers only a 404 with an error response; any other failure arrives here with the error body as content.
+    transport = response.transport_response
+    if isinstance(transport, aiohttp.ClientResponse) and transport.status != 200:
+        msg = f"Failed to read thread tag {tag!r} for {thread_root_id} in {room_id}: HTTP {transport.status} {response.content}"
         raise ThreadTagsError(msg)
     content = response.content
     if not isinstance(content, dict) or not content:
