@@ -297,15 +297,14 @@ The order of results never depends on that scale, so an endpoint in Cohere's for
 ```yaml
 reranker:
   provider: openai_decisions
-  threshold: 0.3
 ```
 
 One request asks, for every candidate, whether it helps reply to the query, and a candidate's score is the probability of yes.
 The query and each candidate are sent clipped to their first and last 1,000 characters, with credential-like values redacted, and candidate text is marked as data, never instructions.
-A request holds up to 128,000 bytes, about 50 clipped candidates; the candidates after those, and any the backend refuses to judge, score 0, so they keep their merged order behind the judged ones and never pass a recall `threshold`.
+A request holds up to 128,000 bytes, about 50 clipped candidates; the candidates after those, any the backend refuses to judge, and any redaction cannot read score 0, so they rank in their merged order behind every candidate judged above 0, and pass only a recall `threshold` of 0.
 A failed request, or a missing API key, fails reranking as described above.
 At most eight rerank requests run at once, under a limit of their own, so reranking and other judgments never wait for each other.
-Their default `threshold` is `0.3`, the value a [recall benchmark](memory.md#searching-file-memory) picked, rather than the `0.8` their other judgment uses keep; as the reranker they rerank file memory by default, sending about 20 redacted memory entries per reply to the provider, until `memory.search.rerank: false`.
+Their default `threshold` is `0.3`, the value a [recall benchmark](memory.md#searching-file-memory) picked, rather than the `0.8` their other judgment uses keep.
 
 ### Contextual Chunk Headers
 

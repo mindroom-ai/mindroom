@@ -267,7 +267,7 @@ Reranking is on with `rerank: true`, and with `rerank` unset when the [`reranker
 With reranking on and a reranker configured, semantic searches fetch 20 hits, or a `search_memories` call's larger `limit`, and the reranker orders them.
 Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](knowledge.md#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
 If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
-Per-turn recall sends 20 memory entries and the message to the reranker, and a `search_memories` call sends 20 or, when larger, up to its `limit`; for `cohere`, `vertex_ai`, `typesafe` and `openai_decisions` the reranker is a hosted service, which adds its response time to every reply.
+A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every reply.
 So with an `openai_decisions` or `typesafe` reranker, every reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false`.
 With `rerank: true` and a `cohere` or `vertex_ai` reranker, memory entries and the message go to that service unredacted; only the judgment rerankers redact.
 
@@ -281,7 +281,8 @@ On three sets of real conversation turns (132 to 1,247 held-out turns each), jud
 
 Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking; a second judge model gave gains of the same sign on that set and on the largest one.
 
-**Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before; set `memory.search.rerank: false` to keep memory entries away from those providers.
+**Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before.
+`memory.search.rerank: false` stops reranking in recall and `search_memories`, but `search_knowledge_base` still reranks the agent's semantic file-memory hits with the root reranker.
 
 ```yaml
 agents:
