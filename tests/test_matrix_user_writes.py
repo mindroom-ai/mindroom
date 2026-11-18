@@ -1048,6 +1048,27 @@ async def test_only_a_message_can_be_edited(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("msgtype", ["m.image", "m.file", "m.audio"])
+@pytest.mark.parametrize("named", ["$own", "$edit"], ids=["the-message", "its-replacement"])
+async def test_only_a_text_message_can_be_edited(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    msgtype: str,
+    named: str,
+) -> None:
+    """An edit sends text, which would replace a photo, file, or recording, so it is refused, also when named by its edit."""
+    content = {"msgtype": msgtype, "body": "holiday.jpg", "url": "mxc://example.com/abc"}
+    homeserver.answers[OWN_EVENT_PATH] = room_event("$own", "m.room.message", content, sender=OWNER)
+    homeserver.answers[f"{ROOM_PATH}/event/$edit"] = edit_of("$edit", "$own", "beach.jpg", sender=OWNER)
+
+    result = await _write(config, paths, homeserver, action="edit", room_id=ROOM, event_id=named, message="Hello")
+
+    assert result == error_result("edit", f"Only text messages can be edited, and $own is a message of type {msgtype}.")
+    assert _changes(homeserver) == []
+
+
+@pytest.mark.asyncio
 async def test_an_edit_of_an_edit_replaces_the_original_message(
     config: Config,
     paths: RuntimePaths,

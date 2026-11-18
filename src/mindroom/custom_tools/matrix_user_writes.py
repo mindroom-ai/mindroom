@@ -80,6 +80,8 @@ _ENCRYPTION_UNKNOWN = "Nothing was sent: whether the room is encrypted could not
 _ROOM_UNCONFIRMED = (
     "The homeserver did not confirm the room. It may have been made: list your owner's rooms before making it again."
 )
+# The message types whose text an edit replaces with text; any other, such as a photo's, an edit would turn into text.
+_EDITABLE_MSGTYPES = frozenset({"m.text", "m.emote", "m.notice"})
 _UNCONFIRMED = "The homeserver did not confirm the message. It may have been sent: read the room before sending again."
 # The send failures that prove nothing was sent: each is known before the event is requested, or, for one too large,
 # may also be the homeserver's refusal of it.
@@ -449,6 +451,11 @@ async def _event_write(
         if redacted(named):
             # The homeserver takes a replacement of a deleted message, and nobody sees it.
             msg = f"{event_id} was deleted, so it cannot be edited."
+            raise MatrixRequestError(msg)
+        original = named.get("content")
+        msgtype = original.get("msgtype") if isinstance(original, dict) else None
+        if msgtype not in _EDITABLE_MSGTYPES:
+            msg = f"Only text messages can be edited, and {event_id} is a message of type {msgtype}."
             raise MatrixRequestError(msg)
         text = str(write.message).strip()
         new_content = format_message_with_mentions(turn.config, turn.runtime_paths, text)
