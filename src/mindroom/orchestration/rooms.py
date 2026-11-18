@@ -14,9 +14,7 @@ from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.identity import managed_account_user_id
-from mindroom.matrix.room_accounts import reconcile_room_accounts
 from mindroom.matrix.room_reconciliation import read_room_state
-from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -113,6 +111,7 @@ class RoomSetup:
     # The router's client when it runs; managed room work runs through its account.
     router_client: Callable[[], nio.AsyncClient | None]
     refresh_agent_reply_memberships: Callable[[], Awaitable[object]]
+    reconcile_room_states: Callable[[], Awaitable[None]]
     publication_allowed: Callable[[], bool] = field(default=lambda: True)
 
     async def setup(self, bots: list[AgentBot]) -> None:
@@ -153,21 +152,15 @@ class RoomSetup:
         logger.info("All agents have joined their configured rooms")
 
     async def publish_room_state(self) -> None:
-        """Reconcile the thread mode and MindRoom accounts of all router rooms after reply admission reopens.
+        """Reconcile the room state of every room a bot holds, through its steward, after reply admission reopens.
 
         This includes retained invited rooms.
         """
         try:
-            if self.publication_allowed() and (client := self.router_client()) is not None:
-                await asyncio.gather(
-                    *(
-                        reconcile(client, self.config_provider(), self.runtime_paths, room_id)
-                        for room_id in client.rooms
-                        for reconcile in (reconcile_room_thread_mode, reconcile_room_accounts)
-                    ),
-                )
+            if self.publication_allowed():
+                await self.reconcile_room_states()
         except Exception:
-            logger.warning("router_room_state_publish_failed", exc_info=True)
+            logger.warning("room_state_publish_failed", exc_info=True)
 
     async def ensure_rooms_exist(self) -> dict[str, str]:
         """Ensure all configured rooms exist, creating them if necessary.

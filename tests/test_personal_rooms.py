@@ -1639,7 +1639,10 @@ async def test_reconciliation_gives_an_older_room_the_managed_state_power_levels
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A personal room created before the router could publish its accounts there gets the power level, then the list."""
+    """A personal room created before MindRoom published accounts gets the power level; its steward publishes the list.
+
+    The account that observed the onboarding room is not the personal room's steward, so it writes nothing there.
+    """
     server = MatrixServer()
     room_id = await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
     power = next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
@@ -1650,21 +1653,6 @@ async def test_reconciliation_gives_an_older_room_the_managed_state_power_levels
     await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", router)
     power = next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
     assert power["events"]["io.mindroom.accounts"] == 0
-    accounts = next(event for event in server.state[room_id] if event["type"] == "io.mindroom.accounts")
-    assert (accounts["sender"], accounts["state_key"]) == (router.user_id, router.user_id)
-    assert accounts["content"] == {"accounts": sorted([server.user_id, router.user_id])}
-
-
-@pytest.mark.asyncio
-async def test_a_new_personal_room_does_not_ask_a_router_that_is_not_in_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The router publishes a personal room's accounts only once it is in the room, so creation reads no members."""
-    server = MatrixServer()
-    router = RouterAccount(server, "!lobby:localhost")
-    room_id = await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", router)
-    assert room_id not in router.member_reads
     assert not any(event["type"] == "io.mindroom.accounts" for event in server.state[room_id])
 
 

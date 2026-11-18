@@ -139,6 +139,7 @@ from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
 from .room_steward import membership_observers, room_poster, room_steward
+from .steward_duties import reconcile_held_room_states
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -452,6 +453,7 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             router_client=self._router_client,
             refresh_agent_reply_memberships=lambda: self.refresh_agent_reply_memberships(),
+            reconcile_room_states=lambda: reconcile_held_room_states(self),
             publication_allowed=lambda: not self.response_admission_gate.closed,
         )
         self.config_reload = ConfigReloadLifecycle(

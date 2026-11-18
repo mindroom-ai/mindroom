@@ -13,6 +13,7 @@ from structlog.testing import capture_logs
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.room_steward import room_steward
 from mindroom.steward_duties import (
     StewardDuties,
@@ -20,7 +21,7 @@ from mindroom.steward_duties import (
     moderator_rights_message,
     put_room_state_as_steward,
 )
-from tests.conftest import test_runtime_paths
+from tests.conftest import install_bots, test_runtime_paths
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
@@ -185,6 +186,22 @@ async def test_sync_that_opens_publishes_every_stewarded_room(tmp_path: Path) ->
     await room.duties(ROUTER_AGENT_NAME).publish_joined_room_state(every_room=True)
     owner = room.ids[ROUTER_AGENT_NAME]
     assert sorted(room.writes) == [(owner, ACCOUNTS, owner), (owner, THREAD_MODE, "")]
+
+
+@pytest.mark.asyncio
+async def test_sweep_reconciles_each_held_room_once_through_its_steward(tmp_path: Path) -> None:
+    """A startup or reload sweep reaches a room without the owner account, and a joined owner that is not steward stays out."""
+    room = _Room(tmp_path, ("agent1", ROUTER_AGENT_NAME))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=room.paths, config=room.config)
+    install_bots(orchestrator, room.bots)
+    await orchestrator.config_reload.after_reload()
+    agent = room.ids["agent1"]
+    assert sorted(room.writes) == [(agent, ACCOUNTS, agent), (agent, THREAD_MODE, "")]
+    # A reload that only changes the config republishes the thread mode of the room it already holds.
+    room.config.agents["agent1"].thread_mode = "thread"
+    await orchestrator.config_reload.after_reload()
+    assert room.state[THREAD_MODE, ""] == {"mode": "thread"}
+    assert {writer for writer, _, _ in room.writes} == {agent}
 
 
 @pytest.mark.asyncio

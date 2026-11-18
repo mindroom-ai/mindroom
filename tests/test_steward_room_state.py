@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -25,7 +26,7 @@ from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.room_thread_modes import clear_room_thread_mode_override, set_room_thread_mode_override
 from mindroom.runtime_shutdown import ShutdownBudget
-from mindroom.steward_duties import StewardDuties, StewardDutiesDeps
+from mindroom.steward_duties import StewardDuties, StewardDutiesDeps, reconcile_held_room_states
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -270,11 +271,11 @@ async def test_a_room_that_refuses_the_routers_state_is_no_warning(
     level: str,
 ) -> None:
     """Where the room's power levels refuse the router's state, a start logs the refusal at debug and still tries it."""
-    config, paths, _, _, client = room_state
+    _config, _paths, _, _, client = room_state
     client.room_put_state.side_effect = None
     client.room_put_state.return_value = nio.RoomPutStateError("user_level (0) < send_level (50)", status_code)
     with capture_logs() as logs:
-        await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+        await _room_setup(room_state).publish_room_state()
     assert {write.args[1] for write in client.room_put_state.await_args_list} == {EVENT_TYPE, ACCOUNTS_EVENT_TYPE}
     assert sorted((log["event"], log["log_level"]) for log in logs) == [
         ("room_accounts_publish_failed", level),
@@ -305,9 +306,9 @@ async def test_router_membership_callback_publishes_agent_join_and_leave(room_st
 @pytest.mark.asyncio
 async def test_setup_publishes_after_agents_join(room_state: RoomState, monkeypatch: pytest.MonkeyPatch) -> None:
     """Initial room setup publishes after every bot has joined."""
-    config, paths, ids, events, client = room_state
+    config, _paths, ids, events, client = room_state
     config.matrix_space.enabled = False
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
+    setup = _room_setup(room_state)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
     snapshot = await read_room_state(client, ROOM_ID)
     assert snapshot is not None
@@ -350,7 +351,7 @@ async def test_live_config_reload_publishes_without_room_setup(room_state: RoomS
     """Mode edits apply live, so a reload with no restarts still updates client state."""
     config, paths, _, events, client = room_state
     orchestrator = _MultiAgentOrchestrator(runtime_paths=paths, config=config)
-    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(client=client)})
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: _owner_bot(room_state)})
     config.agents["agent2"].thread_mode = "room"
     await orchestrator.config_reload.after_reload()
     client.room_get_state.assert_not_awaited()
@@ -363,12 +364,12 @@ async def test_existing_state_is_not_resent_on_reconciliation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Setup skips an already correct remote thread-mode event."""
-    config, paths, _, events, client = room_state
+    config, _paths, _, events, client = room_state
     config.matrix_space.enabled = False
     events[EVENT_TYPE, ""] = {"mode": "mixed"}
     snapshot = await read_room_state(client, ROOM_ID)
     assert snapshot is not None
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
+    setup = _room_setup(room_state)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
     monkeypatch.setattr(setup, "_reconcile_room_policies", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
@@ -430,7 +431,7 @@ async def test_reloads_read_only_the_thread_mode_event(room_state: RoomState) ->
     client.room_get_state.reset_mock()
     client.room_get_state_event.reset_mock()
     client.room_put_state.reset_mock()
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
+    setup = _room_setup(room_state)
     config.agents["agent1"].role = "Updated role"
     await setup.publish_room_state()
     client.room_get_state.assert_not_awaited()
@@ -452,12 +453,12 @@ async def test_setup_defers_reconciliation_until_admission_reopens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Closed reply admission defers publication; reopening compares only the mode event."""
-    config, paths, _, events, client = room_state
+    config, _paths, _, events, client = room_state
     config.matrix_space.enabled = False
     snapshot = await read_room_state(client, ROOM_ID)
     assert snapshot is not None
     client.room_get_state.reset_mock()
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock(), publication_allowed=lambda: False)
+    setup = _room_setup(room_state, publication_allowed=lambda: False)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
     monkeypatch.setattr(setup, "_reconcile_room_policies", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
@@ -553,7 +554,7 @@ async def test_fresh_setup_repairs_another_writers_mode(
     assert snapshot is not None
     _sync_live_room(room_state)
     client.room_get_state.reset_mock()
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
+    setup = _room_setup(room_state)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
     monkeypatch.setattr(setup, "_reconcile_room_policies", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
@@ -607,6 +608,24 @@ async def test_membership_recovers_after_initial_state_read_failure(room_state: 
     client.room_get_state.assert_not_awaited()
 
 
+def _owner_bot(state: RoomState) -> MagicMock:
+    """The owner account's bot with its real duties, the steward of every room it holds."""
+    duties = _router_duties(state)
+    bot = MagicMock(client=state[4], agent_name=ROUTER_AGENT_NAME, steward_duties=duties)
+    runtime = duties.deps.runtime.orchestrator
+    runtime.agent_bots = {ROUTER_AGENT_NAME: bot}
+    runtime.room_steward.return_value = bot
+    return bot
+
+
+def _room_setup(state: RoomState, **options: Any) -> RoomSetup:  # noqa: ANN401
+    """A room setup whose sweep goes through the owner account's duties."""
+    config, paths, _, _, client = state
+    runtime = _owner_bot(state).steward_duties.deps.runtime.orchestrator
+    reconcile = partial(reconcile_held_room_states, runtime)
+    return RoomSetup(paths, lambda: config, lambda: client, AsyncMock(), reconcile, **options)
+
+
 def _router_duties(state: RoomState) -> StewardDuties:
     """Build the owner account's duties, the steward of every room."""
     config, paths, _, _, client = state
@@ -647,7 +666,7 @@ async def test_reload_with_partial_membership(room_state: RoomState) -> None:
     await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     client.rooms[ROOM_ID].remove_member(ids["agent2"].full_id)
     config.agents["agent2"].thread_mode = "room"
-    await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+    await _room_setup(room_state).publish_room_state()
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
 
 
@@ -673,7 +692,7 @@ async def test_unchanged_reload_retries_failed_write(room_state: RoomState) -> N
     config, paths, _, events, client = room_state
     await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     config.agents["agent2"].thread_mode = "room"
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
+    setup = _room_setup(room_state)
     write = client.room_put_state.side_effect
     client.room_put_state.side_effect = TimeoutError()
     await setup.publish_room_state()
@@ -687,13 +706,13 @@ async def test_unchanged_reload_retries_failed_write(room_state: RoomState) -> N
 @pytest.mark.parametrize("trigger", ["startup", "router_join"])
 async def test_retained_ad_hoc_room_is_reconciled(room_state: RoomState, trigger: str) -> None:
     """Retained invited rooms receive state on startup and on router rejoin."""
-    config, paths, _, events, client = room_state
+    config, _paths, _, events, _client = room_state
     for agent in config.agents.values():
         agent.rooms = []
         agent.thread_mode = "room"
     events[EVENT_TYPE, ""] = {"mode": "mixed"}
     if trigger == "startup":
-        await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+        await _room_setup(room_state).publish_room_state()
     else:
         duties = _router_duties(room_state)
         duties.mark_joined_for_room_state(ROOM_ID)
@@ -707,7 +726,7 @@ async def test_startup_admission_reopens_during_joins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Publication during setup cannot overwrite current state with a pre-join snapshot."""
-    config, paths, ids, events, client = room_state
+    config, _paths, ids, events, client = room_state
     config.agents["agent2"].thread_mode = "room"
     config.matrix_space.enabled = False
     for name in ("agent1", "agent2"):
@@ -715,7 +734,7 @@ async def test_startup_admission_reopens_during_joins(
     _sync_live_room(room_state)
     snapshot = await read_room_state(client, ROOM_ID)
     gate_open = False
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock(), publication_allowed=lambda: gate_open)
+    setup = _room_setup(room_state, publication_allowed=lambda: gate_open)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
     monkeypatch.setattr(setup, "_reconcile_room_policies", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
@@ -761,14 +780,14 @@ async def test_show_does_not_publish(room_state: RoomState) -> None:
 @pytest.mark.parametrize("failure", [nio.RoomGetStateEventError("Denied", "M_FORBIDDEN"), TimeoutError()])
 async def test_event_read_failure_is_nonfatal_and_retried(room_state: RoomState, failure: object) -> None:
     """A failed comparison cannot write unproven state or disable the next trigger."""
-    config, paths, _, events, client = room_state
+    _config, _paths, _, events, client = room_state
     read = client.room_get_state_event.side_effect
     client.room_get_state_event.side_effect = failure if isinstance(failure, Exception) else None
     client.room_get_state_event.return_value = failure
-    await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+    await _room_setup(room_state).publish_room_state()
     assert not _writes(client, EVENT_TYPE)
     client.room_get_state_event.side_effect = read
-    await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+    await _room_setup(room_state).publish_room_state()
     assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
 
 
@@ -846,14 +865,14 @@ async def test_joined_team_excludes_departed_configured_individual(room_state: R
 @pytest.mark.parametrize("override", [False, True])
 async def test_sweep_skips_rooms_without_joined_responders(room_state: RoomState, *, override: bool) -> None:
     """Spaces and other rooms without responders do not receive presentation state or warnings."""
-    config, paths, ids, events, client = room_state
+    _config, paths, ids, events, client = room_state
     for name in ("agent1", "agent2"):
         events["m.room.member", ids[name].full_id] = {"membership": "leave"}
     if override:
         set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="room")
     _sync_live_room(room_state)
     with capture_logs() as logs:
-        await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+        await _room_setup(room_state).publish_room_state()
     assert not _writes(client, EVENT_TYPE)
     assert not any(log["log_level"] == "warning" for log in logs)
 
@@ -921,7 +940,7 @@ async def test_router_invite_join_after_agent_publishes_on_next_frame(room_state
 @pytest.mark.parametrize("trigger", ["startup", "router_join"])
 async def test_router_lists_joined_mindroom_accounts_by_any_user_name(room_state: RoomState, trigger: str) -> None:
     """The router lists its joined router, agent, and team accounts, custom user names included, and nobody else."""
-    config, paths, ids, events, client = room_state
+    config, paths, ids, events, _client = room_state
     config.agents["mind"] = AgentConfig(display_name="Alice's mind")
     config.teams["team1"] = TeamConfig(display_name="Team 1", role="Test team", agents=["agent1"])
     ids = entity_ids(config, paths, usernames={"mind": "alice.mind"})
@@ -930,7 +949,7 @@ async def test_router_lists_joined_mindroom_accounts_by_any_user_name(room_state
     events["m.room.member", ids["agent2"].full_id] = {"membership": "invite"}
     _sync_live_room(room_state)
     if trigger == "startup":
-        await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
+        await _room_setup(room_state).publish_room_state()
     else:
         duties = _router_duties(room_state)
         duties.mark_joined_for_room_state(ROOM_ID)
@@ -943,9 +962,9 @@ async def test_router_lists_joined_mindroom_accounts_by_any_user_name(room_state
 @pytest.mark.asyncio
 async def test_config_reload_drops_an_entity_the_config_no_longer_has(room_state: RoomState) -> None:
     """A reload republishes the list, so a removed agent that is still joined is no longer listed."""
-    config, paths, ids, _, client = room_state
+    config, paths, ids, _, _client = room_state
     orchestrator = _MultiAgentOrchestrator(runtime_paths=paths, config=config)
-    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(client=client)})
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: _owner_bot(room_state)})
     await orchestrator.config_reload.after_reload()
     assert _accounts(room_state) == sorted(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "agent2"))
     del config.agents["agent2"]
@@ -956,8 +975,8 @@ async def test_config_reload_drops_an_entity_the_config_no_longer_has(room_state
 @pytest.mark.asyncio
 async def test_unchanged_accounts_are_written_once(room_state: RoomState) -> None:
     """Later triggers with unchanged membership do not rewrite the list."""
-    config, paths, ids, _, client = room_state
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
+    _config, _paths, ids, _, client = room_state
+    setup = _room_setup(room_state)
     for _ in range(3):
         await setup.publish_room_state()
     assert [write.kwargs for write in _writes(client, ACCOUNTS_EVENT_TYPE)] == [
@@ -1018,7 +1037,7 @@ async def test_sync_frame_waits_at_most_ten_seconds_behind_slow_triggers_in_its_
     earlier_triggers: int,
 ) -> None:
     """The reconcile timeout covers the wait for the room's lock, so the router's sync frame stalls at most 10 seconds."""
-    config, paths, _, _, client = room_state
+    _config, _paths, _, _, client = room_state
 
     async def unanswered(*_args: object, **_kwargs: object) -> None:
         await asyncio.Future()
@@ -1028,7 +1047,7 @@ async def test_sync_frame_waits_at_most_ten_seconds_behind_slow_triggers_in_its_
     loop = asyncio.get_running_loop()
     now = 0
     monkeypatch.setattr(loop, "time", lambda: now)
-    setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
+    setup = _room_setup(room_state)
     triggers = [asyncio.create_task(setup.publish_room_state()) for _ in range(earlier_triggers)]
     duties = _router_duties(room_state)
     duties.mark_joined_for_room_state(ROOM_ID)
@@ -1058,7 +1077,7 @@ async def test_reconcile_that_times_out_behind_a_slow_one_is_retried(
     retry starts. A second trigger at 6 s, agent1 leaving or a sync frame for the room, queues ahead of that retry, times
     out at 16 s holding the lock and leaves the retry too little time, so the retry runs once more.
     """
-    config, paths, ids, events, client = room_state
+    _config, _paths, ids, events, client = room_state
     loop = asyncio.get_running_loop()
     now = 0
     monkeypatch.setattr(loop, "time", lambda: now)
@@ -1076,7 +1095,7 @@ async def test_reconcile_that_times_out_behind_a_slow_one_is_retried(
         mock.side_effect = slow(mock.side_effect, only=ACCOUNTS_EVENT_TYPE)
     duties = _router_duties(room_state)
     departures = {4: "agent2", 6: "agent1"} if second_trigger == "leave" else {4: "agent2"}
-    tasks = [asyncio.create_task(RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state())]
+    tasks = [asyncio.create_task(_room_setup(room_state).publish_room_state())]
     for now in range(60):
         if now in departures:
             user_id = ids[departures[now]].full_id
