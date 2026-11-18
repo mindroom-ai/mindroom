@@ -112,7 +112,7 @@ class RoomSetup:
     config_provider: Callable[[], Config]
     # The router's client when it runs; managed room work runs through its account.
     router_client: Callable[[], nio.AsyncClient | None]
-    refresh_agent_reply_memberships: Callable[[], Awaitable[None]]
+    refresh_agent_reply_memberships: Callable[[], Awaitable[object]]
     publication_allowed: Callable[[], bool] = field(default=lambda: True)
 
     async def setup(self, bots: list[AgentBot]) -> None:

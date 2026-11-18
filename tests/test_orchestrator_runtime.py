@@ -5840,6 +5840,27 @@ async def test_shutdown_ends_the_grant_refresh_in_flight(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["published", "read_failed", "voided"])
+async def test_grant_refresh_follow_up_runs_only_after_a_publication(tmp_path: Path, outcome: str) -> None:
+    """A voided refresh changed no grant: only the invite retry that room setup relies on still runs."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+    bot = MagicMock(revoke_reply_authorized_calls=AsyncMock())
+    install_bots(orchestrator, {"code": bot})
+
+    with (
+        patch.object(orchestrator.agent_reply_memberships, "refresh", return_value=outcome),
+        patch.object(orchestrator.turn_recovery, "schedule") as recover_turns,
+    ):
+        assert await orchestrator.refresh_agent_reply_memberships() == outcome
+
+    published = outcome != "voided"
+    bot.schedule_pending_invite_reconciliation.assert_called_once_with()
+    assert recover_turns.call_count == published
+    assert bot.revoke_reply_authorized_calls.await_count == published
+    assert bot.schedule_reply_authorized_call_reconciliation.call_count == published
+
+
+@pytest.mark.asyncio
 async def test_grant_refresh_reads_through_the_synced_bots_only(tmp_path: Path) -> None:
     """A refresh is given the clients of the bots whose own sync is live; without one it still runs and grants nothing."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())

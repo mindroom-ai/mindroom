@@ -151,7 +151,7 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Handle a managed bot completing its first sync."""
         ...
 
-    def refresh_agent_reply_memberships(self) -> Awaitable[None]:
+    def refresh_agent_reply_memberships(self) -> Awaitable[object]:
         """Rebuild room-backed reply grants from the router client."""
         ...
 

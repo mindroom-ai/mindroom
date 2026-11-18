@@ -16,7 +16,7 @@ from uuid import uuid4
 import uvicorn
 
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex, RefreshOutcome
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.api.app_state import EmbeddedRuntime
@@ -1076,13 +1076,15 @@ class _MultiAgentOrchestrator:
                 router.personal_room_target_ready()
         self.turn_recovery.schedule()
 
-    async def refresh_agent_reply_memberships(self) -> None:
+    async def refresh_agent_reply_memberships(self) -> RefreshOutcome:
         """Refresh room-backed reply grants, each room read through the one synced bot that observes it."""
         config = self.config
         observers = partial(membership_observers, self.agent_bots)
-        await self.agent_reply_memberships.refresh(config, self.runtime_paths, observers)
-        self.turn_recovery.schedule()
-        await self.agent_reply_membership_sync.apply_grant_change()
+        outcome = await self.agent_reply_memberships.refresh(config, self.runtime_paths, observers)
+        if outcome != "voided":
+            self.turn_recovery.schedule()
+        await self.agent_reply_membership_sync.apply_grant_change(published=outcome != "voided")
+        return outcome
 
     async def refresh_agent_reply_memberships_when_needed(self) -> None:
         """Refresh room-backed reply grants as above when they need it, for an access check.

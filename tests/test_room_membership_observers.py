@@ -682,6 +682,42 @@ async def test_one_failed_joined_rooms_keeps_discovery_unknown(tmp_path: Path) -
     assert index.is_current_room_member(_BOB, _OTHER, config, runtime_paths)
 
 
+@pytest.mark.asyncio
+async def test_invalidations_during_every_held_read_get_one_retry_then_the_backoff(tmp_path: Path) -> None:
+    """An account whose sync keeps losing history voids each attempt; the coordinator retries once, then waits."""
+    config, runtime_paths = _config(tmp_path)
+    a = _Account(_A, {_ROOM: (_A, _ALICE)})
+    index = AgentReplyMembershipIndex()
+    membership_sync = _sync(index)
+    outcomes: list[object] = []
+
+    async def refresh() -> object:
+        a.hold, a.reading = asyncio.Event(), asyncio.Event()
+        attempt = asyncio.create_task(index.refresh(config, runtime_paths, lambda: (_clients(a), _by_power({}), True)))
+        await _reached(a.reading)
+        membership_sync.invalidate_observer(config, _B, reason="uncertain_sync_response")
+        a.hold.set()
+        outcomes.append(await asyncio.wait_for(attempt, 5))
+        return outcomes[-1]
+
+    index.invalidate(config, reason="initial_config")
+    await asyncio.wait_for(membership_sync.refresh_for_access_check(config, refresh), 5)
+
+    assert outcomes == ["voided", "voided"]
+    assert membership_sync._refresh_retry_at > 0.0
+    assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    membership_sync.request_refresh(config, refresh)
+    await asyncio.sleep(0)
+    assert outcomes == ["voided", "voided"]
+
+    a.hold = None
+    assert await index.refresh(config, runtime_paths, lambda: (_clients(a), _by_power({}), True)) == "published"
+    assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
+    a.joined_rooms_fails = True
+    index.forget_joined_rooms()
+    assert await index.refresh(config, runtime_paths, lambda: (_clients(a), _by_power({}), True)) == "read_failed"
+
+
 def _own_join(previous_membership: str | None) -> IngestionRecordAdmission:
     """Return an account's own join of ``_ROOM`` as its journal admits it: a lifecycle record, no timeline event."""
     return _ingestion_admission(

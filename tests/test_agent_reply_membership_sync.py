@@ -445,36 +445,39 @@ async def test_sync_frames_request_one_refresh_without_waiting_for_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_voided_by_a_grant_loss_runs_again_at_once_without_a_failure_backoff() -> None:
-    """Only a failed read backs off: a refresh a grant loss voided is followed by another in the same task."""
+@pytest.mark.parametrize(
+    ("outcomes", "backs_off"),
+    [
+        (["published"], False),
+        (["read_failed"], True),
+        (["voided", "published"], False),
+        (["voided", "read_failed"], True),
+        (["voided", "voided"], True),
+    ],
+)
+async def test_refresh_outcome_decides_the_retry(outcomes: list[str], *, backs_off: bool) -> None:
+    """A voided refresh gets one retry at once; a failed read and a second void wait for the backoff."""
     config = Config()
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     memberships.needs_refresh.return_value = True
     membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
-    refreshes = 0
+    attempts: list[str] = []
 
-    async def refresh() -> None:
-        nonlocal refreshes
-        refreshes += 1
-        if refreshes == 1:
-            # A bot's receive loop failed while this refresh read Matrix, which voids it.
-            membership_sync.invalidate_observer(config, _OBSERVER, reason="sync_failure")
-        elif refreshes == 2:
-            memberships.needs_refresh.return_value = False
+    async def refresh() -> str:
+        attempts.append(outcomes[len(attempts)])
+        memberships.needs_refresh.return_value = attempts[-1] != "published"
+        return attempts[-1]
 
     membership_sync.request_refresh(config, refresh)
-    await asyncio.wait_for(membership_sync.refresh_for_access_check(config, refresh), 5)
+    task = membership_sync._refresh_task
+    assert task is not None
+    await asyncio.wait_for(task, 5)
 
-    assert refreshes == 2
-    assert membership_sync._refresh_retry_at == 0.0
-
-    memberships.needs_refresh.return_value = True
-    refreshes = 2
+    assert attempts == outcomes
+    assert (membership_sync._refresh_retry_at > 0.0) is backs_off
+    # During the backoff a sync frame starts nothing; without one, grants that need nothing start nothing either.
     membership_sync.request_refresh(config, refresh)
-    await asyncio.wait_for(membership_sync.refresh_for_access_check(config, refresh), 5)
-
-    assert refreshes == 3
-    assert membership_sync._refresh_retry_at > 0.0
+    assert membership_sync._refresh_task is task
 
 
 @pytest.mark.asyncio

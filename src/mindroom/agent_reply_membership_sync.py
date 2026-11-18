@@ -59,8 +59,6 @@ class AgentReplyMembershipSync:
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         self._refresh_task: asyncio.Task[None] | None = None
-        # Counts the grant losses, each of which voids the refresh in flight.
-        self._grant_losses = 0
         # Each account's receive loop: absent while closed, False once armed by its start, True once open.
         self._observer_open: dict[str, bool] = {}
         self._live_transition_lock = asyncio.Lock()
@@ -150,13 +148,12 @@ class AgentReplyMembershipSync:
 
         This never starts a call. An own join only asks for the rebuild: it revokes nothing.
         """
-        self._grant_losses += 1
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         for bot in self._bots() if revoke else ():
             bot.schedule_reply_authorized_call_revocation()
 
-    def request_refresh(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
+    def request_refresh(self, config: Config, refresh: Callable[[], Awaitable[object]]) -> None:
         """Start the refresh when it is due and none is in flight, without waiting for it.
 
         Every bot's sync frame calls this. A frame never waits for another account's Matrix reads: grants the
@@ -165,7 +162,7 @@ class AgentReplyMembershipSync:
         """
         self._refresh_task_when_needed(config, refresh, after_backoff=True)
 
-    async def refresh_if_needed(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
+    async def refresh_if_needed(self, config: Config, refresh: Callable[[], Awaitable[object]]) -> None:
         """Request the refresh as above and wait for it at most 10 s, for the startup publication gate alone.
 
         A slower refresh keeps running in the background, and one that raises leaves the grants as they were.
@@ -181,7 +178,7 @@ class AgentReplyMembershipSync:
             task.cancel()
             await asyncio.wait([task])
 
-    async def refresh_for_access_check(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
+    async def refresh_for_access_check(self, config: Config, refresh: Callable[[], Awaitable[object]]) -> None:
         """Refresh at once when grants need it, even during backoff, and wait until the refresh ends.
 
         Access checks outside a sync frame call this, so they refresh only then, share a refresh in flight with
@@ -195,7 +192,7 @@ class AgentReplyMembershipSync:
     def _refresh_task_when_needed(
         self,
         config: Config,
-        refresh: Callable[[], Awaitable[None]],
+        refresh: Callable[[], Awaitable[object]],
         *,
         after_backoff: bool,
     ) -> asyncio.Task[None] | None:
@@ -213,16 +210,14 @@ class AgentReplyMembershipSync:
             )
         return self._refresh_task
 
-    async def _refresh(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
-        """Refresh, again at once while a grant loss voided the attempt; only a failed read sets the retry backoff."""
-        grant_losses = -1
-        while grant_losses != self._grant_losses:
-            grant_losses = self._grant_losses
+    async def _refresh(self, config: Config, refresh: Callable[[], Awaitable[object]]) -> None:
+        """Refresh, once more at once when an invalidation voided the attempt; what is still unanswered backs off."""
+        if await refresh() == "voided":
             await refresh()
-            if not self._memberships.needs_refresh(config):
-                self._refresh_attempt = 0
-                self._refresh_retry_at = 0.0
-                return
+        if not self._memberships.needs_refresh(config):
+            self._refresh_attempt = 0
+            self._refresh_retry_at = 0.0
+            return
         self._refresh_attempt += 1
         self._refresh_retry_at = time.monotonic() + retry_delay_seconds(
             self._refresh_attempt,
@@ -257,10 +252,11 @@ class AgentReplyMembershipSync:
             await self.apply_grant_change()
             self._live_effects_pending = False
 
-    async def apply_grant_change(self) -> None:
+    async def apply_grant_change(self, *, published: bool = True) -> None:
         """Recheck every bot's invites and calls after a grant change: denied calls end before any allowed call starts.
 
-        An authoritative refresh attempt runs this whether it published or was voided. Calls start even while a grant
+        A refresh that was voided changed no grant and passes ``published`` False, which rechecks the invites only.
+        Calls start even while a grant
         room still awaits a refresh, because each call start rechecks its requester against the current grants.
         Invite acceptance does not depend on grants; the invite recheck rides here because the authoritative refresh
         that room setup runs at startup and on reload is what retries invites recorded before a bot started or whose
@@ -269,6 +265,8 @@ class AgentReplyMembershipSync:
         bots = tuple(self._bots())
         for bot in bots:
             bot.schedule_pending_invite_reconciliation()
+        if not published:
+            return
         await asyncio.gather(*(bot.revoke_reply_authorized_calls() for bot in bots))
         for bot in bots:
             bot.schedule_reply_authorized_call_reconciliation()

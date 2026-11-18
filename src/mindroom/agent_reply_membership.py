@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import nio
 
@@ -33,6 +33,8 @@ _JOIN_LAG_MAX_TRACKED = 4096
 
 type _ResponderMembershipPolicySignature = tuple[str, bool, tuple[str, ...]]
 type _AgentReplyMembershipPolicySignature = tuple[_ResponderMembershipPolicySignature, ...]
+# How a refresh ended: it published every answer, published with a read still failing, or an invalidation voided it.
+type RefreshOutcome = Literal["published", "read_failed", "voided"]
 
 
 def _agent_reply_membership_policy_signature(
@@ -437,7 +439,7 @@ class AgentReplyMembershipIndex:
         config: Config,
         runtime_paths: RuntimePaths,
         observers: Callable[[], tuple[Sequence[nio.AsyncClient], Callable[[str, Sequence[str]], str | None], bool]],
-    ) -> None:
+    ) -> RefreshOutcome:
         """Atomically replace membership state from authoritative Matrix queries, each room read by one observer.
 
         ``observers`` returns the observing accounts' clients, ``pick_observer``, and whether every running account
@@ -481,7 +483,7 @@ class AgentReplyMembershipIndex:
             finally:
                 self._refresh_transitions = None
             if self._desired_signature != signature or self._epoch != expected_epoch:
-                return
+                return "voided"
             candidate = _replay_refresh_transitions(candidate, self._snapshot, config, transitions)
             now_clients, _, complete = observers()
             if not complete or [client.user_id for client in now_clients] != [client.user_id for client in clients]:
@@ -497,6 +499,7 @@ class AgentReplyMembershipIndex:
                         readiness="ready",
                         member_count=len(room.raw_joined_user_ids),
                     )
+            return "read_failed" if candidate.refresh_required else "published"
 
     def apply_member_event(
         self,
