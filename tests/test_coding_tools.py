@@ -34,6 +34,8 @@ from mindroom.tools.file import file_tools
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.models import FileAccess
+
 
 @pytest.fixture
 def tmp_base(tmp_path: Path) -> Path:
@@ -558,53 +560,51 @@ class TestEditFile:
 
 
 def _edit_after_both_read(
-    tools: CodingTools,
+    base_dir: str,
+    file_access: FileAccess,
     path: str,
-    old_text: str,
-    new_text: str,
-    results: Any,  # noqa: ANN401 - a multiprocessing queue, whose class the context makes.
+    edit: tuple[str, str],
+    barrier: Any,  # noqa: ANN401 - a multiprocessing barrier, whose class the context makes.
+    results: Any,  # noqa: ANN401 - a multiprocessing queue.
 ) -> None:
-    """Run in a forked process: edit ``path`` and report the result."""
-    results.put(tools.edit_file(path, _one(old_text, new_text)))
+    """Run in a child process: edit ``path``, waiting after the read until the other child has read too."""
+    read = coding_module.read_resolved_file
+
+    def read_then_wait(base: Path, resolved: Path) -> bytes:
+        content = read(base, resolved)
+        with contextlib.suppress(threading.BrokenBarrierError):
+            barrier.wait(timeout=1)
+        return content
+
+    coding_module.read_resolved_file = read_then_wait
+    results.put(CodingTools(base_dir=base_dir, file_access=file_access).edit_file(path, _one(*edit)))
 
 
 class TestEditFileConcurrency:
     """Concurrent edit_file and write_file calls on one file serialize, across threads and processes."""
 
     @pytest.mark.parametrize("where", ["inside", "outside"])
-    def test_edits_from_two_processes_both_land(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        where: str,
-    ) -> None:
+    def test_edits_from_two_processes_both_land(self, tmp_path: Path, where: str) -> None:
         """Two worker processes editing one file both land, as each worker request runs in its own process."""
         base_dir = tmp_path / "base"
         base_dir.mkdir()
         target = base_dir / "race.txt" if where == "inside" else tmp_path / "race.txt"
         target.write_text("AAAA\nBBBB\n")
-        tools = CodingTools(base_dir=str(base_dir), file_access="workspace" if where == "inside" else "unrestricted")
-        context = multiprocessing.get_context("fork")
-        barrier = context.Barrier(2)
-        results = context.Queue()
-        read = coding_module.read_resolved_file
-
-        def read_then_wait(base: Path, resolved: Path) -> bytes:
-            content = read(base, resolved)
-            with contextlib.suppress(threading.BrokenBarrierError):
-                barrier.wait(timeout=1)
-            return content
-
-        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
+        file_access = "workspace" if where == "inside" else "unrestricted"
+        context = multiprocessing.get_context("spawn")
+        barrier, results = context.Barrier(2), context.Queue()
         processes = [
-            context.Process(target=_edit_after_both_read, args=(tools, str(target), old, new, results))
-            for old, new in (("AAAA", "A" * 50), ("BBBB", "b"))
+            context.Process(
+                target=_edit_after_both_read,
+                args=(str(base_dir), file_access, str(target), edit, barrier, results),
+            )
+            for edit in (("AAAA", "A" * 50), ("BBBB", "b"))
         ]
         for process in processes:
             process.start()
+        reports = [results.get(timeout=60) for _ in processes]
         for process in processes:
-            process.join(timeout=30)
-        reports = [results.get(timeout=5) for _ in processes]
+            process.join(timeout=10)
 
         assert all(report.startswith("Applied") for report in reports), reports
         assert target.read_text() == "A" * 50 + "\nb\n"
