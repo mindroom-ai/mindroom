@@ -428,6 +428,9 @@ class ResponseLifecycleCoordinator:
     # for each paused reply the journal's approval signals report.
     _approval_holds: dict[str, ResponseLifecycleKey] = field(default_factory=dict)
     _stop_following_approvals: Callable[[], None] | None = None
+    # The sources of the replies a restart cut short. Their replay resumes an answer that began before any turn of
+    # this instance, so it never tells the turn it waits behind, such as a job follow-up, that a newer message arrived.
+    continued_sources: frozenset[str] = frozenset()
 
     def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str) -> None:
         """Hold the conversation of each paused reply of ``principal_id``, from the ones paused now, until it ends.
@@ -538,8 +541,6 @@ class ResponseLifecycleCoordinator:
     async def reserve_response_lifecycle(
         self,
         response_envelope: MessageEnvelope,
-        *,
-        signal_queued_message: bool = True,
     ) -> ResponseLifecycleReservation:
         """Reserve FIFO admission on one canonical lifecycle before response preparation."""
         target = response_envelope.target
@@ -554,7 +555,7 @@ class ResponseLifecycleCoordinator:
                 lifecycle_lock=lifecycle_lock,
                 queued_signal=queued_signal,
                 response_envelope=response_envelope,
-                signal_queued_message=signal_queued_message,
+                signal_queued_message=True,
             ),
         )
         try:
@@ -593,6 +594,13 @@ class ResponseLifecycleCoordinator:
         """Return whether one queued ingress should interrupt the active turn."""
         return response_envelope.origin.may_answer_interactive_prompt
 
+    def _is_news(self, response_envelope: MessageEnvelope) -> bool:
+        """Return whether a waiting message may tell the active turn that a newer message arrived."""
+        return (
+            self._should_signal_queued_message(response_envelope)
+            and response_envelope.source_event_id not in self.continued_sources
+        )
+
     def _assert_target_matches_envelope(self, target: MessageTarget, response_envelope: MessageEnvelope) -> None:
         """Require lifecycle callers to use the envelope's canonical response target."""
         if target.lifecycle_key == response_envelope.target.lifecycle_key:
@@ -611,7 +619,7 @@ class ResponseLifecycleCoordinator:
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve an active-turn notice before queued dispatch owns the follow-up; a voice transcript is judged as text."""
         self._assert_target_matches_envelope(target, response_envelope)
-        if not self._should_signal_queued_message(response_envelope):
+        if not self._is_news(response_envelope):
             return None
         if not self._has_active_response_for_thread_key(target.lifecycle_key):
             return None
@@ -639,7 +647,7 @@ class ResponseLifecycleCoordinator:
             return None
         if not (existing_turn or lifecycle_lock.locked()):
             return None
-        if not self._should_signal_queued_message(response_envelope):
+        if not self._is_news(response_envelope):
             return None
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,

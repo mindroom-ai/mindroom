@@ -72,11 +72,7 @@ from mindroom.timing import (
 )
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from mindroom.turns.facts import command_for, is_router_voice_echo
-from mindroom.turns.queued_notice import (
-    arriving_message_notice_reservation,
-    mark_waiting_for_approval,
-    queued_notice_reservation_if_busy,
-)
+from mindroom.turns.queued_notice import mark_waiting_for_approval, queued_notice_reservation_if_busy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -245,7 +241,7 @@ class TurnIngress:
         # response short or show that it waits for this agent.
         may_be_for_me = not self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope)
         if may_be_for_me:
-            ticket.notice = await arriving_message_notice_reservation(
+            ticket.notice = queued_notice_reservation_if_busy(
                 self.deps.response_runner,
                 target=target,
                 envelope=envelope,

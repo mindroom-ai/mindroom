@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext, suppress
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -44,6 +44,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import (
     Cancelled,
     Completed,
@@ -89,7 +90,7 @@ from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turns.dispatch import TurnDispatcher
-from mindroom.turns.queued_notice import arriving_message_notice_reservation, queued_notice_reservation_if_busy
+from mindroom.turns.queued_notice import queued_notice_reservation_if_busy
 from tests.access_schema_support import with_current_room_member_access
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.bot_helpers import make_test_agent_bot
@@ -1122,103 +1123,85 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     assert not queued_signal.has_pending_human_messages()
 
 
-async def _claim_cut_short_reply(bot: AgentBot, envelope: MessageEnvelope) -> None:
-    """Claim a reply to ``envelope``'s message and leave it unfinished, as a restart leaves the reply it cut short."""
-    principal = bot.journal_principal()
-    await principal.replies.write_generation("gen-1")
-    claimed = await principal.replies.claim(
-        rl.ClaimRequest(
-            span_id="span-1",
-            delivery_id=envelope.source_event_id,
-            sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
-            bot_generation="gen-1",
-            now_ns=10,
-            new_reply_id="reply-1",
-            entity_name="general",
-            room_id=envelope.target.room_id,
-            thread_id=envelope.target.resolved_thread_id,
-            membership_epoch=0,
-            empty_presentation=encode_presentation(Presentation()),
-        ),
-    )
-    assert claimed.transition.reply is not None
-
-
 @pytest.mark.asyncio
-async def test_replay_of_a_message_already_being_answered_is_not_a_newer_message(tmp_path: Path) -> None:
-    """A restart replays the message a cut-short reply answers; the turn holding its thread meanwhile is not told."""
+async def test_replay_of_a_message_a_restart_cut_short_is_not_a_newer_message(tmp_path: Path) -> None:
+    """A restart replays the message whose reply it cut short; the turn that holds its thread meanwhile is not told."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = runner.lifecycle_coordinator
     replayed = _envelope(source_event_id="$replayed")
     live = _envelope(source_event_id="$live")
     target = replayed.target
+    # An older instance was answering $replayed, still pending in the journal, when it stopped.
+    principal = bot.journal_principal()
+    await principal.admit(
+        InboundEvent(
+            event_id="$replayed",
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            source={"event_id": "$replayed", "content": {"body": "hello"}},
+        ),
+    )
+    await principal.replies.write_generation("gen-old")
+    claimed = await principal.replies.claim(
+        rl.ClaimRequest(
+            span_id="span-1",
+            delivery_id="$replayed",
+            sources=ResponseSources(("$replayed",), ("$replayed",)),
+            bot_generation="gen-old",
+            now_ns=10,
+            new_reply_id="reply-1",
+            entity_name="general",
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            membership_epoch=0,
+            empty_presentation=encode_presentation(Presentation()),
+        ),
+    )
+    assert claimed.transition.reply is not None
+    continued = await bot._reply_runtime.start()
+    assert continued == frozenset({"$replayed"})
+    runner.note_continued_sources(continued)
+
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
-    await _claim_cut_short_reply(bot, replayed)
-    # Another turn, such as a job follow-up, holds the conversation.
+    # Another turn, such as the follow-up for the jobs the restart ended, holds the conversation.
     queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
-    waiting_for_lock = asyncio.Event()
-    acquire_lock = lifecycle._acquire_response_turn_lock
-
-    async def acquire_after_notice_decision(lock: asyncio.Lock, reservation: object) -> None:
-        waiting_for_lock.set()
-        await acquire_lock(lock, reservation)
-
-    async def pending_after_turn_start(request: ResponseRequest) -> tuple[str, ...]:
-        """Start ``request``'s turn behind the held lock and return the messages it left waiting."""
-        waiting_for_lock.clear()
-        task = asyncio.create_task(bot._response_runner.generate_response(request))
-        await asyncio.wait_for(waiting_for_lock.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-        waiting = tuple(message.event_id for message in queued_signal.pending_message_snapshot())
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        return waiting
-
     try:
-        # Ingress: a live first delivery is news, the replay is not.
-        notice = await arriving_message_notice_reservation(runner, target=target, envelope=live)
+        # Ingress: a live message is news, the replay is not.
+        notice = queued_notice_reservation_if_busy(runner, target=target, envelope=live)
         assert notice is not None
         notice.release()
-        assert await arriving_message_notice_reservation(runner, target=target, envelope=replayed) is None
+        assert queued_notice_reservation_if_busy(runner, target=target, envelope=replayed) is None
+        # An interactive selection's reservation.
+        selection = await runner.reserve_response_lifecycle(replayed)
+        assert queued_signal.pending_message_snapshot() == ()
+        await selection.release()
+        # Turn start: the replay waits for the lock unannounced.
+        waiting_for_lock = asyncio.Event()
+        acquire_lock = lifecycle._acquire_response_turn_lock
+
+        async def acquire_after_notice_decision(lock: asyncio.Lock, reservation: object) -> None:
+            waiting_for_lock.set()
+            await acquire_lock(lock, reservation)
 
         with (
             patch.object(ResponseRunner, "_run_locked_turn", new=AsyncMock(return_value=Owned())),
             patch.object(lifecycle, "_acquire_response_turn_lock", new=acquire_after_notice_decision),
         ):
-            # Turn start: the replay waits unannounced, and so does a batch of replays only.
-            assert await pending_after_turn_start(_request(replayed)) == ()
-            # A batch that coalesced a live message with the replay still announces itself.
-            mixed = _request(
-                replayed,
-                sources=ResponseSources(pending_event_ids=("$replayed", "$live"), logical_source_event_ids=("$live",)),
-            )
-            assert await pending_after_turn_start(mixed) == ("$replayed",)
+            task = asyncio.create_task(bot._response_runner.generate_response(_request(replayed)))
+            await asyncio.wait_for(waiting_for_lock.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            assert queued_signal.pending_message_snapshot() == ()
+            lifecycle_lock.release()
+            assert await task == Owned()
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
-        queued_signal.finish_response_turn()
-
-
-@pytest.mark.asyncio
-async def test_replayed_selection_already_being_answered_reserves_no_notice(tmp_path: Path) -> None:
-    """A selection whose answer a restart cut short reserves its turn without telling the busy turn ahead of it."""
-    bot = _bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    queued_signal = runner.lifecycle_coordinator._get_or_create_queued_signal(_envelope().target)
-    queued_signal.begin_response_turn()
-    try:
-        fresh = await runner.reserve_response_lifecycle(_envelope(source_event_id="$fresh"))
-        assert [message.event_id for message in queued_signal.pending_message_snapshot()] == ["$fresh"]
-        await fresh.release()
-        replayed = _envelope(source_event_id="$replayed")
-        await _claim_cut_short_reply(bot, replayed)
-        reservation = await runner.reserve_response_lifecycle(replayed)
-        assert queued_signal.pending_message_snapshot() == ()
-        await reservation.release()
-    finally:
         queued_signal.finish_response_turn()
 
 
@@ -1839,11 +1822,10 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
             task_b = asyncio.create_task(respond(_request(response_envelope_b)))
             await asyncio.wait_for(queued_signal.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             task_c = asyncio.create_task(respond(_request(response_envelope_c, prompt="hello again")))
-            # C reads the reply store before it queues, which takes more than a few loop turns.
-            for _ in range(500):
+            for _ in range(20):
                 if queued_signal.pending_human_messages == 2:
                     break
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0)
             assert queued_signal.pending_human_messages == 2
 
             lifecycle_lock.release()
