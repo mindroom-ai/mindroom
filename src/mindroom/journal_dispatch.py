@@ -62,7 +62,7 @@ def _needs_turn_replay(event: JournalEvent) -> bool:
     """Return whether replay needs responders and turn recovery semantics."""
     return (
         event.kind in TURN_BACKED_KINDS
-        or event.kind is EventKind.JOB_FOLLOW_UP
+        or event.kind in {EventKind.JOB_FOLLOW_UP, EventKind.ROUTED_TURN}
         or (event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION)
     )
 
@@ -95,6 +95,8 @@ class JournalCallbacks:
     replies_ended: Callable[[tuple[str, ...]], None]
     # Hands a follow-up to its response owner, which settles it.
     on_job_follow_up: Callable[[JournalEvent], Awaitable[None]]
+    # Answers a turn the room's routing lane handed to this bot; returns whether its event may settle.
+    on_routed_turn: Callable[[nio.MatrixRoom, JournalEvent], Awaitable[bool]]
     on_job_cancel: _JobCancelCallback
     on_rtc: _RtcCallback | None = None
 
@@ -245,6 +247,10 @@ class JournalDispatcher:
             # A runtime source, not a Matrix event: nothing for ingress to parse.
             await self.callbacks.on_job_follow_up(event)
             return False
+        if event.kind is EventKind.ROUTED_TURN:
+            # A runtime source too: the room's lane owner already normalized the turn it carries.
+            with turn_dispatch_recovery_scope(active=True):
+                return await self.callbacks.on_routed_turn(self.room_for_id(event.room_id), event)
         return await self._parse_and_invoke(event, needs_turn_replay=needs_turn_replay)
 
     async def _parse_and_invoke(self, event: JournalEvent, *, needs_turn_replay: bool) -> bool:

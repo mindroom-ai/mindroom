@@ -1,8 +1,8 @@
 """Unit tests for the pure turn policy decisions in turn_policy.py.
 
 These are characterization tests for TurnPolicy.plan_turn: they pin down the
-ignore/respond behavior, including the saved selection of who answers an
-unmentioned message, without going through bot-level integration tests.
+ignore/route/respond behavior, including which bot routes an unmentioned
+message, without going through bot-level integration tests.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-import pytest_asyncio
 
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -27,7 +26,6 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.custom_tools.thread_move import _plan_thread_copy
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_journal import EventJournalStore
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
@@ -37,7 +35,7 @@ from mindroom.teams.formation import TeamIntent, TeamOutcome
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.turn_origin import TurnIntent
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch, TurnPolicy
+from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
@@ -54,7 +52,6 @@ from tests.conftest import (
 from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -83,7 +80,7 @@ def config(tmp_path: Path) -> Config:
 
 
 def _policy_for(config: Config, agent_name: str, runtime: ReadyRuntime | None = None) -> TurnPolicy:
-    """Return one bot's policy; bots of one process share ``runtime``, and with it the saved responder selections."""
+    """Return one bot's policy; bots of one process share ``runtime``, and with it the room's lane owner."""
     runtime_paths = runtime_paths_for(config)
     registry = entity_identity_registry(config, runtime_paths)
     return TurnPolicy(
@@ -152,19 +149,6 @@ def _dispatch(context: MessageContext, *, agent_name: str, room_id: str = _ROOM_
     )
 
 
-def _text_event(body: str) -> nio.RoomMessageText:
-    return nio.RoomMessageText.from_dict(
-        {
-            "content": {"body": body, "msgtype": "m.text"},
-            "event_id": _EVENT_ID,
-            "sender": _SENDER,
-            "origin_server_ts": 1_000_000,
-            "room_id": _ROOM_ID,
-            "type": "m.room.message",
-        },
-    )
-
-
 async def _plan(
     policy: TurnPolicy,
     room: nio.MatrixRoom,
@@ -174,26 +158,29 @@ async def _plan(
 ) -> object:
     return await policy.plan_turn(
         room,
-        _text_event("hello agents"),
         dispatch,
         has_active_response_for_target=lambda _target: has_active_response,
-        source_event_ids=(_EVENT_ID,),
     )
 
 
-@pytest_asyncio.fixture
-async def process(config: Config, tmp_path: Path) -> AsyncIterator[ReadyRuntime]:
-    """Return the one runtime every bot of a process shares, on its own journal."""
-    journal = EventJournalStore.open_sqlite(tmp_path / "event_journal.db")
-    try:
-        yield ready_runtime(config, runtime_paths_for(config), journal_store=journal)
-    finally:
-        await journal.close()
+@pytest.fixture
+def process(config: Config) -> ReadyRuntime:
+    """Return the one runtime every bot of a process shares."""
+    return ready_runtime(config, runtime_paths_for(config))
 
 
 def _selector(entity_name: str | None = "research", *, fails: bool = False) -> AsyncMock:
     """Return a responder selector that accepts ``entity_name`` (None for no fit), or fails."""
     return AsyncMock(return_value=None if fails else ResponderSelection(entity_name))
+
+
+def _hold_lane(process: ReadyRuntime, config: Config, entity_name: str, room: nio.MatrixRoom) -> None:
+    """Make ``entity_name`` the one running bot of the process joined to ``room``, which makes it the lane owner."""
+    if entity_name in process.agent_bots:
+        process.agent_bots[entity_name].client.rooms[room.room_id] = room
+        return
+    client = SimpleNamespace(user_id=_entity_id(config, entity_name).full_id, rooms={room.room_id: room})
+    process.fleet.add(entity_name, SimpleNamespace(agent_name=entity_name, running=True, client=client))
 
 
 async def _plans(
@@ -205,31 +192,36 @@ async def _plans(
     *,
     envelope_origin: TurnOrigin | None = None,
     names: tuple[str, ...] = ("general", "research"),
-    answering: str | None = None,
-    queued_follow_up: str | None = None,
+    lane_owner: str | None = ROUTER_AGENT_NAME,
 ) -> dict[str, str]:
-    """Plan one turn on these agents of one process and return each agent's plan: `ignore` or its response kind.
+    """Plan one turn on these agents and the room's lane owner, all of one process; return each agent's outcome.
 
-    ``answering`` names the agent whose reply in the conversation still runs, as its own plan and the process see it;
-    ``queued_follow_up`` names the agent that queued the turn behind a reply that has ended since.
+    An outcome is `ignore`, the agent's own response kind, or `routed` for the agent the lane owner hands the turn to.
     """
     plans: dict[str, str] = {}
-    if answering is not None:
-        process.fleet.add(answering, SimpleNamespace(has_active_response_for_target=lambda _target: True))
+    routed: list[str | None] = []
+    if lane_owner is not None:
+        _hold_lane(process, config, lane_owner, room)
     with patch("mindroom.turn_policy.suggest_responder_for_message", selector):
-        for name in names:
+        for name in dict.fromkeys((*names, *([lane_owner] if lane_owner is not None else []))):
             dispatch = _dispatch(
                 replace(context, am_i_mentioned=_entity_id(config, name) in context.mentioned_agents),
                 agent_name=name,
             )
             if envelope_origin is not None:
                 dispatch = replace(dispatch, envelope=replace(dispatch.envelope, origin=envelope_origin))
-            if name == queued_follow_up:
-                follow_up = replace(dispatch.envelope, dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND)
-                dispatch = replace(dispatch, envelope=follow_up)
             policy = _policy_for(config, name, process)
-            plan = await _plan(policy, room, dispatch, has_active_response=name == answering)
-            plans[name] = "ignore" if plan.kind == "ignore" else plan.response_action.kind
+            plan = await _plan(policy, room, dispatch)
+            if plan.kind == "route":
+                routed.append(await policy.select_responder(room, dispatch))
+            if name in names:
+                plans[name] = "ignore" if plan.response_action is None else plan.response_action.kind
+    # Only the lane owner routes, and it selects once.
+    assert len(routed) <= 1
+    for selected in routed:
+        if selected is not None:
+            assert plans[selected] == "ignore"
+            plans[selected] = "routed"
     return plans
 
 
@@ -376,6 +368,17 @@ async def test_unmentioned_room_message_with_single_responder_responds(config: C
 
     assert plan.kind == "respond"
     assert plan.response_action.kind == "individual"
+
+
+@pytest.mark.asyncio
+async def test_unmentioned_room_message_with_multiple_responders_is_ignored(config: Config) -> None:
+    """With several visible responders, no agent self-selects for an untagged room message."""
+    policy = _policy_for(config, "general")
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+
+    plan = await _plan(policy, room, _dispatch(_context(), agent_name="general"))
+
+    assert plan.kind == "ignore"
 
 
 @pytest.mark.asyncio
@@ -536,25 +539,20 @@ async def test_dm_room_with_multiple_agents_forms_auto_team(config: Config) -> N
 
 
 @pytest.mark.asyncio
-async def test_dm_room_lookup_is_skipped_when_no_dm_auto_team_can_form(config: Config, process: ReadyRuntime) -> None:
+async def test_dm_room_lookup_is_skipped_when_no_dm_auto_team_can_form(config: Config) -> None:
     """Thread messages and single-responder rooms plan without asking the homeserver about DM status."""
-    policy = _policy_for(config, "general", process)
+    policy = _policy_for(config, "general")
     general_id = _entity_id(config, "general").full_id
     two_agent_room = _room_with_members(_SENDER, general_id, _entity_id(config, "research").full_id)
-    # Its own room, so the choice saved for the thread plan's event is not this plan's.
-    single_agent_room = _room_with_members(_SENDER, general_id, room_id="!single:localhost")
+    single_agent_room = _room_with_members(_SENDER, general_id)
 
-    with (
-        patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=True)) as is_dm_room,
-        patch("mindroom.turn_policy.suggest_responder_for_message", _selector("research")),
-    ):
+    with patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=True)) as is_dm_room:
         thread_plan = await _plan(
             policy,
             two_agent_room,
             _dispatch(_context(thread_id="$thread:localhost"), agent_name="general"),
         )
-        single_dispatch = _dispatch(_context(), agent_name="general", room_id=single_agent_room.room_id)
-        single_plan = await _plan(policy, single_agent_room, single_dispatch)
+        single_plan = await _plan(policy, single_agent_room, _dispatch(_context(), agent_name="general"))
 
     is_dm_room.assert_not_awaited()
     assert thread_plan.kind == "ignore"
@@ -661,8 +659,13 @@ async def test_active_response_queues_untagged_thread_follow_up(config: Config) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mention_router", [False, True])
-async def test_router_never_answers_or_selects(config: Config, process: ReadyRuntime, mention_router: bool) -> None:
-    """The router's own plan is always to ignore: it routes nothing and answers no mention."""
+async def test_router_answers_nothing_and_routes_only_its_own_lane(
+    config: Config,
+    process: ReadyRuntime,
+    mention_router: bool,
+) -> None:
+    """The router answers no mention, and routes nothing in a room whose lane another bot owns."""
+    _hold_lane(process, config, "general", _two_agent_room(config))
     mentioned = [_entity_id(config, ROUTER_AGENT_NAME)] if mention_router else []
     selector = _selector()
     with patch("mindroom.turn_policy.suggest_responder_for_message", selector):
@@ -677,19 +680,33 @@ async def test_router_never_answers_or_selects(config: Config, process: ReadyRun
 
 
 @pytest.mark.asyncio
-async def test_unmentioned_message_two_candidates_one_individual(config: Config, process: ReadyRuntime) -> None:
-    """Both candidates ask the process's one selection; the selector runs once and only the chosen agent answers."""
+@pytest.mark.parametrize("lane_owner", [ROUTER_AGENT_NAME, "general", "research"])
+async def test_unmentioned_message_is_routed_by_the_lane_owner_alone(
+    config: Config,
+    process: ReadyRuntime,
+    lane_owner: str,
+) -> None:
+    """Only the room's lane owner, a candidate or not, selects; the selector runs once and no candidate answers by itself."""
     selector = _selector("research")
 
-    plans = await _plans(config, process, _two_agent_room(config), _context(), selector)
+    plans = await _plans(config, process, _two_agent_room(config), _context(), selector, lane_owner=lane_owner)
 
-    assert plans == {"general": "ignore", "research": "individual"}
+    assert plans == {"general": "ignore", "research": "routed"}
     selector.assert_awaited_once()
     message, candidates = selector.await_args.args[:2]
     assert message == "hello agents"
     assert candidates == [_entity_id(config, "general"), _entity_id(config, "research")]
-    # A replay of the turn reads the saved choice.
-    assert await _plans(config, process, _two_agent_room(config), _context(), _selector("general")) == plans
+
+
+@pytest.mark.asyncio
+async def test_room_without_a_lane_owner_routes_nothing(config: Config, process: ReadyRuntime) -> None:
+    """Candidates never select for themselves: with no running bot to own the lane, the message stays unanswered."""
+    selector = _selector("research")
+
+    plans = await _plans(config, process, _two_agent_room(config), _context(), selector, lane_owner=None)
+
+    assert plans == {"general": "ignore", "research": "ignore"}
+    selector.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -705,7 +722,7 @@ async def test_selector_failure_falls_back_to_lowest_matrix_id(config: Config, p
     """A failed selection must not leave the person unanswered: the candidate with the lowest Matrix ID answers."""
     plans = await _plans(config, process, _two_agent_room(config), _context(), _selector(fails=True))
 
-    assert plans == {"general": "individual", "research": "ignore"}
+    assert plans == {"general": "routed", "research": "ignore"}
 
 
 @pytest.mark.asyncio
@@ -757,7 +774,7 @@ async def test_thread_without_an_agent_is_selected(config: Config, process: Read
 
     plans = await _plans(config, process, _two_agent_room(config), context, selector)
 
-    assert plans == {"general": "ignore", "research": "individual"}
+    assert plans == {"general": "ignore", "research": "routed"}
     assert [message.body for message in selector.await_args.args[4]] == ["please help"]
     assert selector.await_args.kwargs == {"room_id": _ROOM_ID, "thread_id": "$thread:localhost"}
 
@@ -844,7 +861,7 @@ async def test_unset_router_access_adds_no_check(config: Config, process: ReadyR
 
     plans = await _plans(config, process, _two_agent_room(config), _context(), _selector("research"))
 
-    assert plans == {"general": "ignore", "research": "individual"}
+    assert plans == {"general": "ignore", "research": "routed"}
 
 
 @pytest.mark.asyncio
@@ -873,14 +890,11 @@ async def test_selection_is_among_the_agents_the_sender_may_reach(
         ]
         context = _context(thread_id="$thread:localhost", thread_history=history)
     selector = _selector("research")
-    journal = EventJournalStore.open_sqlite(tmp_path / "event_journal.db")
-    try:
-        process = ready_runtime(config, runtime_paths_for(config), journal_store=journal)
-        plans = await _plans(config, process, room, context, selector, names=names)
-    finally:
-        await journal.close()
+    process = ready_runtime(config, runtime_paths_for(config))
 
-    assert plans == {"general": "ignore", "research": "individual", "news": "ignore"}
+    plans = await _plans(config, process, room, context, selector, names=names)
+
+    assert plans == {"general": "ignore", "research": "routed", "news": "ignore"}
     selector.assert_awaited_once()
     assert selector.await_args.args[1] == [_entity_id(config, "general"), _entity_id(config, "research")]
 
@@ -905,245 +919,7 @@ async def test_scheduled_prompt_without_agent_is_selected(config: Config, proces
         envelope_origin=origin,
     )
 
-    assert plans == {"general": "ignore", "research": "individual"}
-
-
-def _unanswered_thread() -> MessageContext:
-    """Return a follow-up's context in a thread no agent's message shows in yet."""
-    return _context(
-        thread_id="$thread:localhost",
-        thread_history=[make_visible_message(sender=_SENDER, body="please help")],
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("names", [("general", "research"), ("research", "general")])
-async def test_agent_still_answering_a_thread_keeps_its_follow_up(
-    config: Config,
-    process: ReadyRuntime,
-    names: tuple[str, ...],
-) -> None:
-    """A follow-up in a thread an agent still answers goes to that agent alone, whichever candidate plans first."""
-    selector = _selector("general")
-
-    plans = await _plans(
-        config,
-        process,
-        _two_agent_room(config),
-        _unanswered_thread(),
-        selector,
-        names=names,
-        answering="research",
-    )
-
-    assert plans == {"general": "ignore", "research": "individual"}
-    selector.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("names", [("general", "research"), ("research", "general")])
-async def test_queued_follow_up_and_selection_share_one_owner(
-    config: Config,
-    process: ReadyRuntime,
-    names: tuple[str, ...],
-) -> None:
-    """A follow-up one agent queued behind an ended reply is not also answered by the candidate a selection picks."""
-    plans = await _plans(
-        config,
-        process,
-        _two_agent_room(config),
-        _unanswered_thread(),
-        _selector("research"),
-        names=names,
-        queued_follow_up="general",
-    )
-
-    assert plans == {names[0]: "individual", names[1]: "ignore"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("saved", ["research", None])
-@pytest.mark.parametrize("conversation", ["room", "thread", "unread_thread"])
-async def test_saved_choice_outlives_a_smaller_candidate_pool(
-    config: Config,
-    tmp_path: Path,
-    saved: str | None,
-    conversation: str,
-) -> None:
-    """After a restart the one candidate left reads the saved owner, or the saved no-fit, and stays silent."""
-    journal_path = tmp_path / "event_journal.db"
-    journal = EventJournalStore.open_sqlite(journal_path)
-    try:
-        process = ready_runtime(config, runtime_paths_for(config), journal_store=journal)
-        context = _context() if conversation == "room" else _unanswered_thread()
-        await _plans(config, process, _two_agent_room(config), context, _selector(saved))
-    finally:
-        await journal.close()
-    reopened = EventJournalStore.open_sqlite(journal_path)
-    try:
-        restarted = ready_runtime(config, runtime_paths_for(config), journal_store=reopened)
-        selector = _selector("general")
-        if conversation == "unread_thread":
-            context = replace(context, thread_history=list(context.thread_history))
-        alone = _room_with_members(_SENDER, _entity_id(config, "general").full_id)
-        plans = await _plans(config, restarted, alone, context, selector, names=("general",))
-    finally:
-        await reopened.close()
-
-    assert plans == {"general": "ignore"}
-    selector.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_single_candidate_saves_its_turn_for_a_candidate_that_joins_later(
-    config: Config,
-    process: ReadyRuntime,
-) -> None:
-    """The only candidate saves that it answers, so a bot that sees a larger pool afterwards selects nobody else."""
-    selector = _selector("research")
-    alone = _room_with_members(_SENDER, _entity_id(config, "general").full_id)
-
-    assert await _plans(config, process, alone, _context(), selector, names=("general",)) == {"general": "individual"}
-    plans = await _plans(config, process, _two_agent_room(config), _context(), selector, names=("research",))
-
-    assert plans == {"research": "ignore"}
-    selector.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_follow_up_saved_for_an_agent_whose_reply_ended_is_still_answered(
-    config: Config,
-    process: ReadyRuntime,
-) -> None:
-    """A follow-up the thread's agent left to an agent still answering is answered by it after its reply ended.
-
-    By then that agent sees only the thread's agent in the thread and has no queued follow-up, so by itself it would
-    leave the message to the thread's agent, which already left it to this one.
-    """
-    room = _two_agent_room(config)
-    history = [
-        make_visible_message(sender=_SENDER, body="please help"),
-        make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"),
-    ]
-    context = _context(thread_id="$thread:localhost", thread_history=history)
-    selector = _selector("general")
-
-    first = await _plans(config, process, room, context, selector, names=("general",), answering="research")
-    # Research's reply has ended: it plans with no running reply and no queued follow-up.
-    later = await _plans(config, process, room, context, selector, names=("research",))
-
-    assert (first, later) == ({"general": "ignore"}, {"research": "individual"})
-    selector.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-@pytest.mark.parametrize("silenced_by", ["second_person", "router_access"])
-async def test_saved_message_does_not_carry_a_fresh_one_past_a_rule_that_silences_it(
-    config: Config,
-    process: ReadyRuntime,
-    silenced_by: str,
-) -> None:
-    """An agent answers the message saved for it, alone, when the message batched with it needs a mention.
-
-    The fresh message is left to nobody by a second person in the thread or by `router.access`; the saved choice of
-    the older message is not passed on to it.
-    """
-    room = _room_with_members(
-        _SENDER,
-        "@other:localhost",
-        _entity_id(config, "general").full_id,
-        _entity_id(config, "research").full_id,
-    )
-    for agent in config.agents.values():
-        agent.access = ResponderAccessConfig(users=[_SENDER])
-    if silenced_by == "second_person":
-        context = _context(
-            thread_id="$thread:localhost",
-            thread_history=[make_visible_message(sender="@other:localhost", body="me too")],
-        )
-    else:
-        config.router.access = ResponderAccessConfig(current_room_members=False, users=["@someone-else:localhost"])
-        context = _context()
-    journal = process.event_journal_store()
-    await journal.claim_room_event(_ROOM_ID, "$saved:localhost", "responder", "research")
-    batch = ("$saved:localhost", "$fresh:localhost")
-    selector = _selector("research")
-
-    async def plan(source_event_ids: tuple[str, ...]) -> DispatchPlan:
-        with patch("mindroom.turn_policy.suggest_responder_for_message", selector):
-            return await _policy_for(config, "research", process).plan_turn(
-                room,
-                _text_event("hello agents"),
-                _dispatch(context, agent_name="research"),
-                has_active_response_for_target=lambda _target: False,
-                source_event_ids=source_event_ids,
-            )
-
-    batched = await plan(batch)
-    alone = await plan(batch[:1])
-
-    assert (batched.kind, batched.response_action.kind, batched.response_action.sources) == (
-        "respond",
-        "individual",
-        batch[:1],
-    )
-    assert (alone.kind, alone.response_action.kind, alone.response_action.sources) == ("respond", "individual", None)
-    assert (await plan(batch[1:])).kind == "ignore"
-    assert await journal.room_event_claims(_ROOM_ID, batch, "responder") == {"$saved:localhost": "research"}
-    selector.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_agent_outside_a_thread_saves_no_choice_for_it(config: Config, process: ReadyRuntime) -> None:
-    """An agent that leaves a thread to the agent answering in it only reads: it saves nothing for that agent."""
-    history = [
-        make_visible_message(sender=_SENDER, body="please help"),
-        make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"),
-    ]
-    context = _context(thread_id="$thread:localhost", thread_history=history)
-
-    plans = await _plans(config, process, _two_agent_room(config), context, _selector(), names=("research",))
-
-    assert plans == {"research": "ignore"}
-    assert await process.event_journal_store().room_event_claims(_ROOM_ID, [_EVENT_ID], "responder") == {}
-
-
-@pytest.mark.asyncio
-async def test_saved_individual_owner_stops_a_later_implicit_team(config: Config, process: ReadyRuntime) -> None:
-    """A replay that now sees a second agent in a DM forms no team for a message one agent already owns."""
-    alone = _room_with_members(_SENDER, _entity_id(config, "research").full_id)
-    with patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=True)):
-        first = await _plans(config, process, alone, _context(), _selector(), names=("research",))
-        later = await _plans(config, process, _two_agent_room(config), _context(), _selector())
-
-    # General would surface the team; research is no team owner in the larger room, but the message is saved for it.
-    assert (first, later) == ({"research": "individual"}, {"general": "ignore", "research": "individual"})
-
-
-@pytest.mark.asyncio
-async def test_implicit_team_owner_stops_a_later_individual_answer(config: Config, process: ReadyRuntime) -> None:
-    """A message a DM's team answered through one agent is not answered again by the one agent a replay still sees."""
-    alone = _room_with_members(_SENDER, _entity_id(config, "research").full_id)
-    with patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=True)):
-        first = await _plans(config, process, _two_agent_room(config), _context(), _selector())
-        later = await _plans(config, process, alone, _context(), _selector(), names=("research",))
-        replayed = await _plans(config, process, _two_agent_room(config), _context(), _selector(), names=("general",))
-
-    assert (first, later) == ({"general": "team", "research": "ignore"}, {"research": "ignore"})
-    assert replayed == {"general": "team"}
-
-
-@pytest.mark.asyncio
-async def test_mentioned_agents_team_takes_no_claim(config: Config, process: ReadyRuntime) -> None:
-    """A team the message asks for by mentioning its agents answers whatever is saved for the message."""
-    journal = process.event_journal_store()
-    await journal.claim_room_event(_ROOM_ID, _EVENT_ID, "responder", "research")
-    context = _context(mentioned=[_entity_id(config, "general"), _entity_id(config, "research")])
-
-    plans = await _plans(config, process, _two_agent_room(config), context, _selector())
-
-    assert plans == {"general": "team", "research": "ignore"}
+    assert plans == {"general": "ignore", "research": "routed"}
 
 
 def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:

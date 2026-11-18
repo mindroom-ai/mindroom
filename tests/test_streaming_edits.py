@@ -13,7 +13,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.routing_judgment import ResponderSelection
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -358,13 +357,9 @@ class TestStreamingEdits:
             },
         }
 
-        # Process initial message - calculator should NOT respond (not mentioned, and the selection picks helper)
-        with patch(
-            "mindroom.turn_policy.suggest_responder_for_message",
-            new=AsyncMock(return_value=ResponderSelection("helper")),
-        ):
-            await bot._on_message(mock_room, initial_event)
-            await drain_coalescing(bot)
+        # Process initial message - calculator should NOT respond (not mentioned)
+        await bot._on_message(mock_room, initial_event)
+        await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
         assert mock_stream_agent_response.call_count == 0
 

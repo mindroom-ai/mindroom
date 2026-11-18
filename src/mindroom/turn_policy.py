@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import (
@@ -21,7 +20,6 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
-from mindroom.responder_selection import NO_RESPONDER
 from mindroom.routing import suggest_responder_for_message
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.teams.formation import (
@@ -38,6 +36,7 @@ from mindroom.thread_utils import (
     AgentResponseDecision,
     check_agent_mentioned,
     decide_agent_response,
+    filter_thread_agents_for_sender,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
@@ -54,7 +53,6 @@ if TYPE_CHECKING:
     from mindroom.authorization import ResponderCandidatePermissions
     from mindroom.config.participation import ParticipationConfig
     from mindroom.conversation_resolver import MessageContext
-    from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
@@ -68,14 +66,6 @@ class ResponseAction:
     form_team: TeamResolution | None = None
     rejection_message: str | None = None
     participation: ParticipationConfig | None = None
-    # The only sources of the turn this action answers: the dispatcher hands each back to be answered as its own turn
-    # and leaves the turn's other sources unanswered.
-    sources: tuple[str, ...] | None = None
-
-
-_INDIVIDUAL = ResponseAction(kind="individual")
-# How a bot asks for the saved responder of an unmentioned turn; see `TurnPolicy._claimed_response_action`.
-_Claim = Literal["team", "self", "select", "saved"]
 
 
 @dataclass(frozen=True)
@@ -104,7 +94,8 @@ class PreparedDispatch:
 class DispatchPlan:
     """Pure policy output for one normalized inbound turn."""
 
-    kind: Literal["ignore", "respond"]
+    # ``route``: this bot owns the room's routing lane and hands the turn to the responder it selects.
+    kind: Literal["ignore", "route", "respond"]
     response_action: ResponseAction | None = None
     ignore_reason: Literal["router"] | None = None
 
@@ -505,32 +496,34 @@ class TurnPolicy:
     async def plan_turn(
         self,
         room: nio.MatrixRoom,
-        event: PreparedIngress,
         dispatch: PreparedDispatch,
         *,
         has_active_response_for_target: Callable[[MessageTarget], bool],
-        source_event_ids: tuple[str, ...],
     ) -> DispatchPlan:
-        """Return the explicit policy plan for one prepared inbound turn."""
-        if self.deps.agent_name == ROUTER_AGENT_NAME:
-            # The router answers nothing; until the answering agent posts the voice transcript, it still echoes it.
-            return DispatchPlan(kind="ignore", ignore_reason="router")
+        """Return the explicit policy plan for one prepared inbound turn.
+
+        A bot answers by its own rules first. A turn they leave unanswered is routed by the room's lane owner alone,
+        so every other bot ignores it.
+        """
+        # The router answers nothing; until the answering agent posts the voice transcript, it still echoes it.
+        is_router = self.deps.agent_name == ROUTER_AGENT_NAME
+        ignore = DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
         if self._reply_mode_awaits_mention(dispatch, has_active_response_for_target=has_active_response_for_target):
             if dispatch.context.planning_thread_history_unavailable:
                 # Say when an unread thread, not the message, decided it.
                 self.deps.logger.info("Skipping response: reply mode needs a mention; thread history unavailable")
             else:
                 self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
-            return DispatchPlan(kind="ignore")
-        action = await self._resolve_response_action(
-            dispatch,
-            room,
-            has_active_response_for_target=has_active_response_for_target,
-            source_event_ids=source_event_ids or (event.event_id,),
-        )
-        if action.kind == "skip":
-            return DispatchPlan(kind="ignore")
-        return DispatchPlan(kind="respond", response_action=action)
+            return ignore
+        if not is_router:
+            action = await self._resolve_response_action(
+                dispatch,
+                room,
+                has_active_response_for_target=has_active_response_for_target,
+            )
+            if action.kind != "skip":
+                return DispatchPlan(kind="respond", response_action=action)
+        return replace(ignore, kind="route") if await self._routes(room, dispatch) else ignore
 
     def _reply_mode_awaits_mention(
         self,
@@ -680,7 +673,6 @@ class TurnPolicy:
         room: nio.MatrixRoom,
         *,
         has_active_response_for_target: Callable[[MessageTarget], bool],
-        source_event_ids: tuple[str, ...],
     ) -> ResponseAction:
         """Decide whether to respond as a team, individually, or not at all."""
         context = dispatch.context
@@ -702,9 +694,6 @@ class TurnPolicy:
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         agent_matrix_id = registry.current_id(self.deps.agent_name)
         agent_is_responder_candidate = agent_matrix_id in available_responders_in_room
-        # A turn that names nobody is answered only by a responder the process saved for it.
-        unmentioned = not (context.am_i_mentioned or context.mentioned_agents or context.has_non_agent_mentions)
-        claimed = partial(self._claimed_response_action, dispatch, available_responders_in_room, source_event_ids)
         if not self._has_resolved_planning_candidates(
             context,
             candidates,
@@ -721,7 +710,12 @@ class TurnPolicy:
             candidates.allowed,
             availability,
         )
-        if context.planning_thread_history_unavailable and unmentioned:
+        if (
+            context.planning_thread_history_unavailable
+            and not context.am_i_mentioned
+            and not context.mentioned_agents
+            and not context.has_non_agent_mentions
+        ):
             should_continue_active_thread = (
                 agent_is_responder_candidate
                 and self._should_queue_follow_up_in_active_response_thread(
@@ -734,7 +728,9 @@ class TurnPolicy:
             single_visible_self = (
                 len(available_responders_in_room) == 1 and available_responders_in_room[0] == agent_matrix_id
             )
-            return await claimed("self" if should_continue_active_thread or single_visible_self else "saved")
+            if should_continue_active_thread or single_visible_self:
+                return ResponseAction(kind="individual")
+            return ResponseAction(kind="skip")
         participation_action = self._adaptive_response_action(dispatch, available_responders_in_room)
         if participation_action is not None:
             return participation_action
@@ -764,10 +760,7 @@ class TurnPolicy:
                 available_responders_in_room,
             )
         if team_action is not None:
-            if not unmentioned:
-                return team_action
-            # A team nobody asked for by name answers through one agent, like any other unmentioned turn.
-            return await claimed("saved" if team_action.kind == "skip" else "team", team_action)
+            return team_action
 
         agent_response_decision = decide_agent_response(
             agent_name=self.deps.agent_name,
@@ -785,15 +778,15 @@ class TurnPolicy:
             agents_in_thread=agents_in_thread,
             require_resolved_membership=True,
         )
-        answers, selects = agent_response_decision.should_respond, False
-        if not answers and agent_is_responder_candidate:
-            answers = self._should_queue_follow_up_in_active_response_thread(
+        if not agent_response_decision.should_respond and agent_is_responder_candidate:
+            if self._should_queue_follow_up_in_active_response_thread(
                 context=context,
                 target=dispatch.target,
                 source_envelope=dispatch.envelope,
                 has_active_response_for_target=has_active_response_for_target,
-            )
-            selects = not answers and self._may_have_a_responder_selected(dispatch, agent_response_decision)
+            ):
+                return ResponseAction(kind="individual")
+            self._log_multi_agent_thread_skip(context, agent_response_decision)
         if rejection := self._unlisted_room_mention_rejection(
             context,
             room,
@@ -801,100 +794,77 @@ class TurnPolicy:
             available_responders_in_room,
         ):
             return rejection
-        if not unmentioned or not agent_is_responder_candidate:
-            return _INDIVIDUAL if answers else ResponseAction(kind="skip")
-        return await claimed("self" if answers else "select" if selects else "saved")
+        return ResponseAction(kind="individual" if agent_response_decision.should_respond else "skip")
 
-    def _may_have_a_responder_selected(self, dispatch: PreparedDispatch, decision: AgentResponseDecision) -> bool:
-        """Return whether this turn names no responder among several candidates and may have one selected."""
+    async def _routes(self, room: nio.MatrixRoom, dispatch: PreparedDispatch) -> bool:
+        """Return whether this bot, as the room's lane owner, hands this turn to a responder it selects.
+
+        Only a turn that names nobody and that no candidate answers by itself: the thread, if any, names no responder
+        and holds one person, and several candidates may answer the requester.
+        """
         config, runtime_paths = self.deps.runtime.config, self.deps.runtime_paths
-        context = dispatch.context
-        if decision.skip_reason != "not_single_responder":
-            self._log_multi_agent_thread_skip(context, decision)
+        context, requester_user_id = dispatch.context, dispatch.requester_user_id
+        if context.am_i_mentioned or context.mentioned_agents or context.has_non_agent_mentions:
             return False
-        if context.is_thread and has_multiple_non_agent_users_in_thread(
-            context.planning_thread_history,
-            config,
-            runtime_paths,
-            current_sender_id=dispatch.requester_user_id,
-        ):
+        steward = self.deps.runtime.orchestrator.room_steward(room.room_id)
+        if steward is None or steward.agent_name != self.deps.agent_name:
+            return False
+        if context.planning_thread_history_unavailable:
+            self.deps.logger.info("Skipping routing: thread policy history unavailable")
             return False
         # `router.access`, when set, stays an extra restriction on who may have a message routed.
-        return config.router.access is None or is_sender_allowed_for_agent_reply_in_room(
-            dispatch.requester_user_id,
+        if config.router.access is not None and not is_sender_allowed_for_agent_reply_in_room(
+            requester_user_id,
             ROUTER_AGENT_NAME,
             config,
-            dispatch.target.room_id,
+            room.room_id,
             runtime_paths,
             self.deps.agent_reply_memberships,
             require_resolved_membership=True,
-        )
-
-    async def _claimed_response_action(
-        self,
-        dispatch: PreparedDispatch,
-        candidates: list[MatrixID],
-        source_event_ids: tuple[str, ...],
-        claim: _Claim,
-        action: ResponseAction = _INDIVIDUAL,
-    ) -> ResponseAction:
-        """Answer an unmentioned turn, with ``action``, only as a responder the process saved for it.
-
-        Every candidate asks the process's one selection service first. The first to ask saves who answers: itself for
-        the team it surfaces (``team``); a candidate still answering in the thread, else itself, when it would answer
-        by itself (``self``); the selector's choice when the turn names no responder among several (``select``). A
-        candidate that would not answer by itself saves nothing and reads what another saved (``saved``). So one bot
-        answers the person's own message, also on a replay and when another bot sees other candidates or another thread.
-
-        A read answers only the sources whose own saved choice names this bot. The other sources of its batch get
-        nothing from that choice: whatever keeps this bot from answering by itself keeps it from answering them.
-        """
-        config, runtime_paths = self.deps.runtime.config, self.deps.runtime_paths
-        context, room_id = dispatch.context, dispatch.target.room_id
-        registry = entity_identity_registry(config, runtime_paths)
-
-        async def choose() -> str:
-            if claim != "team" and (answering := self._answering_candidate(dispatch, candidates)) is not None:
-                return answering
-            if claim != "select":
-                return self.deps.agent_name
-            self.deps.logger.info("Selecting a responder", event_id=dispatch.envelope.source_event_id)
-            selection = await suggest_responder_for_message(
-                dispatch.envelope.body,
-                candidates,
+        ):
+            return False
+        candidates = await self.responder_candidates_for_room(room, requester_user_id)
+        if context.is_thread and (
+            filter_thread_agents_for_sender(
+                get_agents_in_thread(context.planning_thread_history, config, runtime_paths),
+                requester_user_id,
                 config,
                 runtime_paths,
-                context.planning_thread_history,
-                room_id=room_id,
-                thread_id=dispatch.target.resolved_thread_id,
+                self.deps.agent_reply_memberships,
+                available_responders_in_room=candidates,
             )
-            if selection is not None:
-                return selection.entity_name or NO_RESPONDER
-            # A failed selection must not leave the person without an answer.
-            fallback = self._select_response_owner(candidates)
-            assert fallback is not None
-            return registry.current_entity_name_for_user_id(fallback.full_id, include_router=False) or NO_RESPONDER
+            or has_multiple_non_agent_users_in_thread(
+                context.planning_thread_history,
+                config,
+                runtime_paths,
+                current_sender_id=requester_user_id,
+            )
+        ):
+            self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
+            return False
+        return len(candidates) > 1
 
-        selections, me = self.deps.runtime.orchestrator.responder_selections, self.deps.agent_name
-        if claim != "saved":
-            owners = await selections.select(room_id, source_event_ids, choose)
-            return action if me in owners else ResponseAction(kind="skip")
-        mine = tuple([source for source in source_event_ids if me in await selections.select(room_id, (source,), None)])
-        if not mine:
-            return ResponseAction(kind="skip")
-        return _INDIVIDUAL if mine == source_event_ids else replace(_INDIVIDUAL, sources=mine)
-
-    def _answering_candidate(self, dispatch: PreparedDispatch, candidates: list[MatrixID]) -> str | None:
-        """Return the candidate whose reply in this turn's thread still runs: the lowest Matrix ID of several."""
-        if not dispatch.context.is_thread or not dispatch.envelope.origin.may_answer_interactive_prompt:
-            return None
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        for candidate in sorted(candidates, key=lambda value: value.full_id):
-            name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
-            bot = self.deps.runtime.orchestrator.agent_bots.get(name) if name is not None else None
-            if bot is not None and bot.has_active_response_for_target(dispatch.target):
-                return name
-        return None
+    async def select_responder(self, room: nio.MatrixRoom, dispatch: PreparedDispatch) -> str | None:
+        """Return the entity selected to answer a turn this bot routes; None when nobody fits."""
+        config, runtime_paths = self.deps.runtime.config, self.deps.runtime_paths
+        candidates = await self.responder_candidates_for_room(room, dispatch.requester_user_id)
+        self.deps.logger.info("Selecting a responder", event_id=dispatch.envelope.source_event_id)
+        selection = await suggest_responder_for_message(
+            dispatch.envelope.body,
+            candidates,
+            config,
+            runtime_paths,
+            dispatch.context.planning_thread_history,
+            room_id=room.room_id,
+            thread_id=dispatch.target.resolved_thread_id,
+        )
+        if selection is not None:
+            return selection.entity_name
+        # A failed selection must not leave the person without an answer.
+        fallback = self._select_response_owner(candidates)
+        assert fallback is not None
+        registry = entity_identity_registry(config, runtime_paths)
+        return registry.current_entity_name_for_user_id(fallback.full_id, include_router=False)
 
     def _unlisted_room_mention_rejection(
         self,

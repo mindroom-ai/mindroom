@@ -31,6 +31,7 @@ from mindroom.event_journal import (
     ApprovalDecisionMetadata,
     EventClass,
     EventKind,
+    InboundEvent,
     PendingPage,
     SemanticConsumer,
     VisibleMessage,
@@ -3247,6 +3248,7 @@ async def test_a_follow_up_whose_turn_is_gone_is_dispatched_again(alice: Princip
             turn_has_live_claim=lambda _event_id: False,
             replies_ended=lambda _reply_ids: None,
             on_job_follow_up=AsyncMock(),
+            on_routed_turn=AsyncMock(),
             on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room(),
@@ -3258,6 +3260,60 @@ async def test_a_follow_up_whose_turn_is_gone_is_dispatched_again(alice: Princip
     assert dispatcher._deferral_is_live(follow_up)
     owners.clear()
     assert not dispatcher._deferral_is_live(follow_up)
+
+
+@pytest.mark.parametrize("settles", [True, False])
+async def test_a_routed_turn_runs_from_the_journal_and_settles_as_its_dispatch_says(
+    alice: PrincipalStore,
+    settles: bool,
+) -> None:
+    """A turn the routing lane put in this bot's journal waits for the fleet, then runs with no ingress parsing.
+
+    Its dispatch says whether it may settle now; a response that took the turn settles it through its own records.
+    """
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        return None
+
+    on_routed_turn = AsyncMock(return_value=settles)
+    dispatcher = JournalDispatcher(
+        store=alice,
+        callbacks=JournalCallbacks(
+            on_message=cast("Any", noop),
+            on_media=cast("Any", noop),
+            on_reaction=cast("Any", noop),
+            on_approval=cast("Any", noop),
+            on_room_lifecycle=cast("Any", noop),
+            on_redaction=cast("Any", noop),
+            on_approval_continuation=AsyncMock(return_value=None),
+            source_has_live_owner=lambda _event_id: False,
+            turn_has_live_claim=lambda _event_id: False,
+            replies_ended=lambda _reply_ids: None,
+            on_job_follow_up=AsyncMock(),
+            on_routed_turn=on_routed_turn,
+            on_job_cancel=AsyncMock(),
+        ),
+        room_for_id=lambda _room_id: room(),
+    )
+    await alice.admit(
+        InboundEvent(
+            event_id="routed:$e1",
+            room_id=ROOM,
+            thread_id=None,
+            kind=EventKind.ROUTED_TURN,
+            event_class=EventClass.ACTIONABLE,
+            sender="@steward:example.org",
+            origin_server_ts=1,
+            source={"events": []},
+        ),
+    )
+
+    assert dispatcher._deferral_is_live(cast("JournalEvent", await alice.load_event("routed:$e1")))
+    await dispatcher.drain_once()
+
+    (_room, routed), _kwargs = on_routed_turn.await_args
+    assert (routed.event_id, routed.source) == ("routed:$e1", {"events": []})
+    assert await alice.is_pending("routed:$e1") is not settles
 
 
 class TestOutOfBandDispatch:
@@ -3287,6 +3343,7 @@ class TestOutOfBandDispatch:
                 turn_has_live_claim=lambda _event_id: False,
                 replies_ended=lambda _reply_ids: None,
                 on_job_follow_up=AsyncMock(),
+                on_routed_turn=AsyncMock(),
                 on_job_cancel=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
@@ -3371,6 +3428,7 @@ class TestDeferralOwnership:
                 turn_has_live_claim=lambda _event_id: turn_claimed,
                 replies_ended=lambda _reply_ids: None,
                 on_job_follow_up=AsyncMock(),
+                on_routed_turn=AsyncMock(),
                 on_job_cancel=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
@@ -4002,6 +4060,7 @@ class TestRecoveryDoesNotReenterALiveTurn:
                 turn_has_live_claim=lambda event_id: event_id in live_claims,
                 replies_ended=lambda _reply_ids: None,
                 on_job_follow_up=AsyncMock(),
+                on_routed_turn=AsyncMock(),
                 on_job_cancel=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
@@ -4240,6 +4299,7 @@ class TestAdmittedWorkReachesItsCallback:
                 turn_has_live_claim=lambda _event_id: False,
                 replies_ended=lambda _reply_ids: None,
                 on_job_follow_up=AsyncMock(),
+                on_routed_turn=AsyncMock(),
                 on_job_cancel=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),

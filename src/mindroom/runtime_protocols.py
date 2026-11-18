@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
     from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
-    from mindroom.responder_selection import ResponderSelections
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.skill_learning.runner import SkillReviewRunner
@@ -92,9 +91,6 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def agent_reply_membership_sync(self) -> AgentReplyMembershipSync: ...  # noqa: D102
-
-    @property
-    def responder_selections(self) -> ResponderSelections: ...  # noqa: D102
 
     @property
     def response_admission_gate(self) -> ResponseAdmissionGate: ...  # noqa: D102

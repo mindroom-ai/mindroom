@@ -52,8 +52,10 @@ from mindroom.timing import (
 )
 from mindroom.timing import timing_scope as timing_scope_context
 from mindroom.turn_origin import TurnIntent
-from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
+from mindroom.turn_store import ClaimContended, ClaimRefused, TurnClaim
+from mindroom.turns.routing_lane import route_turn, routed_events, routed_turn
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -62,12 +64,12 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.coalescing.batch import PreparedTurn
+    from mindroom.coalescing.batch import PreparedTurn, TimestampFormatter
     from mindroom.command_turn_executor import CommandTurnExecutor
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.dispatch_handoff import DispatchEvent, PreparedIngress
-    from mindroom.event_journal import PendingTurnView
+    from mindroom.event_journal import JournalEvent, PendingTurnView
     from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
     from mindroom.ingress_validation import IngressValidator
@@ -76,8 +78,8 @@ if TYPE_CHECKING:
     from mindroom.response_runner import ResponseRunner
     from mindroom.response_sources import SourceFate
     from mindroom.teams.spec import TeamMode
-    from mindroom.turn_policy import DispatchPlan, TurnPolicy
-    from mindroom.turn_store import TurnClaim, TurnStore
+    from mindroom.turn_policy import TurnPolicy
+    from mindroom.turn_store import TurnStore
     from mindroom.turns.facts import RunIdentity
     from mindroom.turns.interactive_selection import InteractiveSelections
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -201,6 +203,8 @@ class TurnDispatchDeps:
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
     selections: InteractiveSelections
+    # Renders a routed turn's messages as the coalescing gate renders its own.
+    timestamp_formatter: TimestampFormatter
 
 
 @dataclass
@@ -255,8 +259,35 @@ class TurnDispatcher:
         await self._dispatch_claimed_text_turn(turn, claim)
         return True
 
-    async def _dispatch_claimed_text_turn(self, turn: PreparedTurn, claim: TurnClaim) -> None:
-        """Run the dispatch pipeline under the turn's merged claim until a response task takes it."""
+    async def dispatch_routed_turn(self, room: nio.MatrixRoom, handoff: JournalEvent) -> bool:
+        """Answer the turn the room's routing lane handed to this bot; return whether its journal event may settle.
+
+        The turn's one source is the handoff, so this bot's own copies of the person's events stay apart from it, and
+        a restart runs it again from the journal. It answers the person's event, whom access is checked for again
+        here. A response that takes the turn settles the handoff through its records, as it settles a message.
+        """
+        async with self.deps.resolver.turn_lookup_scope():
+            events = routed_events(handoff.source, room)
+            # This bot places the turn under its own thread mode, as it placed a relay.
+            thread_id = await self.deps.resolver.coalescing_thread_id(room, events[-1].event)
+            turn = routed_turn(
+                handoff.event_id,
+                thread_id,
+                events,
+                timestamp_formatter=self.deps.timestamp_formatter,
+            )
+            match await self.deps.turn_store.claim(turn.handled_turn):
+                case TurnClaim() as claim:
+                    return not await self._dispatch_claimed_text_turn(turn, claim)
+                case ClaimContended(blocking=blocking):
+                    self.deps.turn_store.retry_when_released(blocking, room.room_id, handoff.event_id)
+                    return False
+                case ClaimRefused():
+                    # This bot already answered one of the person's events in a turn of its own.
+                    return True
+
+    async def _dispatch_claimed_text_turn(self, turn: PreparedTurn, claim: TurnClaim) -> bool:
+        """Run the dispatch pipeline under the turn's claim; return whether a response task took it."""
         held: TurnClaim | None = claim
 
         def take_claim() -> TurnClaim:
@@ -273,7 +304,7 @@ class TurnDispatcher:
                 dispatch_timing=dispatch_timing,
             )
             if prepared is None:
-                return
+                return False
             timing_scope_token = timing_scope_context.set(event_timing_scope(turn.event.event_id))
             async with self.deps.ingress.admitted_reply_decision(
                 turn.facts.run_requester_id,
@@ -281,26 +312,31 @@ class TurnDispatcher:
                 unanswered=prepared.handled_turn.source_event_ids,
             ) as allowed:
                 if not allowed:
-                    return
+                    return False
                 if await self._blocked_before_plan(
                     turn.room,
                     prepared,
                 ):
-                    return
+                    return False
                 message_attachment_ids, trusted_attachment_ids = _attachment_parts(prepared)
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_start")
-                plan = await self.deps.turn_policy.plan_turn(
-                    turn.room,
-                    turn.event,
-                    prepared.dispatch,
-                    has_active_response_for_target=self.deps.response_runner.has_active_response_for_target,
-                    source_event_ids=prepared.handled_turn.source_event_ids,
+                plan = (
+                    await self.deps.turn_policy.plan_turn(
+                        turn.room,
+                        prepared.dispatch,
+                        has_active_response_for_target=self.deps.response_runner.has_active_response_for_target,
+                    )
+                    if turn.answers_event_id is None
+                    # The room's lane owner chose this bot, so its own rules for an unmentioned message do not apply.
+                    else DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
                 )
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_ready")
-                # Only a turn this agent or its team will answer.
-                if plan.response_action is not None and plan.response_action.kind in {"individual", "team"}:
+                # Only a turn someone will answer: routed, or answered by this agent or its team.
+                if plan.kind == "route" or (
+                    plan.response_action is not None and plan.response_action.kind in {"individual", "team"}
+                ):
                     self._queue_prompt_summary(prepared)
                 await self._apply_turn_plan(
                     turn.room,
@@ -315,6 +351,7 @@ class TurnDispatcher:
                 held.release()
             if timing_scope_token is not None:
                 timing_scope_context.reset(timing_scope_token)
+        return held is None
 
     def _queue_prompt_summary(self, prepared: _PreparedTextDispatch) -> None:
         """Start a new thread's title once selected to respond, before execution can block."""
@@ -464,7 +501,9 @@ class TurnDispatcher:
         take_claim: Callable[[], TurnClaim],
     ) -> None:
         visible_responses = self.deps.visible_responses
-        if plan.kind == "ignore":
+        if plan.kind != "respond":
+            if plan.kind == "route" and not await self._route(room, prepared):
+                return
             router_outcome = (
                 await self._router_handled_turn_outcome(room.room_id, prepared.handled_turn)
                 if plan.ignore_reason == "router"
@@ -478,14 +517,6 @@ class TurnDispatcher:
 
         response_action = plan.response_action
         assert response_action is not None
-        if response_action.sources is not None:
-            # Each of these comes back from the journal as its own turn once this turn's claim releases.
-            rest = [
-                source for source in prepared.handled_turn.source_event_ids if source not in response_action.sources
-            ]
-            await visible_responses.settle_source_events_ignored(TurnRecord.create(rest))
-            self.deps.turn_store.retry_when_claim_releases(room.room_id, response_action.sources)
-            return
         # Orderly shutdown has closed task ownership, so no response is planned after it.
         if self.deps.runtime.phase is RunPhase.SHUTTING_DOWN:
             raise ResponseAdmissionRefusedError
@@ -718,8 +749,11 @@ class TurnDispatcher:
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=thread_id,
-            # A response to a finished reply answers the message that reply answered.
-            reply_to_event_id=self.deps.ingress.entity_final_reply_original_event_id(event) or event.event_id,
+            # A routed turn answers the person's event; a response to a finished reply, the message that reply
+            # answered.
+            reply_to_event_id=turn.answers_event_id
+            or self.deps.ingress.entity_final_reply_original_event_id(event)
+            or event.event_id,
             event_source=context_event.source,
         )
         emit_elapsed_timing(
@@ -728,16 +762,18 @@ class TurnDispatcher:
             resolved_thread_id=target.resolved_thread_id,
         )
         extract_context_start = time.monotonic()
-        # An old router relay of a human's message reads only the context the relay names; see the LEGACY_COMPAT
-        # note on `IngressFacts.router_relay`.
-        if turn.command is None and facts.router_relay and facts.original_sender_is_human:
+        # A routed turn reads only the context its event names, since the lane owner read the thread to route it. So
+        # does an old router relay of a human's message; see the LEGACY_COMPAT note on `IngressFacts.router_relay`.
+        if turn.answers_event_id is not None or (
+            turn.command is None and facts.router_relay and facts.original_sender_is_human
+        ):
             context = await self.deps.resolver.extract_trusted_router_relay_context(
                 room,
                 context_event,
                 thread_id=target.source_thread_id,
                 payload_metadata=turn.payload,
             )
-            context_path = "trusted_router_relay"
+            context_path = "routed"
         else:
             context = await self.deps.resolver.extract_dispatch_context(
                 room,
@@ -803,6 +839,32 @@ class TurnDispatcher:
             scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
             scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
         )
+
+    async def _route(self, room: nio.MatrixRoom, prepared: _PreparedTextDispatch) -> bool:
+        """Hand a turn nobody is named for to the responder selected for it, as the room's lane owner.
+
+        The handoff settles this bot's events for the turn as its responder takes it. Returns False when another bot
+        took the room's lane meanwhile; the events then stay pending and are planned again.
+        """
+        orchestrator = self.deps.runtime.orchestrator
+        # Config application waits until the selection and its handoff finish.
+        async with self.deps.runtime.admission_fence():
+            recipients = await route_turn(
+                orchestrator.event_journal_store(),
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                self.deps.agent_name,
+                prepared.turn,
+                partial(self.deps.turn_policy.select_responder, room, prepared.dispatch),
+            )
+        if recipients is None:
+            self.deps.logger.info("Routing lane taken by another bot", room_id=room.room_id)
+            self.deps.turn_store.retry_when_claim_releases(room.room_id, prepared.handled_turn.source_event_ids)
+            return False
+        for recipient in recipients:
+            if (bot := orchestrator.agent_bots.get(recipient)) is not None:
+                bot.routed_turn_accepted()
+        return True
 
     async def _router_handled_turn_outcome(
         self,

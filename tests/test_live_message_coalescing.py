@@ -5179,7 +5179,6 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
 
     async def plan_turn(
         _room: object,
-        _event: object,
         prepared_dispatch: PreparedDispatch,
         **_kwargs: object,
     ) -> DispatchPlan:
@@ -6849,7 +6848,7 @@ async def _capture_gate_dispatches(
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+        dispatch = cast("PreparedDispatch", args[1])
         envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 
@@ -7545,7 +7544,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+        dispatch = cast("PreparedDispatch", args[1])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 
@@ -7611,7 +7610,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+        dispatch = cast("PreparedDispatch", args[1])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 
@@ -7671,7 +7670,7 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     captured_handled_turns: list[TurnRecord] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+        dispatch = cast("PreparedDispatch", args[1])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 

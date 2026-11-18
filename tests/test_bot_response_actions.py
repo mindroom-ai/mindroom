@@ -31,7 +31,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_utils import AgentResponseDecision
-from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from mindroom.turn_policy import PreparedDispatch
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -112,7 +112,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@alice:localhost", "help me"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert mock_decide.call_count == 1
@@ -173,7 +172,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "reject"
@@ -236,7 +234,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "reject"
@@ -297,7 +294,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@user:localhost", "general and research, help"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "reject"
@@ -356,7 +352,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "reject"
@@ -418,7 +413,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "skip"
@@ -469,7 +463,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@bob:localhost", "can someone help?"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "skip"
@@ -515,7 +508,6 @@ class TestAgentBot(AgentBotTestBase):
             _policy_dispatch(bot, room, context, "@bob:localhost", "calculator, help"),
             room,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-            source_event_ids=("$event",),
         )
 
         assert action.kind == "reject"
@@ -568,7 +560,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             room,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-            source_event_ids=("$event",),
         )
 
         assert action.kind == "individual"
@@ -630,7 +621,6 @@ class TestAgentBot(AgentBotTestBase):
             _policy_dispatch(bot, room, context, "@bob:localhost", "ops, help"),
             room,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-            source_event_ids=("$event",),
         )
 
         assert action.kind == "reject"
@@ -707,7 +697,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "reject"
@@ -786,7 +775,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "reject"
@@ -848,7 +836,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "team"
@@ -909,7 +896,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "individual"
@@ -1004,7 +990,6 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 room,
                 has_active_response_for_target=has_active_response,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "individual"
@@ -1083,7 +1068,6 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 room,
                 has_active_response_for_target=MagicMock(return_value=True),
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "skip"
@@ -1146,7 +1130,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             room,
             has_active_response_for_target=MagicMock(return_value=True),
-            source_event_ids=("$event",),
         )
 
         assert action.kind == "skip"
@@ -1225,7 +1208,6 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 room,
                 has_active_response_for_target=has_active_response,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "individual"
@@ -1310,17 +1292,22 @@ class TestAgentBot(AgentBotTestBase):
             envelope=envelope,
         )
 
+        # The only running bot in the room owns its routing lane.
+        bot.running = True
+        bot.client.user_id = bot.matrix_id.full_id
+        bot.client.rooms = {room.room_id: room}
         selector = AsyncMock(return_value=ResponderSelection("research"))
         with patch("mindroom.turn_policy.suggest_responder_for_message", selector):
             plan = await bot._turn_policy.plan_turn(
                 room,
-                event,
                 dispatch,
                 has_active_response_for_target=lambda _target: False,
-                source_event_ids=("$event",),
             )
+            selected = await bot._turn_policy.select_responder(room, dispatch)
 
-        assert plan.response_action == ResponseAction(kind="individual")
+        assert plan.kind == "route"
+        assert selected == "research"
+        assert selector.await_args.args[1] == [ids["research"], ids["writer"]]
         assert selector.await_args.args[1] == [ids["research"], ids["writer"]]
 
     @pytest.mark.asyncio
@@ -1421,7 +1408,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@bas:localhost", "I fixed two issues"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "skip"
@@ -1486,7 +1472,6 @@ class TestAgentBot(AgentBotTestBase):
             _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
             room,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-            source_event_ids=("$event",),
         )
 
         assert action.kind == "individual"
@@ -1554,7 +1539,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "skip"
@@ -1621,7 +1605,6 @@ class TestAgentBot(AgentBotTestBase):
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "individual"

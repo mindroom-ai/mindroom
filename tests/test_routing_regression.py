@@ -628,7 +628,6 @@ class TestRoutingRegression:
                 ),
                 room,
                 has_active_response_for_target=alpha_bot._response_runner.has_active_response_for_target,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "individual"
@@ -700,7 +699,6 @@ class TestRoutingRegression:
             ),
             room,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-            source_event_ids=("$event",),
         )
 
         assert action.kind == "reject"

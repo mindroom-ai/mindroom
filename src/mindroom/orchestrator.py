@@ -138,7 +138,6 @@ from .orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
-from .responder_selection import ResponderSelections
 from .room_steward import room_poster, room_steward
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
@@ -328,11 +327,9 @@ class _MultiAgentOrchestrator:
         repr=False,
     )
     agent_reply_membership_sync: AgentReplyMembershipSync = field(init=False, repr=False)
-    responder_selections: ResponderSelections = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Build the runtime's collaborators around its paths and published config."""
-        self.responder_selections = ResponderSelections(self.event_journal_store)
         self._hook_lifetime = self.hook_registry_state.lifetime()
         self.fleet = EntityFleet(
             EntityFleetHooks(
@@ -1459,6 +1456,8 @@ class _MultiAgentOrchestrator:
             msg = "Another MindRoom runtime is already using this event journal"
             raise PermanentStartupError(msg)
         self._journal_held = True
+        # A routed turn a crash left between its lane owner and its responder moves on before any bot replays.
+        await store.accept_routing_handoffs()
         # Every bot follows the paused replies of its principal from these on.
         await store.load_approval_signals()
         # Each paused turn ends as its approval does: the approval's end is the one place every paused turn ends.

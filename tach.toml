@@ -565,13 +565,13 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.reaction_dispatch",
     "mindroom.reply_scope",
-    "mindroom.responder_selection",
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.tool_jobs.runtime",
     "mindroom.turn_store",
     "mindroom.turns.ingress",
+    "mindroom.turns.routing_lane",
     "mindroom.voice.visible_voice_echo",
 ]
 
@@ -3334,7 +3334,6 @@ depends_on = [
     "mindroom.plugin_lifecycle",
     "mindroom.response_activity",
     "mindroom.response_admission",
-    "mindroom.responder_selection",
     "mindroom.room_steward",
     "mindroom.scheduling.runtime",
     "mindroom.thread_export.workspace_sync",
@@ -4746,13 +4745,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.room_steward"
 depends_on = ["mindroom.constants"]
-
-[[modules]]
-path = "mindroom.responder_selection"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.event_journal",
-]
 
 [[modules]]
 path = "mindroom.room_modes"
@@ -6303,12 +6295,24 @@ depends_on = [
     "mindroom.timestamp_formatting",
     "mindroom.turn_policy",
     "mindroom.turn_record",
+    "mindroom.turn_store",
+    "mindroom.turns.routing_lane",
     "mindroom.reply_turn.request",
 ]
 visibility = [
     "mindroom.bot",
     "mindroom.edit_regenerator",
 ]
+
+[[modules]]
+path = "mindroom.turns.routing_lane"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.event_journal",
+    "mindroom.turn_record",
+]
+visibility = ["mindroom.turns.dispatch"]
 
 [[modules]]
 path = "mindroom.dispatch_replay_guard"
@@ -6346,7 +6350,6 @@ depends_on = [
     "mindroom.responder_availability",
     "mindroom.runtime_protocols",
     "mindroom.teams",
-    "mindroom.responder_selection",
     "mindroom.routing",
 ]
 

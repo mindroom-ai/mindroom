@@ -358,7 +358,6 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
-                source_event_ids=("$event",),
             )
 
         assert multiple_visible_action.kind == "skip"
@@ -371,7 +370,6 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
-                source_event_ids=("$event",),
             )
 
         assert single_visible_action.kind == "individual"
@@ -440,7 +438,6 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "skip"
@@ -513,7 +510,6 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "skip"
@@ -595,7 +591,6 @@ class TestAgentResponseLogic:
                 dispatch,
                 room,
                 has_active_response_for_target=lambda _target: False,
-                source_event_ids=("$event",),
             )
 
         assert action.kind == "individual"

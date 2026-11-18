@@ -420,9 +420,12 @@ class _SpyTurnPolicy:
         self.plan_turn_calls += 1
         return await self.inner.plan_turn(*args, **kwargs)
 
+    async def select_responder(self, *args: Any) -> str | None:  # noqa: ANN401
+        return await self.inner.select_responder(*args)
 
-def _select_responder(monkeypatch: pytest.MonkeyPatch, entity_name: str) -> AsyncMock:
-    """Make the responder selection of an unmentioned turn pick ``entity_name``; return the selector."""
+
+def _select_responder(monkeypatch: pytest.MonkeyPatch, entity_name: str | None) -> AsyncMock:
+    """Make the lane owner's selection for an unmentioned turn pick ``entity_name``, None for no fit; return the selector."""
     selector = AsyncMock(return_value=ResponderSelection(entity_name))
     monkeypatch.setattr("mindroom.turn_policy.suggest_responder_for_message", selector)
     return selector
@@ -545,6 +548,43 @@ def _observe_admission_wait(harness: _Harness, monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(harness.runtime, "wait_for_admission_or_shutdown", observed_wait)
     return started
+
+
+def _own_routing_lane(harness: _Harness, room: nio.MatrixRoom) -> None:
+    """Make this harness's bot the one running bot of its process in ``room``, which makes it the room's lane owner."""
+    deps = harness.dispatcher.deps
+    client = SimpleNamespace(user_id=deps.matrix_id.full_id, rooms={room.room_id: room})
+    harness.runtime.orchestrator.fleet.add(
+        deps.agent_name,
+        SimpleNamespace(agent_name=deps.agent_name, running=True, client=client),
+    )
+
+
+def _routing_lane(config: Config, storage_path: Path, room: nio.MatrixRoom) -> tuple[_Harness, _Harness, _Harness]:
+    """Return the bots of one process in ``room``: the router, which owns its routing lane, `general` and `research`."""
+    router = _build_harness(config, storage_path, agent_name=ROUTER_AGENT_NAME)
+    process = router.runtime.orchestrator
+    _own_routing_lane(router, room)
+    return (
+        router,
+        _build_harness(config, storage_path, process=process),
+        _build_harness(config, storage_path, agent_name="research", process=process),
+    )
+
+
+async def _answer_routed_turns(harness: _Harness, room: nio.MatrixRoom) -> list[str]:
+    """Run the routed turns waiting in this bot's journal, as its journal worker does; return their handoffs."""
+    deps = harness.dispatcher.deps
+    journal = harness.runtime.orchestrator.event_journal_store().principal(
+        journal_principal_id(deps.agent_name, deps.matrix_id.full_id),
+    )
+    waiting = [await journal.load_event(event_id) for event_id in sorted(await journal.unsettled_event_ids())]
+    routed = [event for event in waiting if event is not None and event.kind is EventKind.ROUTED_TURN]
+    for event in routed:
+        if await harness.dispatcher.dispatch_routed_turn(room, event):
+            await journal.settle_many((event.event_id,))
+    await harness.runner.settle_inbox_responses()
+    return [event.event_id for event in routed]
 
 
 def _replace_harness_deps(harness: _Harness, **changes: object) -> None:
@@ -799,6 +839,7 @@ def _build_harness(
             visible_responses=visible_responses,
             retry_dispatch_sources=_retry_dispatch_sources,
             selections=selections,
+            timestamp_formatter=lambda _timestamp_ms: None,
         ),
     )
 
@@ -1011,6 +1052,7 @@ def _obligation_runner(
             turn_has_live_claim=harness.turn_store.has_live_turn_claim,
             replies_ended=lambda _reply_ids: None,
             on_job_follow_up=AsyncMock(),
+            on_routed_turn=AsyncMock(),
             on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room,
@@ -1992,112 +2034,20 @@ async def test_a_relay_of_an_answered_original_is_settled_unless_it_was_answered
 
 
 @pytest.mark.asyncio
-async def test_bots_that_batch_a_burst_differently_leave_no_message_unanswered(
-    config: Config,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A bot that batched two messages answers the one selected for it, though the other went to another bot.
-
-    The other bot planned the messages apart, so each has its own saved choice; the batch must not follow the first
-    message's choice into ignoring the second, which nobody else answers.
-    """
-    general = _build_harness(config, tmp_path)
-    research = _build_harness(config, tmp_path, agent_name="research", process=general.runtime.orchestrator)
-    room = _room_with_members(config, "general", "research")
-    first = _text_event("first message", event_id="$first:localhost")
-    second = _text_event("second message", event_id="$second:localhost", origin_server_ts=1_000_001)
-    selector = AsyncMock(side_effect=[ResponderSelection("general"), ResponderSelection("research")])
-    monkeypatch.setattr("mindroom.turn_policy.suggest_responder_for_message", selector)
-
-    await general.deliver(room, first)
-    await general.deliver(room, second)
-    batch = build_prepared_turn(
-        requester_coalescing_key(room.room_id, None, _SENDER),
-        [
-            make_pending_event(event, room, source_kind=MESSAGE_SOURCE_KIND, requester_user_id=_SENDER)
-            for event in (first, second)
-        ],
-        queues_other_run=nothing_else_queued,
-    )
-    await research.dispatcher.handle_prepared_turn(batch)
-    await research.runner.settle_inbox_responses()
-
-    assert [request.response_envelope.source_event_id for request in general.runner.requests] == ["$first:localhost"]
-    assert general.ignored_dispatch_sources == [("$second:localhost",)]
-    assert len(research.runner.requests) == 1
-    assert research.ignored_dispatch_sources == []
-    assert await research.turn_store.is_handled(_ROOM_ID, "$second:localhost") is True
-    assert selector.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_message_saved_for_an_agent_is_answered_without_the_fresh_one_batched_with_it(
-    config: Config,
-    tmp_path: Path,
-) -> None:
-    """An agent that leaves a fresh message to nobody still answers the older one saved for it, as its own turn.
-
-    A second person wrote in the thread, so the fresh message needs a mention. The batch is not answered: the fresh
-    message is settled, the saved one goes back to the journal, and its own turn answers it alone.
-    """
-    history = thread_history_result(
-        [make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT)],
-        is_full_history=True,
-    )
-    harness = _build_harness(config, tmp_path, agent_name="research", thread_history=history)
-    room = _room_with_members(config, "general", "research")
-    saved = _text_event("saved message", event_id="$saved:localhost", thread_id=_THREAD_ROOT)
-    fresh = _text_event(
-        "fresh message",
-        event_id="$fresh:localhost",
-        thread_id=_THREAD_ROOT,
-        origin_server_ts=1_000_001,
-    )
-    journal = harness.runtime.orchestrator.event_journal_store()
-    await journal.claim_room_event(_ROOM_ID, saved.event_id, "responder", "research")
-
-    async def dispatch(*events: nio.RoomMessageText) -> None:
-        turn = build_prepared_turn(
-            requester_coalescing_key(room.room_id, _THREAD_ROOT, _SENDER),
-            [
-                make_pending_event(event, room, source_kind=MESSAGE_SOURCE_KIND, requester_user_id=_SENDER)
-                for event in events
-            ],
-            queues_other_run=nothing_else_queued,
-        )
-        await harness.dispatcher.handle_prepared_turn(turn)
-        await harness.runner.settle_inbox_responses()
-
-    await dispatch(saved, fresh)
-
-    assert harness.runner.requests == []
-    assert harness.ignored_dispatch_sources == [(fresh.event_id,)]
-    assert harness.retried_dispatch_sources == [(saved.event_id,)]
-    assert await journal.room_event_claims(_ROOM_ID, [saved.event_id, fresh.event_id], "responder") == {
-        saved.event_id: "research",
-    }
-
-    await dispatch(saved)
-
-    assert [request.prompt for request in harness.runner.requests] == ["saved message"]
-    assert harness.ignored_dispatch_sources == [(fresh.event_id,)]
-
-
-@pytest.mark.asyncio
 async def test_original_the_old_router_already_relayed_gets_no_second_answer(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """At upgrade, a message one bot still holds unplanned is answered through its relay only.
+    """At upgrade, a message a lane owner still holds unplanned is answered through its relay only.
 
-    The old router relayed it to `general` and recorded the relay as its answer; `research` plans its own copy of the
-    message after the upgrade and must not select itself for it.
+    The old router relayed it to `general` and recorded the relay as its answer; `research`, which owns the room's
+    lane now, plans its own copy of the message after the upgrade and must not route it again.
     """
     general = _build_harness(config, tmp_path)
     research = _build_harness(config, tmp_path, agent_name="research", process=general.runtime.orchestrator)
     room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+    _own_routing_lane(research, room)
     original = _text_event("untagged message with multiple visible responders")
     relay = _router_relay_event(
         config,
@@ -2116,6 +2066,7 @@ async def test_original_the_old_router_already_relayed_gets_no_second_answer(
     await general.deliver(room, relay)
 
     selector.assert_not_awaited()
+    assert await _answer_routed_turns(research, room) == []
     assert research.runner.requests == []
     assert research.ignored_dispatch_sources == [(original.event_id,)]
     assert [request.user_id for request in general.runner.requests] == [_SENDER]
@@ -2783,16 +2734,11 @@ async def test_sender_outside_reply_allowlist_is_dropped_at_precheck(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_policy_ignore_sends_nothing_and_compacts_callback(
-    config: Config,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An ignore plan, here of the candidate the selection did not pick, compacts exact callback truth."""
+async def test_policy_ignore_sends_nothing_and_compacts_callback(config: Config, tmp_path: Path) -> None:
+    """An ignore plan compacts exact callback truth without recording a turn."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
     event = _text_event("untagged message with multiple visible responders")
-    _select_responder(monkeypatch, "research")
 
     await harness.deliver(room, event)
 
@@ -2804,29 +2750,172 @@ async def test_policy_ignore_sends_nothing_and_compacts_callback(
 
 
 @pytest.mark.asyncio
-async def test_routed_reply_answers_original_event_and_sends_no_relay(
+async def test_unmentioned_message_is_answered_once_by_the_agent_the_lane_owner_selects(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The agent selected for an unmentioned message answers the person's own event; nothing else is sent."""
-    harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general", "research")
+    """The lane owner selects once and sends nothing; the chosen agent answers the person's own event, nobody else."""
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    router, general, research = _routing_lane(config, tmp_path, room)
     event = _text_event("untagged message with multiple visible responders")
-    selector = _select_responder(monkeypatch, "general")
+    selector = _select_responder(monkeypatch, "research")
 
-    await harness.deliver(room, event)
+    for bot in (general, research, router):
+        await bot.deliver(room, event)
+    assert await _answer_routed_turns(general, room) == []
+    assert await _answer_routed_turns(research, room) == [f"routed:{event.event_id}"]
 
     selector.assert_awaited_once()
-    assert harness.gateway.sent == []
-    assert len(harness.runner.requests) == 1
-    request = harness.runner.requests[0]
+    for bot in (router, general, research):
+        assert bot.gateway.sent == []
+        # Each bot's own copy of the message is left unanswered.
+        assert bot.ignored_dispatch_sources == [(event.event_id,)]
+    assert router.runner.requests == []
+    assert general.runner.requests == []
+    (request,) = research.runner.requests
     assert request.prompt == "untagged message with multiple visible responders"
     assert request.user_id == _SENDER
-    assert request.response_envelope.source_event_id == event.event_id
+    assert request.response_envelope.requester_id == _SENDER
     assert request.response_envelope.target.reply_to_event_id == event.event_id
     assert request.response_envelope.origin.intent is TurnIntent.USER_MESSAGE
-    assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is True
+    assert await research.turn_store.is_handled(_ROOM_ID, event.event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_routed_turn_is_answered_once_however_often_it_replays(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a crash past the handoff, neither the lane owner's turn nor the chosen agent's answers a second time."""
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    router, _general, research = _routing_lane(config, tmp_path, room)
+    event = _text_event("untagged message with multiple visible responders")
+    selector = _select_responder(monkeypatch, "research")
+    await router.deliver(room, event)
+    # The journal event of the routed turn outlives the crash that follows its answer.
+    journal = router.runtime.orchestrator.event_journal_store().principal(
+        journal_principal_id("research", _entity_user_id(config, "research")),
+    )
+    (routed,) = [await journal.load_event(event_id) for event_id in await journal.unsettled_event_ids()]
+    assert routed is not None
+    assert await research.dispatcher.dispatch_routed_turn(room, routed) is False
+    await research.runner.settle_inbox_responses()
+
+    await router.deliver(room, event)
+    assert await research.dispatcher.dispatch_routed_turn(room, routed) is True
+    await research.runner.settle_inbox_responses()
+
+    selector.assert_awaited_once()
+    assert len(research.runner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_burst_with_a_queued_edit_is_routed_once_with_the_edited_text(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chosen agent answers the lane owner's whole batch once, as edited while it waited in the owner's queue."""
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    router, _general, research = _routing_lane(config, tmp_path, room)
+    _replace_harness_deps(router, edit_regenerator=_NoEditRegeneration())
+    first = _text_event("what is 2+2?", event_id="$first:localhost", thread_id=_THREAD_ROOT)
+    second = _text_event(
+        "and tell me why",
+        event_id="$second:localhost",
+        thread_id=_THREAD_ROOT,
+        origin_server_ts=1_000_001,
+    )
+    edit = _text_event("* what is 3+3?", event_id="$edit:localhost", origin_server_ts=1_000_002)
+    edit.source["content"]["m.new_content"] = {"body": "what is 3+3?", "msgtype": "m.text"}
+    edit.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": first.event_id}
+    selector = _select_responder(monkeypatch, "research")
+
+    # The burst waits out a debounce in the lane owner's queue.
+    with patch.object(router.ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
+        await router.ingress.handle_text_event(room, first)
+        await router.ingress.handle_text_event(room, second)
+        await router.ingress.handle_text_event(room, edit)
+        await router.gate.drain_all()
+    await _answer_routed_turns(research, room)
+
+    assert [turn.handled_turn.source_event_ids for turn in router.gate_batches] == [(first.event_id, second.event_id)]
+
+    selector.assert_awaited_once()
+    assert "what is 3+3?" in selector.await_args.args[0]
+    (request,) = research.runner.requests
+    assert "what is 3+3?" in request.prompt
+    assert "and tell me why" in request.prompt
+    assert "2+2" not in request.prompt
+    assert request.response_envelope.target.reply_to_event_id == second.event_id
+    for event_id in (first.event_id, second.event_id):
+        assert await research.turn_store.is_handled(_ROOM_ID, event_id) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("selection", "answers"), [("no fit", None), ("fails", "general")])
+async def test_no_fit_is_left_unanswered_and_a_failed_selection_falls_to_the_lowest_matrix_id(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selection: str,
+    answers: str | None,
+) -> None:
+    """Nobody answers a message the selector accepts nobody fits; one it fails on goes to the lowest Matrix ID."""
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    router, general, research = _routing_lane(config, tmp_path, room)
+    event = _text_event("untagged message with multiple visible responders")
+    selector = AsyncMock(return_value=ResponderSelection(None) if selection == "no fit" else None)
+    monkeypatch.setattr("mindroom.turn_policy.suggest_responder_for_message", selector)
+
+    await router.deliver(room, event)
+    await _answer_routed_turns(general, room)
+    await _answer_routed_turns(research, room)
+
+    assert router.gateway.sent == []
+    assert len(general.runner.requests) == (1 if answers == "general" else 0)
+    assert research.runner.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_routed_turn_is_refused_for_a_requester_the_chosen_agent_may_not_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chosen agent checks the person's access again when it takes the turn, and answers nobody it may not."""
+    reaches = {"general": _SENDER, "research": _OWNER, "writer": _SENDER}
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(
+                    display_name=name.title(),
+                    access=ResponderAccessConfig(current_room_members=False, users=[user]),
+                )
+                for name, user in reaches.items()
+            },
+            router={"access": {"current_room_members": False, "members_of_rooms": [], "users": [_SENDER]}},
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research", "writer")
+    router, _general, research = _routing_lane(config, tmp_path, room)
+    event = _text_event("untagged message with multiple visible responders")
+    # The lane owner's candidates leave research out; a choice that names it anyway stops at research.
+    selector = _select_responder(monkeypatch, "research")
+
+    await router.deliver(room, event)
+    handoffs = await _answer_routed_turns(research, room)
+
+    assert [candidate.full_id for candidate in selector.await_args.args[1]] == [
+        _entity_user_id(config, "general"),
+        _entity_user_id(config, "writer"),
+    ]
+    assert handoffs == [f"routed:{event.event_id}"]
+    assert research.runner.requests == []
+    assert await _answer_routed_turns(research, room) == []
 
 
 @pytest.mark.asyncio
@@ -4711,7 +4800,8 @@ async def test_scheduled_new_thread_survives_selection_in_room_mode(
 ) -> None:
     """A scheduled fire that names no agent keeps its per-fire thread, session and model for the agent that answers.
 
-    The selected agent answers the fire itself; a router relay of such a fire already in the room is answered as before.
+    The agent the lane owner selects answers the fire itself; a router relay of such a fire already in the room is
+    answered as before.
     """
     config = bind_runtime_paths(
         Config(
@@ -4751,11 +4841,14 @@ async def test_scheduled_new_thread_survives_selection_in_room_mode(
             },
         )
     selector = _select_responder(monkeypatch, "general")
-    agent_harness = _build_harness(config, tmp_path / "agent")
+    router, agent_harness, _research = _routing_lane(config, tmp_path / "agent", room)
 
+    await router.deliver(room, event)
     await agent_harness.deliver(room, event)
+    await _answer_routed_turns(agent_harness, room)
 
     assert selector.await_count == (0 if old_relay else 1)
+    assert router.gateway.sent == []
     assert agent_harness.gateway.sent == []
     assert len(agent_harness.runner.requests) == 1
     assert agent_harness.runner.requests[0].scheduled_model == "cheap"
