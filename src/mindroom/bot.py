@@ -357,6 +357,8 @@ class AgentBot:
             orchestrator.config_reload,
             self._report_personal_room_membership_change,
             lambda room_id: self.steward_duties.is_steward(room_id),
+            lambda room, device: None if (bot := orchestrator.room_poster(room, device)) is None else bot.client,
+            lambda: orchestrator.running_entity_client(ROUTER_AGENT_NAME),
         )
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(

@@ -233,8 +233,14 @@ class PersonalRoomService:
         source_client: nio.AsyncClient,
         *,
         reinvite_departed_owner: bool = False,
+        poster: Callable[[str | None], nio.AsyncClient | None] | None = None,
+        admin: nio.AsyncClient | None = None,
     ) -> str | None:
-        """Reconcile a currently eligible human from a router-observed room."""
+        """Reconcile a currently eligible human from a room its steward observed through ``source_client``.
+
+        ``poster`` gives the account that sends the confirmation, and ``admin`` the one for the optional admin join;
+        the observing account does both where neither is given.
+        """
         if await self._eligible_settings(user_id, source_room_id, source_client) is None:
             return None
         path = personal_room_record_path(self.runtime_paths, self.agent_name, user_id)
@@ -266,7 +272,7 @@ class PersonalRoomService:
                 human_joined = await self._reconcile_membership(
                     record,
                     path,
-                    source_client,
+                    admin or source_client,
                     source_room_id,
                     reinvite_departed_owner,
                 )
@@ -282,7 +288,7 @@ class PersonalRoomService:
                 await self._finish(record, path, source_room_id, human_joined=human_joined)
                 settings = self._require_current_settings(user_id, source_room_id)
                 if source_room_id == record.source_room_id:
-                    await self._confirm(record, path, settings, source_client)
+                    await self._confirm(record, path, settings, poster or (lambda _device_id: source_client))
                 await self._invite_router_if_never_member(record)
                 return record.room_id
         except _PolicyChangedError:
@@ -846,10 +852,15 @@ class PersonalRoomService:
         record: PersonalRoomRecord,
         path: Path,
         settings: PersonalRoomsConfig,
-        source_client: nio.AsyncClient,
+        poster: Callable[[str | None], nio.AsyncClient | None],
     ) -> None:
         if not settings.confirmation or record.confirmation_event_id is not None:
             return
+        # A retry keeps the account whose device its transaction ID is frozen to, while that account is in the room.
+        source_client = poster(record.confirmation_device_id)
+        if source_client is None:
+            msg = "Personal-room confirmation has no account to send it"
+            raise RuntimeError(msg)
         if record.confirmation_content is None:
             record.confirmation_content = build_message_content(
                 settings.confirmation.format(**self._template_values(record)),

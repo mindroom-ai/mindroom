@@ -338,6 +338,8 @@ async def test_validated_replacement_source_completes_deferred_welcome(
             Mock(),
             Mock(),
             lambda _room_id: False,
+            lambda _room_id, _device_id: owner.runtime.client,
+            lambda: owner.runtime.client,
         )
         await lifecycle.member_event(
             nio.MatrixRoom(room_id, server.user_id),
@@ -356,6 +358,8 @@ async def test_validated_replacement_source_completes_deferred_welcome(
         Mock(),
         Mock(),
         lambda _room_id: True,
+        lambda _room_id, _device_id: restarted.runtime.client,
+        lambda: restarted.runtime.client,
     )
     await router._reconcile()
     record = read_personal_room(path)
@@ -808,6 +812,8 @@ async def test_a_pending_guest_removal_retry_does_not_delay_shutdown(
         config_reload=Mock(),
         report_membership_change=Mock(),
         is_steward=lambda _room_id: False,
+        poster_client=lambda _room_id, _device_id: owner.runtime.client,
+        owner_client=lambda: owner.runtime.client,
     )
 
     await asyncio.wait_for(lifecycle.cancel_reconciliation(timeout_seconds=1), timeout=2)
@@ -831,6 +837,8 @@ async def test_the_room_lifecycle_removes_an_invited_person(tmp_path: Path, monk
         config_reload=Mock(),
         report_membership_change=Mock(),
         is_steward=lambda _room_id: False,
+        poster_client=lambda _room_id, _device_id: owner.runtime.client,
+        owner_client=lambda: owner.runtime.client,
     )
     room = nio.MatrixRoom(room_id, server.user_id)
     room.add_member("@alice:localhost", None, None)
@@ -1174,6 +1182,8 @@ async def test_a_refused_initial_join_says_why_in_the_reconciliation_warning(
         Mock(),
         Mock(),
         lambda _room_id: True,
+        lambda _room_id, _device_id: owner.runtime.client,
+        lambda: owner.runtime.client,
     )
 
     with capture_logs() as logs:
@@ -2810,6 +2820,8 @@ async def test_owner_event_retires_initial_join_after_later_invite(
         Mock(),
         Mock(),
         lambda _room_id: False,
+        lambda _room_id, _device_id: owner.runtime.client,
+        lambda: owner.runtime.client,
     )
     server.set_member(room_id, "@alice:localhost", observed_membership)
     event = _room_member_event(membership=observed_membership, prev_membership=previous_membership)
@@ -2857,6 +2869,8 @@ async def test_owner_event_retirement_requires_recorded_room_and_user(
         Mock(),
         Mock(),
         lambda _room_id: False,
+        lambda _room_id, _device_id: owner.runtime.client,
+        lambda: owner.runtime.client,
     )
     leave = _room_member_event(membership="leave", prev_membership="invite")
     await lifecycle.member_event(nio.MatrixRoom("!other:localhost", server.user_id), leave)
@@ -2888,6 +2902,8 @@ async def test_unrecorded_owner_event_creates_no_lock_when_feature_disabled(
         Mock(),
         Mock(),
         lambda _room_id: False,
+        lambda _room_id, _device_id: owner.runtime.client,
+        lambda: owner.runtime.client,
     )
     await lifecycle.member_event(
         nio.MatrixRoom("!other:localhost", server.user_id),
@@ -3439,6 +3455,8 @@ async def test_a_refused_initial_join_counts_when_the_homeserver_joins_the_owner
         Mock(),
         Mock(),
         lambda _room_id: True,
+        lambda _room_id, _device_id: owner.runtime.client,
+        lambda: owner.runtime.client,
     )
 
     with capture_logs() as logs:
@@ -3550,3 +3568,43 @@ async def test_a_slow_membership_read_still_ends_the_wait_on_time(
 
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
     assert read_personal_room(path).initial_join_pending is True
+
+
+@pytest.mark.asyncio
+async def test_steward_only_observes_while_the_poster_confirms_and_the_owner_account_joins_the_requester(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary agent that stewards the onboarding room lends its view of the room's members and nothing else."""
+    server = MatrixServer()
+    steward, poster, admin = (RouterAccount(server, "!lobby:localhost") for _ in range(3))
+    senders: list[object] = []
+    admins: list[object] = []
+    devices: list[str | None] = []
+
+    async def deliver(client: object, room_id: str, content: dict[str, Any], **kwargs: Any) -> object:
+        senders.append(client)
+        return await server.deliver(client, room_id, content, **kwargs)
+
+    async def admin_join(client: object, room_id: str, user_id: str) -> str | None:
+        admins.append(client)
+        server.set_member(room_id, user_id, "join")
+        return None
+
+    def poster_for(device_id: str | None) -> RouterAccount:
+        devices.append(device_id)
+        return poster
+
+    owner = service(tmp_path, server, monkeypatch, auto_join_requester=True, welcome="", confirmation="Ready")
+    monkeypatch.setattr("mindroom.matrix.personal_rooms.send_message_result", deliver)
+    monkeypatch.setattr("mindroom.matrix.personal_rooms.admin_join_room_user_failure", admin_join)
+    server.fail_send = True
+    with pytest.raises(RuntimeError, match="confirmation delivery failed"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", steward, poster=poster_for, admin=admin)
+    server.fail_send = False
+    await owner.ensure("@alice:localhost", "!lobby:localhost", steward, poster=poster_for, admin=admin)
+
+    assert senders == [poster, poster]
+    assert admins == [admin]
+    # The retry asks for the sender whose device the first attempt froze the confirmation to.
+    assert devices == [None, poster.device_id]

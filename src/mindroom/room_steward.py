@@ -70,12 +70,18 @@ def _own_power(client: nio.AsyncClient, room_id: str) -> float:
     return 0 if room is None else room.power_levels.get_user_level(client.user_id)
 
 
-def room_poster(bots: Mapping[str, AgentBot], room_id: str) -> AgentBot | None:
+def room_poster(bots: Mapping[str, AgentBot], room_id: str, device_id: str | None = None) -> AgentBot | None:
     """Return the bot for the few posts that have no answering agent, None when no running bot is in the room.
 
     It is the owner account where that is running and joined, which reads as a neutral voice in the rooms it
     administers, else the lowest Matrix ID among the running, joined agents and teams.
+    A retry that names the device of its first attempt keeps that account while it is running and joined.
     """
     owner = bots.get(ROUTER_AGENT_NAME)
-    poster = min(_joined(bots, room_id), key=lambda joined: (joined[1] is not owner, joined[0]), default=None)
+
+    def rank(joined: tuple[str, AgentBot, nio.MatrixRoom]) -> tuple[bool, bool, str]:
+        client = joined[1].client
+        return (client is None or client.device_id != device_id, joined[1] is not owner, joined[0])
+
+    poster = min(_joined(bots, room_id), key=rank, default=None)
     return None if poster is None else poster[1]

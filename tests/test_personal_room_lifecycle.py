@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, call
+from unittest.mock import ANY, AsyncMock, Mock, call
 
 import nio
 import pytest
@@ -72,7 +72,18 @@ def coordination(tmp_path: Path) -> Coordination:
     owner = Mock(spec=PersonalRoomService)
     local = Mock(spec=PersonalRoomService)
     lookup = Mock(return_value=PersonalRoomTarget(owner, first_sync_complete=True))
-    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, Mock(), Mock(), lambda _room_id: True)
+    lifecycle = PersonalRoomLifecycle(
+        "router",
+        runtime,
+        paths,
+        local,
+        lookup,
+        Mock(),
+        Mock(),
+        lambda _room_id: True,
+        lambda _room_id, _device_id: runtime.client,
+        lambda: runtime.client,
+    )
     return Coordination(lifecycle, owner, local, lookup)
 
 
@@ -127,6 +138,8 @@ def template_coordination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Te
         config_reload := Mock(status=ConfigReloadStatus(status="applied")),
         Mock(),
         lambda _room_id: True,
+        lambda _room_id, _device_id: runtime.client,
+        lambda: runtime.client,
     )
     return TemplateCoordination(lifecycle, target, lookup, provision, config_reload)
 
@@ -225,6 +238,8 @@ async def test_commands_require_exact_self_request_in_onboarding_room(coordinati
         room.room_id,
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
+        poster=ANY,
+        admin=ANY,
     )
     coordination.owner.ensure.reset_mock()
     # The event's trusted requester is someone else, as when an entity relays alice's words for bob.
@@ -280,6 +295,24 @@ async def test_onboarding_join_observed_by_room_steward(coordination: Coordinati
 
 
 @pytest.mark.asyncio
+async def test_agent_steward_onboards_through_the_rooms_poster_and_the_owner_account(
+    coordination: Coordination,
+) -> None:
+    """A steward lends only its view of the onboarding room: the room's poster confirms and the owner account joins."""
+    lifecycle = coordination.lifecycle
+    lifecycle.agent_name = "helper"
+    poster, owner_client = Mock(), Mock()
+    lifecycle.poster_client = Mock(return_value=poster)
+    lifecycle.owner_client = Mock(return_value=owner_client)
+    await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
+    ensure = coordination.owner.ensure.await_args
+    assert ensure.args == ("@alice:localhost", "!lobby:localhost", lifecycle.runtime.client)
+    assert ensure.kwargs["admin"] is owner_client
+    assert ensure.kwargs["poster"]("DEVICE") is poster
+    lifecycle.poster_client.assert_called_once_with("!lobby:localhost", "DEVICE")
+
+
+@pytest.mark.asyncio
 async def test_non_steward_never_routes_onboarding(coordination: Coordination) -> None:
     """Only the onboarding room's steward selects and invokes the target service."""
     lifecycle = coordination.lifecycle
@@ -324,6 +357,8 @@ async def test_live_membership_leaves_unknown_baseline_to_durable_gate(
             room.room_id,
             coordination.lifecycle.runtime.client,
             reinvite_departed_owner=True,
+            poster=ANY,
+            admin=ANY,
         )
     join = RoomMemberJoin(room.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", previous)
     await coordination.lifecycle.baseline_join(join)
@@ -535,7 +570,14 @@ async def test_failed_live_trigger_is_retried_by_reconciliation_with_its_reinvit
     await lifecycle.member_event(LOBBY, lobby_rejoin())
     await lifecycle._reconcile()
 
-    retry = call("@alice:localhost", LOBBY.room_id, lifecycle.runtime.client, reinvite_departed_owner=True)
+    retry = call(
+        "@alice:localhost",
+        LOBBY.room_id,
+        lifecycle.runtime.client,
+        reinvite_departed_owner=True,
+        poster=ANY,
+        admin=ANY,
+    )
     assert coordination.owner.ensure.await_args_list[-2:] == [retry, retry]
     assert lifecycle._reconciled
 
@@ -555,6 +597,8 @@ async def test_failed_live_trigger_without_recorded_intent_is_retried(coordinati
         LOBBY.room_id,
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
+        poster=ANY,
+        admin=ANY,
     )
     assert lifecycle._reconciled
 
@@ -610,6 +654,8 @@ async def test_successful_live_trigger_retires_only_the_retry_it_covers(
         LOBBY.room_id,
         lifecycle.runtime.client,
         reinvite_departed_owner=retried_reinvite,
+        poster=ANY,
+        admin=lifecycle.runtime.client,
     )
     assert lifecycle._reconciled
 
@@ -623,7 +669,7 @@ async def test_rejoin_failing_during_its_owners_reconciliation_keeps_the_reinvit
     record_intent(lifecycle, "alice")
     reinvites = []
 
-    async def ensure(*_args: object, reinvite_departed_owner: bool) -> None:
+    async def ensure(*_args: object, reinvite_departed_owner: bool, **_actors: object) -> None:
         reinvites.append(reinvite_departed_owner)
         if len(reinvites) == 1:
             await lifecycle.member_event(LOBBY, lobby_rejoin())
@@ -1359,6 +1405,8 @@ async def test_corrupt_record_does_not_block_other_record(coordination: Coordina
         "!lobby:localhost",
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
+        poster=ANY,
+        admin=ANY,
     )
 
 
@@ -1406,6 +1454,8 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
         "!new:localhost",
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
+        poster=ANY,
+        admin=ANY,
     )
 
 
@@ -1510,6 +1560,8 @@ async def test_template_reconciliation_ensures_on_the_users_own_agent(
         "!lobby:localhost",
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
+        poster=ANY,
+        admin=ANY,
     )
     template_coordination.provision.assert_not_awaited()
     assert lifecycle._reconciled
@@ -1536,6 +1588,8 @@ async def test_template_reconciliation_retries_intent_recorded_by_each_users_age
         "!lobby:localhost",
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
+        poster=ANY,
+        admin=ANY,
     )
 
 
@@ -1628,6 +1682,8 @@ async def test_template_bridge_alias_onboards_onto_its_persons_agent(
         "!lobby:localhost",
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
+        poster=ANY,
+        admin=ANY,
     )
 
 
@@ -1651,6 +1707,8 @@ async def test_template_alias_onboarding_survives_a_restart(template_coordinatio
         "!lobby:localhost",
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
+        poster=ANY,
+        admin=ANY,
     )
 
 
@@ -1672,6 +1730,8 @@ async def test_one_users_provisioning_failure_does_not_stop_another_in_the_same_
         "!lobby:localhost",
         lifecycle.runtime.client,
         reinvite_departed_owner=False,
+        poster=ANY,
+        admin=ANY,
     )
     assert lifecycle._failure_streaks[("@aaron:localhost", "!lobby:localhost")].failures == 1
 

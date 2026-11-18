@@ -117,8 +117,8 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Return the bot that does one room's shared invisible work now."""
         ...
 
-    def room_poster(self, room_id: str) -> AgentBot | None:
-        """Return the bot that posts in one room where no agent answers."""
+    def room_poster(self, room_id: str, device_id: str | None = None) -> AgentBot | None:
+        """Return the bot that posts in one room where no agent answers, the one a retry's device names if joined."""
         ...
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from functools import partial
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -107,6 +108,10 @@ class PersonalRoomLifecycle:
     report_membership_change: Callable[[str, str], None]
     # Whether this bot is a room's steward now; an onboarding room's steward observes its joins.
     is_steward: Callable[[str], bool]
+    # The client that posts in a room for no agent, the one a retry's recorded device names where it is still joined.
+    poster_client: Callable[[str, str | None], nio.AsyncClient | None]
+    # The owner account's client while it runs, which backs the optional admin join.
+    owner_client: Callable[[], nio.AsyncClient | None]
     # A live join and a reconciliation pass can both reach one user; only one may register the account.
     _provisioning: set[tuple[str, str]] = field(default_factory=set, init=False)
     _reconciled: bool = field(default=False, init=False)
@@ -299,6 +304,8 @@ class PersonalRoomLifecycle:
             source_room_id,
             self.runtime.client,
             reinvite_departed_owner=reinvite_departed_owner,
+            poster=partial(self.poster_client, source_room_id),
+            admin=self.owner_client(),
         )
 
     async def _provision_personal_agent(
