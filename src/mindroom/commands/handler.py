@@ -35,7 +35,7 @@ from mindroom.matrix.room_membership import cached_member_ids, room_membership_i
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
-from mindroom.scheduling.errors import SchedulingError
+from mindroom.scheduling.errors import SchedulingError, refused_for_power
 from mindroom.scheduling.tasks import (
     SchedulingRuntime,
     cancel_all_scheduled_tasks,
@@ -515,7 +515,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         try:
             response_text = await _run_schedule_command(context, room, event, command, requester_user_id)
         except SchedulingError as error:
-            response_text = f"❌ {error}"
+            response_text = str(refused_for_power(error) or f"❌ {error}")
 
     elif command.type in {CommandType.JOBS, CommandType.CANCEL_JOB}:
         # A command sent outside any thread speaks for the whole room, though its reply opens a thread.

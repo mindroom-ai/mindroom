@@ -2273,7 +2273,7 @@ async def test_persist_scheduled_task_state_raises_on_matrix_error() -> None:
         room_id="!test:server",
     )
 
-    with pytest.raises(SchedulingError, match="Failed to persist scheduled task state"):
+    with pytest.raises(SchedulingError, match=r"^I need moderator rights in this room to save schedules\.$"):
         await persist_scheduled_task_state(
             client=client,
             owner_id=None,
@@ -2356,7 +2356,7 @@ async def test_restored_task_state_refused_to_the_router_lands_through_a_bot_the
         assert agent_client.room_put_state.await_args.kwargs["state_key"] == "taskdone"
         assert agent_client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
     else:
-        with pytest.raises(SchedulingError, match="Failed to persist scheduled task state"):
+        with pytest.raises(SchedulingError, match=r"^I need moderator rights in this room to save schedules\.$"):
             await save()
         agent_client.room_put_state.assert_not_awaited()
 
@@ -2666,15 +2666,13 @@ async def test_schedule_task_with_a_failed_state_write_and_no_fallback_writer_fa
         )
 
     message = str(exc_info.value)
-    assert message.startswith("Failed to schedule: ")
-    assert "Failed to persist scheduled task state" in message
-    assert message.endswith("I need moderator rights in this room to save schedules.")
+    assert message == "Failed to schedule: I need moderator rights in this room to save schedules."
     start_task.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_state_write_error_includes_hint_when_the_fallback_writer_raises() -> None:
-    """A raised write by the bot that may write the room's state must still tell the room admin how to recover."""
+async def test_fallback_writer_failure_that_is_not_about_power_gives_no_moderator_advice() -> None:
+    """A raised write by the bot that may write the room's state is a failure to retry, not a lack of power."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     writer = make_matrix_client_mock(user_id="@mindroom_general:server")
@@ -2694,8 +2692,7 @@ async def test_state_write_error_includes_hint_when_the_fallback_writer_raises()
         )
 
     message = str(exc_info.value)
-    assert "@mindroom_general:server write failed (RuntimeError: writer unavailable)" in message
-    assert message.endswith("I need moderator rights in this room to save schedules.")
+    assert message.endswith("@mindroom_general:server write failed (RuntimeError: writer unavailable).")
 
 
 @pytest.mark.asyncio

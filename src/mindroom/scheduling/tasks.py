@@ -45,8 +45,10 @@ from mindroom.providers import registry as provider_registry
 from mindroom.scheduling.errors import (
     ScheduledTaskNotFoundError,
     ScheduledTaskStateReadError,
+    ScheduledTaskStateRefusedError,
     ScheduledTaskStorageError,
     SchedulingError,
+    refused_for_power,
 )
 from mindroom.scheduling.ownership import decide_task_owner
 from mindroom.steward_duties import moderator_rights_message
@@ -711,8 +713,11 @@ async def _write_scheduled_task_state(
     room_id: str,
     task_id: str,
     content: dict[str, typing.Any],
-) -> str | None:
-    """Write one scheduled-task state event as one account, returning why it failed or None once it landed."""
+) -> tuple[str, bool] | None:
+    """Write one scheduled-task state event as one account; None once it landed.
+
+    A failure returns its reason and whether the room refused the write for lack of power.
+    """
     try:
         response = await client.room_put_state(
             room_id=room_id,
@@ -721,8 +726,10 @@ async def _write_scheduled_task_state(
             state_key=task_id,
         )
     except Exception as exc:
-        return f"{type(exc).__name__}: {exc!s}"
-    return None if isinstance(response, nio.RoomPutStateResponse) else str(response)
+        return f"{type(exc).__name__}: {exc!s}", False
+    if isinstance(response, nio.RoomPutStateResponse):
+        return None
+    return str(response), isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
 
 
 async def _put_scheduled_task_state_content(
@@ -736,6 +743,7 @@ async def _put_scheduled_task_state_content(
     failure = await _write_scheduled_task_state(client, room_id, task_id, content)
     if failure is None:
         return
+    reason, refused = failure
 
     if writers is not None:
         with writers.other_state_writer(room_id, refused_user_id=client.user_id) as writer:
@@ -744,12 +752,13 @@ async def _put_scheduled_task_state_content(
                 if writer_failure is None:
                     logger.info("scheduled_task_state_persisted_via_room_writer", room_id=room_id, task_id=task_id)
                     return
-                failure = f"{failure}; {writer.user_id} write failed ({writer_failure})"
+                # The lent account has the power, so its failure decides whether power is what is missing.
+                reason, refused = f"{reason}; {writer.user_id} write failed ({writer_failure[0]})", writer_failure[1]
 
-    msg = (
-        f"Failed to persist scheduled task state for task `{task_id}`: {failure}. "
-        f"{moderator_rights_message('save schedules')}"
-    )
+    if refused:
+        logger.warning("scheduled_task_state_refused", room_id=room_id, task_id=task_id, error=reason)
+        raise ScheduledTaskStateRefusedError(moderator_rights_message("save schedules"))
+    msg = f"Failed to persist scheduled task state for task `{task_id}`: {reason}."
     raise ScheduledTaskStorageError(msg)
 
 
@@ -1660,6 +1669,7 @@ async def cancel_all_scheduled_tasks(
     response = await _room_state_for_tasks(client, room_id)
     cancelled_count = 0
     failed_count = 0
+    refusals: list[ScheduledTaskStateRefusedError | None] = []
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
 
     for event in response.events:
@@ -1679,10 +1689,13 @@ async def cancel_all_scheduled_tasks(
                 await _cancel_stored_task(client, room_id, task_id, current_content, task_runtime)
             cancelled_count += 1
             logger.info("scheduled_task_cancelled", task_id=task_id)
-        except Exception:
+        except Exception as error:
             logger.exception("scheduled_task_cancel_failed", task_id=task_id)
             failed_count += 1
+            refusals.append(refused_for_power(error))
     if cancelled_count == 0:
+        if (refusal := next(iter(refusals), None)) is not None and all(refusals):
+            raise refusal
         if failed_count > 0:
             msg = f"Failed to cancel {failed_count} scheduled task(s)"
             raise SchedulingError(msg)

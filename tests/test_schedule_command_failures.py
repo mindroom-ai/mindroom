@@ -367,16 +367,28 @@ async def test_cancel_of_a_task_that_already_ended(tmp_path: Path, status: str) 
 
 @pytest.mark.asyncio
 async def test_state_refusal_says_moderator_rights(tmp_path: Path) -> None:
-    """A cancellation Matrix refuses to store reports the refusal and that the agent needs moderator rights."""
+    """A cancellation the room refuses for lack of power answers with the moderator-rights sentence and nothing else."""
     client = make_matrix_client_mock()
     _serve_task(client, _workflow())
     client.room_put_state = AsyncMock(return_value=_STATE_WRITE_REFUSED)
 
     reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client)
 
+    assert reply == "I need moderator rights in this room to save schedules."
+
+
+@pytest.mark.asyncio
+async def test_state_write_timeout_gives_no_moderator_advice(tmp_path: Path) -> None:
+    """A cancellation that fails for another reason than power reports the failure, without moderator advice."""
+    client = make_matrix_client_mock()
+    _serve_task(client, _workflow())
+    client.room_put_state = AsyncMock(side_effect=TimeoutError("slow"))
+
+    reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client)
+
     assert reply == (
         f"❌ Failed to cancel task `{TASK_ID}`: Failed to persist scheduled task state for task `{TASK_ID}`: "
-        "RoomPutStateError: M_FORBIDDEN denied. I need moderator rights in this room to save schedules."
+        "TimeoutError: slow."
     )
 
 
@@ -394,15 +406,27 @@ def _serve_pending_tasks(client: AsyncMock, *task_ids: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_all_when_every_cancellation_fails(tmp_path: Path) -> None:
-    """Cancelling every schedule when none can be stored counts the failures."""
+@pytest.mark.parametrize(
+    ("write", "expected"),
+    [
+        (AsyncMock(return_value=_STATE_WRITE_REFUSED), "I need moderator rights in this room to save schedules."),
+        (AsyncMock(side_effect=TimeoutError("slow")), "❌ Failed to cancel 2 scheduled task(s)"),
+        (
+            AsyncMock(side_effect=[_STATE_WRITE_REFUSED, TimeoutError("slow")]),
+            "❌ Failed to cancel 2 scheduled task(s)",
+        ),
+    ],
+    ids=["all-refused-for-power", "all-timed-out", "mixed"],
+)
+async def test_cancel_all_when_every_cancellation_fails(tmp_path: Path, write: AsyncMock, expected: str) -> None:
+    """Cancelling every schedule when none can be stored counts the failures, unless power is all that is missing."""
     client = make_matrix_client_mock()
     _serve_pending_tasks(client, "first", "second")
-    client.room_put_state = AsyncMock(return_value=_STATE_WRITE_REFUSED)
+    client.room_put_state = write
 
     reply = await _reply(tmp_path, "!cancel_schedule all", client=client)
 
-    assert reply == "❌ Failed to cancel 2 scheduled task(s)"
+    assert reply == expected
 
 
 @pytest.mark.asyncio
