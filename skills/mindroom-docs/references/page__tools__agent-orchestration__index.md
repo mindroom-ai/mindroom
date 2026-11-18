@@ -96,11 +96,15 @@ Use `continue_subagent` with the returned ID to send a follow-up into the same c
 The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
 Follow-ups keep the child's history, model, and mode, and recheck current permissions.
 A follow-up sent while the child is still running or awaiting approval is refused; finish that turn first.
-If MindRoom restarts while a child works as a background job, the child continues on its own after the restart, from the work it had done and under the same job, and no call it finished runs again.
+If MindRoom restarts while a child works as a background job, the child continues on its own after the restart, from the work it had done and under the same job.
+MindRoom runs none of its calls again, and the child is told which calls finished so that it does not repeat them.
+A call that finished just before a crash, before its result was saved, is reported to the child as one that may have partly run; the child is told to check before repeating it, and nothing enforces that.
 A child that was waiting for an approval, another decision of a person, or a subagent of its own, or whose job restarts have cut short three times, is reported as interrupted instead, and a follow-up continues it.
 So is a child whose parent reply was stopped: a Stop leaves a working child running, but no restart continues it.
-Its job then says that the user stopped it, so the parent does not continue it either unless the user asks.
-So is a child whose agent left the room meanwhile, or whose requester's room access stays unresolved for 10 minutes after the restart.
+Its job's result then says that the user stopped it and tells the parent not to continue it unless the user asks.
+That is an instruction to the parent, not a guarantee: a follow-up the parent sends anyway is not refused.
+So is a child whose agent left the room meanwhile, or whose requester's room access stays unresolved for 10 minutes.
+The 10 minutes start once the agent's bot has finished its first sync after the restart and found the access unresolved, so a job whose bot never finishes that sync stays waiting.
 Until the job ends, a follow-up to that child is refused as busy.
 A child turn that runs inside its parent's reply is reported as interrupted instead of being rerun; a pending approval of a child running as a background job is denied, and one that paused its parent's reply stays pending.
 

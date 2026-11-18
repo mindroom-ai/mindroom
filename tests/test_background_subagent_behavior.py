@@ -627,8 +627,10 @@ async def test_a_continued_subagents_own_subagent_is_sent_its_own_task(
             [request] = helper.requests
             [sent] = [str(content) for role, content, _call_id in _sent(request) if role == "user"]
             assert "Give a weather summary." in sent
-            assert SUBAGENT_RESTART_CONTINUATION_PROMPT not in sent
-            assert "contents of a" not in sent
+            # Nothing the nested agent is sent, its system messages included, holds the continued turn's prompt.
+            everything = "\n".join(str(message.content) for message in request.messages)
+            assert SUBAGENT_RESTART_CONTINUATION_PROMPT not in everything
+            assert "contents of a" not in everything
         finally:
             await conversation.close()
 
@@ -969,11 +971,23 @@ async def test_a_stop_while_a_continuation_launches_has_the_effect_it_has_on_a_w
             await asyncio.wait_for(saving.wait(), JOB_TEST_TIMEOUT)
             stopping = asyncio.create_task(reply.stop())
             entry = conversation.runtime._entries[job_id]
-            while not entry.control.reply_stopped:  # noqa: ASYNC110 - the Stop marks the job without an event.
-                await asyncio.sleep(0)
-            assert entry.task is None
-            saved.set()
-            await asyncio.gather(launching, stopping)
+            try:
+                async with asyncio.timeout(JOB_TEST_TIMEOUT):
+                    # The Stop marks the job without an event to wait for.
+                    while not entry.control.reply_stopped:
+                        if stopping.done():
+                            # A Stop that failed reports its own error; one that ended had to mark the job first.
+                            stopping.result()
+                            pytest.fail("The Stop ended without marking its reply's job")
+                        await asyncio.sleep(0)
+                assert entry.task is None
+            finally:
+                # A failed check still releases the held save, and neither task is left pending.
+                saved.set()
+                outcomes = await asyncio.gather(launching, stopping, return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
         await asyncio.wait_for(continued.wait(), JOB_TEST_TIMEOUT)
         assert (await conversation.job(job_id)).status == "running"
         assert conversation.runtime._entries[job_id].control.reply_stopped
