@@ -805,14 +805,20 @@ class TestMaybeGenerateThreadSummary:
     def _count(self) -> int:
         return self.baselines.count(_ROOM, _THREAD)
 
-    async def _provisional(self, prompt: str = "Plan a trip", *, config: Config | None = None) -> None:
+    async def _provisional(
+        self,
+        prompt: str = "Plan a trip",
+        *,
+        config: Config | None = None,
+        prompt_event_ids: tuple[str, ...] = ("$event0",),
+    ) -> None:
         await automatic.maybe_generate_prompt_summary(
             self.client,
             _ROOM,
             _THREAD,
             config or _mock_config(),
             self.rp,
-            prompt_event_id="$event0",
+            prompt_event_ids=prompt_event_ids,
             prompt=prompt,
             conversation_reader=self.conversation_reader,
             entity_name="router",
@@ -870,7 +876,7 @@ class TestMaybeGenerateThreadSummary:
             "$fork",
             _mock_config(),
             self.rp,
-            prompt_event_id="$fork",
+            prompt_event_ids=("$fork",),
             prompt="carry on",
             conversation_reader=self.conversation_reader,
             entity_name="router",
@@ -904,7 +910,7 @@ class TestMaybeGenerateThreadSummary:
             "$fork",
             _mock_config(),
             self.rp,
-            prompt_event_id="$fork",
+            prompt_event_ids=("$fork", "$next"),
             prompt=None,
             conversation_reader=self.conversation_reader,
             entity_name="router",
@@ -1063,6 +1069,21 @@ class TestMaybeGenerateThreadSummary:
         assert not _sent_summaries(self.client)
         assert self._count() == 0
 
+    @pytest.mark.parametrize("third_human", [False, True])
+    async def test_provisional_title_covers_every_message_of_a_coalesced_first_turn(self, third_human: bool) -> None:
+        """An attachment and the text sent with it are one first turn; a person's message outside it is a reply."""
+        model = self._summarizer(*([] if third_human else [_title("Video summary")]))
+        self._history(_make_thread_history(3 if third_human else 2))
+
+        await self._provisional("[Attached video]\nSummarize this video", prompt_event_ids=("$event0", "$event1"))
+
+        assert len(model.requests) == int(not third_human)
+        if not third_human:
+            assert "[Attached video]\nSummarize this video" in _prompt(model.requests[0])
+            assert _sent_summaries(self.client)[0]["summary"] == "Video summary"
+        else:
+            assert not _sent_summaries(self.client)
+
     async def test_provisional_title_once_across_runtimes_before_sync_echo(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1200,7 +1221,7 @@ class TestMaybeGenerateThreadSummary:
             other_thread,
             config,
             self.rp,
-            prompt_event_id="$event0",
+            prompt_event_ids=("$event0",),
             prompt="Plan a trip",
             conversation_reader=self.conversation_reader,
             entity_name="router",
