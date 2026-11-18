@@ -7985,7 +7985,7 @@ async def test_a_route_names_every_message_of_the_batch_it_routes(
 
 @pytest.mark.asyncio
 async def test_a_routed_batch_links_every_message_it_names_to_its_answer(tmp_path: Path) -> None:
-    """The responder answers the last message a route names, and an edit or deletion of any of them finds the answer."""
+    """The responder answers the last message a route names, and a deletion of any of them finds the answer."""
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
@@ -8014,24 +8014,10 @@ async def test_a_routed_batch_links_every_message_it_names_to_its_answer(tmp_pat
         record = await harness.turn_store.get_turn_record(original)
         assert record is not None
         assert record.source_event_ids == (route_id,)
-        assert record.prompt_source_event_id(original) == route_id
-        assert record.requester_id_for_source(original) == _SENDER
-
-    # An edit of the earlier message is kept on the route's source, as an edit of the last one is.
-    record = await harness.turn_store.get_turn_record(first)
-    assert record is not None
-    revision = (2_000_000, "$edit-of-first:localhost")
-    registered = await harness.turn_store.register_edit_revision(record, first, revision)
-    assert registered is not None
-    assert registered.revision_watermark(first) == revision
-    await harness.turn_store.record_edit(registered, edited_event_id=first, prompt="first, edited", revision=revision)
-    edited = await harness.turn_store.get_turn_record(first)
-    assert edited is not None
-    assert edited.source_event_prompts == {route_id: "first, edited"}
 
     # A deletion of the earlier message deletes the route's source, as a deletion of the last one does.
     await _redact(harness, first, _ROOM_ID)
-    assert await harness.turn_store.deleted_sources(edited) == frozenset({route_id})
+    assert await harness.turn_store.deleted_sources(record) == frozenset({route_id})
 
 
 @pytest.mark.asyncio

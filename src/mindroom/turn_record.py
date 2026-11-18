@@ -262,9 +262,6 @@ class TurnRecord:
         for source_id, metadata in (self.source_event_metadata or {}).items():
             if metadata.discovery_event_id == event_id:
                 return source_id
-        # A route names every message of its batch, and only the last is its source's own alias.
-        if len(self.source_event_ids) == 1 and event_id in self.discovery_event_ids:
-            return self.source_event_ids[0]
         return event_id
 
     def requester_id_for_source(self, event_id: str) -> str | None:
