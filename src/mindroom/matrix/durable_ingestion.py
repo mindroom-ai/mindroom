@@ -211,8 +211,12 @@ async def run_ingestion_pump(
         if facts is None:
             await wait_for_work()
         else:
-            # A retry may be acknowledging work committed before the prior
-            # pump could notify its dispatcher. The journal decides what runs.
-            wake_semantic_dispatch()
+            # Only a new actionable event gives the dispatcher anything to find.
+            # A replay may be acknowledging work committed before the prior pump
+            # could notify it, so a replay wakes too. Any other batch (an edit,
+            # a receipt, an empty sync) changes nothing the dispatcher reads, and
+            # waking on it re-read every pending row once per sync.
+            if facts.semantic_event_new or not facts.receipt_new:
+                wake_semantic_dispatch()
             if after_ack is not None:
                 after_ack()

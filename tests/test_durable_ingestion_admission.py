@@ -173,6 +173,54 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
 
 
 @pytest.mark.asyncio
+async def test_pump_wakes_the_dispatcher_only_for_new_actionable_work_or_a_replay(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """An empty sync or a redelivered event leaves nothing for the dispatcher to find."""
+    stream = uuid4()
+    principal = await principal_for(journal_database(), stream)
+    redelivered = SyncBatch(stream, 3, (message("$new"),))
+    batches = [
+        SyncBatch(stream, 1, ()),
+        SyncBatch(stream, 2, (message("$new"),)),
+        redelivered,
+        # The same batch again: acknowledging it may finish a commit whose wake was lost.
+        redelivered,
+    ]
+    acked: list[SyncBatch] = []
+    wakes: list[int] = []
+    idle = asyncio.Event()
+
+    class Batches(Session):
+        async def next_batch(self) -> SyncBatch | None:
+            return batches[len(acked)] if len(acked) < len(batches) else None
+
+        async def ack(self, batch: SyncBatch) -> None:
+            acked.append(batch)
+
+    async def wait_for_work() -> None:
+        idle.set()
+        await asyncio.Event().wait()
+
+    pump = asyncio.create_task(
+        durable_ingestion.run_ingestion_pump(
+            Batches(batches[0]),
+            principal,
+            account_id=ACCOUNT,
+            wait_for_work=wait_for_work,
+            wake_semantic_dispatch=lambda: wakes.append(len(acked)),
+        ),
+    )
+    try:
+        await asyncio.wait_for(idle.wait(), 1)
+    finally:
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+    assert acked == batches
+    assert wakes == [2, 4]
+
+
+@pytest.mark.asyncio
 async def test_batch_projection_failure_rolls_back_all_records_and_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
