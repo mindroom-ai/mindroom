@@ -637,6 +637,8 @@ class StreamingResponse:
     reasoning_text: str = field(default="", init=False)
     _reasoning_segment_started_at: float | None = field(default=None, init=False, repr=False)
     _reasoning_seconds: float = field(default=0.0, init=False, repr=False)
+    # When reasoning alone last asked for a progress edit, which it does at most once per update interval.
+    _reasoning_refresh_requested_at: float = field(default=0.0, init=False, repr=False)
     # Each segment's UTF-16 start in the reasoning, the visible tool calls before it, and, once closed, its duration.
     _reasoning_segments: list[dict[str, int]] = field(default_factory=list, init=False, repr=False)
     # The latest output each running tool call reported, by call ID; only live frames show it.
@@ -1653,7 +1655,15 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if isinstance(chunk, ReasoningDelta):
                 # Live frames show reasoning; without them, progress edits carry it at their ordinary cadence.
                 streaming.add_reasoning(chunk.text, started_at=chunk.started_at)
-                if streaming.event_id is not None and streaming._shows_stream and not streaming.live_active:
+                now = time.time()
+                if (
+                    streaming.event_id is not None
+                    and streaming._shows_stream
+                    and not streaming.live_active
+                    and now - streaming._reasoning_refresh_requested_at >= streaming._current_update_interval(now)
+                ):
+                    # At most once per interval, as a refused oversized edit does not advance the throttle.
+                    streaming._reasoning_refresh_requested_at = now
                     _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
             if isinstance(chunk, ToolProgress):
