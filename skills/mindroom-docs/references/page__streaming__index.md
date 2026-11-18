@@ -17,6 +17,7 @@ This page covers when streaming is used, how to tune or disable it, how streamed
 3. When the response finishes, a final edit holds the complete text.
 
 When a response is not streamed, the placeholder is replaced with the complete response in a single edit.
+A [chart](https://docs.mindroom.chat/widgets/) or an [interactive question](https://docs.mindroom.chat/interactive/) appears once the agent has finished writing its code block; until then the message shows only the text before it.
 Agents also show a typing indicator while they work on a response.
 
 ## Live Updates

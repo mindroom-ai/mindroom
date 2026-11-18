@@ -38,6 +38,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Features | File & Video Attachments | `attachments.md` | `attachments/index.md` | `page__attachments__index.md` |
 | Features | Interactive Questions | `interactive.md` | `interactive/index.md` | `page__interactive__index.md` |
 | Features | Interactive Canvases | `canvases.md` | `canvases/index.md` | `page__canvases__index.md` |
+| Features | Widgets | `widgets.md` | `widgets/index.md` | `page__widgets__index.md` |
 | Features | Thread Exports | `thread-exports.md` | `thread-exports/index.md` | `page__thread-exports__index.md` |
 | Features | Workspace Files | `workspace-files.md` | `workspace-files/index.md` | `page__workspace-files__index.md` |
 | Features | Bug Reports | `bug-reports.md` | `bug-reports/index.md` | `page__bug-reports__index.md` |

@@ -643,6 +643,8 @@ Matrix sync callback
 | `room_modes.py` | The one path `!thread_mode` and plugin routes take to change a room's thread mode override and republish it |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
+| `ui_widgets/models.py` | The strict schema of a `ui` block an agent with `ui_widgets` writes; `chart` only so far |
+| `ui_widgets/render.py` | What a reply's `ui` blocks become on each write: a `mindroom-ui-<id>` fallback block in the text and the `io.mindroom.ui` value |
 | `stop.py` | `SpanRegistry`: cancels exactly the reply span a Stop reaches; the Stop button reaction |
 | `topic_generator.py` | Managed room topics from the configured description or generated with AI |
 | `debug_report.py` | Read-only collection of what the backend stored about one reported conversation: event journal, stored runs, tool-call and LLM request logs, and log lines |

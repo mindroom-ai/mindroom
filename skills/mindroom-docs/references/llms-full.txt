@@ -1794,6 +1794,7 @@ agents:
 | `created_agents_per_owner` | int, >= 0 | `0` | How many agents each person may create through this agent with `create_agent`; `0` turns the tool off. It applies to this agent only and is not inherited from `defaults`. See [Created Agents and Self-Updates](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages; see [Tool Calls During Streaming](https://docs.mindroom.chat/streaming/#tool-calls-during-streaming) |
 | `show_reasoning` | bool | `null` | Show the model's reasoning on streamed replies to everyone in the room; see [Reasoning](https://docs.mindroom.chat/streaming/#reasoning) |
+| `ui_widgets` | bool | `null` | Let the agent draw charts in its replies; see [Widgets](https://docs.mindroom.chat/widgets/) |
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes) decides. See [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing) |
 | `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
 | `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `file` and `coding` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
@@ -2027,6 +2028,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `max_tool_calls_per_turn` | `1000` |
 | `show_tool_calls` | `true` |
 | `show_reasoning` | `true` |
+| `ui_widgets` | `false` |
 | `worker_tools` | `null` (the deployment's execution mode decides) |
 | `worker_scope` | `null` |
 | `file_access` | `workspace` |
@@ -3091,7 +3093,12 @@ Show or switch the reply mode of the current Matrix room.
 `!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 [Plugin routes](https://docs.mindroom.chat/plugins/#http-routes) change the override as this command does, for room admins only.
-The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
+The override is the room's `reply_mode` setting: the `io.mindroom.room_settings` state event with state key `reply_mode` and content `{"value": "auto"}` or `{"value": "mentions"}`, where `{}` clears it.
+MindRoom Chat sets it from the room settings dialog, and any client may send the event; it falls under the room's `state_default` power level (normally 50), so moderators and admins can change it there.
+The router writes it for the command, so the command answers ❌ when the room does not let the router send that state.
+It lives in the room, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
+Agents take a change as soon as their sync shows it, and read the setting again at least every ten minutes.
+An override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
 The router answers `!reply_mode`, so in a room without the router, such as a direct-message room with one agent, set the mode with a `rooms` entry keyed by the room's `!` room ID instead, for example `rooms: {"!abc123:example.com": {reply_mode: mentions}}`; the router then also joins that room when it can.
 
 ## Threading (MSC3440)
@@ -5458,6 +5465,7 @@ This page covers when streaming is used, how to tune or disable it, how streamed
 3. When the response finishes, a final edit holds the complete text.
 
 When a response is not streamed, the placeholder is replaced with the complete response in a single edit.
+A [chart](https://docs.mindroom.chat/widgets/) or an [interactive question](https://docs.mindroom.chat/interactive/) appears once the agent has finished writing its code block; until then the message shows only the text before it.
 Agents also show a typing indicator while they work on a response.
 
 ## Live Updates
@@ -6363,6 +6371,7 @@ Pruning never deletes workspace files, the source files of registered attachment
 
 Agents can ask users a multiple-choice question that they answer by clicking an emoji reaction or typing the option number.
 Use this when an agent needs the user to pick between a few concrete options before it continues.
+To show numbers as a chart instead, see [Widgets](https://docs.mindroom.chat/widgets/).
 
 <video controls playsinline preload="metadata" aria-label="The agent asks a multiple-choice question before it decides" style="width: 100%" poster="https://github.com/user-attachments/assets/2a7ab600-0934-4b53-a47b-ec8fcd80201d" data-poster-light="https://github.com/user-attachments/assets/2a7ab600-0934-4b53-a47b-ec8fcd80201d" data-poster-dark="https://github.com/user-attachments/assets/4ee1ad16-4d36-4aca-932d-49b8447b5239">
   <source src="https://github.com/user-attachments/assets/35bb8221-3405-4efb-b236-304a58f898e8" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -6754,6 +6763,32 @@ For choices the variables cannot make, such as a chart palette, `window.mindroom
 - A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, and a page that loads libraries or remote assets can put data in the addresses it requests, so a malicious page could leak what the user types into it.
   Chat therefore names the agent that made each canvas and reminds the user that what they enter may leave the panel.
 - Agents should show only pages they wrote, never downloaded or untrusted pages, because every canvas appears as the agent's own.
+
+# Widgets
+
+An agent can draw a bar, line, area, or pie chart in its reply.
+MindRoom Chat shows it as a card with a Chart and a Table view as soon as the agent has finished writing it; Element and other clients show the same numbers as a text table in a code block.
+
+Charts are off by default.
+Set `ui_widgets: true` on an agent, or under `defaults` for every agent that leaves it unset:
+
+```yaml
+agents:
+  analyst:
+    display_name: Analyst
+    ui_widgets: true
+```
+
+The agent is then told how to write a chart, and draws one when you ask for a chart or want a trend or breakdown of numbers it has.
+The setting applies from the agent's next reply, without a restart.
+Only an agent's own replies draw charts: a team's reply, a message sent with the `matrix_message` tool, and the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) show the agent's `ui` code block as it wrote it.
+
+## Limits
+
+- A chart holds at most 8 series and 200 points; for more, the agent answers in prose.
+- A text table of more than 40 rows shows its first and last 20.
+- MindRoom Chat shows the text table instead of the chart when the reply is too long for one ordinary message (see [Large Messages](https://docs.mindroom.chat/streaming/#large-messages)) or holds more than 8 charts.
+- MindRoom Chat draws charts only for accounts named `mindroom_...` on your own homeserver, so keep that prefix reserved for MindRoom's agents.
 
 # Thread Exports
 
@@ -7480,15 +7515,18 @@ models:
     provider: openai
     id: gpt-6-astra
     pricing:
-      input: 5.0
-      output: 30.0
-      cache_read: 0.5
+      input: 10.0
+      output: 50.0
+      cache_read: 1.0
+      cache_write: 12.5
   luna:
     provider: openai
     id: gpt-6-luna
     pricing:
-      input: 0.2
-      output: 1.25
+      input: 0.1
+      output: 0.5
+      cache_read: 0.01
+      cache_write: 0.125
 
 budgets:
   monthly_limit_usd: 20
@@ -19564,7 +19602,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
 | `await terminals(workspace, *, create=False)` | The agent's terminals for an `AgentWorkspace` that `agents()` or `agent()` returned, or `None` while its `terminal` is `none`; see [An agent's terminals](#an-agents-terminals) |
-| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
+| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply` (the room's `reply_mode` setting as the runtime last read it), each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 | `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
 

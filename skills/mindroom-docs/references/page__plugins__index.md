@@ -1139,7 +1139,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
 | `await terminals(workspace, *, create=False)` | The agent's terminals for an `AgentWorkspace` that `agents()` or `agent()` returned, or `None` while its `terminal` is `none`; see [An agent's terminals](#an-agents-terminals) |
-| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
+| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply` (the room's `reply_mode` setting as the runtime last read it), each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 | `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
 

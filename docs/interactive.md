@@ -6,6 +6,7 @@ icon: lucide/mouse-pointer-click
 
 Agents can ask users a multiple-choice question that they answer by clicking an emoji reaction or typing the option number.
 Use this when an agent needs the user to pick between a few concrete options before it continues.
+To show numbers as a chart instead, see [Widgets](widgets.md).
 
 <video controls playsinline preload="metadata" aria-label="The agent asks a multiple-choice question before it decides" style="width: 100%" poster="https://github.com/user-attachments/assets/2a7ab600-0934-4b53-a47b-ec8fcd80201d" data-poster-light="https://github.com/user-attachments/assets/2a7ab600-0934-4b53-a47b-ec8fcd80201d" data-poster-dark="https://github.com/user-attachments/assets/4ee1ad16-4d36-4aca-932d-49b8447b5239">
   <source src="https://github.com/user-attachments/assets/35bb8221-3405-4efb-b236-304a58f898e8" type="video/mp4" media="(prefers-color-scheme: dark)">

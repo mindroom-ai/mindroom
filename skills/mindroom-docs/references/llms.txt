@@ -31,6 +31,7 @@
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/)
 - [Interactive Questions](https://docs.mindroom.chat/interactive/)
 - [Interactive Canvases](https://docs.mindroom.chat/canvases/)
+- [Widgets](https://docs.mindroom.chat/widgets/)
 - [Thread Exports](https://docs.mindroom.chat/thread-exports/)
 - [Workspace Files](https://docs.mindroom.chat/workspace-files/)
 - [Bug Reports](https://docs.mindroom.chat/bug-reports/)
