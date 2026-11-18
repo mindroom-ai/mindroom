@@ -675,6 +675,23 @@ async def test_send_to_a_person_without_a_dm_creates_one_and_records_it(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("answering", [{"thread_id": "$root"}, {"event_id": "$message"}], ids=["thread", "reply"])
+async def test_an_answer_to_a_person_without_a_dm_makes_none(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    answering: dict[str, str],
+) -> None:
+    """A thread or message to answer cannot be in a DM not made yet, so none is made and nobody is invited."""
+    homeserver.answers.update({DIRECT_PATH: {}, CREATE_PATH: {"room_id": NEW_DM}})
+
+    result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?", **answering)
+
+    assert result == error_result("send", f"There is no DM with {BOB} yet, so nothing there to answer.")
+    assert _changes(homeserver) == []
+
+
+@pytest.mark.asyncio
 async def test_a_new_dm_that_could_not_be_listed_still_gets_the_message(
     config: Config,
     paths: RuntimePaths,
@@ -1458,14 +1475,19 @@ async def test_a_stray_room_id_does_not_give_create_room_its_own_rate_limit(
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """create_room takes no room_id, so varying one given anyway leaves every create_room one count."""
+    """create_room takes no room_id, and whom it invites names no room, so every create_room shares one count."""
     homeserver.answers[CREATE_PATH] = {"room_id": NEW_DM}
     toolkit = owner_toolkit(config, paths)
 
     with owner_turn(config, paths), homeserver.serving_the_toolkit():
         results = [
             json.loads(
-                await toolkit.matrix_user_write(action="create_room", name="Trip", room_id=f"!stray{n}:example.com"),
+                await toolkit.matrix_user_write(
+                    action="create_room",
+                    name="Trip",
+                    room_id=f"!stray{n}:example.com",
+                    user_id=f"@guest{n}:example.com",
+                ),
             )
             for n in range(13)
         ]
@@ -1531,7 +1553,7 @@ async def test_a_dm_the_homeserver_did_not_confirm_says_it_may_exist(
 
     assert result == error_result("send", ROOM_UNCONFIRMED)
     [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
-    assert (audit["status"], audit["error"]) == ("error", ROOM_UNCONFIRMED)
+    assert (audit["status"], audit["error"], audit["invited"]) == ("error", ROOM_UNCONFIRMED, BOB)
     assert homeserver.paths()[-1] == CREATE_PATH
 
 

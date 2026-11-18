@@ -226,7 +226,7 @@ async def _write(
         max_actions=_MAX_WRITES,
         tool_name="matrix_user",
         context=turn,
-        room_id=write.room_id or write.user_id or "",
+        room_id="" if write.action == "create_room" else write.room_id or write.user_id or "",
         limit_label="matrix_user writes",
     )
     if limited is not None:
@@ -342,7 +342,8 @@ async def _send(
     if write.room_id is not None:
         return await _send_into(client, turn, write, written, file, marker, write.room_id)
     them = str(write.user_id)
-    room_id, made = await _direct_room(client, actor.person_user_id, them, written)
+    answers = write.thread_id is not None or write.event_id is not None
+    room_id, made = await _direct_room(client, actor.person_user_id, them, written, answers=answers)
     try:
         fields = await _send_into(client, turn, write, written, file, marker, room_id)
     except MatrixRequestError as failed:
@@ -444,8 +445,8 @@ async def _event_write(
         named = await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
         replaced = _replaced_event_id(named)
         if replaced is not None:
-            # An earlier edit's result names its replacement event. Clients ignore a replacement of a replacement, so
-            # the message it replaced is the one to edit, if it too may be.
+            # An event ID from elsewhere, such as a read of the room, may name an edit's replacement event. Clients
+            # ignore a replacement of a replacement, so the message it replaced is the one to edit, if it too may be.
             event_id = replaced
             named = await _require_changeable(client, room_id, event_id, actor.person_user_id, edit=True)
         if redacted(named):
@@ -540,11 +541,19 @@ def _made_dm(room_id: str, them: str, not_listed: str | None) -> str:
     return f"{made}, but could not list it as a DM ({why}). To send there again, use room_id {room_id}."
 
 
-async def _direct_room(client: nio.AsyncClient, person: str, them: str, written: _Written) -> tuple[str, bool]:
+async def _direct_room(
+    client: nio.AsyncClient,
+    person: str,
+    them: str,
+    written: _Written,
+    *,
+    answers: bool,
+) -> tuple[str, bool]:
     """Return the person's DM with ``them``, and whether it was made now, as one is when they have none.
 
     Their DM is the newest room the person's `m.direct` lists for ``them`` whose members, joined or invited, are only the
-    two of them. A room made now is added there, and is their DM for this send even when that fails.
+    two of them. A room made now is added there, and is their DM for this send even when that fails. A send that
+    ``answers`` a thread or a message makes none: a room made now holds neither.
     Calls of this runtime for one person take turns, so a second one finds the DM the first made and recorded.
     ``written`` names the room, whom a room made now invited, and why it could not be added, if it could not.
     """
@@ -556,8 +565,13 @@ async def _direct_room(client: nio.AsyncClient, person: str, them: str, written:
             if isinstance(room_id, str) and await _only_the_two(client, room_id, person, them):
                 written.room_id = room_id
                 return room_id, False
+        if answers:
+            msg = f"There is no DM with {them} yet, so nothing there to answer."
+            raise MatrixRequestError(msg)
+        # Set before the request, so that the audit line of a room the homeserver did not confirm names them too.
+        written.invited = them
         room_id = await _create_room(client, {"preset": "trusted_private_chat", "is_direct": True, "invite": [them]})
-        written.room_id, written.invited = room_id, them
+        written.room_id = room_id
         written.dm_not_listed = await _record_direct_room(client, direct_path, them, room_id)
         return room_id, True
 
