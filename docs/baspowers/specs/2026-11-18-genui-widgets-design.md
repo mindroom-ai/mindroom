@@ -178,7 +178,7 @@ This is `m.new_content` of the edit; the edit's outer copy has the same `body` a
 
 ### 5.5 In progress, and live frames
 
-- While the reply streams, closed valid blocks are already replaced, and the text is cut where an open column-0 `ui` fence begins (its opening line complete).
+- While the reply streams, closed valid blocks are already replaced, and the text is cut where an open column-0 `ui` fence begins, from its opening line on, even when nothing follows that line yet: a note written below it would otherwise complete the line and land inside the block.
 - Nothing signals the open fence, and Chat shows nothing for it until it closes.
 - Durable progress updates carry the value as `io.mindroom.ui` (in `m.new_content` when the update is an edit).
 - Live frames (`io.mindroom.live`) carry the same value as `ui`: present in a snapshot when there is a value; in a delta, `ui` replaces the whole value and `null` clears it. Frame version stays 1.
@@ -251,6 +251,7 @@ Rules of the function:
 - A valid closed block becomes its fallback block and gets an entry while the reply has fewer than 8 entries and stays within 16,384 bytes; past that the fallback alone shows.
 - An invalid closed block is left exactly as written; a final write logs a warning with the validation errors and never the block's text.
 - A marker block already in the text is ordinary text: it gets no entry and its id is not reused (C2).
+- An approval pause records the text its reply showed, cut at an open `ui` fence, for a first pause and for a chained one. A Stop, error or restart note below a paused reply is written from that record, so it shows no partial block; the run itself resumes from its own storage.
 - One write shows text that is already rendered: an approval pause after a streamed attempt is written with the text the stream acknowledged. Its widgets are those of the reply's record, which holds the raw text, that the written text has a marker block for; a marker block the record did not author stays inert.
 - Text without a column-0 `ui` fence is returned as the same object.
 

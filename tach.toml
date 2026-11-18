@@ -1483,6 +1483,7 @@ depends_on = [
     "mindroom.delegation.recovery",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.response",
+    "mindroom.config.resolution",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",

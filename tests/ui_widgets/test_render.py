@@ -203,8 +203,11 @@ def test_an_open_fence_is_cut_only_in_progress() -> None:
     after_a_chart = render_ui_widgets(f"{_ui(CHART)}\n\n{OPEN}", in_progress=True)
     assert after_a_chart.text == f"{BLOCK}\n\nSignups peaked."
     assert len(after_a_chart.content["widgets"]) == 1
-    for unfinished_line in ("Hi\n\n```", "Hi\n\n```u", "Hi\n\n```ui"):
-        assert render_ui_widgets(unfinished_line, in_progress=True).text is unfinished_line
+    for not_yet_ui in ("Hi\n\n```", "Hi\n\n```u", "Hi\n\n```uix"):
+        assert render_ui_widgets(not_yet_ui, in_progress=True).text is not_yet_ui
+    # The opening line alone is hidden too: a note written below it would complete the line and land in the block.
+    assert render_ui_widgets("Hi\n\n```ui", in_progress=True).text == "Hi"
+    assert without_open_ui_fence("Hi\n\n```ui") == "Hi"
 
 
 def test_without_open_ui_fence() -> None:

@@ -50,6 +50,7 @@ from mindroom.approval.response import (
 )
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.config.resolution import ui_widgets
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_KEY,
@@ -124,6 +125,7 @@ from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import body_without_tool_markers
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.ui_widgets.render import without_open_ui_fence
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -280,6 +282,15 @@ class ApprovalContinuationRunner:
             extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
         )
 
+    def _as_shown(self, paused: PausedAttempt, entity_name: str) -> PausedAttempt:
+        """Return a paused attempt with the text its reply showed: an agent's open ``ui`` block never was.
+
+        The pause's record and every note below it are written from this text; the run resumes from its own storage.
+        """
+        if not ui_widgets(self.deps.runtime.config, entity_name):
+            return paused
+        return replace(paused, response_text=without_open_ui_fence(paused.response_text))
+
     async def suspend_for_approval(
         self,
         paused: PausedAttempt,
@@ -294,6 +305,7 @@ class ApprovalContinuationRunner:
         team_mode: str | None = None,
     ) -> FinalDeliveryOutcome:
         """Persist a paused run, expose its cards, and leave the response lock."""
+        paused = self._as_shown(paused, self.deps.agent_name)
         requester_id = request.user_id or execution_identity.requester_id
         if requester_id is None:
             msg = "Approval continuation requires the original requester identity"
@@ -676,6 +688,7 @@ class ApprovalContinuationRunner:
         in_place: bool = False,
     ) -> _ApprovalPausePresentation:
         """Replace one claim with the run's next exact pause generation, recorded with the reply's pause row."""
+        paused = self._as_shown(paused, current.entity_name)
         require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await plan_approval_calls(

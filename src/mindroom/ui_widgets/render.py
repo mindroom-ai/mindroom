@@ -111,8 +111,8 @@ def _block(json_text: str) -> tuple[str, tuple[str, ...]] | list[str]:
 def _ui_fences(lines: list[str]) -> tuple[list[tuple[int, int]], int | None, set[str]]:
     """The column-0 `ui` fences outside any other block, where the markdown parser the HTML is made with finds them.
 
-    Returns the opening and closing line of each closed one, the opening line of an open one once that line is
-    complete, and the id of every marker block.
+    Returns the opening and closing line of each closed one, the opening line of an open one, and the id of every
+    marker block.
     """
     closed: list[tuple[int, int]] = []
     open_at = None
@@ -128,7 +128,7 @@ def _ui_fences(lines: list[str]) -> tuple[list[tuple[int, int]], int | None, set
         # An open top-level fence runs to the last line, which then is not a closing fence.
         if end - 1 > start and re.fullmatch(f" {{0,3}}{fence}{fence[0]}*[ \t]*", lines[end - 1]):
             closed.append((start, end - 1))
-        elif start < len(lines) - 1:
+        else:
             open_at = start
     return closed, open_at, marker_ids
 

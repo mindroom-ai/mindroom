@@ -1082,3 +1082,66 @@ async def test_a_chart_shown_before_an_approval_is_a_widget_in_every_later_write
         assert len(shown) >= (4 if streams else 3)
         assert [ids for _, ids in shown] == [["df4d729a5d"]] * len(shown)
         assert all(_UI_CHART_BLOCK in body and '{"type"' not in body for body, _ in shown)
+
+
+_OPEN_UI_BLOCK = '\n\nA second chart:\n\n```ui\n{"type":"chart",'
+
+
+@pytest.mark.parametrize("streams", [True, False], ids=["streamed", "collected"])
+@pytest.mark.parametrize("opener", [_OPEN_UI_BLOCK, "\n\nA second chart:\n\n```ui"], ids=["open-block", "opener"])
+async def test_a_stop_on_a_reply_paused_inside_an_open_ui_block_writes_its_note_below_the_drawn_chart(
+    tmp_path: Path,
+    streams: bool,
+    opener: str,
+) -> None:
+    """A pause records what the reply showed, so a Stop after it shows no partial chart and no note in a code block."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        bot.config.agents["general"].ui_widgets = True
+        with patch_response_runner_module(
+            stream_agent_response=_pausing_stream(_paused(text=_UI_CHART_REPLY + opener)),
+            should_use_streaming=AsyncMock(return_value=streams),
+            typing_indicator=_noop_typing,
+        ):
+            await unwrap_extracted_collaborator(bot._response_runner).generate_response(_plain_request(_target()))
+        paused = await _reply(bot)
+        assert paused.state is rl.ReplyState.PAUSED
+        assert render_body(decode_presentation(paused.presentation))[0] == f"{_UI_CHART_REPLY}\n\nA second chart:"
+        with _journal_wakes(bot) as wakes:
+            assert await asyncio.wait_for(await _stop(bot, "$sent1", 5), timeout=5)
+        await _run_approval_wakes(bot, wakes)
+
+        assert (await _reply(bot)).state is rl.ReplyState.CANCELLED
+        shown = [body for body in _sent_bodies(bot) if body != "Thinking..."]
+        assert shown[-1] == f"{_UI_CHART_SHOWN}\n\nA second chart:\n\n**[Response cancelled by user]**"
+        assert not any("```ui" in body or '{"type"' in body for body in shown)
+        assert _widget_ids(_sent_contents(bot)[-1]) == ["df4d729a5d"]
+
+
+async def test_a_second_pause_inside_an_open_ui_block_shows_what_the_resume_showed(tmp_path: Path) -> None:
+    """A chained pause is written from the resumed run's text, and hides the block that text leaves open."""
+    resumes = 0
+
+    async def resume(*_args: object, **_kwargs: object) -> PausedAttempt | CompletedApprovalRun:
+        nonlocal resumes
+        resumes += 1
+        if resumes == 2:
+            return CompletedApprovalRun(f"{_UI_CHART_REPLY}\n\nBoth read.", {})
+        return _paused(run_id="run-2", text=_UI_CHART_REPLY + _OPEN_UI_BLOCK)
+
+    async with _approval_bot(tmp_path, requires_human=False) as bot:
+        bot.config.agents["general"].ui_widgets = True
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        with (
+            patch_response_runner_module(
+                stream_agent_response=_pausing_stream(_paused(text=_UI_CHART_REPLY)),
+                should_use_streaming=AsyncMock(return_value=False),
+                typing_indicator=_noop_typing,
+            ),
+            patch.object(type(runner.approvals), "_continue_entity_call", AsyncMock(side_effect=resume)),
+        ):
+            await runner.generate_response(_plain_request(_target()))
+
+        assert (await _reply(bot)).state is rl.ReplyState.COMPLETED
+        shown = list(dict.fromkeys(body for body in _sent_bodies(bot) if body != "Thinking..."))
+        assert shown == [_UI_CHART_SHOWN, f"{_UI_CHART_SHOWN}\n\nA second chart:", f"{_UI_CHART_SHOWN}\n\nBoth read."]
+        assert [_widget_ids(content) for content in _sent_contents(bot)[-2:]] == [["df4d729a5d"]] * 2

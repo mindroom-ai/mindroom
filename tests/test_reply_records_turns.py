@@ -2705,12 +2705,17 @@ def _sent_contents(bot: AgentBot) -> list[dict[str, object]]:
 
 
 @pytest.mark.parametrize("frames_on", [True, False], ids=["live-frames", "durable-edits"])
+@pytest.mark.parametrize("open_block", ['```ui\n{"type":"chart","kind":"bar",', "```ui"], ids=["block", "opener"])
 async def test_a_stop_inside_an_open_ui_block_keeps_the_drawn_chart_and_writes_its_note_below(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     frames_on: bool,
+    open_block: str,
 ) -> None:
-    """A Stop while a second chart is still arriving keeps the first as a widget and shows none of the partial JSON."""
+    """A Stop while a second chart is still arriving keeps the first as a widget and shows none of the second.
+
+    Not even its opening line, which the note would otherwise complete and land inside.
+    """
     bot = await _streaming_bot(tmp_path)
     bot.config.agents["general"].ui_widgets = True
     frames: list[str] = []
@@ -2742,7 +2747,7 @@ async def test_a_stop_inside_an_open_ui_block_keeps_the_drawn_chart_and_writes_i
         await shows("mindroom-ui-df4d729a5d")
         yield "A second chart:"
         await shows("A second chart:")
-        yield '\n\n```ui\n{"type":"chart","kind":"bar",'
+        yield f"\n\n{open_block}"
         # The open block shows nothing, so there is nothing to wait for but the stream taking the chunk in.
         await asyncio.sleep(0.1)
         inside_the_open_block.set()
@@ -2765,8 +2770,8 @@ async def test_a_stop_inside_an_open_ui_block_keeps_the_drawn_chart_and_writes_i
     assert _sent_bodies(bot)[-1] == f"{_UI_CHART_SHOWN}\n\nA second chart:\n\n**[Response cancelled by user]**"
     assert _widget_ids(_sent_contents(bot)[-1]) == ["df4d729a5d"]
     # Nothing a reader saw, durable or live, held the JSON of either block.
-    assert not any('{"type"' in body for body in _sent_bodies(bot))
-    assert not any('{\\"type\\"' in frame for frame in frames)
+    assert not any('{"type"' in body or "```ui" in body for body in _sent_bodies(bot))
+    assert not any('{\\"type\\"' in frame or "```ui" in frame for frame in frames)
     assert bool(frames) is frames_on
 
 
