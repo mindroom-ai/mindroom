@@ -15,7 +15,7 @@ import mindroom.streaming as streaming_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, StreamingConfig
-from mindroom.live_frames.frames import LIVE_EVENT_TYPE, LiveDocs
+from mindroom.live_frames.frames import LIVE_EVENT_TYPE, LiveDocs, fitted_tools
 from mindroom.live_frames.publisher import LivePublisher
 from mindroom.live_frames.transport import LiveSendOutcome, frame_fits
 from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolProgress, ToolStarted
@@ -600,6 +600,10 @@ async def test_frames_drop_the_oldest_previews_only_at_a_snapshot(
     snapshot = frames.sent[-1]["snapshot"]["tools"]
     assert publisher.bare > 0
     assert frame_fits(client, _ROOM_ID, frames.sent[-1], event_type=LIVE_EVENT_TYPE)
+    # The fewest previews dropped: keeping one more would not fit.
+    one_more = {**frames.sent[-1], "snapshot": {**frames.sent[-1]["snapshot"]}}
+    one_more["snapshot"]["tools"] = list(fitted_tools(docs(160).tools, bare=publisher.bare - 1))
+    assert not frame_fits(client, _ROOM_ID, one_more, event_type=LIVE_EVENT_TYPE)
     assert [("args_preview" in entry) for entry in snapshot] == [False] * publisher.bare + [True] * (
         160 - publisher.bare
     )
