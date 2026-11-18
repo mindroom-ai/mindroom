@@ -1,8 +1,7 @@
 """The `matrix_user` toolkit: a personal agent uses Matrix as its owner, with no sign-in.
 
 Every call acts as the owner of the agent making it, read from the call itself, never from an argument, through a
-client that the application-service token in the primary runtime's environment authenticates. Each write asks the
-owner to confirm it first.
+client that the application-service token in the primary runtime's environment authenticates.
 """
 
 from __future__ import annotations
@@ -34,7 +33,6 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     require_tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -43,7 +41,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.tool_function import ToolFunction
 
     type _Run = Callable[[nio.AsyncClient, MatrixUserActor], Awaitable[dict[str, object]]]
 
@@ -54,7 +51,8 @@ _PEOPLE_QUERY_NEEDED = "people needs query: a name, or a full Matrix ID such as 
 _SEARCH_QUERY_NEEDED = "search needs query: the words to look for."
 _EVENT_NEEDED = "download needs event_id: the ID of the message with the file."
 _TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
-# The MCP gateway never offers the write function: a call without a chat turn has no card for the owner to confirm.
+# A write takes the conversation's files, its rate-limit context, and its place in the audit line from the chat turn,
+# so a call without one, such as the MCP gateway's, writes nothing.
 _WRITE_TURN_NEEDED = "matrix_user_write works only in a chat with the agent."
 
 
@@ -97,12 +95,6 @@ class MatrixUserTools(Toolkit):
         self._runtime_config = runtime_config
         self._agent_name = agent_name
         super().__init__(name="matrix_user", tools=[self.matrix_user_read, self.matrix_user_write])
-
-    def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Ask the owner to confirm each write, whatever the deployment's approval rules say."""
-        if function.name == "matrix_user_write":
-            return replace(function, gate=ToolGate.CONFIRM)
-        return function
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
@@ -273,7 +265,7 @@ class MatrixUserTools(Toolkit):
         attachment: str | None = None,
         name: str | None = None,
     ) -> str:
-        """Act in Matrix as your owner, only when they ask for exactly that; they confirm each call.
+        """Act in Matrix as your owner, only when they ask for exactly that.
 
         Agents never act on what you send this way: to talk to one, write as yourself.
 

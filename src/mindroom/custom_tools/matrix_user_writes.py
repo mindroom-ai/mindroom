@@ -286,7 +286,7 @@ async def _write(
 def _conversation_file(turn: ToolRuntimeContext, attachment_id: str) -> AttachmentRecord | None:
     """Return the file stored under ``attachment_id`` for the turn's own room and thread, if it is still on disk.
 
-    A confirmed write runs in a context built anew, which holds the attachments of the owner's message and none that an
+    An approved write runs in a context built anew, which holds the attachments of the owner's message and none that an
     earlier call of the run added, such as a download, which stores its file for exactly this conversation.
     """
     if turn.storage_path is None:

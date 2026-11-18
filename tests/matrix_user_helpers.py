@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from aiohttp import ClientResponse
 
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
 from mindroom.constants import resolve_runtime_paths
@@ -44,6 +45,8 @@ ROOM = "!room:example.com"
 TOKEN = "as-user-secret-7f3a9c"  # noqa: S105
 ROOM_NEEDED = "needs room_id, a room ID such as !abc:example.com or an alias such as #abc:example.com."
 SYNC_PATH = "/_matrix/client/v3/sync"
+# The rule a deployment sets for a card before every write.
+WRITES_NEED_APPROVAL = ApprovalRuleConfig(match="matrix_user_write", action="require_approval")
 # The time of every room event the helpers make, plus its ``minute``.
 NOON = int(datetime(2026, 11, 16, 12, 0, tzinfo=UTC).timestamp() * 1000)
 

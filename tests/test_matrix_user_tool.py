@@ -14,16 +14,16 @@ from structlog.testing import capture_logs
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import AgentToolContext, resolve_connection_agent, resolve_connection_user
 from mindroom.attachments.storage import load_attachment
+from mindroom.config.approval import ToolApprovalConfig
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.teams.members import resolve_exact_team_members
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import (
     current_execution_identity,
     get_tool_runtime_context,
     member_tool_scope,
 )
 from mindroom.tool_system.tool_function import ToolGate
-from tests.agent_tool_helpers import toolkit_offers
+from tests.agent_tool_helpers import call_entrypoint, toolkit_offers
 from tests.matrix_user_helpers import (
     AGENT,
     OWNER,
@@ -31,6 +31,7 @@ from tests.matrix_user_helpers import (
     ROOM_NEEDED,
     SYNC_PATH,
     TOKEN,
+    WRITES_NEED_APPROVAL,
     Answer,
     FakeHomeserver,
     error_result,
@@ -44,6 +45,7 @@ from tests.matrix_user_helpers import (
     search_answer,
     sync_answer,
 )
+from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
 STRANGER = "@bob:example.com"
 NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
 TURN_NEEDED = "download needs a chat turn: the file is handed to the conversation it was asked in."
+WRITE_TURN_NEEDED = "matrix_user_write works only in a chat with the agent."
 # An alias, and the room the homeserver's directory says it names.
 ALIAS = "#general:example.com"
 ALIASED_ROOM = "!general:example.com"
@@ -451,17 +454,39 @@ def test_the_read_function_takes_no_user_to_act_as(config: Config, paths: Runtim
     ]
 
 
-def test_the_write_function_asks_for_confirmation_and_the_read_function_does_not(
+def test_a_rule_that_requires_approval_gates_the_write_function(config: Config, paths: RuntimePaths) -> None:
+    """A write asks the owner first when a `tool_approval` rule says so; a caller that cannot resume is not offered it."""
+    config.tool_approval = ToolApprovalConfig(rules=[WRITES_NEED_APPROVAL])
+
+    functions = gated_functions(owner_toolkit(config, paths), config)
+    unresumable = gated_functions(owner_toolkit(config, paths), config, resumable=False)
+
+    assert {name: function.gate for name, function in functions.items()} == {
+        "matrix_user_read": None,
+        "matrix_user_write": ToolGate.POLICY,
+    }
+    assert list(unresumable) == ["matrix_user_read"]
+
+
+@pytest.mark.asyncio
+async def test_without_a_rule_that_requires_approval_a_write_runs_at_once(
     config: Config,
     paths: RuntimePaths,
+    homeserver: FakeHomeserver,
 ) -> None:
-    """Each write as the owner shows the owner a card first, whatever the deployment's approval rules; reads do not."""
-    functions = adapt_toolkit(owner_toolkit(config, paths)).functions
+    """With no rule that requires approval and the default `auto_approve`, the toolkit itself asks nobody first."""
+    assert config.tool_approval.default == "auto_approve"
+    homeserver.answers[f"/_matrix/client/v3/rooms/{ROOM}/leave"] = {}
+    functions = gated_functions(owner_toolkit(config, paths), config)
 
-    assert {function.name: function.gate for function in functions} == {
-        "matrix_user_read": None,
-        "matrix_user_write": ToolGate.CONFIRM,
-    }
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        result = await call_entrypoint(functions["matrix_user_write"], action="leave", room_id=ROOM)
+
+    assert [function.gate for function in functions.values()] == [None, None]
+    assert json.loads(str(result)) == ok_result("leave", room_id=ROOM)
+    assert [request.path for request in homeserver.requests if request.method == "POST"] == [
+        f"/_matrix/client/v3/rooms/{ROOM}/leave",
+    ]
 
 
 @pytest.mark.asyncio
@@ -505,11 +530,38 @@ async def test_the_write_function_takes_no_user_to_act_as(
 
 
 @pytest.mark.asyncio
-async def test_the_gateway_offers_the_read_function_only(
+async def test_the_gateway_write_needs_a_chat_turn(
     gateway_agent: AgentToolContext,
     homeserver: FakeHomeserver,
 ) -> None:
-    """A write asks the owner on a card, which an MCP client cannot show, so the gateway neither lists nor runs it."""
+    """Without a rule that requires approval the gateway offers the write, which answers that it needs a chat turn."""
+    with homeserver.serving_the_toolkit():
+        found = await gateway.search_tools(gateway_agent, toolkit="matrix_user")
+        refused = await gateway.invoke_tool(
+            gateway_agent,
+            toolkit="matrix_user",
+            function="matrix_user_write",
+            arguments={"action": "leave", "room_id": ROOM},
+        )
+
+    assert "error" not in found
+    assert [result["function"] for result in found["results"]] == ["matrix_user_read", "matrix_user_write"]
+    assert "error" not in refused
+    assert json.loads(refused["result"]) == error_result("leave", WRITE_TURN_NEEDED)
+    assert homeserver.requests == []
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_offers_no_write_a_rule_asks_approval_for(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """A write that a rule asks the owner to approve on a card, which an MCP client cannot show, is not run there."""
+    config.tool_approval = ToolApprovalConfig(rules=[WRITES_NEED_APPROVAL])
+    owner = resolve_connection_user(ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config), OWNER)
+    gateway_agent = resolve_connection_agent(owner, AGENT)
+
     with homeserver.serving_the_toolkit():
         found = await gateway.search_tools(gateway_agent, toolkit="matrix_user")
         refused = await gateway.invoke_tool(
@@ -540,7 +592,7 @@ async def test_a_write_without_a_chat_turn_is_refused(
     with homeserver.serving_the_toolkit():
         result = await owner_toolkit(config, paths).matrix_user_write(action="leave", room_id=ROOM)
 
-    assert json.loads(result) == error_result("leave", "matrix_user_write works only in a chat with the agent.")
+    assert json.loads(result) == error_result("leave", WRITE_TURN_NEEDED)
     assert homeserver.requests == []
 
 

@@ -2580,7 +2580,6 @@ depends_on = [
     "mindroom.matrix.user_masquerade",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.tool_function",
 ]
 
 [[modules]]

@@ -16,6 +16,7 @@ from structlog.testing import capture_logs
 
 from mindroom.ai import ai_response
 from mindroom.attachments.storage import register_local_attachment
+from mindroom.config.approval import ToolApprovalConfig
 from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.custom_tools import matrix_user_writes
 from mindroom.entity_resolution import current_entity_id
@@ -37,6 +38,7 @@ from tests.matrix_user_helpers import (
     ROOM,
     ROOM_NEEDED,
     TOKEN,
+    WRITES_NEED_APPROVAL,
     Answer,
     FakeHomeserver,
     HomeserverRequest,
@@ -538,7 +540,7 @@ async def _run_until_a_write_waits(
     monkeypatch: pytest.MonkeyPatch,
     model: ScriptedModel,
 ) -> PausedAttempt:
-    """Run a reply of Alice's agent to her with ``model`` until a write it calls waits for her to confirm it."""
+    """Run a reply of Alice's agent to her with ``model`` until a write it calls waits for her approval."""
     install_model_providers(monkeypatch, {"default": model})
     # Without background tool jobs, the call that waits pauses the reply.
     config.background_tool_jobs.enabled = False
@@ -559,13 +561,13 @@ async def _run_until_a_write_waits(
     return waiting.value.paused
 
 
-async def _confirm(
+async def _approve(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
     paused: PausedAttempt,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Confirm the write ``paused`` waits for and continue its run, as the approval runner does once Alice confirms.
+    """Approve the write ``paused`` waits for and continue its run, as the approval runner does once Alice approves.
 
     The run continues in a context built anew for the same room, thread, and requester, which holds only the
     attachments of Alice's own message, here none, and nothing an earlier call of the run added to its context.
@@ -597,17 +599,18 @@ async def _confirm(
 
 
 @pytest.mark.asyncio
-async def test_a_file_downloaded_in_a_run_is_sent_once_the_owner_confirms(
+async def test_a_file_downloaded_in_a_run_is_sent_once_the_owner_approves(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
     agent_id: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A send waits for the owner and then runs in a context built anew, where a file the run downloaded still goes out.
+    """A send waits for the owner's approval and then runs in a context built anew, where a downloaded file goes out.
 
-    Nothing is written before the owner confirms. The file is uploaded as the owner and marked as the agent's.
+    A rule asks for the approval. Nothing is written before the owner approves. The file is uploaded as the owner and marked as the agent's.
     """
+    config.tool_approval = ToolApprovalConfig(rules=[WRITES_NEED_APPROVAL])
     files = "!files:example.com"
     content = {
         "msgtype": "m.file",
@@ -643,7 +646,7 @@ async def test_a_file_downloaded_in_a_run_is_sent_once_the_owner_confirms(
     assert [waiting.tool_name for waiting in paused.tools] == ["matrix_user_write"]
     assert _changes(homeserver) == []
 
-    result = await _confirm(config, paths, homeserver, paused)
+    result = await _approve(config, paths, homeserver, paused)
 
     assert isinstance(result, CompletedApprovalRun)
     sent = json.loads(str(model.requests[-1].messages[-1].content))
