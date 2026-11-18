@@ -110,7 +110,7 @@ from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinato
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .room_reply_modes import observe_room_settings_event, refresh_room_reply_mode
+from .room_reply_modes import observe_room_settings_event
 from .router.duties import RouterDuties, RouterDutiesDeps
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
@@ -1088,14 +1088,9 @@ class AgentBot:
             await self._router.room_joined(room_id)
 
     async def _restore_joined_room(self, room_id: str) -> None:
-        """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime.
-
-        The router also reads the room's reply mode setting, which checks that cannot wait for it use.
-        """
+        """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime."""
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
-        if self._router is not None and self.client is not None:
-            await refresh_room_reply_mode(self.client, self.runtime_paths, room_id)
 
     def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop."""
