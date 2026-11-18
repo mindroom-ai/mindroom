@@ -752,8 +752,9 @@ async def _put_scheduled_task_state_content(
                 if writer_failure is None:
                     logger.info("scheduled_task_state_persisted_via_room_writer", room_id=room_id, task_id=task_id)
                     return
-                # The lent account has the power, so its failure decides whether power is what is missing.
-                reason, refused = f"{reason}; {writer.user_id} write failed ({writer_failure[0]})", writer_failure[1]
+                # Power is what is missing only when the room refused every account that tried.
+                refused = refused and writer_failure[1]
+                reason = f"{reason}; {writer.user_id} write failed ({writer_failure[0]})"
 
     if refused:
         logger.warning("scheduled_task_state_refused", room_id=room_id, task_id=task_id, error=reason)

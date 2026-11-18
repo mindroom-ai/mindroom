@@ -102,13 +102,14 @@ async def _reply(
     responders: list[MatrixID] | None = None,
     acts_for_requester: bool = False,
     conversation_reader: ConversationReader | None = None,
+    other_writer: AsyncMock | None = None,
 ) -> str:
     """Run one chat command through the command handler and return the reply it posts."""
     runtime_paths = schedule_runtime_paths(tmp_path)
     config = _config(runtime_paths)
     ids = entity_ids(config, runtime_paths)
     scheduled_tasks = MagicMock(spec=ScheduledTaskRuntime)
-    scheduled_tasks.other_state_writer.return_value = nullcontext()
+    scheduled_tasks.other_state_writer.return_value = nullcontext(other_writer)
     context = make_test_command_handler_context(
         client=client,
         config=config,
@@ -390,6 +391,21 @@ async def test_state_write_timeout_gives_no_moderator_advice(tmp_path: Path) -> 
         f"❌ Failed to cancel task `{TASK_ID}`: Failed to persist scheduled task state for task `{TASK_ID}`: "
         "TimeoutError: slow."
     )
+
+
+@pytest.mark.asyncio
+async def test_timeout_then_refusal_of_the_lent_writer_gives_no_moderator_advice(tmp_path: Path) -> None:
+    """A write that timed out is not explained by the room refusing the account that retried it."""
+    client = make_matrix_client_mock()
+    _serve_task(client, _workflow())
+    client.room_put_state = AsyncMock(side_effect=TimeoutError("slow"))
+    other_writer = make_matrix_client_mock(user_id="@other:server")
+    other_writer.room_put_state = AsyncMock(return_value=_STATE_WRITE_REFUSED)
+
+    reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client, other_writer=other_writer)
+
+    assert reply.startswith(f"❌ Failed to cancel task `{TASK_ID}`: Failed to persist scheduled task state")
+    assert "moderator rights" not in reply
 
 
 def _serve_pending_tasks(client: AsyncMock, *task_ids: str) -> None:
