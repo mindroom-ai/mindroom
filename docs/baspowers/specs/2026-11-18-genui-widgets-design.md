@@ -182,7 +182,7 @@ This is `m.new_content` of the edit; the edit's outer copy has the same `body` a
 - Nothing signals the open fence, and Chat shows nothing for it until it closes.
 - Durable progress updates carry the value as `io.mindroom.ui` (in `m.new_content` when the update is an edit).
 - Live frames (`io.mindroom.live`) carry the same value as `ui`: present in a snapshot when there is a value; in a delta, `ui` replaces the whole value and `null` clears it. Frame version stays 1.
-- A snapshot that does not fit its size limit is sent without `ui` before anything else is cut, and the deltas after it leave `ui` out too; the fallback block shows until a snapshot that fits brings it back. A delta is fitted as itself, so one that fits sets or keeps `ui` whatever a snapshot would weigh.
+- A snapshot that does not fit its size limit is sent without `ui` before anything else is cut, and the deltas after it leave `ui` out too; the fallback block shows until a snapshot that fits brings it back. A delta is fitted as itself, so one that fits sets or keeps `ui` whatever a snapshot would weigh, and one that does not fit sheds `ui` first, clearing a value shown before.
 - A client older than this field ignores `ui`; a delta that carries nothing else makes it wait for the next snapshot.
 - On the final update of a reply that ended inside an open `ui` fence, the partial block stays an ordinary code block.
 - A Stop, restart or error note is written below what the reply had shown, so the hidden partial block is not revealed and cannot swallow the note.
@@ -515,3 +515,8 @@ Findings are numbered as in the reviews of Sol (S) and Astra (A).
 
 - A late-bound row whose create is larger than about 30 kB passes the event limit once it is wrapped into an edit, with or without widgets; the widget fit no longer adds to it.
 
+## Appendix C. Code review round 2, backend (2026-11-18)
+
+- A1 (a late edit past the event limit): a write, and a stream, that starts while its reply's create is owed draws no widgets and goes out as without `ui_widgets` (6.3).
+- A4 (a pause with tool calls shown): an open `ui` block that holds a tool call's marker is not cut; it stays as written, as without `ui_widgets`.
+- A6 (an oversized delta): a delta too big with `ui` sheds it before a snapshot is tried or the delta goes out as it is (5.5).
