@@ -1163,9 +1163,10 @@ async def test_replay_of_a_message_a_restart_cut_short_is_not_a_newer_message(tm
         ),
     )
     assert claimed.transition.reply is not None
-    continued = await bot._reply_runtime.start()
-    assert continued == frozenset({"$replayed"})
-    runner.note_continued_sources(continued)
+    await bot._take_over_replies()
+    # A second takeover before replay reclaims the reply, as a retried start does, still knows it continues.
+    await bot._take_over_replies()
+    assert lifecycle.continued_sources == frozenset({"$replayed"})
 
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -1199,6 +1200,11 @@ async def test_replay_of_a_message_a_restart_cut_short_is_not_a_newer_message(tm
             assert queued_signal.pending_message_snapshot() == ()
             lifecycle_lock.release()
             assert await task == Owned()
+        # Once its sender edits the replay again, it carries something new.
+        runner.note_edited_source("$replayed")
+        edited = queued_notice_reservation_if_busy(runner, target=target, envelope=replayed)
+        assert edited is not None
+        edited.release()
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()

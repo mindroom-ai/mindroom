@@ -493,15 +493,9 @@ class ReplyRuntime:
         await self.take_ownership()
         # No span a deletion ended before this start survived it; recovery delivers what their replies owe.
         await self.store.replies.take_deletion_endings()
-        continued: set[str] = set()
         for applied in await self.store.replies.owner_lost(self.generation, now_ns=time.time_ns()):
             await self.run_effects(applied.post_commit)
-            reply = applied.transition.reply
-            if reply is not None and not reply.terminal:
-                continued.update(
-                    source for span in applied.transition.spans for source in span.sources.pending_event_ids
-                )
-        return frozenset(continued)
+        return await self.store.replies.continued_sources()
 
     @asynccontextmanager
     async def span_scope(self) -> AsyncIterator[SpanSlot]:
