@@ -50,6 +50,8 @@ class ParticipationGate:
     decider: ParticipationDecider | None = field(default=None, repr=False)
     # Runs once a decision approves the reply, before anything that waits on the decision may show it.
     on_approved: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
+    # Whether ``on_approved`` raised: the turn then answers nothing, and its sources stay pending for a retry.
+    publication_failed: bool = field(default=False, init=False)
     _decision: ParticipationDecision | None = field(default=None, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     decided: asyncio.Event = field(default_factory=asyncio.Event)
@@ -95,7 +97,11 @@ class ParticipationGate:
             if self.decision is None:
                 decision = await decide()
                 if decision.action == "respond" and self.decision is None and self.on_approved is not None:
-                    await self.on_approved()
+                    try:
+                        await self.on_approved()
+                    except Exception:
+                        self.publication_failed = True
+                        raise
                 self._settle(decision)
             return self.approved
 
