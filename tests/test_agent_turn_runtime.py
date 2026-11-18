@@ -1551,7 +1551,8 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     """Without a job actor, participation decides first, the receipt joins next, and compaction sizes the result.
 
     The checkpoint then saves what is sent, and saves again before a tool batch runs. The rest of the hooks are
-    wired. A reply with a job actor projects its job definitions before participation.
+    wired. A reply with a job actor projects its job definitions before participation. Before them all stands the
+    hook that publishes a delegated child's usage, which does nothing in a reply.
     """
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
     captured: dict[str, Any] = {}
@@ -1567,6 +1568,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
 
     hooks = captured["hooks"]
     assert [function.__qualname__.split(".")[0] for function in hooks.before_request] == [
+        "child_usage_hook",
         "participation_hook",
         "approval_receipt_hook",
         "mid_turn_compaction_hook",
