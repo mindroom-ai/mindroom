@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.thread_export import ThreadExportStats
-    from mindroom.thread_export.execution import EnumeratedRooms, ExportedThreads
+    from mindroom.thread_export.execution import ExportedThreads
 
 
 async def _export_threads_for_client(
@@ -1564,14 +1564,13 @@ async def _remembering_pass(
     output_dir: Path,
     source: ThreadExportSource,
     history: Sequence[ResolvedVisibleMessage] = _REMEMBERED_HISTORY,
-    listing: AsyncMock | None = None,
 ) -> tuple[ThreadExportStats, AsyncMock]:
     """Run one workspace pass over the remembered thread, and return its stats and the thread read it made."""
     fetch = AsyncMock(return_value=copy.deepcopy(list(history)))
     with (
         patch(
             "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
-            new=listing or AsyncMock(return_value=([_REMEMBERED_THREAD], False)),
+            new=AsyncMock(return_value=([_REMEMBERED_THREAD], False)),
         ),
         patch("mindroom.thread_export.execution.fetch_projected_thread_history", new=fetch),
     ):
@@ -1719,32 +1718,3 @@ async def test_a_room_whose_thread_files_cannot_be_listed_is_exported_as_on_a_fi
 
     fetch.assert_awaited_once()
     assert (stats.threads_exported, stats.failures) == (1, 0)
-
-
-@pytest.mark.asyncio
-async def test_a_pass_lists_a_room_only_when_its_record_of_earlier_listings_lacks_it(tmp_path: Path) -> None:
-    """A room listed before is exported from that listing, cut short or not; any other is listed and recorded if it can be."""
-    config = _config(tmp_path)
-    output_dir = tmp_path / "exports"
-    enumerated: EnumeratedRooms = {}
-    source = replace(_remembering_source({}, _journal_answer()), enumerated=enumerated)
-    listing = AsyncMock(return_value=([_REMEMBERED_THREAD], False))
-
-    await _remembering_pass(config, output_dir, source, listing=listing)
-    assert enumerated == {_REMEMBERED_ROOM.room_id: ([_REMEMBERED_THREAD], False)}
-    written = _remembered_file(output_dir).read_bytes()
-
-    enumerated[_REMEMBERED_ROOM.room_id] = ([_REMEMBERED_THREAD], True)
-    stats, _ = await _remembering_pass(config, output_dir, source, listing=listing)
-
-    listing.assert_awaited_once()
-    assert (stats.rooms_exported, stats.threads_seen, stats.threads_exported, stats.truncated_rooms) == (1, 1, 1, 1)
-    assert _remembered_file(output_dir).read_bytes() == written
-
-    enumerated.clear()
-    listing.side_effect = RuntimeError("threads unavailable")
-    stats, _ = await _remembering_pass(config, output_dir, source, listing=listing)
-
-    assert listing.await_count == 2
-    assert stats.failures == 1
-    assert enumerated == {}

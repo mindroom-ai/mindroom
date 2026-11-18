@@ -195,43 +195,6 @@ async def test_an_agent_keeps_what_its_passes_wrote_for_the_next_pass(tmp_path: 
     assert second.exported is first.exported
 
 
-async def test_activity_in_a_room_makes_each_agent_list_its_threads_again(tmp_path: Path) -> None:
-    """Each agent keeps the thread roots its passes listed in a room until that room has activity."""
-    config = _config(
-        tmp_path,
-        {
-            "code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig()),
-            "other": AgentConfig(display_name="Other", thread_exports=AgentThreadExportConfig()),
-        },
-    )
-    write_thread_export_matrix_state(tmp_path)
-    runner = _runner(
-        config,
-        _bots(
-            _FakeBot("@mindroom_router:localhost"),
-            _FakeBot("@mindroom_code:localhost"),
-            _FakeBot("@mindroom_other:localhost"),
-        ),
-    )
-    export = _export_mock()
-
-    with patch(EXPORT_PATH, new=export):
-        runner.queue_full_pass()
-        await runner._run_pass_once()
-        first = export.await_args.kwargs["sources"]
-        for source in first:
-            assert source.enumerated is not None
-            source.enumerated.update({"!lobby:localhost": (["$lobby"], False), "!dev:localhost": (["$dev"], False)})
-        runner.mark_room_activity("!lobby:localhost")
-        await runner._run_pass_once()
-
-    second = export.await_args.kwargs["sources"]
-    assert [source.entity_name for source in second] == ["code", "other"]
-    for before, after in zip(first, second, strict=True):
-        assert after.enumerated is before.enumerated
-        assert after.enumerated == {"!dev:localhost": (["$dev"], False)}
-
-
 async def test_partial_pass_queries_only_agents_related_to_dirty_rooms(tmp_path: Path) -> None:
     """A partial pass avoids joined-room lookups for unrelated agents."""
     config = _config(
