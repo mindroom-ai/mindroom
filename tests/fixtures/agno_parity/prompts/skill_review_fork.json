@@ -210,7 +210,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
+                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Use an empty string to restore\nnormal agent, room, and thread model selection."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -981,7 +981,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
+                "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Use an empty string to restore\nnormal agent, room, and thread model selection."
               },
               "mindroom_output_path": {
                 "anyOf": [

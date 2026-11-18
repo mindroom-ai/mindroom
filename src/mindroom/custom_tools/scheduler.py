@@ -183,8 +183,9 @@ class SchedulerTools(Toolkit):
                 keeping findings, failures, and independently sent tool messages
                 visible. Leave unset to preserve the existing mode.
             model: Configured model alias for each run, including team members,
-                or `name@level` for one of its reasoning levels. Leave unset to preserve the existing choice. Use an empty string
-                to restore normal agent, room, and thread model selection.
+                or `name@level` for one of its reasoning levels. Leave unset to
+                preserve the existing choice. Use an empty string to restore
+                normal agent, room, and thread model selection.
 
         Returns:
             The edit result message.
