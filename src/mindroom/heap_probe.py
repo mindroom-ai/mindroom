@@ -45,6 +45,7 @@ import functools
 import gc
 import math
 import os
+import re
 import sys
 import time
 from collections import Counter
@@ -74,6 +75,9 @@ _MIN_HEAP_TASK_INTERVAL_SECONDS = 60.0
 _FROZEN_HEAP_FULL_COLLECTION_THRESHOLD = 100
 _TOP_TYPE_COUNT = 25
 _SMAPS_PATH = Path("/proc/self/smaps")
+# A mapping header ("start-end perms offset device inode [path]") or its "Swap:" line; every other line is ignored.
+# Bytes, because mapped paths may hold any byte except an escaped newline.
+_SMAPS_LINE = re.compile(rb"^(?:([0-9a-f]+)-([0-9a-f]+) (\S+) |Swap:[ \t]+(\d+) kB$)", re.MULTILINE)
 # madvise(2) advice that faults a range in as reads would, including pages in swap (Linux 5.14 and later).
 _MADV_POPULATE_READ = 22
 
@@ -176,27 +180,29 @@ def _madvise() -> Callable[[int, int, int], int]:
     return function
 
 
-def _read_swapped_memory_back() -> None:
-    """Fault this process's swapped-out private memory back in; run it on a worker thread.
+def _read_swapped_memory_back() -> int:
+    """Fault this process's swapped-out private memory back in and return the KiB of swap the kernel accepted.
 
-    A full collection reads every object's header, so on a partly swapped
-    heap it takes one major page fault per swapped page while holding the
-    GIL, which stopped a production process for over a minute. Faulting
-    those mappings in from a thread first lets the loop keep running. Kernels
-    without ``MADV_POPULATE_READ`` reject the advice and nothing changes.
+    Run it on a worker thread. A full collection reads every object's header,
+    so on a partly swapped heap it takes one major page fault per swapped page
+    while holding the GIL, which stopped a production process for over a
+    minute. Faulting those mappings in from a thread first lets the loop keep
+    running. Kernels without ``MADV_POPULATE_READ`` reject the advice and
+    nothing changes.
     """
     try:
-        smaps = _SMAPS_PATH.read_text()
+        smaps = _SMAPS_PATH.read_bytes()
     except OSError:  # no procfs, such as on macOS
-        return
+        return 0
+    paged_in_kib = 0
     mapping: tuple[int, int] | None = None
-    for line in smaps.splitlines():
-        field, _, rest = line.partition(" ")
-        if not field.endswith(":"):  # a mapping header: "start-end perms offset device inode [path]"
-            start, end = (int(address, 16) for address in field.split("-"))
-            mapping = (start, end - start) if rest.startswith("r") and rest[3] == "p" else None
-        elif field == "Swap:" and mapping is not None and int(rest.split()[0]) > 0:
-            _madvise()(*mapping, _MADV_POPULATE_READ)
+    for start, end, permissions, swap_kib in _SMAPS_LINE.findall(smaps):
+        if permissions:
+            readable_private = permissions.startswith(b"r") and permissions.endswith(b"p")
+            mapping = (int(start, 16), int(end, 16) - int(start, 16)) if readable_private else None
+        elif mapping is not None and int(swap_kib) > 0 and _madvise()(*mapping, _MADV_POPULATE_READ) == 0:
+            paged_in_kib += int(swap_kib)
+    return paged_in_kib
 
 
 def freeze_startup_heap() -> None:
@@ -245,7 +251,7 @@ async def _run_heap_type_probe(
         _log_heap_type_probe()
 
 
-def _refreeze_runtime_heap() -> None:
+def _refreeze_runtime_heap(*, paged_in_kib: int, page_in_seconds: float) -> None:
     """Collect what the frozen heap released, then freeze the survivors again.
 
     Unfreezing first makes objects frozen earlier collectable, such as bots a
@@ -266,7 +272,16 @@ def _refreeze_runtime_heap() -> None:
         frozen_objects=gc.get_freeze_count(),
         collected=collected,
         collect_seconds=round(collect_seconds, 3),
+        paged_in_kib=paged_in_kib,
+        page_in_seconds=round(page_in_seconds, 3),
     )
+
+
+async def _page_in_and_refreeze() -> None:
+    """Read swapped-out memory back in off the loop, then refreeze on it."""
+    started = time.perf_counter()
+    paged_in_kib = await asyncio.to_thread(_read_swapped_memory_back)
+    _refreeze_runtime_heap(paged_in_kib=paged_in_kib, page_in_seconds=time.perf_counter() - started)
 
 
 async def _run_heap_refreeze(
@@ -277,13 +292,11 @@ async def _run_heap_refreeze(
 ) -> None:
     """Refreeze once the runtime is ready, then after each interval until cancelled."""
     await ready()
-    await asyncio.to_thread(_read_swapped_memory_back)
-    _refreeze_runtime_heap()
+    await _page_in_and_refreeze()
     _raise_full_collection_threshold()
     while True:
         await sleep(interval_seconds)
-        await asyncio.to_thread(_read_swapped_memory_back)
-        _refreeze_runtime_heap()
+        await _page_in_and_refreeze()
 
 
 def _raise_full_collection_threshold() -> None:
