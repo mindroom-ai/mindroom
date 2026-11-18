@@ -113,9 +113,9 @@ def budget_model(
     budgets = config.budgets
     if budgets is None or requester_id is None:
         return model_name
-    # A level of the fallback model already runs the fallback, and keeps the level it names.
+    # A fallback that names no level is that model at any level, so a reference to one keeps the level it names.
     # Unpriced models add no tracked spend, so swapping them could only raise cost.
-    is_fallback = split_model_reference(model_name)[0] == split_model_reference(budgets.fallback_model)[0]
+    is_fallback = budgets.fallback_model in (model_name, split_model_reference(model_name)[0])
     if is_fallback or not _is_priced(config, model_name):
         return model_name
     canonical_requester_id = budget_user_id(requester_id, config, runtime_paths)

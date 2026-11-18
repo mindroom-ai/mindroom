@@ -668,18 +668,30 @@ async def test_a_level_permission_admits_only_its_fallbacks_level(
 
 
 @pytest.mark.asyncio
-async def test_a_level_of_the_fallback_model_keeps_its_level_over_budget(
+@pytest.mark.parametrize(
+    ("fallback", "requested", "permitted", "runs"),
+    [("cheap", "cheap@low", "cheap@low", "cheap@low"), ("cheap@low", "cheap@high", "cheap", "cheap@low")],
+    ids=["fallback-without-a-level", "fallback-at-a-level"],
+)
+async def test_a_level_of_the_fallback_model_runs_at_a_fixed_level_over_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    fallback: str,
+    requested: str,
+    permitted: str,
+    runs: str,
 ) -> None:
-    """Over budget, ``cheap@low`` already is the fallback ``cheap``, so a reload of its default cannot move a step."""
+    """Over budget, a level of the fallback model keeps its level unless the fallback names one, which then wins.
+
+    Either way a reload of the model's default cannot move a later step.
+    """
 
     def config(default: str) -> Config:
         loaded = _subagent_workflow_config()
         reasoning = ReasoningConfig(levels=["low", "high"], default=default)
         pricing = ModelPricing(input=1, output=2)
         loaded.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning, pricing=pricing)
-        loaded.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
+        loaded.budgets = BudgetsConfig(fallback_model=fallback, monthly_limit_usd=0)
         return loaded
 
     workflow = _SubagentWorkflow(tmp_path, monkeypatch, config("low"))
@@ -698,12 +710,12 @@ async def test_a_level_of_the_fallback_model_keeps_its_level_over_budget(
         "context",
         lambda: tool_runtime_context(replace(context, config_provider=lambda: live[0])),
     )
-    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": "cheap@low"}
+    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": requested}
 
-    run = await workflow.run(_subagent_workflow_spec([participant], steps=2, models=["cheap@low"]))
+    run = await workflow.run(_subagent_workflow_spec([participant], steps=2, models=[permitted]))
 
     assert run["status"] == "completed", run
-    assert loaded == ["cheap@low", "cheap@low"]
+    assert loaded == [runs, runs]
 
 
 @pytest.mark.asyncio

@@ -76,7 +76,7 @@ A reply that already started finishes on its model, so the reply that reaches th
 ## Over-Budget Replies
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
-A reply that already names the fallback model at one of its [reasoning levels](configuration/models.md#reasoning-levels), such as `luna@high` when `fallback_model` is `luna` or `luna@low`, keeps that level.
+When `fallback_model` names no [reasoning level](configuration/models.md#reasoning-levels), a reply that already names the fallback model at a level, such as `luna@high` for `fallback_model: luna`, keeps that level; a `fallback_model` with a level, such as `luna@low`, replaces it.
 This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](openai-api.md) keys mapped to a requester.
 The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.
