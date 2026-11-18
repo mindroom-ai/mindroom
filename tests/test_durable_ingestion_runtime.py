@@ -36,6 +36,7 @@ from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoor
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
+from tests.access_schema_support import refresh_memberships
 from tests.bot_helpers import make_matrix_client_mock
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, legacy_default_store_client, start_call_manager
 from tests.durable_sync_helpers import skip_crypto_maintenance
@@ -337,7 +338,7 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(
         control = nio.RoomMember(bot.agent_user.user_id, None, None)
         member = nio.RoomMember(sender, None, None)
         client.joined_members.return_value = nio.JoinedMembersResponse(members=[control, member], room_id=ROOM)
-        await index.refresh(bot.config, bot.runtime_paths, client)
+        await refresh_memberships(index, bot.config, bot.runtime_paths, client)
         assert index.is_allowed(sender, ["grant"], bot.config, bot.runtime_paths)
         frame = {
             "next_batch": "next2",
@@ -368,7 +369,7 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(
         )
         await bot.orchestrator.agent_reply_membership_sync.refresh_if_needed(
             bot.config,
-            lambda: index.refresh(bot.config, bot.runtime_paths, client),
+            lambda: refresh_memberships(index, bot.config, bot.runtime_paths, client),
         )
         assert client.joined_members.await_count == 2
         assert index.is_allowed(sender, ["grant"], bot.config, bot.runtime_paths) is rejoined

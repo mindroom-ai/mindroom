@@ -65,11 +65,13 @@ class ReadyRuntime(_MultiAgentOrchestrator):
 
 @dataclass
 class RecordingRouter:
-    """A running router bot, recording what each grant refresh's follow-up asks of it."""
+    """A running, synced router bot, recording what each grant refresh's follow-up asks of it."""
 
     client: object
     config: Config
     running: bool = True
+    first_sync_complete: bool = True
+    accepting_work: bool = True
     follow_ups: list[str] = field(default_factory=list)
 
     def schedule_pending_invite_reconciliation(self) -> None:

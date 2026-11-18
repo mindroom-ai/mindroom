@@ -45,6 +45,7 @@ from mindroom.external_triggers.store import (
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
+from tests.access_schema_support import refresh_memberships
 from tests.identity_helpers import persist_entity_accounts
 from tests.matrix_state_helpers import save_matrix_state
 from tests.runtime_fakes import bind_test_embedded_runtime
@@ -321,7 +322,7 @@ async def test_external_trigger_target_accepts_grant_room_member(tmp_path: Path)
         room_id=grant_room_id,
     )
     memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    await refresh_memberships(memberships, config, runtime_paths, client)
     _create_record(runtime_paths, config, _public_key_b64(Ed25519PrivateKey.generate()))
     snapshot = ExternalTriggerStore(runtime_paths).delivery_snapshot(
         "campground",
@@ -373,7 +374,7 @@ async def _membership_authorized_runtime(
         room_id=grant_room_id,
     )
     memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, membership_client)
+    await refresh_memberships(memberships, config, runtime_paths, membership_client)
     return config, runtime_paths, memberships, membership_client
 
 
@@ -1019,7 +1020,7 @@ async def test_membership_authorized_trigger_waits_for_reload_snapshot(
                 ),
             )
             await asyncio.wait_for(wait_started.wait(), timeout=1)
-            await memberships.refresh(config, runtime_paths, membership_client)
+            await refresh_memberships(memberships, config, runtime_paths, membership_client)
             gate.reopen()
             response = await request_task
 

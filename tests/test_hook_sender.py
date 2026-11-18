@@ -57,7 +57,7 @@ from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher
-from tests.access_schema_support import with_current_room_member_access
+from tests.access_schema_support import refresh_memberships, with_current_room_member_access
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -1865,7 +1865,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
         members=[nio.RoomMember("@mindroom_router:localhost", None, None)],
         room_id=room.room_id,
     )
-    await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, bot.client)
+    await refresh_memberships(bot._runtime_view.agent_reply_memberships, bot.config, bot.runtime_paths, bot.client)
     event = nio.RoomMessageText.from_dict(
         {
             "event_id": "$unauthorized-hook-dispatch",

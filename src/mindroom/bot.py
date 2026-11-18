@@ -1183,9 +1183,12 @@ class AgentBot:
         mark_matrix_sync_loop_started(self.agent_name)
 
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
-        """Fail room-backed reply grants closed when the router's sync can no longer vouch for them."""
-        if self._router is not None:
-            self._router.invalidate_memberships(reason=reason)
+        """Fail closed the room-backed reply grants this bot's account observes, which its sync no longer vouches for."""
+        self.orchestrator.agent_reply_membership_sync.invalidate_observer(
+            self.config,
+            self.matrix_id.full_id,
+            reason=reason,
+        )
 
     @property
     def call_manager(self) -> CallManager | None:
@@ -1356,8 +1359,15 @@ class AgentBot:
         first_sync_response: bool,
     ) -> None:
         """Run side effects that do not own raw sync checkpoint safety."""
+        orchestrator = self.orchestrator
+        if first_sync_response:
+            # This account can observe rooms from now on, and may be the only one in some of them.
+            self.invalidate_agent_reply_memberships(reason="first_sync_complete")
+        await orchestrator.agent_reply_membership_sync.refresh_if_needed(
+            orchestrator.config,
+            orchestrator.refresh_agent_reply_memberships,
+        )
         if self._router is not None:
-            await self._router.refresh_memberships_if_needed()
             await self._router.publish_joined_room_state()
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
@@ -1374,9 +1384,14 @@ class AgentBot:
         admission: IngestionRecordAdmission,
         timeline_provenance: nio.TimelineEventProvenance | None,
     ) -> None:
-        """Revoke uncertain control-room grants before admitting more work."""
-        if self._router is not None:
-            self._router.before_ingestion_admission(admission, timeline_provenance)
+        """Revoke the grants of rooms this bot's sync is no longer sure of before admitting more work."""
+        self.orchestrator.agent_reply_membership_sync.pre_admit_ingestion(
+            self.config,
+            self.runtime_paths,
+            admission,
+            timeline_provenance,
+            observer_user_id=self.matrix_id.full_id,
+        )
 
     async def _after_ingestion_admission(
         self,
@@ -1397,10 +1412,15 @@ class AgentBot:
         }
         if facts.receipt_new and (admission.projected is not None or member_activity):
             self.orchestrator.observe_room_activity(event.room_id)
-        if live_member and self._router is not None:
+        if live_member:
             parsed = nio.RoomMemberEvent.from_dict(dict(event.source))
             assert isinstance(parsed, nio.RoomMemberEvent)
-            await self._router.live_membership_transition(event.room_id, parsed)
+            await self.orchestrator.agent_reply_membership_sync.apply_live_transition(
+                self.config,
+                event.room_id,
+                parsed,
+                control_user_id=self.matrix_id.full_id,
+            )
 
     async def _apply_ingestion_membership(self, admission: IngestionRecordAdmission) -> None:
         """Reconcile app state only while this admitted membership is still current."""
@@ -1901,6 +1921,7 @@ class AgentBot:
                 resulting_action="drain_then_cancel_response_runtime",
             )
         self._runtime_view.begin_draining()
+        self.invalidate_agent_reply_memberships(reason="observer_stopping")
         self._delivery_recovery_wake.set()
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()

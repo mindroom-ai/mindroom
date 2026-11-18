@@ -181,6 +181,7 @@ from mindroom.turn_model import TurnModel
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import SourcePreparation
+from tests.access_schema_support import OBSERVER_USER_ID, refresh_memberships
 from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import (
     advance_continuation,
@@ -1451,7 +1452,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
         room_id=grant_room_id,
     )
     memberships = runner.deps.runtime.agent_reply_memberships
-    await memberships.refresh(config, runner.deps.runtime_paths, membership_client)
+    await refresh_memberships(memberships, config, runner.deps.runtime_paths, membership_client)
 
     first_started = asyncio.Event()
     release_first = asyncio.Event()
@@ -1507,7 +1508,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
             config,
             grant_room_id,
             leave,
-            control_user_id="@mindroom_router:localhost",
+            control_user_id=OBSERVER_USER_ID,
         )
         if uncertain:
             memberships.invalidate(config, reason="uncertain_sync_response")
@@ -1518,7 +1519,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
             with pytest.raises(ReplyMembershipPendingError):
                 await asyncio.wait_for(second, timeout=2)
             assert model_sources == ["$first"]
-            await memberships.refresh(config, runner.deps.runtime_paths, membership_client)
+            await refresh_memberships(memberships, config, runner.deps.runtime_paths, membership_client)
             assert await runner.generate_response(second_request) == Owned()
         else:
             # The revoked request leaves its source for its caller to settle.
@@ -2717,7 +2718,8 @@ async def test_ready_approval_replay_rechecks_current_authorization(
         membership_client = AsyncMock(spec=nio.AsyncClient)
         membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
         if revoked_layer == "room":
-            await runner.deps.runtime.agent_reply_memberships.refresh(
+            await refresh_memberships(
+                runner.deps.runtime.agent_reply_memberships,
                 runner.deps.runtime.config,
                 runner.deps.runtime_paths,
                 membership_client,
@@ -2748,7 +2750,8 @@ async def test_ready_approval_replay_rechecks_current_authorization(
             settle_failure.assert_not_awaited()
             execute.assert_not_awaited()
             # The same owned source becomes a definitive denial after refresh.
-            await runner.deps.runtime.agent_reply_memberships.refresh(
+            await refresh_memberships(
+                runner.deps.runtime.agent_reply_memberships,
                 runner.deps.runtime.config,
                 runner.deps.runtime_paths,
                 membership_client,

@@ -28,7 +28,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from tests.access_schema_support import with_responder_access
+from tests.access_schema_support import refresh_memberships, with_responder_access
 from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -310,7 +310,7 @@ class TestDelegateTools:
             room_id=grant_room_id,
         )
         memberships = AgentReplyMembershipIndex()
-        await memberships.refresh(config, runtime_paths, client)
+        await refresh_memberships(memberships, config, runtime_paths, client)
         tools = DelegateTools(
             agent_name="leader",
             runtime_paths=runtime_paths,

@@ -32,6 +32,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
+from tests.access_schema_support import OBSERVER_USER_ID, refresh_memberships
 from tests.conftest import make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_state_helpers import save_matrix_state
@@ -210,7 +211,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
         room_id="!grant:localhost",
     )
     memberships = runner.deps.runtime.agent_reply_memberships
-    await memberships.refresh(bot.config, bot.runtime_paths, membership_client)
+    await refresh_memberships(memberships, bot.config, bot.runtime_paths, membership_client)
     entered = asyncio.Event()
     exited = asyncio.Event()
     release = asyncio.Event()
@@ -276,7 +277,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
             bot.config,
             "!grant:localhost",
             leave,
-            control_user_id="@mindroom_router:localhost",
+            control_user_id=OBSERVER_USER_ID,
         )
         await release_callback()
     with patch.object(type(orchestrator._script_runtime), "shutdown", side_effect=release_callback):

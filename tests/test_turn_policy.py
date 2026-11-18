@@ -34,7 +34,7 @@ from mindroom.teams.spec import TeamMode
 from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
-from tests.access_schema_support import with_responder_access
+from tests.access_schema_support import refresh_memberships, with_responder_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
@@ -932,7 +932,7 @@ async def test_current_room_grant_preserves_existing_thread_owner(config: Config
         members=[nio.RoomMember(_SENDER, None, None)],
         room_id=room.room_id,
     )
-    await policy.deps.agent_reply_memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(policy.deps.agent_reply_memberships, config, runtime_paths_for(config), client)
     history = [make_visible_message(sender=_entity_id(config, "general").full_id, body="Earlier answer")]
     context = _context(thread_id="$root", thread_history=history)
     plan = await _plan(policy, room, _dispatch(context, agent_name=agent_name))

@@ -153,7 +153,7 @@ from mindroom.visible_response_reconciliation import VisibleResponseReconciler, 
 from mindroom.voice.ingress import VoiceIngress, VoiceIngressDeps
 from mindroom.voice.readiness import VoiceReadiness
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
-from tests.access_schema_support import with_responder_access
+from tests.access_schema_support import refresh_memberships, with_responder_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
@@ -4279,14 +4279,14 @@ async def test_scheduled_fire_rechecks_membership_after_requester_revocation(tmp
         room_id=room.room_id,
     )
     memberships = harness.runtime.agent_reply_memberships
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
 
     client.joined_members.return_value = nio.JoinedMembersResponse(
         members=[nio.RoomMember(responder_user_id, None, None)],
         room_id=room.room_id,
     )
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     room.remove_member(_SENDER)  # This bot's own sync sees the departure too.
 
     await harness.deliver(room, event)
@@ -4315,7 +4315,7 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
         members=[nio.RoomMember(_SENDER, None, None)],
         room_id=room.room_id,
     )
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     memberships.invalidate(config, reason="uncertain_sync_response")
     validator = harness.ingress.deps.ingress
     with pytest.raises(ReplyMembershipPendingError):
@@ -4344,7 +4344,7 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     assert await dispatcher.store.pending() == before
     assert await harness.turn_store.get_turn_record(event.event_id) is None
     assert harness.runner.requests == []
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     assert await validator.precheck_event(
         room,
         event,
@@ -4352,7 +4352,7 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
         is_edit=kind == "edit",
     )
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     room.remove_member(_SENDER)  # This bot's own sync sees the departure too.
     dispatcher.start()
     try:
@@ -4378,9 +4378,8 @@ async def test_first_message_after_joining_waits_for_the_router_to_apply_the_joi
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     validator = harness.ingress.deps.ingress
-    router_id = _entity_user_id(config, ROUTER_AGENT_NAME)
 
     def router_applies_join(user_id: str) -> None:
         join = nio.RoomMemberEvent.from_dict(
@@ -4394,7 +4393,7 @@ async def test_first_message_after_joining_waits_for_the_router_to_apply_the_joi
             },
         )
         assert isinstance(join, nio.RoomMemberEvent)
-        assert memberships.apply_member_event(config, room.room_id, join, control_user_id=router_id)
+        assert memberships.apply_member_event(config, room.room_id, join, control_user_id=client.user_id)
 
     # The check settles in the same callback once the router catches up, instead of failing it into a journal retry.
     precheck = asyncio.create_task(
@@ -4426,7 +4425,7 @@ async def test_message_checked_during_a_membership_refresh_passes_when_the_refre
         members=[nio.RoomMember(_SENDER, None, None)],
         room_id=room.room_id,
     )
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     memberships.invalidate(config, reason="uncertain_sync_response")
     validator = harness.ingress.deps.ingress
 
@@ -4435,7 +4434,7 @@ async def test_message_checked_during_a_membership_refresh_passes_when_the_refre
     )
     await asyncio.sleep(0)
     assert not precheck.done()
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
 
     assert await asyncio.wait_for(precheck, timeout=5) is True
 
@@ -4452,7 +4451,7 @@ async def test_departed_sender_is_denied_once_this_agent_sees_the_leave(tmp_path
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     validator = harness.ingress.deps.ingress
 
     with pytest.raises(ReplyMembershipPendingError):
@@ -6636,7 +6635,7 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
         room_id=room.room_id,
     )
     memberships = harness.runtime.agent_reply_memberships
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     memberships.invalidate(config, reason="uncertain_sync_response")
     tracking_path = tmp_path / "dispatch-tracking"
     dispatcher = _obligation_runner(
@@ -6690,7 +6689,7 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
             members=[nio.RoomMember(_SENDER, None, None)] if recover_as_member else [],
             room_id=room.room_id,
         )
-        await memberships.refresh(config, runtime_paths_for(config), client)
+        await refresh_memberships(memberships, config, runtime_paths_for(config), client)
         if not recover_as_member:
             room.remove_member(_SENDER)  # This bot's own sync sees the departure too.
         if cold:
@@ -6740,7 +6739,7 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
         room_id=room.room_id,
     )
     memberships = harness.runtime.agent_reply_memberships
-    await memberships.refresh(config, runtime_paths_for(config), client)
+    await refresh_memberships(memberships, config, runtime_paths_for(config), client)
     dispatcher = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
@@ -6785,7 +6784,7 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
                 assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
         elif race == "denied":
             client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
-            await memberships.refresh(config, runtime_paths_for(config), client)
+            await refresh_memberships(memberships, config, runtime_paths_for(config), client)
             assert not harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
         release.set()
         await harness.gate.drain_all()
@@ -6801,7 +6800,7 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
             assert before["response_count"] == 0
             assert before["ledger_exists"] is False
             assert before["retry_requests"] == [(event.event_id,)]
-            await memberships.refresh(config, runtime_paths_for(config), client)
+            await refresh_memberships(memberships, config, runtime_paths_for(config), client)
         await _settle_dispatcher(harness, dispatcher)
         after_count = len(harness.runner.requests)
         await dispatcher.drain_once()

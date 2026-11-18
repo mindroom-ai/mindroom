@@ -1,4 +1,4 @@
-"""Router-sync lifecycle for the shared reply-membership index and what each grant change asks of every bot."""
+"""Sync lifecycle of the shared reply-membership index, driven by every bot, and what each grant change asks of them."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class _ReplyGrantEffects(Protocol):
 
 
 class AgentReplyMembershipSync:
-    """Own router receive-generation and sync-batch membership state, and apply every grant change to the fleet."""
+    """Apply each bot's sync to the rooms its account observes, and every grant change to the fleet."""
 
     def __init__(
         self,
@@ -69,16 +69,23 @@ class AgentReplyMembershipSync:
         self._memberships.invalidate(config, reason=reason)
         self._grants_lost()
 
+    def invalidate_observer(self, config: Config, observer_user_id: str, *, reason: str) -> None:
+        """Fail closed the rooms one account observes, request a refresh, and end the calls that lost reply access."""
+        self._memberships.invalidate_observer(config, observer_user_id, reason=reason)
+        self._grants_lost()
+
     def pre_admit_ingestion(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
         admission: IngestionRecordAdmission,
         timeline_provenance: nio.TimelineEventProvenance | None,
+        *,
+        observer_user_id: str,
     ) -> None:
-        """Fence uncertainty and reported control departures before admission, revoking the calls they deny."""
+        """Fence one account's sync uncertainty and reported departures before admission, revoking the calls they deny."""
         if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
-            self.invalidate(config, reason="uncertain_sync_response")
+            self.invalidate_observer(config, observer_user_id, reason="uncertain_sync_response")
             return
         if (
             timeline_provenance is nio.TimelineEventProvenance.RECOVERED
@@ -98,7 +105,13 @@ class AgentReplyMembershipSync:
             reason = "control_client_departed"
         else:
             return
-        if self._memberships.mark_room_unready(config, runtime_paths, room_id, reason=reason):
+        if self._memberships.mark_room_unready(
+            config,
+            runtime_paths,
+            room_id,
+            observer_user_id=observer_user_id,
+            reason=reason,
+        ):
             self._grants_lost()
 
     def _grants_lost(self) -> None:
@@ -111,20 +124,14 @@ class AgentReplyMembershipSync:
         for bot in self._bots():
             bot.schedule_reply_authorized_call_revocation()
 
-    async def refresh_if_needed(
-        self,
-        config: Config,
-        refresh: Callable[[], Awaitable[None]],
-        *,
-        owner: object | None = None,
-    ) -> None:
+    async def refresh_if_needed(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
         """Refresh once when due, apply bounded retry backoff on failure, and wait for the refresh at most 10 s.
 
-        A slower refresh keeps running in the background, so the router's sync frame never stalls behind a slow
-        homeserver and a large rebuild still finishes; the next frame waits for that refresh instead of starting one.
-        A stopping router cancels it at once, and its owner's shutdown drain, the router's, covers one started later.
+        A slower refresh keeps running in the background, so a bot's sync frame never stalls behind a slow homeserver
+        and a large rebuild still finishes; the next frame waits for that refresh instead of starting one.
+        No bot owns the refresh, so a stopping one does not cancel it: its invalidation keeps it from publishing.
         """
-        task = self._refresh_task_when_needed(config, refresh, owner=owner, after_backoff=True)
+        task = self._refresh_task_when_needed(config, refresh, after_backoff=True)
         if task is not None:
             with suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(task), 10)
@@ -132,11 +139,11 @@ class AgentReplyMembershipSync:
     async def refresh_for_access_check(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
         """Refresh at once when grants need it, even during backoff, and wait until the refresh ends.
 
-        Access checks outside the router's sync call this, so they refresh only then, share a refresh in flight with
-        the router's sync, and update its backoff. Waiting never cancels the refresh, and one that raises or is
+        Access checks outside a sync frame call this, so they refresh only then, share a refresh in flight with
+        the bots' sync frames, and update its backoff. Waiting never cancels the refresh, and one that raises or is
         cancelled leaves the grants as they were.
         """
-        task = self._refresh_task_when_needed(config, refresh, owner=None, after_backoff=False)
+        task = self._refresh_task_when_needed(config, refresh, after_backoff=False)
         if task is not None:
             await asyncio.wait([task])
 
@@ -145,7 +152,6 @@ class AgentReplyMembershipSync:
         config: Config,
         refresh: Callable[[], Awaitable[None]],
         *,
-        owner: object | None,
         after_backoff: bool,
     ) -> asyncio.Task[None] | None:
         """When grants need it, return the refresh in flight, else start one if ``after_backoff`` allows."""
@@ -159,14 +165,8 @@ class AgentReplyMembershipSync:
             self._refresh_task = create_background_task(
                 self._refresh(config, refresh),
                 name="agent_reply_membership_refresh",
-                owner=owner,
             )
         return self._refresh_task
-
-    def cancel_refresh(self) -> None:
-        """Cancel a running refresh; a later frame starts another while grants still need one."""
-        if self._refresh_task is not None:
-            self._refresh_task.cancel()
 
     async def _refresh(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
         await refresh()
@@ -189,7 +189,7 @@ class AgentReplyMembershipSync:
         *,
         control_user_id: str,
     ) -> None:
-        """Apply one durable LIVE transition and run its effects.
+        """Apply one durable LIVE transition from ``control_user_id``'s sync and run its effects.
 
         Effects that a failed or cancelled run left pending run again with the next transition, such as this event's
         replay.

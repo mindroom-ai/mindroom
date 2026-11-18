@@ -138,7 +138,7 @@ from .orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
-from .room_steward import room_poster, room_steward
+from .room_steward import membership_observers, room_poster, room_steward
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -798,8 +798,6 @@ class _MultiAgentOrchestrator:
         self._external_trigger_runtime.unbind()
         self._computer_runtime.unbind()
         if ROUTER_AGENT_NAME in entity_names:
-            # Fence room-backed grants before stopping their sole control client.
-            self.agent_reply_membership_sync.invalidate(self.config, reason="router_replacement")
             self._call_transcripts_runtime.unbind()
         await self.scheduled_tasks.release(entity_names)
 
@@ -1079,13 +1077,10 @@ class _MultiAgentOrchestrator:
         self.turn_recovery.schedule()
 
     async def refresh_agent_reply_memberships(self) -> None:
-        """Refresh room-backed reply grants through the router's Matrix client."""
+        """Refresh room-backed reply grants, each room read through the one synced bot that observes it."""
         config = self.config
-        router_client = self._router_client()
-        if router_client is None:
-            self.agent_reply_membership_sync.invalidate(config, reason="router_unavailable")
-            return
-        await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_client)
+        clients, pick_observer = membership_observers(self.agent_bots)
+        await self.agent_reply_memberships.refresh(config, self.runtime_paths, clients, pick_observer=pick_observer)
         self.turn_recovery.schedule()
         await self.agent_reply_membership_sync.apply_grant_change()
 

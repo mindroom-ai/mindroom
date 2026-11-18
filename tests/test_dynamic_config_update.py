@@ -18,6 +18,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
+from tests.access_schema_support import refresh_memberships
 from tests.conftest import install_bots, install_model_providers, orchestrator_runtime_paths, published_config_load
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
@@ -516,7 +517,8 @@ class TestDynamicConfigUpdate:
             members=[nio.RoomMember("@alice:example.com", None, None)],
             room_id=room_id,
         )
-        await orchestrator.agent_reply_memberships.refresh(
+        await refresh_memberships(
+            orchestrator.agent_reply_memberships,
             initial_config,
             orchestrator.runtime_paths,
             membership_client,
@@ -590,7 +592,8 @@ class TestDynamicConfigUpdate:
             members=[nio.RoomMember("@alice:example.com", None, None)],
             room_id=room_id,
         )
-        await orchestrator.agent_reply_memberships.refresh(
+        await refresh_memberships(
+            orchestrator.agent_reply_memberships,
             initial_config,
             orchestrator.runtime_paths,
             membership_client,

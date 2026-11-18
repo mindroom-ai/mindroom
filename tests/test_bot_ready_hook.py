@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 from uuid import UUID
 
 import nio
@@ -45,6 +45,7 @@ from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.tool_system.plugins import config_plugins
+from tests.access_schema_support import refresh_memberships
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -106,15 +107,17 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, ReadyRuntim
     bot = _agent_bot(tmp_path, agent_name="router")
     orchestrator = cast("ReadyRuntime", bot.orchestrator)
     membership_sync = orchestrator.agent_reply_membership_sync
-    membership_sync.invalidate = MagicMock(wraps=membership_sync.invalidate)  # type: ignore[method-assign]
+    membership_sync.invalidate_observer = MagicMock(  # type: ignore[method-assign]
+        wraps=membership_sync.invalidate_observer,
+    )
     orchestrator.refresh_agent_reply_memberships = AsyncMock()
     orchestrator.handle_bot_ready = AsyncMock()
     return bot, orchestrator
 
 
 def _invalidations(orchestrator: ReadyRuntime) -> MagicMock:
-    """Return the observed grant invalidations of a runtime from `_router_bot_with_orchestrator`."""
-    return cast("MagicMock", orchestrator.agent_reply_membership_sync.invalidate)
+    """Return the observed invalidations of a bot's own rooms in a runtime from `_router_bot_with_orchestrator`."""
+    return cast("MagicMock", orchestrator.agent_reply_membership_sync.invalidate_observer)
 
 
 async def _router_with_call_manager(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
@@ -353,7 +356,7 @@ def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> No
 
     bot.mark_sync_loop_started()
 
-    _invalidations(orchestrator).assert_called_once_with(bot.config, reason="sync_loop_started")
+    _invalidations(orchestrator).assert_called_once_with(bot.config, bot.matrix_id.full_id, reason="sync_loop_started")
 
 
 @pytest.mark.asyncio
@@ -395,7 +398,11 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
     ):
         await _complete_frame(bot)
 
-    _invalidations(orchestrator).assert_called_once_with(bot.config, reason="uncertain_sync_response")
+    # The generation's first frame also makes this account an observer, which asks for a refresh of its own.
+    assert _invalidations(orchestrator).call_args_list == [
+        call(bot.config, bot.matrix_id.full_id, reason=reason)
+        for reason in ("uncertain_sync_response", "first_sync_complete")
+    ]
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 
 
@@ -406,7 +413,11 @@ def test_router_limited_sync_invalidates_before_timeline_admission(tmp_path: Pat
 
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
 
-    _invalidations(orchestrator).assert_called_once_with(bot.config, reason="uncertain_sync_response")
+    _invalidations(orchestrator).assert_called_once_with(
+        bot.config,
+        bot.matrix_id.full_id,
+        reason="uncertain_sync_response",
+    )
 
 
 @pytest.mark.asyncio
@@ -432,7 +443,7 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
         ],
         room_id=room_id,
     )
-    await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(bot._runtime_view.agent_reply_memberships, bot.config, bot.runtime_paths, client)
     departure = _validated_reported_membership_admission(
         bot,
         room_id,
@@ -462,20 +473,6 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
 
 
 @pytest.mark.asyncio
-async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tmp_path: Path) -> None:
-    """An unavailable grant room must not cause one Matrix API refresh for every incoming message."""
-    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
-    bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
-
-    with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
-        await bot._router.refresh_memberships_if_needed()
-        await bot._router.refresh_memberships_if_needed()
-
-    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
 async def test_router_authoritative_departure_revokes_grant_before_membership_fence(
     tmp_path: Path,
 ) -> None:
@@ -486,7 +483,7 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
     client = _grant_room_client(bot, room_id, sender_id)
     bot.client = client
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     assert index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
     admission = _validated_reported_membership_admission(
         bot,
@@ -522,7 +519,7 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
     client = _grant_room_client(bot, room_id, sender_id)
     bot.client = client
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
 
     departure = _validated_reported_membership_admission(
         bot,
@@ -559,7 +556,7 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     client = _grant_room_client(bot, room_id, sender_id)
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     admission = _validated_reported_membership_admission(
         bot,
         room_id,
@@ -587,7 +584,7 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
     bot, call_manager = await _router_with_call_manager(tmp_path)
     client = _grant_room_client(bot, grant_room_id, sender_id)
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     member_event = _member_event(
         "$membership",
         user_id=sender_id,
@@ -629,7 +626,7 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
     bot, call_manager = await _router_with_call_manager(tmp_path)
     client = _grant_room_client(bot, room_id)
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     member_event = _member_event("$join", user_id=sender_id, membership="join", ts=1)
     admission = _validated_timeline_admission(
         bot,
@@ -724,7 +721,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     bot, call_manager = await _router_with_call_manager(tmp_path)
     client = _grant_room_client(bot, room_id)
     index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
     join_event = _member_event("$join", user_id=sender_id, membership="join", ts=1)
     revoke_event = _member_event("$revoke", user_id=sender_id, membership=membership, ts=2)
     join_admission = _validated_timeline_admission(

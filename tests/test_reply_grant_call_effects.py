@@ -14,6 +14,7 @@ from nio import TimelineEventProvenance
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from tests.access_schema_support import refresh_memberships
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, start_call_manager
 from tests.test_bot_ready_hook import (
     _FRESH_SEMANTIC_FACTS,
@@ -82,7 +83,12 @@ async def _router_and_agent(tmp_path: Path, calls: _Calls) -> tuple[AgentBot, Ag
     agent = _agent_bot(tmp_path, agent_name="code", orchestrator=cast("ReadyRuntime", router.orchestrator))
     router.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     router.client = _grant_room_client(router, GRANT_ROOM_ID)
-    await router._runtime_view.agent_reply_memberships.refresh(router.config, router.runtime_paths, router.client)
+    await refresh_memberships(
+        router._runtime_view.agent_reply_memberships,
+        router.config,
+        router.runtime_paths,
+        router.client,
+    )
     managers = {bot.agent_name: calls.observe(bot.agent_name, await start_call_manager(bot)) for bot in (router, agent)}
     return router, agent, managers
 

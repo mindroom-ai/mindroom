@@ -22,7 +22,7 @@ from mindroom.orchestration.computer_runtime import _authorize_computer, _comput
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 from mindroom.worker_computer.sessions import ComputerError
-from tests.access_schema_support import joined_members_response
+from tests.access_schema_support import joined_members_response, refresh_memberships
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.runtime_fakes import RecordingRouter, ready_runtime
 
@@ -125,7 +125,7 @@ async def test_live_membership_policy_and_canonical_browser_scope(
         runtime_paths=paths,
         client=client,
         memberships=memberships,
-        refresh_memberships=lambda: memberships.refresh(config, paths, client),
+        refresh_memberships=lambda: refresh_memberships(memberships, config, paths, client),
     )
     if denial:
         with pytest.raises(ComputerError) as error:
@@ -180,7 +180,7 @@ async def test_actual_membership_refresh_does_not_log_transport_urls(tmp_path: P
             runtime_paths=paths,
             client=client,
             memberships=memberships,
-            refresh_memberships=lambda: memberships.refresh(config, paths, client),
+            refresh_memberships=lambda: refresh_memberships(memberships, config, paths, client),
         )
     assert error.value.status_code == 503
     assert "refresh-secret" not in str(logs)

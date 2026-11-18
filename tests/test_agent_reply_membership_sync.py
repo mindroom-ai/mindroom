@@ -1,4 +1,4 @@
-"""Tests for router reply-membership sync coordination and what each grant change asks of every bot."""
+"""Tests for reply-membership sync coordination and what each grant change asks of every bot."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
-from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -43,6 +42,7 @@ _JOIN = nio.RoomMemberEvent.from_dict(
     },
 )
 assert isinstance(_JOIN, nio.RoomMemberEvent)
+_OBSERVER = "@mindroom_observer:localhost"
 
 
 @dataclass
@@ -96,7 +96,7 @@ def _fleet(*names: str, hold: asyncio.Event | None = None) -> tuple[list[_Bot], 
 
 
 def test_history_loss_invalidates_grants_and_revokes_every_bots_calls_before_admission(tmp_path: Path) -> None:
-    """A history-loss carrier fails every room grant closed and schedules every bot's revocation synchronously."""
+    """A history-loss carrier fails its account's rooms closed and schedules every bot's revocation synchronously."""
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     bots, calls = _fleet("router", "voice")
     membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
@@ -107,9 +107,11 @@ def test_history_loss_invalidates_grants_and_revokes_every_bots_calls_before_adm
         test_runtime_paths(tmp_path),
         _ingestion_admission(IngestionRecordDisposition.HISTORY_LOSS, room_id="!uncertain:localhost"),
         None,
+        observer_user_id=_OBSERVER,
     )
 
-    memberships.invalidate.assert_called_once_with(config, reason="uncertain_sync_response")
+    memberships.invalidate_observer.assert_called_once_with(config, _OBSERVER, reason="uncertain_sync_response")
+    memberships.invalidate.assert_not_called()
     memberships.mark_room_unready.assert_not_called()
     assert calls.log == [("router", "scheduled_revoke"), ("voice", "scheduled_revoke")]
 
@@ -148,7 +150,7 @@ async def test_history_loss_refreshes_only_room_backed_grants(
         nonlocal refreshes
         refreshes += 1
 
-    membership_sync.invalidate(config, reason="uncertain_sync_response")
+    membership_sync.invalidate_observer(config, _OBSERVER, reason="uncertain_sync_response")
     await membership_sync.refresh_if_needed(config, refresh)
 
     assert refreshes == expected_refreshes
@@ -197,7 +199,7 @@ def test_room_fence_revokes_every_bots_calls_before_admission(
     *,
     grant_changed: bool,
 ) -> None:
-    """A reported control departure or recovered membership fences its room; when a grant changed, every bot revokes."""
+    """A reported departure or recovered membership fences its room for its account; a changed grant revokes calls."""
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     memberships.mark_room_unready.return_value = grant_changed
     bots, calls = _fleet("router", "voice")
@@ -205,10 +207,16 @@ def test_room_fence_revokes_every_bots_calls_before_admission(
     config = Config()
     runtime_paths = test_runtime_paths(tmp_path)
 
-    membership_sync.pre_admit_ingestion(config, runtime_paths, admission, provenance)
+    membership_sync.pre_admit_ingestion(config, runtime_paths, admission, provenance, observer_user_id=_OBSERVER)
 
-    memberships.mark_room_unready.assert_called_once_with(config, runtime_paths, "!departed:localhost", reason=reason)
-    memberships.invalidate.assert_not_called()
+    memberships.mark_room_unready.assert_called_once_with(
+        config,
+        runtime_paths,
+        "!departed:localhost",
+        observer_user_id=_OBSERVER,
+        reason=reason,
+    )
+    memberships.invalidate_observer.assert_not_called()
     assert calls.log == ([("router", "scheduled_revoke"), ("voice", "scheduled_revoke")] if grant_changed else [])
 
 
@@ -241,9 +249,15 @@ def test_non_reported_departure_carriers_do_not_change_reply_memberships(
     bots, calls = _fleet("router")
     membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
 
-    membership_sync.pre_admit_ingestion(Config(), test_runtime_paths(tmp_path), admission, None)
+    membership_sync.pre_admit_ingestion(
+        Config(),
+        test_runtime_paths(tmp_path),
+        admission,
+        None,
+        observer_user_id=_OBSERVER,
+    )
 
-    memberships.invalidate.assert_not_called()
+    memberships.invalidate_observer.assert_not_called()
     memberships.mark_room_unready.assert_not_called()
     assert calls.log == []
 
@@ -253,8 +267,8 @@ def test_every_invalidation_revokes_and_none_starts_calls() -> None:
     bots, calls = _fleet("router", "voice")
     membership_sync = AgentReplyMembershipSync(AgentReplyMembershipIndex(), lambda: bots)
 
-    membership_sync.invalidate(Config(), reason="uncertain_sync_response")
-    membership_sync.invalidate(Config(), reason="sync_loop_started")
+    membership_sync.invalidate(Config(), reason="config_reload")
+    membership_sync.invalidate_observer(Config(), _OBSERVER, reason="sync_loop_started")
 
     assert calls.ops("scheduled_revoke") == ["router", "router", "voice", "voice"]
     assert calls.ops("reconcile") == []
@@ -347,7 +361,7 @@ async def test_live_transition_retries_unfinished_effects_after_event_replay(int
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("loss", ["invalidation", "room_fence"])
+@pytest.mark.parametrize("loss", ["invalidation", "observer_invalidation", "room_fence"])
 async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(tmp_path: Path, loss: str) -> None:
     """A failed refresh waits out its backoff, but a new loss of authority refreshes at once."""
     config = Config()
@@ -367,6 +381,8 @@ async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
     assert refreshes == 1
     if loss == "invalidation":
         membership_sync.invalidate(config, reason="uncertain_sync_response")
+    elif loss == "observer_invalidation":
+        membership_sync.invalidate_observer(config, _OBSERVER, reason="uncertain_sync_response")
     else:
         membership_sync.pre_admit_ingestion(
             config,
@@ -379,6 +395,7 @@ async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
                 membership="leave",
             ),
             None,
+            observer_user_id=_OBSERVER,
         )
     await membership_sync.refresh_if_needed(config, failed_refresh)
 
@@ -421,28 +438,35 @@ async def test_sync_frame_waits_at_most_ten_seconds_for_a_slow_refresh(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_the_routers_stop_cancels_its_slow_refresh() -> None:
-    """The refresh outlives a frame that stopped waiting, but not the router whose drain owns it."""
+async def test_a_stopping_observer_does_not_cancel_the_refresh() -> None:
+    """No bot owns the refresh: one that stops only invalidates its rooms, and the refresh runs to its end."""
     config = Config()
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     memberships.needs_refresh.return_value = True
     membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
-    router = object()
     started = asyncio.Event()
+    release = asyncio.Event()
+    finished = False
 
-    async def hung_refresh() -> None:
+    async def slow_refresh() -> None:
+        nonlocal finished
         started.set()
-        await asyncio.Future()
+        await release.wait()
+        finished = True
 
-    frame = asyncio.create_task(membership_sync.refresh_if_needed(config, hung_refresh, owner=router))
+    frame = asyncio.create_task(membership_sync.refresh_if_needed(config, slow_refresh))
     await started.wait()
-    assert not await wait_for_background_tasks(timeout=0, owner=router)
-    assert isinstance((await asyncio.gather(frame, return_exceptions=True))[0], asyncio.CancelledError)
+    membership_sync.invalidate_observer(config, _OBSERVER, reason="observer_stopping")
+    release.set()
+    await frame
+
+    assert finished
+    memberships.invalidate_observer.assert_called_once_with(config, _OBSERVER, reason="observer_stopping")
 
 
 @pytest.mark.asyncio
 async def test_a_sync_frame_never_waits_on_a_refresh_it_does_not_need() -> None:
-    """A refresh an access check started to read one room again is no reason for the router's frame to wait."""
+    """A refresh an access check started to read one room again is no reason for a bot's frame to wait."""
     config = Config()
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     memberships.needs_refresh.return_value = True

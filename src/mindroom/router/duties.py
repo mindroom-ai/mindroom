@@ -30,10 +30,9 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
     from mindroom.bot_room_lifecycle import BotRoomLifecycle
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.event_journal import IngestionRecordAdmission, PrincipalStore
+    from mindroom.event_journal import PrincipalStore
     from mindroom.hooks import HookContextSupport
     from mindroom.matrix.identity import MatrixID
     from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
@@ -54,10 +53,9 @@ class RouterDutiesDeps:
 
 @dataclass
 class RouterDuties:
-    """Keep room-backed reply grants current, set up the rooms the router joins, and emit room-membership hooks.
+    """Set up the rooms the router joins and emit room-membership hooks.
 
-    Only the router bot builds one; the runtime owns the reply-membership index and its sync coordinator, which the
-    router drives from its own Matrix sync.
+    Only the router bot builds one.
     """
 
     deps: RouterDutiesDeps
@@ -70,10 +68,6 @@ class RouterDuties:
     # Rooms where a trigger failed while their retry ran, so that retry runs once more.
     _room_state_reruns: set[str] = field(default_factory=set, init=False, repr=False)
 
-    @property
-    def _membership_sync(self) -> AgentReplyMembershipSync:
-        return self.deps.runtime.orchestrator.agent_reply_membership_sync
-
     async def started(self, client: nio.AsyncClient) -> None:
         """Remove managed accounts the config no longer has from the rooms the router can see."""
         try:
@@ -82,11 +76,10 @@ class RouterDuties:
             self.deps.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
 
     def stopping(self) -> None:
-        """Cancel the membership refresh and room state retries, which a stopping router discards, without waiting.
+        """Cancel the room state retries, which a stopping router discards, without waiting.
 
-        The next router redoes both, and waiting for them would spend the stop budget its replies need to finish.
+        The next router redoes them, and waiting for them would spend the stop budget its replies need to finish.
         """
-        self._membership_sync.cancel_refresh()
         for task in self._room_state_retries.values():
             task.cancel()
 
@@ -150,37 +143,6 @@ class RouterDuties:
             reconcile_room_accounts(client, runtime.config, runtime.runtime_paths, room_id),
         )
         return all(current)
-
-    def invalidate_memberships(self, *, reason: str) -> None:
-        """Fail closed when the router's view of Matrix membership is uncertain."""
-        self._membership_sync.invalidate(self.deps.runtime.config, reason=reason)
-
-    async def refresh_memberships_if_needed(self) -> None:
-        """Rebuild room-backed reply grants after a receive-generation boundary."""
-        orchestrator = self.deps.runtime.orchestrator
-        await self._membership_sync.refresh_if_needed(
-            orchestrator.config,
-            orchestrator.refresh_agent_reply_memberships,
-            owner=self.deps.runtime,
-        )
-
-    def before_ingestion_admission(
-        self,
-        admission: IngestionRecordAdmission,
-        timeline_provenance: nio.TimelineEventProvenance | None,
-    ) -> None:
-        """Revoke uncertain control-room grants before the router admits more work."""
-        runtime = self.deps.runtime
-        self._membership_sync.pre_admit_ingestion(runtime.config, runtime.runtime_paths, admission, timeline_provenance)
-
-    async def live_membership_transition(self, room_id: str, event: nio.RoomMemberEvent) -> None:
-        """Update reply grants from one durably admitted live Matrix membership transition."""
-        await self._membership_sync.apply_live_transition(
-            self.deps.runtime.config,
-            room_id,
-            event,
-            control_user_id=self.deps.matrix_id.full_id,
-        )
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Refresh responder presentation, the room's MindRoom accounts and the welcome, and emit human membership hooks."""

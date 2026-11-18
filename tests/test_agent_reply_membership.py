@@ -16,7 +16,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.state import MatrixState
-from tests.access_schema_support import joined_members_response
+from tests.access_schema_support import joined_members_response, refresh_memberships
 from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
@@ -146,7 +146,7 @@ async def _refresh_while_router_applies(
     client = AsyncMock()
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=list(answers))
     client.joined_members.side_effect = joined_members
-    refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
+    refresh_task = asyncio.create_task(refresh_memberships(index, config, runtime_paths, client))
     await query_started.wait()
     for room_id, user_id, membership in transitions:
         index.apply_member_event(
@@ -174,7 +174,7 @@ async def test_refresh_canonicalizes_authoritativejoined_members_response(tmp_pa
     client.joined_members.return_value = joined_members_response(room_id, "@telegram_alice:example.com")
     index = AgentReplyMembershipIndex()
 
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
     assert index.is_allowed("@telegram_alice:example.com", ["project"], config, runtime_paths)
@@ -198,7 +198,7 @@ async def test_configured_bot_alias_cannot_prove_human_grant_room_membership(tmp
     client.joined_members.return_value = joined_members_response(room_id, bot_id)
     index = AgentReplyMembershipIndex()
 
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert not index.is_allowed(owner_id, ["project"], config, runtime_paths)
 
@@ -220,7 +220,7 @@ async def test_managed_agent_alias_cannot_prove_human_grant_room_membership(tmp_
     client.joined_members.return_value = joined_members_response(room_id, managed_agent_id)
     index = AgentReplyMembershipIndex()
 
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert not index.is_allowed(owner_id, ["project"], config, runtime_paths)
 
@@ -241,7 +241,7 @@ async def test_refresh_uses_any_ready_joined_room(tmp_path: Path) -> None:
     ]
     index = AgentReplyMembershipIndex()
 
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert index.is_allowed("@alice:example.com", ["project", "secondary"], config, runtime_paths)
 
@@ -256,7 +256,7 @@ async def test_ready_room_can_grant_while_another_room_awaits_retry(tmp_path: Pa
     client.joined_members.return_value = joined_members_response("!project:example.com", "@alice:example.com")
     index = AgentReplyMembershipIndex()
 
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert index.needs_refresh(config)
     assert index.is_allowed("@alice:example.com", ["project", "secondary"], config, runtime_paths)
@@ -270,7 +270,7 @@ async def test_unresolved_grant_room_fails_closed(tmp_path: Path) -> None:
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!project:example.com"])
     index = AgentReplyMembershipIndex()
 
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
     client.joined_members.assert_not_awaited()
@@ -286,7 +286,7 @@ async def test_router_not_joined_to_grant_room_fails_closed(tmp_path: Path) -> N
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
     index = AgentReplyMembershipIndex()
 
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
     client.joined_members.assert_not_awaited()
@@ -307,7 +307,7 @@ async def test_failed_joined_members_snapshot_fails_closed(tmp_path: Path) -> No
     )
     index = AgentReplyMembershipIndex()
 
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
@@ -323,7 +323,7 @@ async def test_non_join_transition_revokes_ready_member(tmp_path: Path, membersh
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = joined_members_response(room_id, "@alice:example.com")
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     index.apply_member_event(
         config,
@@ -345,7 +345,7 @@ async def test_join_transition_adds_member_to_ready_snapshot(tmp_path: Path) -> 
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = joined_members_response(room_id)
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     index.apply_member_event(
         config,
@@ -375,7 +375,7 @@ async def test_alias_departure_preserves_other_joined_identity_for_canonical_use
         "@telegram_alice:example.com",
     )
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     index.apply_member_event(
         config,
@@ -398,7 +398,7 @@ async def test_control_client_departure_marks_grant_room_unready(tmp_path: Path)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = joined_members_response(room_id, router_user_id, "@alice:example.com")
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     index.apply_member_event(
         config,
@@ -430,14 +430,16 @@ async def test_authoritative_control_departure_fences_inflight_initial_snapshot(
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
     index.invalidate(config, reason="startup")
-    refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
+    refresh_task = asyncio.create_task(refresh_memberships(index, config, runtime_paths, client))
     await query_started.wait()
 
     try:
-        assert index.mark_room_unready(
+        # No published row names the router yet, so only the refresh in flight applies its departure.
+        assert not index.mark_room_unready(
             config,
             runtime_paths,
             room_id,
+            observer_user_id=_ROUTER_ID,
             reason="control_client_departed",
         )
     finally:
@@ -467,7 +469,7 @@ async def test_unrelated_room_transition_during_refresh_leaves_grants_ready(tmp_
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
     index.invalidate(config, reason="reload")
-    refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
+    refresh_task = asyncio.create_task(refresh_memberships(index, config, runtime_paths, client))
     await query_started.wait()
 
     index.apply_member_event(
@@ -508,7 +510,7 @@ async def test_room_grant_policy_change_invalidates_old_snapshot(tmp_path: Path)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = joined_members_response(room_id, "@alice:example.com")
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
     changed_config, _ = _runtime_config(
         tmp_path,
         member_rooms=["secondary"],
@@ -531,7 +533,7 @@ async def test_alias_policy_change_reuses_raw_membership_snapshot(tmp_path: Path
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = joined_members_response(room_id, "@bridge:example.com")
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
     changed_config, _ = _runtime_config(
         tmp_path,
         member_rooms=["project"],
@@ -559,9 +561,9 @@ async def test_refresh_adopts_changed_policy_without_external_invalidation(tmp_p
         joined_members_response("!secondary:example.com", "@bob:example.com"),
     ]
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
-    await index.refresh(changed_config, runtime_paths, client)
+    await refresh_memberships(index, changed_config, runtime_paths, client)
 
     assert not index.needs_refresh(changed_config)
     assert index.is_allowed("@bob:example.com", ["secondary"], changed_config, runtime_paths)
@@ -578,7 +580,7 @@ async def test_invalidation_revokes_ready_members_until_refresh(tmp_path: Path) 
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = joined_members_response(room_id, "@alice:example.com")
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     index.invalidate(config, reason="sync_restart")
 
@@ -615,7 +617,7 @@ async def test_new_current_room_transition_requests_authoritative_refresh(
     client = AsyncMock()
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
     assert index.needs_refresh(config) is named_room
     assert not index.grants_pending(config, joined_rooms=(), current_room_id=room_id)
 
@@ -634,7 +636,13 @@ async def test_new_current_room_transition_requests_authoritative_refresh(
             if log["event"] == "agent_reply_grant_room_membership_transition"
         ] == ([] if named_room else [(None, room_id)])
     else:
-        changed = index.mark_room_unready(config, runtime_paths, room_id, reason="recovered_membership")
+        changed = index.mark_room_unready(
+            config,
+            runtime_paths,
+            room_id,
+            observer_user_id=control_user_id,
+            reason="recovered_membership",
+        )
 
     assert changed
     assert index.needs_refresh(config)
@@ -662,7 +670,7 @@ async def test_current_room_refresh_reuses_ready_room_snapshots(tmp_path: Path) 
         joined_members_response(new_room_id, control_user_id),
     ]
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     index.apply_member_event(
         config,
@@ -670,7 +678,7 @@ async def test_current_room_refresh_reuses_ready_room_snapshots(tmp_path: Path) 
         _member_event(control_user_id, "join"),
         control_user_id=control_user_id,
     )
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert [call.args[0] for call in client.joined_members.await_args_list] == [
         first_room_id,
@@ -696,15 +704,15 @@ async def test_failed_membership_queries_log_why_they_failed(tmp_path: Path) -> 
     index = AgentReplyMembershipIndex()
 
     with capture_logs() as logs:
-        await index.refresh(config, runtime_paths, client)
-        await index.refresh(config, runtime_paths, client)
+        await refresh_memberships(index, config, runtime_paths, client)
+        await refresh_memberships(index, config, runtime_paths, client)
 
     assert [
         (log["event"], log["error"])
         for log in logs
-        if log["event"] in {"agent_reply_control_client_joined_rooms_failed", "agent_reply_grant_room_snapshot_failed"}
+        if log["event"] in {"agent_reply_observer_joined_rooms_failed", "agent_reply_grant_room_snapshot_failed"}
     ] == [
-        ("agent_reply_control_client_joined_rooms_failed", "LocalProtocolError: durable sync session is closed"),
+        ("agent_reply_observer_joined_rooms_failed", "LocalProtocolError: durable sync session is closed"),
         ("agent_reply_grant_room_snapshot_failed", "LocalProtocolError: room membership changed during lookup"),
     ]
 
@@ -722,7 +730,7 @@ async def test_a_member_list_raced_by_a_membership_change_is_read_again(tmp_path
     ]
     index = AgentReplyMembershipIndex()
 
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     assert index.is_current_room_member("@alice:example.com", room_id, config, runtime_paths)
 
@@ -737,13 +745,14 @@ async def test_control_departure_marks_current_room_snapshot_unready(tmp_path: P
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = joined_members_response(room_id, control_user_id, "@alice:example.com")
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
     assert index.is_current_room_member("@alice:example.com", room_id, config, runtime_paths)
 
     changed = index.mark_room_unready(
         config,
         runtime_paths,
         room_id,
+        observer_user_id=control_user_id,
         reason="control_client_departed",
     )
 
@@ -773,7 +782,7 @@ async def test_invalidation_during_refresh_prevents_stale_publication(tmp_path: 
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
     index.invalidate(config, reason="startup")
-    refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
+    refresh_task = asyncio.create_task(refresh_memberships(index, config, runtime_paths, client))
     await first_query_started.wait()
 
     index.invalidate(config, reason="reconnect")
@@ -827,7 +836,7 @@ async def test_old_policy_refresh_cannot_publish_after_policy_replacement(tmp_pa
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
     index.invalidate(config, reason="startup")
-    refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
+    refresh_task = asyncio.create_task(refresh_memberships(index, config, runtime_paths, client))
     await query_started.wait()
 
     changed_config, _ = _runtime_config(tmp_path, member_rooms=["secondary"])
@@ -858,7 +867,7 @@ async def test_current_room_absence_is_independent_of_other_named_grants(
     client = AsyncMock(spec=nio.AsyncClient)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, paths, client)
+    await refresh_memberships(index, config, paths, client)
 
     assert not index.grants_pending(config, joined_rooms=(), current_room_id=room_id)
     if other_names_room:
@@ -867,12 +876,12 @@ async def test_current_room_absence_is_independent_of_other_named_grants(
     # Presence with an unresolved membership query remains uncertain.
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersError("unavailable", "M_UNKNOWN")
-    await index.refresh(config, paths, client)
+    await refresh_memberships(index, config, paths, client)
     assert index.grants_pending(config, joined_rooms=(), current_room_id=room_id)
 
     # Unknown joined-room discovery cannot prove absence.
     client.joined_rooms.return_value = nio.JoinedRoomsError("unavailable", "M_UNKNOWN")
-    await index.refresh(config, paths, client)
+    await refresh_memberships(index, config, paths, client)
     assert index.grants_pending(config, joined_rooms=(), current_room_id=room_id)
     assert index.needs_refresh(config)
 
@@ -928,7 +937,7 @@ async def test_grant_room_is_logged_ready_only_when_its_snapshot_is_published(tm
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
     index.invalidate(config, reason="startup")
-    refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
+    refresh_task = asyncio.create_task(refresh_memberships(index, config, runtime_paths, client))
     await query_started.wait()
 
     with capture_logs() as superseded_logs:
@@ -936,7 +945,7 @@ async def test_grant_room_is_logged_ready_only_when_its_snapshot_is_published(tm
         release_query.set()
         await refresh_task
     with capture_logs() as published_logs:
-        await index.refresh(config, runtime_paths, client)
+        await refresh_memberships(index, config, runtime_paths, client)
 
     assert [log for log in superseded_logs if log["event"] == "agent_reply_grant_room_ready"] == []
     assert [
@@ -980,7 +989,7 @@ async def test_transition_that_changes_no_grant_reports_no_change(tmp_path: Path
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = joined_members_response(room_id, _ALICE_ID)
     index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
 
     for user_id, membership in ((_ALICE_ID, "join"), (_BOB_ID, "leave")):
         assert not index.apply_member_event(

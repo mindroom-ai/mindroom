@@ -20,6 +20,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+
+OBSERVER_USER_ID = "@mindroom_router:example.com"
+
 
 def membership_config(
     tmp_path: Path,
@@ -118,8 +122,30 @@ async def membership_index(
         for room_key in sorted(memberships_by_room_key)
     ]
     index = AgentReplyMembershipIndex(clock=clock)
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
     return index
+
+
+async def refresh_memberships(
+    index: AgentReplyMembershipIndex,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    client: nio.AsyncClient | AsyncMock,
+    *,
+    observer_user_id: str | None = None,
+) -> None:
+    """Refresh ``index`` with ``client`` as its only observing account, under ``observer_user_id`` when given.
+
+    A mock client without a Matrix ID of its own observes as ``OBSERVER_USER_ID``.
+    """
+    if observer_user_id is not None or not isinstance(getattr(client, "user_id", None), str):
+        client.user_id = observer_user_id or OBSERVER_USER_ID
+    await index.refresh(
+        config,
+        runtime_paths,
+        [client],
+        pick_observer=lambda _room_id, user_ids: min(user_ids, default=None),
+    )
 
 
 def unresolved_membership_index(config: Config) -> AgentReplyMembershipIndex:

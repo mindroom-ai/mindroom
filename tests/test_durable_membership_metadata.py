@@ -16,6 +16,7 @@ from mindroom.event_journal import DeliveryProjectionPendingError, EventKind
 from mindroom.event_journal import journal as journal_ops
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.state import MatrixState
+from tests.access_schema_support import refresh_memberships
 from tests.conftest import make_matrix_client_mock
 from tests.durable_sync_helpers import skip_crypto_maintenance
 from tests.journal_helpers import membership_position
@@ -169,7 +170,7 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
             members=[nio.RoomMember(account, None, None)],
             room_id=ROOM,
         )
-        await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, snapshot)
+        await refresh_memberships(bot._runtime_view.agent_reply_memberships, bot.config, bot.runtime_paths, snapshot)
         await source.put(
             _response(
                 "two",
@@ -202,7 +203,7 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
             _response("three", [_member("$rejoin", account, "join")], []),
         )
         await drain_until(3)
-        await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, snapshot)
+        await refresh_memberships(bot._runtime_view.agent_reply_memberships, bot.config, bot.runtime_paths, snapshot)
         await source.put(_response("four", [], [_member("$live-grant", SENDER, "join"), _message("$live")]))
         await drain_until(4)
         assert ("$live", True, "join", 1) in observed

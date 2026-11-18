@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import httpx
 import nio
@@ -5808,23 +5808,6 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("entities", "fenced"), [({ROUTER_AGENT_NAME, "general"}, True), ({"general"}, False)])
-async def test_entity_changes_fence_room_grants_only_when_the_router_stops(
-    tmp_path: Path,
-    entities: set[str],
-    *,
-    fenced: bool,
-) -> None:
-    """Room-backed reply grants are revoked before their only control client, the router, stops."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
-
-    with patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate:
-        await orchestrator._entities_changing(entities)
-
-    assert invalidate.call_args_list == ([call(orchestrator.config, reason="router_replacement")] if fenced else [])
-
-
-@pytest.mark.asyncio
 async def test_shutdown_fails_room_grants_closed(tmp_path: Path) -> None:
     """Once every bot stopped, room grants are revoked, so nothing left running can act on them."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
@@ -5836,18 +5819,19 @@ async def test_shutdown_fails_room_grants_closed(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_grant_refresh_without_a_router_fails_grants_closed(tmp_path: Path) -> None:
-    """Without the router's client no refresh can vouch for room grants, so they stay revoked and calls are revoked."""
+async def test_grant_refresh_reads_through_the_synced_bots_only(tmp_path: Path) -> None:
+    """A refresh is given the clients of the bots whose own sync is live; without one it still runs and grants nothing."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+    live = {"running": True, "accepting_work": True, "revoke_reply_authorized_calls": AsyncMock()}
+    synced = MagicMock(first_sync_complete=True, **live)
+    starting = MagicMock(first_sync_complete=False, **live)
 
-    with (
-        patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate,
-        patch.object(orchestrator.agent_reply_memberships, "refresh") as refresh,
-    ):
+    with patch.object(orchestrator.agent_reply_memberships, "refresh") as refresh:
+        await orchestrator.refresh_agent_reply_memberships()
+        install_bots(orchestrator, {"synced": synced, "starting": starting})
         await orchestrator.refresh_agent_reply_memberships()
 
-    invalidate.assert_called_once_with(orchestrator.config, reason="router_unavailable")
-    refresh.assert_not_called()
+    assert [request.args[2] for request in refresh.await_args_list] == [[], [synced.client]]
 
 
 @pytest.mark.asyncio

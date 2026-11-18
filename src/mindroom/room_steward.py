@@ -1,5 +1,7 @@
 """Which MindRoom account acts for a room: the steward for shared invisible work, the poster where no agent answers.
 
+The steward rule also picks the account that observes a room's members for reply access.
+
 Both answers come from the live bots and each bot's own room cache at the moment of the call; nothing is saved.
 """
 
@@ -10,7 +12,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import ROUTER_AGENT_NAME
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     import nio
 
@@ -40,6 +42,32 @@ def room_steward(bots: Mapping[str, AgentBot], room_id: str) -> AgentBot | None:
     joined = list(_joined(bots, room_id))
     steward_id = pick_steward((user_id, room.power_levels.get_user_level(user_id)) for user_id, _bot, room in joined)
     return next((bot for user_id, bot, _room in joined if user_id == steward_id), None)
+
+
+def membership_observers(
+    bots: Mapping[str, AgentBot],
+) -> tuple[list[nio.AsyncClient], Callable[[str, Sequence[str]], str | None]]:
+    """Return the clients that may observe room members for reply access, and the steward rule among their accounts.
+
+    A bot observes only while its own sync is live: after its first sync completed and until it stops accepting work.
+    The rule ranks the accounts it is given for one room by the power each one's own cache of that room gives it.
+    """
+    clients = {
+        bot.client.user_id: bot.client
+        for bot in bots.values()
+        if bot.client is not None and bot.running and bot.first_sync_complete and bot.accepting_work
+    }
+
+    def pick_observer(room_id: str, user_ids: Sequence[str]) -> str | None:
+        return pick_steward((user_id, _own_power(clients[user_id], room_id)) for user_id in user_ids)
+
+    return list(clients.values()), pick_observer
+
+
+def _own_power(client: nio.AsyncClient, room_id: str) -> float:
+    """Return the power the client's own cache of a room gives its account, 0 before that cache holds the room."""
+    room = client.rooms.get(room_id)
+    return 0 if room is None else room.power_levels.get_user_level(client.user_id)
 
 
 def room_poster(bots: Mapping[str, AgentBot], room_id: str) -> AgentBot | None:

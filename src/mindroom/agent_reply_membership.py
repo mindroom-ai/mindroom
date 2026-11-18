@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Every bot syncs on its own, so the bot answering a message can see its sender join before the
-# router's sync applies that join here. A denial then waits this long for the router to catch up.
+# Every bot syncs on its own, so the bot answering a message can see its sender join before the room's
+# observer's sync applies that join here. A denial then waits this long for the observer to catch up.
 _JOIN_LAG_GRACE_SECONDS = 15.0
 # A finished wait is remembered this long, so each wait stays bounded and a later join gets a fresh one.
 _JOIN_LAG_RETENTION_SECONDS = 4 * _JOIN_LAG_GRACE_SECONDS
@@ -74,12 +74,14 @@ def _requires_current_room_memberships(config: Config) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class _GrantRoomMembership:
-    """One managed grant room's stable identity and joined-user snapshot."""
+    """One room's stable identity and joined-user snapshot, with a room key when it is a managed grant room."""
 
     room_key: str | None
     room_id: str | None
     ready: bool
     raw_joined_user_ids: frozenset[str] = frozenset()
+    # The account whose members read built the row and whose live membership events alone change it.
+    observer_user_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,9 +109,9 @@ class AgentReplyMembershipIndex:
         self._refresh_lock = asyncio.Lock()
         # Live transitions seen while a refresh queries Matrix, which it replays onto its answers before publishing.
         self._refresh_transitions: list[_LiveTransition] | None = None
-        # (room ID, requester) to when a denial first waited for the router's view of that join.
+        # (room ID, requester) to when a denial first waited for the observer's view of that join.
         self._join_lag_started: dict[tuple[str, str], float] = {}
-        # Rooms whose ready rows may trail a join the router has not applied yet, which the next refresh reads again.
+        # Rooms whose ready rows may trail a join the observer has not applied yet, which the next refresh reads again.
         self._reread_room_ids: set[str] = set()
         self._clock = clock
 
@@ -176,13 +178,13 @@ class AgentReplyMembershipIndex:
         )
 
     def knows_joined_rooms(self) -> bool:
-        """Return whether the snapshot knows the router's rooms, which an invalidation or a failed room list unsets."""
+        """Return whether the snapshot knows the observers' rooms, which an invalidation or a failed room list unsets."""
         return self._snapshot.possible_joined_room_ids is not None
 
     def misses_member(self, sender_id: str, room_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
-        """Return whether the snapshot holds one room ready without a sender, as before the router applies their join.
+        """Return whether the snapshot holds one room ready without a sender, as before the observer applies their join.
 
-        The router applies a join from its own sync, which can trail the room's live roster.
+        The room's observer applies a join from its own sync, which can trail the room's live roster.
         """
         snapshot = self._snapshot
         return (
@@ -199,9 +201,9 @@ class AgentReplyMembershipIndex:
     ) -> bool:
         """Refresh through ``refresh`` until ``current`` holds, twice at most, reading ``room_id`` again while it fails.
 
-        Only that room is read again; the other ready rooms stay. The router applies a join from its own sync, which
-        can trail the room's live roster, and a refresh already in flight may have read the room before the join, so
-        one more follows it. Return whether ``current`` holds at the end.
+        Only that room is read again; the other ready rooms stay. The room's observer applies a join from its own
+        sync, which can trail the room's live roster, and a refresh already in flight may have read the room before
+        the join, so one more follows it. Return whether ``current`` holds at the end.
         """
         for _ in range(2):
             if not current():
@@ -211,7 +213,7 @@ class AgentReplyMembershipIndex:
                 return True
         return False
 
-    def awaits_router_join(
+    def awaits_observer_join(
         self,
         sender_id: str,
         room_id: str,
@@ -222,7 +224,7 @@ class AgentReplyMembershipIndex:
         config: Config,
         runtime_paths: RuntimePaths,
     ) -> bool:
-        """Return whether a denial in this room should wait briefly for the router to apply a join.
+        """Return whether a denial in this room should wait briefly for the room's observer to apply a join.
 
         ``observed_joined_user_ids`` is the answering bot's own roster for the room. It never grants
         access: the snapshot stays the only grant, and this only defers settling a denial while a
@@ -317,63 +319,91 @@ class AgentReplyMembershipIndex:
             grant_room_count=len(room_keys),
         )
 
+    def invalidate_observer(self, config: Config, observer_user_id: str, *, reason: str) -> None:
+        """Revoke the grants of the rooms one account observes, and its say in which rooms exist, until a refresh.
+
+        Its sync lost history or restarted, or the account is stopping, so its view of those rooms may have missed
+        a change. A refresh in flight may hold that account's answers and never publishes.
+        """
+        signature = _agent_reply_membership_policy_signature(config)
+        if self._desired_signature != signature or self._snapshot.policy_signature != signature:
+            self.invalidate(config, reason=reason)
+            return
+        self._epoch += 1
+        self._publish(
+            replace(
+                self._snapshot,
+                rooms=tuple(
+                    replace(room, ready=False, raw_joined_user_ids=frozenset())
+                    if room.observer_user_id == observer_user_id
+                    else room
+                    for room in self._snapshot.rooms
+                ),
+                refresh_required=True,
+                possible_joined_room_ids=None,
+            ),
+        )
+        logger.info("agent_reply_memberships_observer_invalidated", reason=reason, observer_user_id=observer_user_id)
+
     def mark_room_unready(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
         room_id: str,
         *,
+        observer_user_id: str,
         reason: str,
     ) -> bool:
-        """Fail one room closed until its current membership can be queried."""
+        """Fail one room closed until its members can be read again, when ``observer_user_id`` observes it.
+
+        A room without a row gets an unready one, and a room the snapshot holds unjoined counts as possibly joined;
+        both ask the next refresh to read it. Another account's ready row for the room stays as it is.
+        """
         signature = _agent_reply_membership_policy_signature(config)
-        if self._desired_signature != signature or self._snapshot.policy_signature != signature:
+        snapshot = self._snapshot
+        if self._desired_signature != signature or snapshot.policy_signature != signature:
             return False
+        if self._refresh_transitions is not None:
+            # The refresh in flight may be pinning the room to this account, which no published row shows yet.
+            self._refresh_transitions.append(_LiveTransition(room_id, None, observer_user_id))
         state = matrix_state_for_runtime(runtime_paths)
         matching_room_keys = {
             room_key
             for room_key in _referenced_room_keys(config)
             if (managed_room := state.rooms.get(room_key)) is not None and managed_room.room_id == room_id
         }
-        matching_rooms = tuple(
-            room for room in self._snapshot.rooms if room.room_id == room_id or room.room_key in matching_room_keys
+        room_has_row = any(room.room_id == room_id or room.room_key in matching_room_keys for room in snapshot.rooms)
+        if not room_has_row and not _requires_current_room_memberships(config):
+            return False
+        observed_rooms = tuple(
+            room
+            for room in snapshot.rooms
+            if room.ready and room.room_id == room_id and room.observer_user_id == observer_user_id
         )
-        if not matching_rooms and not _requires_current_room_memberships(config):
+        possible_room_ids = snapshot.possible_joined_room_ids
+        if room_has_row and not observed_rooms and (possible_room_ids is None or room_id in possible_room_ids):
             return False
 
-        # Invalidation while an authoritative query is in flight must
-        # fence that query even when the room ID was not yet published.
         self._epoch += 1
-        updated_rooms = [
-            replace(
-                room,
-                room_id=room_id,
-                ready=False,
-                raw_joined_user_ids=frozenset(),
-            )
-            if room in matching_rooms
-            else room
-            for room in self._snapshot.rooms
-        ]
-        if not matching_rooms:
-            updated_rooms.append(_GrantRoomMembership(room_key=None, room_id=room_id, ready=False))
+        unready_rooms = observed_rooms if room_has_row else (_GrantRoomMembership(None, room_id, ready=False),)
         self._publish(
             replace(
-                self._snapshot,
-                rooms=tuple(updated_rooms),
-                refresh_required=True,
-                possible_joined_room_ids=(
-                    None
-                    if self._snapshot.possible_joined_room_ids is None
-                    else self._snapshot.possible_joined_room_ids | {room_id}
+                snapshot,
+                rooms=(
+                    *(
+                        replace(room, ready=False, raw_joined_user_ids=frozenset()) if room in observed_rooms else room
+                        for room in snapshot.rooms
+                    ),
+                    *(() if room_has_row else unready_rooms),
                 ),
+                refresh_required=True,
+                possible_joined_room_ids=None if possible_room_ids is None else possible_room_ids | {room_id},
             ),
         )
-        logged_rooms = matching_rooms or (updated_rooms[-1],)
-        for matched_room in logged_rooms:
+        for unready_room in unready_rooms:
             logger.warning(
                 "agent_reply_grant_room_unready",
-                room_key=matched_room.room_key,
+                room_key=unready_room.room_key,
                 room_id=room_id,
                 readiness="unready",
                 reason=reason,
@@ -384,9 +414,16 @@ class AgentReplyMembershipIndex:
         self,
         config: Config,
         runtime_paths: RuntimePaths,
-        client: nio.AsyncClient,
+        clients: Sequence[nio.AsyncClient],
+        *,
+        pick_observer: Callable[[str, Sequence[str]], str | None],
     ) -> None:
-        """Atomically replace membership state from authoritative Matrix queries."""
+        """Atomically replace membership state from authoritative Matrix queries, each room read by one observer.
+
+        A room keeps the observer its row names while that account is among ``clients`` and its own answer lists the
+        room; else ``pick_observer(room_id, joined_user_ids)`` picks one among the accounts whose answers list it,
+        None when there is none.
+        """
         signature = _agent_reply_membership_policy_signature(config)
         if self._desired_signature is None:
             self._desired_signature = signature
@@ -395,12 +432,10 @@ class AgentReplyMembershipIndex:
         async with self._refresh_lock:
             expected_epoch = self._epoch
             reread, self._reread_room_ids = self._reread_room_ids, set()
+            snapshot = self._snapshot
             previous_rooms = (
-                tuple(room for room in self._snapshot.rooms if room.room_id not in reread)
-                if self._snapshot.policy_signature == signature
-                and (
-                    reread or (self._snapshot.refresh_required and any(not room.ready for room in self._snapshot.rooms))
-                )
+                tuple(room for room in snapshot.rooms if room.room_id not in reread)
+                if snapshot.policy_signature == signature and (reread or snapshot.refresh_required)
                 else ()
             )
             self._refresh_transitions = transitions = []
@@ -408,9 +443,15 @@ class AgentReplyMembershipIndex:
                 candidate = await _build_authoritative_snapshot(
                     config,
                     runtime_paths,
-                    client,
+                    clients,
+                    pick_observer,
                     signature=signature,
                     previous_rooms=previous_rooms,
+                    pinned_observers={
+                        room.room_id: room.observer_user_id
+                        for room in snapshot.rooms
+                        if room.room_id is not None and room.observer_user_id is not None
+                    },
                 )
             finally:
                 self._refresh_transitions = None
@@ -436,11 +477,11 @@ class AgentReplyMembershipIndex:
         *,
         control_user_id: str,
     ) -> bool:
-        """Apply one live membership transition to every matching ready grant room."""
+        """Apply one live membership transition from ``control_user_id``'s sync to the ready rows it observes."""
         signature = _agent_reply_membership_policy_signature(config)
         if self._desired_signature != signature:
             return False
-        transition = _LiveTransition(room_id=room_id, event=event, control_user_id=control_user_id)
+        transition = _LiveTransition(room_id, event, control_user_id)
         if self._refresh_transitions is not None:
             # The refresh in flight replays this onto its answers instead of
             # being voided by it, so room setup's own joins cannot discard it.
@@ -467,10 +508,10 @@ class AgentReplyMembershipIndex:
 
 @dataclass(frozen=True, slots=True)
 class _LiveTransition:
-    """One membership event from the router's live sync."""
+    """One membership event from an account's live sync, or with no event, that account's lost view of the room."""
 
     room_id: str
-    event: nio.RoomMemberEvent
+    event: nio.RoomMemberEvent | None
     control_user_id: str
 
 
@@ -487,15 +528,7 @@ def _snapshot_after_transition(
     if not matching_rooms and not _requires_current_room_memberships(config):
         return None
 
-    updated_rooms = [
-        _apply_transition_to_room(
-            room,
-            room_id=room_id,
-            event=transition.event,
-            control_user_id=transition.control_user_id,
-        )
-        for room in snapshot.rooms
-    ]
+    updated_rooms = [_apply_transition_to_room(room, transition) for room in snapshot.rooms]
     if not matching_rooms:
         updated_rooms.append(_GrantRoomMembership(room_key=None, room_id=room_id, ready=False))
     updated_rooms_tuple = tuple(updated_rooms)
@@ -528,7 +561,7 @@ def _replay_refresh_transitions(
     transitions: list[_LiveTransition],
 ) -> _AgentReplyMembershipSnapshot:
     """Return a refreshed candidate after the live transitions recorded while it queried Matrix."""
-    answered = {(room.room_key, room.room_id): room for room in candidate.rooms}
+    answered = {_row_identity(room): room for room in candidate.rooms}
     for transition in transitions:
         applied = _snapshot_after_transition(candidate, config, transition)
         if applied is not None:
@@ -536,21 +569,21 @@ def _replay_refresh_transitions(
     # Nothing orders a recorded transition against Matrix's answer for its
     # room. A departure only denies, so it always applies. A join of someone
     # the answer lacks may predate a kick the answer already holds and the
-    # router has not seen yet, so it must not grant on its own: that room
-    # keeps its published row instead. A ready published row is the router's
-    # own view, which every ready room relies on between refreshes and which
-    # already holds every recorded transition; without one the room stays
-    # unready until the next refresh answers it.
-    published_ready_rooms = {(room.room_key, room.room_id): room for room in published.rooms if room.ready}
+    # observer has not seen yet, so it must not grant on its own: that room
+    # keeps its published row instead. A ready published row of the same
+    # observer is that observer's own view, which every ready room relies on
+    # between refreshes and which already holds every recorded transition;
+    # without one the room stays unready until the next refresh answers it.
+    published_ready_rooms = {_row_identity(room): room for room in published.rooms if room.ready}
     rooms: list[_GrantRoomMembership] = []
     for room in candidate.rooms:
-        key = (room.room_key, room.room_id)
+        key = _row_identity(room)
         answer = answered.get(key)
         if answer is None or not answer.ready:
             # Replay never makes a row ready, so a row Matrix did not answer ready stays as it is.
             rooms.append(room)
         elif not room.ready:
-            # Only the control client's own departure makes an answered row unready.
+            # Only the observer's own departure, or its lost view of the room, makes an answered row unready.
             rooms.append(_unready_room(room.room_key, room.room_id, reason="control_client_departed"))
         elif room.raw_joined_user_ids <= answer.raw_joined_user_ids:
             rooms.append(room)
@@ -565,22 +598,22 @@ def _replay_refresh_transitions(
     )
 
 
-def _apply_transition_to_room(
-    room: _GrantRoomMembership,
-    *,
-    room_id: str,
-    event: nio.RoomMemberEvent,
-    control_user_id: str,
-) -> _GrantRoomMembership:
-    """Return one grant-room value after applying a matching live transition."""
-    if room.room_id != room_id:
+def _row_identity(room: _GrantRoomMembership) -> tuple[str | None, str | None, str | None]:
+    """Return what makes two rows the same room under the same observer."""
+    return room.room_key, room.room_id, room.observer_user_id
+
+
+def _apply_transition_to_room(room: _GrantRoomMembership, transition: _LiveTransition) -> _GrantRoomMembership:
+    """Return one room's row after a transition, which changes it only when the row's observer reported it.
+
+    Another account's copy of an event is not ordered against the observer's read, and nothing would correct a
+    departure it applied after the person re-joined.
+    """
+    event = transition.event
+    if room.room_id != transition.room_id or room.observer_user_id != transition.control_user_id:
         return room
-    if event.state_key == control_user_id and event.membership != "join":
-        return replace(
-            room,
-            ready=False,
-            raw_joined_user_ids=frozenset(),
-        )
+    if event is None or (event.state_key == transition.control_user_id and event.membership != "join"):
+        return replace(room, ready=False, raw_joined_user_ids=frozenset())
     if not room.ready:
         return room
     raw_joined_user_ids = set(room.raw_joined_user_ids)
@@ -594,10 +627,12 @@ def _apply_transition_to_room(
 async def _build_authoritative_snapshot(
     config: Config,
     runtime_paths: RuntimePaths,
-    client: nio.AsyncClient,
+    clients: Sequence[nio.AsyncClient],
+    pick_observer: Callable[[str, Sequence[str]], str | None],
     *,
     signature: _AgentReplyMembershipPolicySignature,
     previous_rooms: tuple[_GrantRoomMembership, ...],
+    pinned_observers: dict[str, str],
 ) -> _AgentReplyMembershipSnapshot:
     """Build one complete candidate without exposing partially refreshed rooms."""
     room_keys = _referenced_room_keys(config)
@@ -605,117 +640,62 @@ async def _build_authoritative_snapshot(
     if not room_keys and not requires_current_rooms:
         return _AgentReplyMembershipSnapshot(policy_signature=signature, refresh_required=False)
 
-    state = matrix_state_for_runtime(runtime_paths)
-    joined_room_ids = await _authoritative_joined_room_ids(client)
-    memberships_by_room_id: dict[str, frozenset[str] | None] = {}
-    rooms: list[_GrantRoomMembership] = []
-    previous_grant_rooms = {room.room_key: room for room in previous_rooms if room.room_key is not None}
-    for room_key in room_keys:
-        managed_room = state.rooms.get(room_key)
-        room_id = managed_room.room_id if managed_room is not None else None
-        previous_room = previous_grant_rooms.get(room_key)
-        if (
-            previous_room is not None
-            and previous_room.ready
-            and previous_room.room_id == room_id
-            and joined_room_ids is not None
-            and room_id in joined_room_ids
-        ):
-            rooms.append(previous_room)
-            continue
-        rooms.append(
-            await _build_grant_room_membership(
-                client,
-                room_key=room_key,
-                room_id=room_id,
-                joined_room_ids=joined_room_ids,
-                memberships_by_room_id=memberships_by_room_id,
-            ),
-        )
-    grant_room_ids = {room.room_id for room in rooms if room.room_id is not None}
-    if requires_current_rooms and joined_room_ids is not None:
-        rooms.extend(
-            await _build_current_room_memberships(
-                client,
-                joined_room_ids - grant_room_ids,
-                previous_rooms=previous_rooms,
-            ),
-        )
-    frozen_rooms = tuple(rooms)
-    return _AgentReplyMembershipSnapshot(
-        policy_signature=signature,
-        rooms=frozen_rooms,
-        refresh_required=(joined_room_ids is None or any(not room.ready for room in frozen_rooms)),
-        possible_joined_room_ids=joined_room_ids,
-    )
+    clients_by_user_id = {client.user_id: client for client in clients}
+    joined_user_ids_by_room_id, rooms_known = await _joined_user_ids_by_room_id(clients_by_user_id)
+    reusable_rooms = {(room.room_key, room.room_id): room for room in previous_rooms if room.ready}
 
-
-async def _build_grant_room_membership(
-    client: nio.AsyncClient,
-    *,
-    room_key: str,
-    room_id: str | None,
-    joined_room_ids: frozenset[str] | None,
-    memberships_by_room_id: dict[str, frozenset[str] | None],
-) -> _GrantRoomMembership:
-    """Build one managed grant-room snapshot without publishing partial state."""
-    if room_id is None:
-        return _unready_room(room_key, None, reason="managed_room_unresolved")
-    if joined_room_ids is None:
-        return _unready_room(room_key, room_id, reason="joined_rooms_unavailable")
-    if room_id not in joined_room_ids:
-        return _unready_room(room_key, room_id, reason="control_client_not_joined")
-    if room_id not in memberships_by_room_id:
-        memberships_by_room_id[room_id] = await _authoritative_room_members(
-            client,
-            room_key=room_key,
-            room_id=room_id,
-        )
-    raw_joined_user_ids = memberships_by_room_id[room_id]
-    if raw_joined_user_ids is None:
-        return _unready_room(room_key, room_id, reason="joined_members_unavailable")
-    return _GrantRoomMembership(
-        room_key=room_key,
-        room_id=room_id,
-        ready=True,
-        raw_joined_user_ids=raw_joined_user_ids,
-    )
-
-
-async def _build_current_room_memberships(
-    client: nio.AsyncClient,
-    room_ids: frozenset[str],
-    *,
-    previous_rooms: tuple[_GrantRoomMembership, ...],
-) -> list[_GrantRoomMembership]:
-    """Build authoritative snapshots for joined rooms used by current-room grants."""
-    previous_by_room_id = {
-        room.room_id: room
-        for room in previous_rooms
-        if room.room_key is None and room.room_id is not None and room.ready
-    }
-    rooms: list[_GrantRoomMembership] = []
-    for room_id in sorted(room_ids):
-        if previous_room := previous_by_room_id.get(room_id):
-            rooms.append(previous_room)
-            continue
+    async def room_membership(room_key: str | None, room_id: str) -> _GrantRoomMembership:
+        """Return one room's row: the previous ready one its observer still vouches for, else a fresh read."""
+        joined_user_ids = joined_user_ids_by_room_id.get(room_id, [])
+        previous_room = reusable_rooms.get((room_key, room_id))
+        if previous_room is not None and previous_room.observer_user_id in joined_user_ids:
+            return previous_room
+        pinned = pinned_observers.get(room_id)
+        observer_user_id = pinned if pinned in joined_user_ids else pick_observer(room_id, joined_user_ids)
+        if observer_user_id is None:
+            reason = "no_observer_joined" if rooms_known else "joined_rooms_unavailable"
+            return _unready_room(room_key, room_id, reason=reason)
         raw_joined_user_ids = await _authoritative_room_members(
-            client,
-            room_key=room_id,
+            clients_by_user_id[observer_user_id],
+            room_key=room_key or room_id,
             room_id=room_id,
         )
         if raw_joined_user_ids is None:
-            rooms.append(_unready_room(None, room_id, reason="joined_members_unavailable"))
-            continue
-        rooms.append(
-            _GrantRoomMembership(
-                room_key=None,
-                room_id=room_id,
-                ready=True,
-                raw_joined_user_ids=raw_joined_user_ids,
-            ),
-        )
-    return rooms
+            return _unready_room(room_key, room_id, reason="joined_members_unavailable")
+        return _GrantRoomMembership(room_key, room_id, True, raw_joined_user_ids, observer_user_id)
+
+    state = matrix_state_for_runtime(runtime_paths)
+    rooms: list[_GrantRoomMembership] = []
+    for room_key in room_keys:
+        managed_room = state.rooms.get(room_key)
+        if managed_room is None:
+            rooms.append(_unready_room(room_key, None, reason="managed_room_unresolved"))
+        else:
+            rooms.append(await room_membership(room_key, managed_room.room_id))
+    if requires_current_rooms:
+        current_room_ids = sorted(joined_user_ids_by_room_id.keys() - {room.room_id for room in rooms})
+        rooms.extend([await room_membership(None, room_id) for room_id in current_room_ids])
+    return _AgentReplyMembershipSnapshot(
+        policy_signature=signature,
+        rooms=tuple(rooms),
+        refresh_required=not rooms_known or any(not room.ready for room in rooms),
+        possible_joined_room_ids=frozenset(joined_user_ids_by_room_id) if rooms_known else None,
+    )
+
+
+async def _joined_user_ids_by_room_id(
+    clients_by_user_id: dict[str, nio.AsyncClient],
+) -> tuple[dict[str, list[str]], bool]:
+    """Return the accounts whose own room list holds each room, and whether those lists name every joined room.
+
+    Without an account nothing is known, and one failed list may hide the rooms only that account has joined.
+    """
+    answers = await asyncio.gather(*map(_authoritative_joined_room_ids, clients_by_user_id.values()))
+    joined_user_ids_by_room_id: dict[str, list[str]] = {}
+    for user_id, joined_room_ids in zip(clients_by_user_id, answers, strict=True):
+        for room_id in joined_room_ids or ():
+            joined_user_ids_by_room_id.setdefault(room_id, []).append(user_id)
+    return joined_user_ids_by_room_id, bool(answers) and None not in answers
 
 
 def _query_error(exc: Exception) -> str:
@@ -729,14 +709,15 @@ def _query_error(exc: Exception) -> str:
 
 
 async def _authoritative_joined_room_ids(client: nio.AsyncClient) -> frozenset[str] | None:
-    """Return the control client's joined rooms or fail closed."""
+    """Return one observing account's joined rooms or fail closed."""
     try:
         response = await client.joined_rooms()
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         logger.warning(
-            "agent_reply_control_client_joined_rooms_failed",
+            "agent_reply_observer_joined_rooms_failed",
+            observer_user_id=client.user_id,
             readiness="unready",
             error=_query_error(exc),
         )
@@ -744,7 +725,8 @@ async def _authoritative_joined_room_ids(client: nio.AsyncClient) -> frozenset[s
     if isinstance(response, nio.JoinedRoomsResponse):
         return frozenset(response.rooms)
     logger.warning(
-        "agent_reply_control_client_joined_rooms_failed",
+        "agent_reply_observer_joined_rooms_failed",
+        observer_user_id=client.user_id,
         readiness="unready",
         error=str(response),
     )

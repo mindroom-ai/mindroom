@@ -11,8 +11,6 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
@@ -1194,38 +1192,18 @@ async def _hang_a_room_state_retry(duties: RouterDuties, state: RoomState) -> No
     trigger_done = True
 
 
-async def _hang_a_membership_refresh(duties: RouterDuties, orchestrator: Any) -> asyncio.Task[None]:  # noqa: ANN401
-    """Start a membership refresh that never finishes and return the sync frame waiting for it."""
-    memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.needs_refresh.return_value = True
-    orchestrator.agent_reply_membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
-    started = asyncio.Event()
-
-    async def hung_refresh() -> None:
-        started.set()
-        await asyncio.Future()
-
-    orchestrator.refresh_agent_reply_memberships = hung_refresh
-    frame = asyncio.create_task(duties.refresh_memberships_if_needed())
-    await started.wait()
-    return frame
-
-
 @pytest.mark.asyncio
-async def test_the_router_owns_its_refresh_and_room_state_retry(room_state: RoomState) -> None:
-    """The router's runtime owns both background tasks, so its shutdown drain covers them."""
+async def test_the_router_owns_its_room_state_retry(room_state: RoomState) -> None:
+    """The router's runtime owns the background retry, so its shutdown drain covers it."""
     duties = _router_duties(room_state)
     router = duties.deps.runtime
     await _hang_a_room_state_retry(duties, room_state)
     assert not await wait_for_background_tasks(timeout=0, owner=router)
-    frame = await _hang_a_membership_refresh(duties, router.orchestrator)
-    assert not await wait_for_background_tasks(timeout=0, owner=router)
-    assert isinstance((await asyncio.gather(frame, return_exceptions=True))[0], asyncio.CancelledError)
 
 
 @pytest.mark.asyncio
-async def test_router_stop_cancels_its_refresh_and_room_state_retry_without_waiting(room_state: RoomState) -> None:
-    """A stopping router discards both, so they leave its stop budget to the replies it drains."""
+async def test_router_stop_cancels_its_room_state_retry_without_waiting(room_state: RoomState) -> None:
+    """A stopping router discards the retry, so it leaves its stop budget to the replies it drains."""
     config, paths, ids, _, client = room_state
     user = AgentMatrixUser(ROUTER_AGENT_NAME, ids[ROUTER_AGENT_NAME].full_id, "Router", TEST_PASSWORD)
     bot = install_runtime_journal_support(make_test_agent_bot(user, config=config, runtime_paths=paths))
@@ -1233,8 +1211,6 @@ async def test_router_stop_cancels_its_refresh_and_room_state_retry_without_wait
     duties = bot._router
     assert duties is not None
     await _hang_a_room_state_retry(duties, room_state)
-    frame = await _hang_a_membership_refresh(duties, bot.orchestrator)
     budget = bot._sync_shutdown_budget = ShutdownBudget.start(5.0)
     await bot.prepare_for_sync_shutdown()
     assert budget.remaining_seconds() > 4
-    assert isinstance((await asyncio.gather(frame, return_exceptions=True))[0], asyncio.CancelledError)
