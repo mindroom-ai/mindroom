@@ -19,6 +19,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_a
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
+from mindroom.config.models import split_model_reference
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
@@ -945,6 +946,10 @@ def _validate_workflow_policy_for_context(
 
 def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
     """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
+    permitted = {
+        model_name for model_name in context.config.models if not _model_refs(context, model_name).isdisjoint(model_refs)
+    }
+    permitted |= {ref for ref in model_refs if split_model_reference(ref)[1] is not None and ref in context.config.models}
     substitutes = {
         budget_model(
             context.config,
@@ -954,10 +959,9 @@ def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) 
             model_name,
             log_fallback=False,
         )
-        for model_name in context.config.models
-        if not _model_refs(context, model_name).isdisjoint(model_refs)
+        for model_name in permitted
     }
-    return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes))
+    return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes - permitted))
 
 
 def _participant_scope(context: ToolRuntimeContext, agent_name: str) -> ModelScope:
@@ -978,10 +982,11 @@ def _caller_runtime_model_name(context: ToolRuntimeContext) -> str:
 
 
 def _workflow_permission_model_refs(context: ToolRuntimeContext, models: list[str]) -> set[str]:
+    """Return what each permitted reference admits: a ``name@level`` only itself, a name or ID every level."""
     refs: set[str] = set()
     for model_ref in models:
         refs.add(model_ref)
-        if (model_name := _configured_model_name(context, model_ref)) is not None:
+        if split_model_reference(model_ref)[1] is None and (model_name := _configured_model_name(context, model_ref)):
             refs.update(_model_refs(context, model_name))
     return refs
 
@@ -997,8 +1002,12 @@ def _configured_model_name(context: ToolRuntimeContext, model_ref: str) -> str |
 
 
 def _model_refs(context: ToolRuntimeContext, model_name: str) -> set[str]:
-    refs = {model_name}
+    """Return the references a permission may name the model by: its name, base name, ID, and ``name@level``."""
+    base_name, _level = split_model_reference(model_name)
+    refs = {model_name, base_name}
     model_config = context.config.models.get(model_name)
     if model_config is not None:
         refs.add(model_config.id)
+        if model_config.reasoning is not None:
+            refs.add(f"{base_name}@{model_config.reasoning.default}")
     return refs

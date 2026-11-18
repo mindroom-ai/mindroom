@@ -1675,6 +1675,7 @@ depends_on = [
 path = "mindroom.custom_tools.dynamic_workflow"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
+    "mindroom.config.models",
     "mindroom.agent_loop",
     "mindroom.agent_loop.build",
     "mindroom.agents",
