@@ -823,7 +823,11 @@ def _prompt_source(rows: _Rows, event_id: str) -> str:
     physical = {source.event_id for source in rows.sources}
     if event_id in physical:
         return event_id
-    return next((source.event_id for source in rows.sources if source.discovery_event_id == event_id), event_id)
+    mapped = next((source.event_id for source in rows.sources if source.discovery_event_id == event_id), None)
+    if mapped is None and len(rows.sources) == 1 and event_id in rows.aliases:
+        # As `TurnRecord.prompt_source_event_id` reads it: every alias of a one-source turn is that source's.
+        return rows.sources[0].event_id
+    return mapped or event_id
 
 
 def record_revisions(

@@ -887,7 +887,7 @@ class TestAgentBot(AgentBotTestBase):
 
         route = bot._delivery_gateway.send_route.await_args.args[1]
         assert route["body"] == "⏰ [Automated Task]\nPoll the queue"
-        assert route[ROUTE_EVENT_TYPE]["event_id"] == "$scheduled"
+        assert route[ROUTE_EVENT_TYPE]["event_ids"] == ["$scheduled"]
         send_response.assert_not_awaited()
 
     @pytest.mark.asyncio

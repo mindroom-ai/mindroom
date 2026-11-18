@@ -4628,7 +4628,7 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
     [route] = router_harness.gateway.routes
     assert route[constants.ROUTE_EVENT_TYPE] == {
         "entity": _entity_user_id(config, "general"),
-        "event_id": scheduled_event.event_id,
+        "event_ids": [scheduled_event.event_id],
         "thread_id": scheduled_event.event_id,
     }
     # The task itself is a visible message the responder reads, so the route repeats no text.
@@ -7764,7 +7764,7 @@ def _route_message(
     event_id: str = "$route:localhost",
 ) -> nio.RoomMessageFormatted:
     """Return a steward's route of `$question:localhost` to an entity, as journal dispatch hands it to ingress."""
-    route = {"entity": _entity_user_id(config, entity), "event_id": "$question:localhost"}
+    route = {"entity": _entity_user_id(config, entity), "event_ids": ["$question:localhost"]}
     return _route_as_delivered(
         config,
         {
@@ -7823,6 +7823,35 @@ async def test_a_routed_responder_answers_the_persons_own_event_for_that_person(
 
 
 @pytest.mark.asyncio
+async def test_a_responder_that_answers_in_the_room_runs_with_the_text_its_route_carries(tmp_path: Path) -> None:
+    """An agent in room mode reads no conversation, so it answers the person's text its route brings."""
+    config = _single_agent_config(tmp_path, "room")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    route = _route_as_delivered(
+        config,
+        {
+            constants.ROUTE_EVENT_TYPE: {
+                "entity": _entity_user_id(config, "general"),
+                "event_ids": ["$question:localhost"],
+            },
+            constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            constants.ORIGINAL_SENDER_KEY: _SENDER,
+            "body": "What changed today?",
+        },
+        steward=ROUTER_AGENT_NAME,
+    )
+
+    await harness.deliver(room, route)
+
+    [request] = harness.runner.requests
+    assert request.prompt == "What changed today?"
+    assert request.user_id == _SENDER
+    assert request.response_envelope.target.resolved_thread_id is None
+    assert request.response_envelope.target.reply_to_event_id == "$question:localhost"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "general"])
 async def test_a_route_to_another_responder_leaves_this_one_silent(tmp_path: Path, steward: str) -> None:
     """Every bot in the room receives the route, the steward that sent it too; only the one it names answers."""
@@ -7846,7 +7875,7 @@ async def test_a_persons_message_cannot_pose_as_a_route(tmp_path: Path) -> None:
             "content": {
                 "body": "hello",
                 "msgtype": "m.text",
-                constants.ROUTE_EVENT_TYPE: {"entity": _entity_user_id(config, "general"), "event_id": "$other"},
+                constants.ROUTE_EVENT_TYPE: {"entity": _entity_user_id(config, "general"), "event_ids": ["$other"]},
                 constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 constants.ORIGINAL_SENDER_KEY: "@victim:localhost",
             },
@@ -7913,6 +7942,89 @@ async def test_old_router_relay_event_still_answers_from_relay_context(
     # The relay is a visible message, so the answer replies to it as before.
     assert request.response_envelope.target.reply_to_event_id == "$router-relay:localhost"
     assert trusted_context.await_count == (1 if relay_context else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("anchor", "named"),
+    [
+        ("$second:localhost", ["$first:localhost", "$second:localhost"]),
+        # An upload routed with its caption is answered at the upload, which the route then names last.
+        ("$first:localhost", ["$second:localhost", "$first:localhost"]),
+    ],
+)
+async def test_a_route_names_every_message_of_the_batch_it_routes(
+    config: Config,
+    tmp_path: Path,
+    anchor: str,
+    named: list[str],
+) -> None:
+    """A steward that routes a batch of a person's messages names them all, the one the answer replies to last."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+
+    await execute_router_relay(
+        harness.dispatcher.deps,
+        room,
+        _text_event("and this too", event_id=anchor),
+        (),
+        requester_user_id=_SENDER,
+        handled_turn=TurnRecord.create(["$first:localhost", "$second:localhost"], completed=False),
+    )
+
+    [route] = harness.gateway.routes
+    assert route[constants.ROUTE_EVENT_TYPE]["event_ids"] == named
+
+
+@pytest.mark.asyncio
+async def test_a_routed_batch_links_every_message_it_names_to_its_answer(tmp_path: Path) -> None:
+    """The responder answers the last message a route names, and an edit or deletion of any of them finds the answer."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+    first, question, route_id = "$first:localhost", "$question:localhost", "$route:localhost"
+    route = _route_as_delivered(
+        config,
+        {
+            constants.ROUTE_EVENT_TYPE: {"entity": _entity_user_id(config, "general"), "event_ids": [first, question]},
+            constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            constants.ORIGINAL_SENDER_KEY: _SENDER,
+        },
+        steward=ROUTER_AGENT_NAME,
+        event_id=route_id,
+    )
+
+    await harness.deliver(room, route)
+
+    [request] = harness.runner.requests
+    assert request.response_envelope.target.reply_to_event_id == question
+    assert request.sources.logical_source_event_ids == (route_id,)
+    assert set(request.sources.discovery_event_ids) == {first, question}
+    # A stored run names both messages, so deleting either removes it from the history.
+    assert request.matrix_run_metadata is not None
+    assert set(request.matrix_run_metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY]) == {first, question}
+    for original in (first, question):
+        record = await harness.turn_store.get_turn_record(original)
+        assert record is not None
+        assert record.source_event_ids == (route_id,)
+        assert record.prompt_source_event_id(original) == route_id
+        assert record.requester_id_for_source(original) == _SENDER
+
+    # An edit of the earlier message is kept on the route's source, as an edit of the last one is.
+    record = await harness.turn_store.get_turn_record(first)
+    assert record is not None
+    revision = (2_000_000, "$edit-of-first:localhost")
+    registered = await harness.turn_store.register_edit_revision(record, first, revision)
+    assert registered is not None
+    assert registered.revision_watermark(first) == revision
+    await harness.turn_store.record_edit(registered, edited_event_id=first, prompt="first, edited", revision=revision)
+    edited = await harness.turn_store.get_turn_record(first)
+    assert edited is not None
+    assert edited.source_event_prompts == {route_id: "first, edited"}
+
+    # A deletion of the earlier message deletes the route's source, as a deletion of the last one does.
+    await _redact(harness, first, _ROOM_ID)
+    assert await harness.turn_store.deleted_sources(edited) == frozenset({route_id})
 
 
 @pytest.mark.asyncio

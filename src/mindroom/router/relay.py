@@ -295,14 +295,16 @@ async def execute_router_relay(  # noqa: PLR0911
         "entity": entity_identity_registry(deps.runtime.config, deps.runtime_paths)
         .current_id(suggested_entity)
         .full_id,
-        "event_id": event.event_id,
+        # Every message of the routed batch, the one the answer replies to last.
+        "event_ids": [*(i for i in tracked_handled_turn.source_event_ids if i != event.event_id), event.event_id],
     }
     if thread_event_id is not None:
         route["thread_id"] = thread_event_id
     content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route}
-    if scheduled_prompt is not None:
-        # A scheduled task's prompt may be in no visible message, so its route carries it.
-        content["body"] = scheduled_prompt
+    if scheduled_prompt is not None or thread_event_id is None:
+        # A responder in a thread reads the person's messages there. One that answers in the room reads no
+        # conversation, and a scheduled task's prompt may be in no visible message, so their route carries the prompt.
+        content["body"] = scheduled_prompt or message or event.body
     event_id = await deps.delivery_gateway.send_route(room.room_id, content)
     with bound_log_context(**resolved_target.log_context):
         if event_id is None:

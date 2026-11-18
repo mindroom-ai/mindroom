@@ -373,6 +373,7 @@ def test_a_route_is_trusted_from_any_managed_account_and_names_the_message_it_ro
     facts = validator.classify(_route_as_message(route), room_id="!room:localhost")
 
     assert (facts.routed_event_id, facts.discovery_event_id) == ("$human", "$human")
+    assert facts.discovery_event_ids == ("$earlier", "$human")
     assert facts.run_requester_id == "@user:localhost"
     assert facts.router_relay
     assert facts.origin.intent is TurnIntent.ROUTER_HANDOFF
@@ -387,7 +388,7 @@ def _route(sender: str, entity: str) -> nio.UnknownEvent:
             "sender": sender,
             "origin_server_ts": 1,
             "content": {
-                ROUTE_EVENT_TYPE: {"entity": entity, "event_id": "$human"},
+                ROUTE_EVENT_TYPE: {"entity": entity, "event_ids": ["$earlier", "$human"]},
                 ORIGINAL_SENDER_KEY: "@user:localhost",
                 SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             },

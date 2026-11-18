@@ -767,13 +767,8 @@ class TurnIngress:
                 ticket.close()
                 handed_off = await self._handle_edit_event(room, event, facts)
                 return TurnDispatchOutcome.DEFERRED if handed_off is True else TurnDispatchOutcome.INTENTIONALLY_IGNORED
-            discovery_alias = facts.discovery_event_id
             claimed = await ticket.claim_turn(
-                TurnRecord.create(
-                    [event.event_id],
-                    discovery_event_ids=(discovery_alias,) if discovery_alias else (),
-                    completed=False,
-                ),
+                TurnRecord.create([event.event_id], discovery_event_ids=facts.discovery_event_ids, completed=False),
             )
             if claimed is not None:
                 return claimed

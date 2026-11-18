@@ -508,15 +508,21 @@ def _as_message(event: nio.UnknownEvent, content: dict[str, Any]) -> nio.RoomMes
 
 
 def _route_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
-    """Validate one route and return it as the mention its responder answers, in reply to the person's event."""
+    """Validate one route and return it as the mention its responder answers, in reply to the last event it names."""
     content = event.source.get("content")
     route = content.get(ROUTE_EVENT_TYPE) if isinstance(content, dict) else None
     if event.type != ROUTE_EVENT_TYPE or not isinstance(route, dict):
         msg = "Route has the wrong event type or names nothing"
         raise ValueError(msg)
-    entity, event_id, thread_id = route.get("entity"), route.get("event_id"), route.get("thread_id")
-    if not isinstance(entity, str) or not isinstance(event_id, str) or not isinstance(thread_id, str | None):
-        msg = "Route does not name its responder, the person's event and its thread"
+    entity, event_ids, thread_id = route.get("entity"), route.get("event_ids"), route.get("thread_id")
+    if (
+        not isinstance(entity, str)
+        or not isinstance(event_ids, list)
+        or not event_ids
+        or not all(isinstance(event_id, str) for event_id in event_ids)
+        or not isinstance(thread_id, str | None)
+    ):
+        msg = "Route does not name its responder, the person's events and its thread"
         raise TypeError(msg)
     body = content.get("body")
     message = _as_message(
@@ -526,13 +532,13 @@ def _route_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
             body if isinstance(body, str) and body.strip() else _ROUTED_PROMPT,
             mentioned_user_ids=[entity],
             thread_event_id=thread_id,
-            reply_to_event_id=event_id,
+            reply_to_event_id=event_ids[-1],
             extra_content={key: content[key] for key in _ROUTE_CONTEXT_KEYS if key in content},
         ),
     )
     # What makes a message a route stands outside its content, which any message could carry: only this dispatch
     # of a route event writes it.
-    message.source[ROUTE_EVENT_TYPE] = [event_id]
+    message.source[ROUTE_EVENT_TYPE] = event_ids
     return message
 
 

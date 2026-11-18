@@ -1644,7 +1644,7 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
     assert VOICE_RAW_AUDIO_FALLBACK_KEY not in edit_request.extra_content
-    assert route.pop(ROUTE_EVENT_TYPE)["event_id"] == "$voice_event"
+    assert route.pop(ROUTE_EVENT_TYPE)["event_ids"] == ["$voice_event"]
     assert route == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -1862,7 +1862,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     route = dict(bot._delivery_gateway.send_route.await_args.args[1])
     assert route.pop(ROUTE_EVENT_TYPE) == {
         "entity": "@mindroom_home:localhost",
-        "event_id": "$voice_event",
+        "event_ids": ["$voice_event"],
         "thread_id": "$voice_event",
     }
     assert route == {

@@ -453,7 +453,7 @@ class TestRouterHandoffThreadMode:
         room_mode_config: Config,
         router_user: AgentMatrixUser,
     ) -> None:
-        """A route to a room-mode agent names no thread, so that agent answers in the room."""
+        """A route to a room-mode agent names no thread, so that agent answers in the room, and carries the text."""
         bot = _agent_bot(config=room_mode_config, agent_user=router_user)
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
@@ -490,8 +490,10 @@ class TestRouterHandoffThreadMode:
         mock_get_latest.assert_not_called()
         assert captured_content[ROUTE_EVENT_TYPE] == {
             "entity": "@mindroom_assistant:localhost",
-            "event_id": "$user_event",
+            "event_ids": ["$user_event"],
         }
+        # An agent that answers in the room reads no conversation, so its route brings the person's text.
+        assert captured_content["body"] == "Help me"
 
     @pytest.mark.asyncio
     async def test_router_handoff_uses_suggested_thread_mode(
@@ -534,9 +536,11 @@ class TestRouterHandoffThreadMode:
         mock_get_latest.assert_not_called()
         assert captured_content[ROUTE_EVENT_TYPE] == {
             "entity": "@mindroom_coder:localhost",
-            "event_id": "$user_event",
+            "event_ids": ["$user_event"],
             "thread_id": "$thread_root",
         }
+        # An agent that answers in a thread reads the person's message there.
+        assert "body" not in captured_content
 
 
 class TestCreateSessionIdWithNoneThread:

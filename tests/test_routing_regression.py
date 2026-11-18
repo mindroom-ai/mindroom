@@ -1009,7 +1009,7 @@ class TestRoutingRegression:
         assert route_send["content"] == {
             ROUTE_EVENT_TYPE: {
                 "entity": mock_research_agent.user_id,
-                "event_id": "$user_msg_456",
+                "event_ids": ["$user_msg_456"],
                 "thread_id": "$user_msg_456",
             },
             SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,

@@ -47,9 +47,9 @@ class IngressFacts:
     acting_requester_id: str | None = None
     hook_source: str | None = None
     message_received_depth: int = 0
-    # The person's event a steward's hidden route names: its responder answers that event.
-    routed_event_id: str | None = None
-    # The earlier event a turn for this event also owns: a routed message or a finalized reply.
+    # The person's events a steward's hidden route names: its responder answers the last one.
+    routed_event_ids: tuple[str, ...] = ()
+    # The earlier event this event's source answers for: the last routed message or a finalized reply.
     discovery_event_id: str | None = None
     sender_entity_name: str | None = None
     # The entity behind the run requester, if one is.
@@ -57,6 +57,16 @@ class IngressFacts:
     # Whether this is a contact room of the responder that refuses the sender: only the counterparty and the
     # responder's owner start an active contact's turns, and a removed contact's room starts none.
     contact_refused: bool = False
+
+    @property
+    def routed_event_id(self) -> str | None:
+        """Return the person's event a route's responder answers, or None for an event no steward routed."""
+        return self.routed_event_ids[-1] if self.routed_event_ids else None
+
+    @property
+    def discovery_event_ids(self) -> tuple[str, ...]:
+        """Return every earlier event a turn for this event also owns, so their edits and deletions find it."""
+        return self.routed_event_ids or tuple(filter(None, (self.discovery_event_id,)))
 
     @property
     def run_requester_id(self) -> str:
@@ -98,7 +108,7 @@ class IngressFacts:
     @property
     def routed(self) -> bool:
         """Return whether the room's steward routed this event to its responder."""
-        return self.routed_event_id is not None or self.sender_entity_name == ROUTER_AGENT_NAME
+        return bool(self.routed_event_ids) or self.sender_entity_name == ROUTER_AGENT_NAME
 
     @property
     def router_relay(self) -> bool:

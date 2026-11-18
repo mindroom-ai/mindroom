@@ -152,7 +152,7 @@ def route_event(
             "origin_server_ts": 1_000,
             "type": ROUTE_EVENT_TYPE,
             "content": {
-                ROUTE_EVENT_TYPE: {"entity": BOT, "event_id": "$question"} if route is None else route,
+                ROUTE_EVENT_TYPE: {"entity": BOT, "event_ids": ["$question"]} if route is None else route,
                 SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 ORIGINAL_SENDER_KEY: ALICE,
                 **(extra_content or {}),
@@ -4825,7 +4825,7 @@ class TestRouteDispatch:
         """
         event = route_event(
             "$route",
-            route={"entity": BOT, "event_id": "$question", "thread_id": "$root", "unknown": "dropped"},
+            route={"entity": BOT, "event_ids": ["$earlier", "$question"], "thread_id": "$root", "unknown": "dropped"},
             extra_content={
                 "com.example.unknown": 4,
                 ACTING_REQUESTER_KEY: "@mallory:example.org",
@@ -4858,7 +4858,7 @@ class TestRouteDispatch:
             ORIGINAL_SENDER_KEY: ALICE,
         }
         # What makes the message a route is outside its content, where only this dispatch writes.
-        assert delivered.source[ROUTE_EVENT_TYPE] == ["$question"]
+        assert delivered.source[ROUTE_EVENT_TYPE] == ["$earlier", "$question"]
 
     async def test_a_route_outside_a_thread_carries_the_prompt_its_scheduled_task_relays(
         self,
@@ -4895,8 +4895,11 @@ class TestRouteDispatch:
         [
             "not an object",
             {"entity": BOT},
-            {"entity": 7, "event_id": "$question"},
-            {"entity": BOT, "event_id": "$question", "thread_id": 7},
+            {"entity": BOT, "event_ids": []},
+            {"entity": BOT, "event_ids": ["$question", 7]},
+            {"entity": BOT, "event_id": "$question"},
+            {"entity": 7, "event_ids": ["$question"]},
+            {"entity": BOT, "event_ids": ["$question"], "thread_id": 7},
         ],
     )
     async def test_a_malformed_route_settles_without_reaching_a_responder(
