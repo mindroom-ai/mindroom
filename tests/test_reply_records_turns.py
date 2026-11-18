@@ -28,6 +28,7 @@ from mindroom.constants import (
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    UI_WIDGETS_CONTENT_KEY,
 )
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
@@ -63,6 +64,7 @@ from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import RevisionSnapshotChangedError, TurnRecord
 from mindroom.turn_store import SourcePreparation
+from tests import response_runner_helpers
 from tests.agent_tool_helpers import tool_policy
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
@@ -73,13 +75,14 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.journal_membership_helpers import admit_room_membership
-from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _plain_request, _target
+from tests.response_runner_helpers import _bot, _config, _envelope, _noop_typing, _plain_request, _target
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.config.main import Config
     from mindroom.delivery_gateway import ResponseIdentity
     from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_turn import ResponseTurnContext
@@ -2678,3 +2681,151 @@ async def test_a_regeneration_that_waits_for_earlier_writes_keeps_its_edit(tmp_p
     assert await _answer(bot, _regeneration(answer_event_id="$sent1"), model) == Owned()
     model.assert_not_awaited()
     assert await _span_outcomes(bot, await _reply(bot)) == [rl.SpanOutcome.COMPLETED]
+
+
+_UI_CHART = (
+    '{"type":"chart","kind":"line","title":"Signups","labels":["Jan","Feb","Mar"],'
+    '"series":[{"name":"Signups","data":[120,180.5,150]}],"y":"users"}'
+)
+_UI_CHART_REPLY = f"Signups peaked.\n\n```ui\n{_UI_CHART}\n```"
+_UI_CHART_BLOCK = "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```"
+_UI_CHART_SHOWN = f"Signups peaked.\n\n{_UI_CHART_BLOCK}"
+
+
+def _widget_ids(content: dict[str, object]) -> list[str]:
+    """Return the ids of the widgets one message write carries where a client reads them."""
+    shown = content.get("m.new_content", content)
+    assert UI_WIDGETS_CONTENT_KEY not in content or shown is content, "an edit's fallback copy carries no widgets"
+    value = shown.get(UI_WIDGETS_CONTENT_KEY)
+    return [] if value is None else [entry["id"] for entry in value["widgets"]]
+
+
+def _sent_contents(bot: AgentBot) -> list[dict[str, object]]:
+    return [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
+
+
+@pytest.mark.parametrize("frames_on", [True, False], ids=["live-frames", "durable-edits"])
+async def test_a_stop_inside_an_open_ui_block_keeps_the_drawn_chart_and_writes_its_note_below(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    frames_on: bool,
+) -> None:
+    """A Stop while a second chart is still arriving keeps the first as a widget and shows none of the partial JSON."""
+    bot = await _streaming_bot(tmp_path)
+    bot.config.agents["general"].ui_widgets = True
+    frames: list[str] = []
+    if frames_on:
+        streaming = bot.config.defaults.streaming
+        # Frames carry the progress: the next durable edit is a minute away.
+        streaming.update_interval = 60
+        streaming.max_idle = 2.0
+
+        async def relays(_homeserver_url: str) -> bool:
+            return True
+
+        async def send_frame(_client: object, _room_id: str, frame: dict[str, object], **_kwargs: object) -> object:
+            frames.append(json.dumps(frame))
+            return LiveSendOutcome.SENT
+
+        monkeypatch.setattr(streaming_module, "homeserver_relays_live_frames", relays)
+        monkeypatch.setattr(live_publisher_module, "send_live_frame", send_frame)
+        monkeypatch.setattr(live_publisher_module, "_FRAME_INTERVAL_SECONDS", 0.01)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    inside_the_open_block = asyncio.Event()
+
+    async def shows(text: str) -> None:
+        while not any(text in shown for shown in (*frames, *_sent_bodies(bot))):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield f"{_UI_CHART_REPLY}\n\n"
+        await shows("mindroom-ui-df4d729a5d")
+        yield "A second chart:"
+        await shows("A second chart:")
+        yield '\n\n```ui\n{"type":"chart","kind":"bar",'
+        # The open block shows nothing, so there is nothing to wait for but the stream taking the chunk in.
+        await asyncio.sleep(0.1)
+        inside_the_open_block.set()
+        await asyncio.Event().wait()
+        yield "never"
+
+    with patch_response_runner_module(
+        stream_agent_response=stream,
+        should_use_streaming=AsyncMock(return_value=True),
+        typing_indicator=_noop_typing,
+    ):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        await asyncio.wait_for(inside_the_open_block.wait(), timeout=5)
+        reply = await _reply(bot)
+        assert reply.event_id is not None
+        stop = await _stop(bot, reply.event_id, 7)
+        assert await asyncio.wait_for(stop, timeout=5)
+        await asyncio.wait_for(response, timeout=5)
+
+    assert _sent_bodies(bot)[-1] == f"{_UI_CHART_SHOWN}\n\nA second chart:\n\n**[Response cancelled by user]**"
+    assert _widget_ids(_sent_contents(bot)[-1]) == ["df4d729a5d"]
+    # Nothing a reader saw, durable or live, held the JSON of either block.
+    assert not any('{"type"' in body for body in _sent_bodies(bot))
+    assert not any('{\\"type\\"' in frame for frame in frames)
+    assert bool(frames) is frames_on
+
+
+async def test_a_chart_a_restart_interrupted_is_a_widget_under_the_restart_note_and_the_continuation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restart note and the reply that continues below it are written from the records, chart included."""
+
+    def config_with_widgets(path: Path) -> Config:
+        config = _config(path)
+        config.agents["general"].ui_widgets = True
+        return config
+
+    monkeypatch.setattr(response_runner_helpers, "_config", config_with_widgets)
+    old = await _streaming_bot(tmp_path)
+    response = await _blocked_stream(old, _UI_CHART_REPLY)
+    await asyncio.wait_for(_wait_until_sent(old, _UI_CHART_SHOWN), timeout=5)
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._take_over_replies()
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "March is still above January."
+
+    interrupted = f"{_UI_CHART_SHOWN}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
+    try:
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            await unwrap_extracted_collaborator(restarted._response_runner).generate_response(
+                _plain_request(_target()),
+            )
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+    bodies = _sent_bodies(restarted)
+    assert bodies[-1] == f"{interrupted}\n\nMarch is still above January."
+    assert all(body.startswith(interrupted) for body in bodies)
+    assert [_widget_ids(content) for content in _sent_contents(restarted)] == [["df4d729a5d"]] * len(bodies)
+
+
+async def test_a_chart_regenerated_into_prose_leaves_no_widget(tmp_path: Path) -> None:
+    """An edit that carries no widgets removes them: the regenerated answer's final edit has no key."""
+    bot = await _streaming_bot(tmp_path)
+    bot.config.agents["general"].ui_widgets = True
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value=_UI_CHART_REPLY))
+    assert _sent_bodies(bot)[-1] == _UI_CHART_SHOWN
+    assert _widget_ids(_sent_contents(bot)[-1]) == ["df4d729a5d"]
+
+    prose = "Signups peaked in February at 180.5 users."
+    assert await _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(return_value=prose)) == Owned()
+
+    regenerated = _sent_contents(bot)[-1]
+    assert regenerated["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$sent1"}
+    assert regenerated["m.new_content"]["body"] == prose
+    assert UI_WIDGETS_CONTENT_KEY not in regenerated["m.new_content"]
+    assert UI_WIDGETS_CONTENT_KEY not in regenerated

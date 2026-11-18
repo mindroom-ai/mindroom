@@ -250,6 +250,7 @@ Rules of the function:
 - A valid closed block becomes its fallback block and gets an entry while the reply has fewer than 8 entries and stays within 16,384 bytes; past that the fallback alone shows.
 - An invalid closed block is left exactly as written; a final write logs a warning with the validation errors and never the block's text.
 - A marker block already in the text is ordinary text: it gets no entry and its id is not reused (C2).
+- One write shows text that is already rendered: an approval pause after a streamed attempt is written with the text the stream acknowledged. Its widgets are those of the reply's record, which holds the raw text, that the written text has a marker block for; a marker block the record did not author stays inert.
 - Text without a column-0 `ui` fence is returned as the same object.
 
 What follows from running it on every write:

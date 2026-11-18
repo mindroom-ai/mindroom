@@ -60,6 +60,9 @@ from tests.conftest import (
 )
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_reply_records_turns import (
+    _UI_CHART_BLOCK,
+    _UI_CHART_REPLY,
+    _UI_CHART_SHOWN,
     _admit_edit,
     _coalesced_turn,
     _FlakyHomeserver,
@@ -68,8 +71,10 @@ from tests.test_reply_records_turns import (
     _regeneration,
     _reply,
     _sent_bodies,
+    _sent_contents,
     _stop,
     _streaming_bot,
+    _widget_ids,
 )
 
 if TYPE_CHECKING:
@@ -1022,3 +1027,58 @@ async def test_a_pause_whose_send_failed_once_still_waits_for_its_approval(tmp_p
         reply = await _reply(bot)
         assert reply.confirmed_seq == reply.reply_sequence
         assert _sent_bodies(bot)[-1] == "Reading document"
+
+
+@pytest.mark.parametrize("streams", [True, False], ids=["streamed", "collected"])
+async def test_a_chart_shown_before_an_approval_is_a_widget_in_every_later_write(tmp_path: Path, streams: bool) -> None:
+    """The pause, the resumed progress, a second pause and the answer each carry the chart drawn before the first pause."""
+    second = f"{_UI_CHART_REPLY}\n\nReading the second document"
+    resumes = 0
+
+    async def resume(
+        *_args: object,
+        progress: object = None,
+        **_kwargs: object,
+    ) -> PausedAttempt | CompletedApprovalRun:
+        nonlocal resumes
+        resumes += 1
+        if resumes == 2:
+            return CompletedApprovalRun(f"{second}\n\nBoth read.", {})
+        if progress is not None:
+            await progress(StructuredStreamChunk(content=second))  # type: ignore[operator]
+        return _paused(run_id="run-2", text=second)
+
+    async with _approval_bot(tmp_path, requires_human=False) as bot:
+        bot.config.agents["general"].ui_widgets = True
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        with (
+            patch_response_runner_module(
+                stream_agent_response=_pausing_stream(_paused(text=_UI_CHART_REPLY)),
+                should_use_streaming=AsyncMock(return_value=streams),
+                typing_indicator=_noop_typing,
+            ),
+            patch.object(type(runner.approvals), "_continue_entity_call", AsyncMock(side_effect=resume)),
+        ):
+            await runner.generate_response(_plain_request(_target()))
+
+        assert (await _reply(bot)).state is rl.ReplyState.COMPLETED
+        assert await _span_kinds(bot) == [
+            (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
+            (rl.SpanKind.APPROVAL_RESUME, rl.SpanOutcome.PAUSED),
+            (rl.SpanKind.APPROVAL_RESUME, rl.SpanOutcome.COMPLETED),
+        ]
+        shown = [
+            (body, _widget_ids(content))
+            for body, content in zip(_sent_bodies(bot), _sent_contents(bot), strict=True)
+            if body != "Thinking..."
+        ]
+        # The pause, the second pause and the answer, in that order, whatever progress showed between them.
+        distinct = list(dict.fromkeys(body for body, _ in shown))
+        assert distinct == [
+            _UI_CHART_SHOWN,
+            f"{_UI_CHART_SHOWN}\n\nReading the second document",
+            f"{_UI_CHART_SHOWN}\n\nReading the second document\n\nBoth read.",
+        ]
+        assert len(shown) >= (4 if streams else 3)
+        assert [ids for _, ids in shown] == [["df4d729a5d"]] * len(shown)
+        assert all(_UI_CHART_BLOCK in body and '{"type"' not in body for body, _ in shown)

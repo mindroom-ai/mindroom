@@ -16,6 +16,7 @@ from mindroom.ui_widgets.render import (
     _canonical_widget_json,
     _fallback_block,
     _widget_id,
+    recorded_ui_widgets,
     render_ui_widgets,
     without_open_ui_fence,
 )
@@ -214,6 +215,20 @@ def test_without_open_ui_fence() -> None:
     assert without_open_ui_fence(inside_another) is inside_another
     prose = "No fence here."
     assert without_open_ui_fence(prose) is prose
+
+
+def test_text_a_stream_already_rendered_gets_its_widgets_from_the_text_as_written() -> None:
+    """A write that shows rendered text again finds its widgets in the reply's record, and nowhere else."""
+    raw = f"Before.\n\n{_ui(CHART)}\n\nAfter."
+    once = render_ui_widgets(raw, in_progress=False)
+    assert recorded_ui_widgets(once.text, raw) == once.content
+    # Only the widgets the shown text has a block for.
+    other = _ui(_chart(title="Other"))
+    assert recorded_ui_widgets(once.text, f"{raw}\n\n{other}") == once.content
+    assert recorded_ui_widgets("Before.", raw) is None
+    # A marker block the record did not author as a `ui` block stays inert.
+    assert recorded_ui_widgets(once.text, "Before.\n\nAfter.") is None
+    assert recorded_ui_widgets(BLOCK, BLOCK) is None
 
 
 def test_block_results_are_memoized() -> None:

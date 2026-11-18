@@ -179,8 +179,8 @@ def _replace_blocks(
     return out + lines[position:], found
 
 
-def _content(found: list[tuple[str, str]]) -> dict[str, object] | None:
-    """The `io.mindroom.ui` value: each id once, within the entry and byte limits; `None` without an entry."""
+def _entries(found: list[tuple[str, str]]) -> list[dict[str, str]]:
+    """The entries of an `io.mindroom.ui` value: each id once, within the entry and byte limits."""
     widgets: dict[str, str] = {}
     size = 0
     for widget_id, canonical in found:
@@ -188,9 +188,28 @@ def _content(found: list[tuple[str, str]]) -> dict[str, object] | None:
         if widget_id not in widgets and len(widgets) < _MAX_WIDGETS and size + canonical_bytes <= _MAX_UI_BYTES:
             widgets[widget_id] = canonical
             size += canonical_bytes
-    if not widgets:
-        return None
-    return {"version": 1, "widgets": [{"id": widget_id, "json": canonical} for widget_id, canonical in widgets.items()]}
+    return [{"id": widget_id, "json": canonical} for widget_id, canonical in widgets.items()]
+
+
+def _ui_value(entries: list[dict[str, str]]) -> dict[str, object] | None:
+    """The `io.mindroom.ui` value of some entries; `None` without one, so the key is left out."""
+    return {"version": 1, "widgets": entries} if entries else None
+
+
+def _rendered(text: str, *, in_progress: bool) -> tuple[str, list[dict[str, str]]]:
+    """The text with its valid closed `ui` blocks replaced, and their entries; the same text when nothing changes."""
+    if _UI_FENCE.search(text) is None:
+        return text, []
+    lines = text.split("\n")
+    closed, open_at = _ui_fences(lines)
+    cut = in_progress and open_at is not None
+    if cut:
+        del lines[open_at:]
+    out, found = _replace_blocks(lines, closed, set(_MARKER_ID.findall(text)), warn=not in_progress)
+    if not found and not cut:
+        return text, []
+    rendered = "\n".join(out)
+    return rendered.rstrip() if cut else rendered, _entries(found)
 
 
 def render_ui_widgets(text: str, *, in_progress: bool) -> _UiRender:
@@ -200,15 +219,17 @@ def render_ui_widgets(text: str, *, in_progress: bool) -> _UiRender:
     While the reply is in progress the text is cut at an open `ui` fence; a finished reply keeps it as written.
     Text that changes in no way is returned as the same object.
     """
-    if _UI_FENCE.search(text) is None:
-        return _UiRender(text, None)
-    lines = text.split("\n")
-    closed, open_at = _ui_fences(lines)
-    cut = in_progress and open_at is not None
-    if cut:
-        del lines[open_at:]
-    out, found = _replace_blocks(lines, closed, set(_MARKER_ID.findall(text)), warn=not in_progress)
-    if not found and not cut:
-        return _UiRender(text, None)
-    rendered = "\n".join(out)
-    return _UiRender(rendered.rstrip() if cut else rendered, _content(found))
+    rendered, entries = _rendered(text, in_progress=in_progress)
+    return _UiRender(rendered, _ui_value(entries))
+
+
+def recorded_ui_widgets(shown_text: str, recorded_text: str) -> dict[str, object] | None:
+    """Return the widgets of ``recorded_text`` that ``shown_text`` holds a marker block for, as an ``io.mindroom.ui`` value.
+
+    A write that shows text a stream already rendered has no ``ui`` block left to read, while the reply's record
+    still holds the text as the model wrote it. A marker block the record did not author stays without a widget.
+    """
+    if _MARKER not in shown_text:
+        return None
+    entries = _rendered(recorded_text, in_progress=False)[1]
+    return _ui_value([entry for entry in entries if _MARKER + entry["id"] in shown_text])

@@ -131,7 +131,7 @@ from mindroom.streaming import (
     send_streaming_response,
     stream_progress_edits,
 )
-from mindroom.ui_widgets.render import render_ui_widgets, without_open_ui_fence
+from mindroom.ui_widgets.render import recorded_ui_widgets, render_ui_widgets, without_open_ui_fence
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -1568,18 +1568,24 @@ class DeliveryGateway:
         self,
         text: str,
         extra_content: dict[str, Any] | None,
+        shown: Presentation | None,
     ) -> tuple[str, dict[str, Any] | None]:
         """Return a reply body with its valid ``ui`` blocks as fallback blocks, and its content with their widgets.
 
-        A reply's records hold the text as the model wrote it, and notes, pauses and multi-span bodies are rendered
-        from them, so every write of a reply runs this; an agent without ``ui_widgets`` gets both back as they are.
+        A reply's records hold the text as the model wrote it, and notes and multi-span bodies are rendered from
+        them, so every write of a reply runs this. An approval pause is written with the text its stream already
+        showed, blocks rendered; its widgets come from ``shown``, the reply's record of that text.
+        An agent without ``ui_widgets`` gets both back as they are.
         """
         if not ui_widgets(self.deps.runtime.config, self.deps.agent_name):
             return text, extra_content
         rendered = render_ui_widgets(text, in_progress=False)
-        if rendered.content is None:
+        content = rendered.content
+        if content is None and shown is not None:
+            content = recorded_ui_widgets(text, render_body(shown)[0])
+        if content is None:
             return rendered.text, extra_content
-        return rendered.text, {**(extra_content or {}), UI_WIDGETS_CONTENT_KEY: rendered.content}
+        return rendered.text, {**(extra_content or {}), UI_WIDGETS_CONTENT_KEY: content}
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -1591,7 +1597,11 @@ class DeliveryGateway:
                 request.tool_trace,
                 request.reply_write.shown,
             )
-            response_text, extra_content = self._with_ui_widgets(response_text, request.extra_content)
+            response_text, extra_content = self._with_ui_widgets(
+                response_text,
+                request.extra_content,
+                request.reply_write.shown,
+            )
             request = replace(
                 request,
                 response_text=response_text,
@@ -1665,7 +1675,7 @@ class DeliveryGateway:
         target = request.target
         if request.reply_write is not None:
             new_text, tool_trace = _reply_body(request.new_text, request.tool_trace, request.reply_write.shown)
-            new_text, extra_content = self._with_ui_widgets(new_text, request.extra_content)
+            new_text, extra_content = self._with_ui_widgets(new_text, request.extra_content, request.reply_write.shown)
             request = replace(request, new_text=new_text, tool_trace=tool_trace, extra_content=extra_content)
         # The edit envelope discards any pre-existing relation before adding m.replace.
         content = format_message_with_mentions(

@@ -247,15 +247,16 @@ def test_live_frames_carry_ui_in_snapshot_and_delta() -> None:
 ### Task 7: Lifecycle proofs from persisted records
 
 **Files:**
-- Test: `tests/test_user_stop_convergence.py`, `tests/test_approval_turn_continuation.py`, `tests/test_edit_after_restart.py` (one new test each, with the files' existing harnesses)
+- Test: `tests/test_reply_records_turns.py` (Stop, restart, regeneration) and `tests/test_reply_records_approvals.py` (approval), whose harnesses run a real bot, gateway and reply records against a fake Matrix client. The three files first named here have no harness that streams a reply.
 - Modify: whatever Tasks 5 and 6 touched, only if a test here fails
+- Found by the approval test: a pause that follows a streamed attempt is written with the text the stream acknowledged, blocks already rendered, so the render saw no `ui` block and the pause edit dropped the key. `recorded_ui_widgets` in `render.py` now gives such a write the widgets of the reply's record (`reply_write.shown`) that its text has a marker block for; `_with_ui_widgets` in the gateway calls it when the text itself yields none.
 
 The tests assert the Matrix content that was sent (body and `io.mindroom.ui`), read from the fake client or the outbox, never a hand-built `resumed_text`.
 
 - [ ] **Step 1: Write the tests.**
   - Stop, frames on and off: a stream that closed the 5.4 chart and is inside a second, open `ui` fence is stopped. The terminal content's body holds the first chart's marker block, no `{"type"`, and the cancellation note as its last paragraph outside any fence; `m.new_content` carries the first chart's entry.
   - Approval: chart, then a tool call that pauses; the pause write, the resumed progress, a second pause and the final each carry the chart's entry and its marker block; the id is the same in all four.
-  - Restart: a reply interrupted after the chart closed gets its restart note on the next start; that write carries the entry, and the reply that continues below it keeps the block.
+  - Restart: a reply interrupted after the chart closed is replayed on the next start; every write of the replay shows the chart's block and the restart note and carries the entry, the continuation below them included.
   - Regeneration: the same turn regenerated into prose sends a final edit without the key.
 - [ ] **Step 2: Run.** Expected: PASS if Tasks 5 and 6 covered every path; otherwise fix the path the failing test names and add nothing else.
 - [ ] **Step 3: Commit** (message `test(ui-widgets): widgets across stop, approval and restart`).
