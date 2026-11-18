@@ -208,6 +208,11 @@ class PersonalRoomLifecycle:
 
     def schedule_reconciliation(self) -> None:
         """Start at most one maintenance pass without delaying durable sync admission."""
+        settings = self.runtime.config.personal_rooms
+        if settings is None:
+            # A reload turned the feature off, which ends every trigger still owed a retry.
+            self._retry_candidates.clear()
+            return
         if (
             self._reconciled
             or not (self.observes_onboarding_joins or self._retry_candidates)
@@ -215,8 +220,6 @@ class PersonalRoomLifecycle:
             or monotonic() < self._next_reconciliation_at
         ):
             return
-        settings = self.runtime.config.personal_rooms
-        assert settings is not None
         if not self._reconciliation_ready(settings):
             return
         self._reconciliation_task = create_background_task(

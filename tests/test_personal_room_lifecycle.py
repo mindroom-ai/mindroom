@@ -361,6 +361,22 @@ async def test_claimed_baseline_join_onboards_and_retries_without_stewardship(co
 
 
 @pytest.mark.asyncio
+async def test_disabling_personal_rooms_drops_a_queued_retry(coordination: Coordination) -> None:
+    """A reload that turns the feature off ends a failed trigger's retry, so the next sync frame schedules nothing."""
+    lifecycle = coordination.lifecycle
+    coordination.owner.ensure.side_effect = RuntimeError("Personal-room invite failed")
+    assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+    assert lifecycle._retry_candidates
+    lifecycle.runtime.config.personal_rooms = None
+    lifecycle.config_changed()
+
+    lifecycle.schedule_reconciliation()
+
+    assert lifecycle._reconciliation_task is None
+    assert not lifecycle._retry_candidates
+
+
+@pytest.mark.asyncio
 async def test_non_steward_never_routes_onboarding(coordination: Coordination) -> None:
     """A bot that stewards no onboarding room and took no trigger selects and invokes no target service."""
     lifecycle = coordination.lifecycle
