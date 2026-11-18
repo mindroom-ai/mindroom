@@ -1878,7 +1878,7 @@ How a private agent behaves:
   With `memory_backend: file`, the same workspace holds the agent's file memory.
 - Files load in list order, each headed by its resolved path so the agent knows where to edit it.
 - Missing files are skipped with a warning in the logs.
-- Edits take effect on the next reply without a restart.
+- Edits take effect on the next reply without a restart; an ongoing conversation receives them as a note ([Prompt Caching](https://docs.mindroom.chat/configuration/models/#prompt-caching)).
 
 `defaults.max_preload_chars` (default `50000`) caps the section.
 When it is exceeded, MindRoom drops whole files from the start of the list first and then trims the last remaining file from its end.
@@ -2585,6 +2585,11 @@ Some models reject sampling controls:
 
 An agent's system prompt has a stable part (identity, role, instructions, workspace context files, tool instructions, skills, and knowledge bases) and a turn part (the current date, file memory, and system enrichment); the stable part stays the same across turns and conversations, so providers that cache prompts can reuse it.
 Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
+
+A changed system prompt makes the provider read the whole conversation again, so an ongoing conversation keeps the system prompt it last sent while its cache can still be reused.
+What changed since, such as an edited context file, a new skill, a new `MEMORY.md` entry, or the date, reaches the agent once as a note after the current message.
+The conversation takes the current system prompt when its history is compacted, when its model or tools change, or after no request for the model's cache lifetime: one hour, or five minutes with `extended_cache_time: false` and for providers without that setting.
+Teams and [minimal mode](https://docs.mindroom.chat/tools/agent-cli/) agents always send the current system prompt.
 
 The `anthropic`, `bedrock_claude`, and `vertexai_claude` providers enable prompt caching with a one-hour lifetime by default.
 The `openrouter` provider caches the same way for model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`, using OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching); other OpenRouter model families cache implicitly.
@@ -3713,7 +3718,7 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
+An ongoing conversation keeps the inlined copy it last sent and receives entries added to `MEMORY.md` since, for example from another conversation, as a note after the current message ([Prompt Caching](https://docs.mindroom.chat/configuration/models/#prompt-caching)); edited or deleted lines reload the file from its next reply, and new conversations see every change right away.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their size in the turn model's tokens ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)).
 Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
 Only whole lines are inlined, never part of a line.
@@ -20830,9 +20835,11 @@ async def inject_room_tags(ctx: SystemEnrichContext) -> None:
         )
 ```
 
-Items are rendered in a `<mindroom_system_context>` block, with `"stable"` items first and `"volatile"` items last, each group sorted by key.
+Items are rendered in a `<mindroom_system_context>` block, sorted by key.
+For an agent, `"stable"` items join the system prompt, and `"volatile"` items, the default, follow the current message in their own block, so they never change the system prompt; a team's system prompt takes both.
+Mark an item `"stable"` only when its text stays the same from turn to turn; a changed one reaches an ongoing conversation as a note instead ([Prompt Caching](https://docs.mindroom.chat/configuration/models/#prompt-caching)).
 `persist` has no effect here because system enrichment always applies to the current turn only.
-Changing the system prompt invalidates more of the provider's prompt cache, so use `system:enrich` only for room- or turn-scoped instructions that need system-level priority, and `message:enrich` with `persist=False` for live data.
+Use `system:enrich` only for room- or turn-scoped instructions that need system-level priority, and `message:enrich` with `persist=False` for live data.
 The key `matrix_message_target` is reserved; MindRoom replaces hook items that use it.
 
 ## Enrichment in minimal mode

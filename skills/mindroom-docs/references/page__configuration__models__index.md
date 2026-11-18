@@ -533,6 +533,11 @@ Some models reject sampling controls:
 An agent's system prompt has a stable part (identity, role, instructions, workspace context files, tool instructions, skills, and knowledge bases) and a turn part (the current date, file memory, and system enrichment); the stable part stays the same across turns and conversations, so providers that cache prompts can reuse it.
 Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
 
+A changed system prompt makes the provider read the whole conversation again, so an ongoing conversation keeps the system prompt it last sent while its cache can still be reused.
+What changed since, such as an edited context file, a new skill, a new `MEMORY.md` entry, or the date, reaches the agent once as a note after the current message.
+The conversation takes the current system prompt when its history is compacted, when its model or tools change, or after no request for the model's cache lifetime: one hour, or five minutes with `extended_cache_time: false` and for providers without that setting.
+Teams and [minimal mode](https://docs.mindroom.chat/tools/agent-cli/) agents always send the current system prompt.
+
 The `anthropic`, `bedrock_claude`, and `vertexai_claude` providers enable prompt caching with a one-hour lifetime by default.
 The `openrouter` provider caches the same way for model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`, using OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching); other OpenRouter model families cache implicitly.
 Set `extra_kwargs.cache_system_prompt: false` to turn off MindRoom's Claude cache breakpoints, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.

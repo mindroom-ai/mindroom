@@ -674,18 +674,10 @@ def _mark_pipeline_timing(pipeline_timing: DispatchPipelineTiming | None, label:
 def _turn_system_messages(build: AgentBuild, ctx: ResponseTurnContext, session_preamble: str) -> tuple[Message, ...]:
     """Render the turn's system messages: the build's prompt, the memory preamble, and the stable system enrichment.
 
-    Volatile system enrichment follows the conversation instead (``_volatile_system_enrichment``).
+    Volatile system enrichment follows the conversation instead, in the turn's transient context.
     """
     stable = [item for item in ctx.system_enrichment_items if item.cache_policy == "stable"]
     return prompt_for_turn(build, session_preamble, _render_system_enrichment_context(stable))
-
-
-def _volatile_system_enrichment(ctx: ResponseTurnContext) -> str:
-    """Render the system enrichment that may differ from turn to turn, which the turn's transient context carries.
-
-    In the system prompt it would change the text before the conversation and with it miss the whole prompt cache.
-    """
-    return render_system_enrichment_block([item for item in ctx.system_enrichment_items if item.cache_policy != "stable"])
 
 
 def _prompt_snapshots(runtime_paths: RuntimePaths) -> Path:
@@ -758,6 +750,28 @@ async def _held_system_messages(
     )
     note = config.render_prompt("SYSTEM_PROMPT_CHANGES_TEMPLATE", changes=changes) if changes else ""
     return tuple(Message(role="system", content=text) for text in system), note
+
+
+async def _system_messages_after_compaction(
+    system_messages: tuple[Message, ...],
+    build: AgentBuild,
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    scope_context: ScopeSessionContext | None,
+    conversation: ConversationRef | None,
+    memory: MemoryPromptParts,
+) -> tuple[Message, ...]:
+    """Return the fresh system messages when this turn's history preparation compacted, else ``system_messages``.
+
+    That compaction already changes the request after the system prompt, so the fresh prompt costs nothing here,
+    while waiting for the next turn would make it miss the cache on the whole compacted history.
+    """
+    compacted = _prompt_conversation(ctx, config, scope_context)
+    if compacted is None or compacted == conversation:
+        return system_messages
+    fresh, _ = await _held_system_messages(build, ctx, config, runtime_paths, compacted, memory)
+    return fresh
 
 
 async def _prepare_turn_memory(
@@ -942,7 +956,11 @@ async def _prepare_agent_and_prompt(
             (
                 prompt_parts.transient_turn_context,
                 render_enrichment_block(list(ctx.transient_enrichment_items)),
-                _volatile_system_enrichment(ctx),
+                # Volatile system enrichment follows the conversation: in the system prompt it would change the text
+                # before the conversation and with it miss the whole prompt cache.
+                render_system_enrichment_block(
+                    [item for item in ctx.system_enrichment_items if item.cache_policy != "stable"],
+                ),
                 prompt_changes,
             ),
         )
@@ -970,11 +988,16 @@ async def _prepare_agent_and_prompt(
         outside_matrix=ctx.outside_matrix,
         pipeline_timing=pipeline_timing,
     )
-    compacted = _prompt_conversation(ctx, config, scope_context)
-    if compacted is not None and compacted != prompt_conversation:
-        # This turn's history preparation compacted, which changes the request after the system prompt anyway, so
-        # the fresh prompt costs nothing here, while the next turn would miss the cache on the compacted history.
-        system_messages, _ = await _held_system_messages(build, ctx, config, runtime_paths, compacted, prompt_parts)
+    system_messages = await _system_messages_after_compaction(
+        system_messages,
+        build,
+        ctx,
+        config,
+        runtime_paths,
+        scope_context,
+        prompt_conversation,
+        prompt_parts,
+    )
     history, summary = (
         replayed_history(
             scope_context.session,
