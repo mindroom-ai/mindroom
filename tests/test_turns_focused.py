@@ -434,8 +434,8 @@ class _SpyTurnPolicy:
     def is_room_steward(self, room_id: str) -> bool:
         return self.inner.is_room_steward(room_id)
 
-    async def aims_command_at_me(self, *args: Any) -> bool:  # noqa: ANN401
-        return await self.inner.aims_command_at_me(*args)
+    async def aims_command_at_me(self, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        return await self.inner.aims_command_at_me(*args, **kwargs)
 
     async def owns_command(self, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
         return await self.inner.owns_command(*args, **kwargs)
@@ -2196,6 +2196,60 @@ async def test_command_target_not_ready_notice_comes_from_the_commands_owner(
 
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert len(harness.gateway.sent) == (agent_name == "general")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["general", "research"])
+async def test_two_bots_with_split_room_snapshots_answer_a_command_once(
+    config: Config,
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    first: str,
+) -> None:
+    """Two bots that see different members while a join syncs share one saved owner, so one of them answers."""
+    seen = {"general": ("general", "research"), "research": ("research",)}
+    sent = 0
+    for agent_name in sorted(seen, key=lambda name: name != first):
+        harness = _build_harness(config, tmp_path / agent_name, agent_name=agent_name)
+        harness.runtime.orchestrator.journal_store = journal_store
+        await harness.ingress.handle_text_event(_room_with_members(config, *seen[agent_name]), _text_event("!help"))
+        sent += len(harness.gateway.sent)
+
+    assert sent == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["general", "research"])
+async def test_not_ready_notice_and_the_running_bot_give_a_command_one_outcome(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    journal_store: EventJournalStore,
+    first: str,
+) -> None:
+    """One bot cannot place a thread command and another runs it in its thread: the saved owner alone acts."""
+    history = thread_history_result(
+        [
+            make_visible_message(sender=_SENDER, body="please help", event_id="$thread:localhost"),
+            make_visible_message(sender=_entity_user_id(config, "research"), body="sure", event_id="$a:localhost"),
+        ],
+        is_full_history=True,
+    )
+    room = _room_with_members(config, "general", "research")
+    sent = 0
+    for agent_name in sorted(("general", "research"), key=lambda name: name != first):
+        harness = _build_harness(config, tmp_path / agent_name, agent_name=agent_name, thread_history=history)
+        harness.runtime.orchestrator.journal_store = journal_store
+        if agent_name == "general":
+
+            async def unresolved(*_args: object) -> str | None:
+                raise ThreadMembershipLookupError
+
+            monkeypatch.setattr(harness.ingress.deps.resolver, "coalescing_thread_id", unresolved)
+        await harness.ingress.handle_text_event(room, _text_event("!help", thread_id="$thread:localhost"))
+        sent += len(harness.gateway.sent)
+
+    assert sent == 1
 
 
 @pytest.mark.asyncio

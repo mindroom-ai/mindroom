@@ -879,12 +879,21 @@ async def _command_owners(
     owners = []
     for name, room in rooms.items():
         policy = _policy_for(config, name)
-        if journal_store is not None:
-            policy.deps.runtime.orchestrator.journal_store = journal_store
+        policy.deps.runtime.orchestrator.journal_store = journal_store or _claims()
         dispatch = _dispatch(context or _context(), agent_name=name)
         if await policy.owns_command(room, dispatch, command, source_event_id=_EVENT_ID):
             owners.append(name)
     return owners
+
+
+def _claims() -> EventJournalStore:
+    """Return a claim store that saves the first owner of each room event's purpose."""
+    saved: dict[tuple[str, ...], str] = {}
+
+    async def claim_room_event(*key_and_owner: str) -> str:
+        return saved.setdefault(key_and_owner[:3], key_and_owner[3])
+
+    return cast("EventJournalStore", SimpleNamespace(claim_room_event=claim_room_event))
 
 
 def _shared_room(config: Config, *entity_names: str) -> dict[str, nio.MatrixRoom]:
@@ -941,20 +950,22 @@ async def test_command_in_one_agent_room_is_handled_by_that_agent(config: Config
 
 
 @pytest.mark.asyncio
-async def test_side_effect_command_runs_once_across_two_bots(config: Config) -> None:
-    """Two bots that each believe a command is theirs run a command with side effects once."""
-    rooms = {name: _room_with_members(_SENDER, _entity_id(config, name).full_id) for name in ("general", "research")}
-    saved: dict[tuple[str, ...], str] = {}
+async def test_command_owner_comes_from_the_joined_pool(tmp_path: Path) -> None:
+    """An agent configured for a room it has left owns no command there: the joined candidates decide."""
+    agents = {name: AgentConfig(display_name=name.title(), rooms=[_ROOM_ID]) for name in ("general", "research")}
+    config = bind_runtime_paths(Config(agents=agents), test_runtime_paths(tmp_path))
 
-    async def claim_room_event(*key_and_owner: str) -> str:
-        return saved.setdefault(key_and_owner[:3], key_and_owner[3])
+    assert await _command_owners(config, "!help", _shared_room(config, "research")) == ["research"]
 
-    journal_store = cast("EventJournalStore", SimpleNamespace(claim_room_event=claim_room_event))
-    assert await _command_owners(config, "!help", rooms) == ["general", "research"]
-    assert await _command_owners(config, "!thread_mode room", rooms, journal_store=journal_store) == ["general"]
-    # The saved owner still runs it when its copy of the command is replayed.
-    assert await _command_owners(config, "!thread_mode room", rooms, journal_store=journal_store) == ["general"]
-    assert saved == {(_ROOM_ID, _EVENT_ID, "command"): "general"}
+
+@pytest.mark.asyncio
+async def test_saved_command_owner_is_followed_on_replay(config: Config) -> None:
+    """Bots that disagree on a command's owner follow the first one saved, and its replay still runs it."""
+    rooms = {name: _room_with_members(_SENDER, _entity_id(config, name).full_id) for name in ("research", "general")}
+    claims = _claims()
+
+    assert await _command_owners(config, "!help", rooms, journal_store=claims) == ["research"]
+    assert await _command_owners(config, "!help", rooms, journal_store=claims) == ["research"]
 
 
 def _router_access_denies_everyone(tmp_path: Path, **general: Any) -> Config:  # noqa: ANN401

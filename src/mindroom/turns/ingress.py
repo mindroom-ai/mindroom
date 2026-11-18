@@ -533,7 +533,13 @@ class TurnIngress:
             self.deps.runtime_paths,
             room=room,
         )
-        if await self.deps.turn_policy.aims_command_at_me(room, requester_user_id, command, mentioned_agents):
+        if await self.deps.turn_policy.aims_command_at_me(
+            room,
+            requester_user_id,
+            command,
+            mentioned_agents,
+            source_event_id=event.event_id,
+        ):
             async with self.deps.ingress.admitted_reply_decision(
                 requester_user_id,
                 room.room_id,

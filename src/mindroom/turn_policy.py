@@ -14,13 +14,13 @@ from mindroom.authorization import (
     is_sender_allowed_for_responder,
 )
 from mindroom.commands.desktop_commands import chat_pairing_desktop_error
-from mindroom.commands.parsing import COMMAND_TYPES_WITH_SIDE_EFFECTS, CommandType
+from mindroom.commands.parsing import CommandType
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.contacts.turns import contact_room, unmentioned_message_answerer
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
-from mindroom.matrix.room_membership import room_has_only
+from mindroom.matrix.room_membership import cached_joined_member_ids, room_has_only
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
@@ -553,30 +553,46 @@ class TurnPolicy:
         command: Command,
         mentioned_agents: Sequence[MatrixID],
         thread_history: Sequence[ResolvedVisibleMessage] = (),
+        *,
+        source_event_id: str,
     ) -> bool:
-        """Return whether this bot is the one a command is aimed at.
+        """Return whether this bot is the saved owner of one command, the bot it is aimed at.
 
         A Desktop agent alone with the requester runs `/desktop`.
         A command that mentions agents or teams is for the lowest Matrix ID among them, and one in a thread with a
         single agent the requester may address is for that agent.
-        Any other command addresses MindRoom itself: the candidate with the lowest Matrix ID runs it, whatever the
-        reply mode and the thread, where `router.access` admits the requester.
+        Any other command addresses MindRoom itself: the joined candidate with the lowest Matrix ID runs it, whatever
+        the reply mode and the thread, where `router.access` admits the requester.
+        Bots can differ on this while a join or a thread reaches them, so the first to decide saves the owner and
+        every bot follows the saved one, on each replay too.
         """
         config = self.deps.runtime.config
+        me = self.deps.matrix_id
+        joined = cached_joined_member_ids(room)
+        candidates = [
+            candidate
+            for candidate in await self.responder_candidates_for_room(room, requester_user_id)
+            if candidate.full_id in joined
+        ]
         if (
             command.type is CommandType.DESKTOP
             and chat_pairing_desktop_error(config, self.deps.agent_name) is None
             and room_has_only(config, room, {requester_user_id, room.own_user_id})
         ):
-            return True
-        candidates = await self.responder_candidates_for_room(room, requester_user_id)
-        aimed_at = [candidate for candidate in candidates if candidate in mentioned_agents]
-        if not mentioned_agents:
+            aimed_at = [me]
+        elif mentioned_agents:
+            aimed_at = [candidate for candidate in candidates if candidate in mentioned_agents]
+        else:
             in_thread = get_agents_in_thread(thread_history, config, self.deps.runtime_paths)
             aimed_at = [candidate for candidate in candidates if candidate in in_thread]
             if len(aimed_at) != 1:
                 aimed_at = candidates if self._routing_admits(requester_user_id, room.room_id) else []
-        return self._select_response_owner(aimed_at) == self.deps.matrix_id
+        owner = self._select_response_owner(aimed_at)
+        if owner is None:
+            return False
+        journal = self.deps.runtime.orchestrator.event_journal_store()
+        saved = await journal.claim_room_event(room.room_id, source_event_id, "command", owner.full_id)
+        return saved == me.full_id and me in (owner, *candidates)
 
     async def owns_command(
         self,
@@ -586,21 +602,15 @@ class TurnPolicy:
         *,
         source_event_id: str,
     ) -> bool:
-        """Return whether this bot runs one command: it is aimed at this bot, and no other bot took it first."""
-        owned = await self.aims_command_at_me(
+        """Return whether this bot runs one command: it is the command's saved owner."""
+        return await self.aims_command_at_me(
             room,
             dispatch.requester_user_id,
             command,
             dispatch.context.mentioned_agents,
             dispatch.context.planning_thread_history,
+            source_event_id=source_event_id,
         )
-        if not owned or command.type not in COMMAND_TYPES_WITH_SIDE_EFFECTS:
-            return owned
-        # Bots can differ on whom a command is aimed at while a join or a thread reaches them, so the first to
-        # claim one with side effects runs it, on each replay too.
-        name = self.deps.agent_name
-        journal = self.deps.runtime.orchestrator.event_journal_store()
-        return await journal.claim_room_event(room.room_id, source_event_id, "command", name) == name
 
     def is_room_steward(self, room_id: str) -> bool:
         """Return whether this bot is the room's steward, the one bot that routes there."""
