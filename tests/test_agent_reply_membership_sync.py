@@ -554,10 +554,10 @@ async def test_a_stopping_observer_does_not_cancel_the_refresh() -> None:
         finished = True
 
     frame = asyncio.create_task(membership_sync.refresh_if_needed(config, slow_refresh))
-    await started.wait()
+    await asyncio.wait_for(started.wait(), 5)
     membership_sync.invalidate_observer(config, _OBSERVER, reason="observer_stopping")
     release.set()
-    await frame
+    await asyncio.wait_for(frame, 5)
 
     assert finished
     memberships.invalidate_observer.assert_called_once_with(config, _OBSERVER, reason="observer_stopping")
@@ -583,13 +583,13 @@ async def test_a_sync_frame_never_waits_on_a_refresh_it_does_not_need() -> None:
         await release.wait()
 
     check = asyncio.create_task(membership_sync.refresh_for_access_check(config, held_refresh))
-    await started.wait()
+    await asyncio.wait_for(started.wait(), 5)
     async with asyncio.timeout(1):
         await membership_sync.refresh_if_needed(config, held_refresh)
 
     assert not check.done()
     release.set()
-    await check
+    await asyncio.wait_for(check, 5)
     assert refreshes == 1
 
 

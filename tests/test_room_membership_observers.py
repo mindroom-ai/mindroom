@@ -365,13 +365,13 @@ async def test_observer_stop_during_refresh_voids_its_rows(tmp_path: Path) -> No
     await _refresh(index, config, runtime_paths, b)
     b.answers[_ROOM] = (_A, _B, _ALICE)
     refresh = asyncio.create_task(_refresh(index, config, runtime_paths, a, b, power={_A: 50}))
-    await a.reading.wait()
+    await _reached(a.reading)
 
     # No published row names A yet, so the invalidation must void the refresh that holds A's answers.
     membership_sync.invalidate_observer(config, _A, reason="observer_stopping")
     assert a.hold is not None
     a.hold.set()
-    await refresh
+    await asyncio.wait_for(refresh, 5)
 
     assert _observers(index) == {_OTHER: _B}
     assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
@@ -434,7 +434,7 @@ async def test_account_reporting_its_departure_during_the_refresh_that_pins_a_ro
     membership_sync.invalidate_observer(config, _B, reason="observer_stopping")
     a.hold = asyncio.Event()
     refresh = asyncio.create_task(_refresh(index, config, runtime_paths, a))
-    await a.reading.wait()
+    await _reached(a.reading)
 
     # No published row names A yet, so only the refresh in flight can apply this.
     membership_sync.pre_admit_ingestion(
@@ -451,7 +451,7 @@ async def test_account_reporting_its_departure_during_the_refresh_that_pins_a_ro
         observer_user_id=_A,
     )
     a.hold.set()
-    await refresh
+    await asyncio.wait_for(refresh, 5)
 
     assert _observers(index) == {}
     assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
@@ -474,12 +474,12 @@ async def test_join_seen_while_a_room_moves_to_a_new_observer_does_not_restore_t
     index.apply_member_event(config, _OTHER, _member_event(_BOB, "join"), control_user_id=_B)
     assert index.needs_refresh(config)
     refresh = asyncio.create_task(_refresh(index, config, runtime_paths, a, b))
-    await b.reading.wait()
+    await _reached(b.reading)
 
     index.apply_member_event(config, _ROOM, _member_event(_ALICE, "join"), control_user_id=_B)
     assert b.hold is not None
     b.hold.set()
-    await refresh
+    await asyncio.wait_for(refresh, 5)
 
     assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
     assert _observers(index) == {}
@@ -494,14 +494,14 @@ async def test_join_seen_during_refresh_that_read_a_kick_does_not_grant(tmp_path
     b = _Account(_B, {_ROOM: (_A, _B)})
     index = AgentReplyMembershipIndex()
     refresh = asyncio.create_task(_refresh(index, config, runtime_paths, a, b))
-    await a.reading.wait()
+    await _reached(a.reading)
 
     # Alice joined and was kicked before the read; both syncs still trail the kick.
     for account in (_B, _A):
         index.apply_member_event(config, _ROOM, _member_event(_ALICE, "join"), control_user_id=account)
     assert a.hold is not None
     a.hold.set()
-    await refresh
+    await asyncio.wait_for(refresh, 5)
 
     assert not index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
     assert _observers(index) == {}
