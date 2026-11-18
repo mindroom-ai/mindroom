@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Literal
+from typing import Any, Literal
 
 import nio
 import pytest
@@ -100,6 +100,24 @@ def _lifecycle(
     return ReplyCompactionLifecycle(recorder, notice or RecordingCompactionLifecycle())
 
 
+async def _prepare_short_answer_edit(content: list[dict[str, object]], *, room_encrypted: bool) -> dict[str, Any]:
+    """Prepare an edit to the short answer "Short answer." that carries ``content`` twice, as every edit does."""
+    edit = {
+        "msgtype": "m.text",
+        "body": "* Short answer.",
+        "m.new_content": {"msgtype": "m.text", "body": "Short answer.", COMPACTIONS_CONTENT_KEY: content},
+        COMPACTIONS_CONTENT_KEY: content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+    }
+    return await prepare_large_message(
+        _UploadClient(nio.UploadResponse("mxc://server/sidecar")),
+        "!room:server",
+        edit,
+        room_encrypted=room_encrypted,
+        sidecar_required=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_start_progress_success_updates_one_entry_in_place() -> None:
     """One compaction stays one entry, edited by id from running to success."""
@@ -173,20 +191,7 @@ async def test_a_verbose_failure_reason_is_capped_so_a_short_answer_edit_still_f
     assert len(reason) == 301
     assert reason.startswith("provider said: xxx")
     assert reason.endswith("…")
-    edit = {
-        "msgtype": "m.text",
-        "body": "* Short answer.",
-        "m.new_content": {"msgtype": "m.text", "body": "Short answer.", COMPACTIONS_CONTENT_KEY: content},
-        COMPACTIONS_CONTENT_KEY: content,
-        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-    }
-    prepared = await prepare_large_message(
-        _UploadClient(nio.UploadResponse("mxc://server/sidecar")),
-        "!room:server",
-        edit,
-        room_encrypted=False,
-        sidecar_required=True,
-    )
+    prepared = await _prepare_short_answer_edit(content, room_encrypted=False)
     assert prepared["m.new_content"]["body"] == "Short answer."
 
 
@@ -216,20 +221,7 @@ async def test_a_reply_writes_only_its_newest_compactions_so_a_short_answer_edit
     assert MAX_REPLY_COMPACTIONS == 8
     assert [entry["id"] for entry in content] == entry_ids[-kept:]
     assert len(json.dumps(content)) <= MAX_REPLY_COMPACTIONS_BYTES
-    edit = {
-        "msgtype": "m.text",
-        "body": "* Short answer.",
-        "m.new_content": {"msgtype": "m.text", "body": "Short answer.", COMPACTIONS_CONTENT_KEY: content},
-        COMPACTIONS_CONTENT_KEY: content,
-        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-    }
-    prepared = await prepare_large_message(
-        _UploadClient(nio.UploadResponse("mxc://server/sidecar")),
-        "!room:server",
-        edit,
-        room_encrypted=True,
-        sidecar_required=True,
-    )
+    prepared = await _prepare_short_answer_edit(content, room_encrypted=True)
     assert prepared["m.new_content"]["body"] == "Short answer."
     assert len(prepared[COMPACTIONS_CONTENT_KEY]) == kept
 
@@ -320,26 +312,16 @@ def test_after_tool_read_once_at_start() -> None:
 
 
 def test_unbound_recorder_anchors_at_zero() -> None:
-    """Without a bound delivery, an entry anchors above every tool call."""
+    """Without a bound delivery, never bound or since unbound, an entry anchors above every tool call."""
     recorder = ReplyCompactions()
     recorder.start(_start())
-
-    content = recorder.content()
-    assert content is not None
-    assert content[0]["after_tool"] == 0
-
-
-def test_unbind_stops_reading_the_delivery() -> None:
-    """An unbound recorder no longer reads the delivery it was bound to."""
-    recorder = ReplyCompactions()
     recorder.bind(tool_count=lambda: 3)
     recorder.unbind()
-
     recorder.start(_start())
 
     content = recorder.content()
     assert content is not None
-    assert content[0]["after_tool"] == 0
+    assert [entry["after_tool"] for entry in content] == [0, 0]
 
 
 def test_content_is_a_copy() -> None:
