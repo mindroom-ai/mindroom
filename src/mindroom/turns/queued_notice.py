@@ -27,7 +27,7 @@ class _ApprovalWaitSupport(Protocol):
     delivery_gateway: DeliveryGateway
 
 
-async def queued_notice_reservation_if_busy(
+def queued_notice_reservation_if_busy(
     response_runner: ResponseRunner,
     *,
     target: MessageTarget,
@@ -45,12 +45,37 @@ async def queued_notice_reservation_if_busy(
         return None
     if not response_runner.has_active_response_for_target(target):
         return None
-    if await response_runner.is_answering(envelope.source_event_id):
-        # A restart's replay of the message a cut-short reply answers: nobody sent anything new.
-        return None
     return response_runner.reserve_waiting_human_message(
         target=target,
         response_envelope=envelope,
+        mentions_nobody=mentions_nobody,
+        transcript=transcript,
+        mode=mode,
+    )
+
+
+async def arriving_message_notice_reservation(
+    response_runner: ResponseRunner,
+    *,
+    target: MessageTarget,
+    envelope: MessageEnvelope,
+    mentions_nobody: bool = False,
+    transcript: str | None = None,
+    mode: MidTurnMode = MidTurnMode.AUTO,
+) -> QueuedHumanNoticeReservation | None:
+    """Reserve the queued notice for a message as ingress takes it in, unless a reply to it is already under way.
+
+    A restart replays the message a cut-short reply answers. Nobody sent anything new, so the turn that holds its
+    conversation meanwhile, such as a job follow-up, is not told that a newer message waits.
+    """
+    if response_runner.has_active_response_for_target(target) and await response_runner.is_answering(
+        (envelope.source_event_id,),
+    ):
+        return None
+    return queued_notice_reservation_if_busy(
+        response_runner,
+        target=target,
+        envelope=envelope,
         mentions_nobody=mentions_nobody,
         transcript=transcript,
         mode=mode,

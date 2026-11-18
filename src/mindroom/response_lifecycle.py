@@ -538,6 +538,8 @@ class ResponseLifecycleCoordinator:
     async def reserve_response_lifecycle(
         self,
         response_envelope: MessageEnvelope,
+        *,
+        signal_queued_message: bool = True,
     ) -> ResponseLifecycleReservation:
         """Reserve FIFO admission on one canonical lifecycle before response preparation."""
         target = response_envelope.target
@@ -552,7 +554,7 @@ class ResponseLifecycleCoordinator:
                 lifecycle_lock=lifecycle_lock,
                 queued_signal=queued_signal,
                 response_envelope=response_envelope,
-                signal_queued_message=True,
+                signal_queued_message=signal_queued_message,
             ),
         )
         try:

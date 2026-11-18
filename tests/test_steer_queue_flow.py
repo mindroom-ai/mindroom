@@ -59,7 +59,7 @@ from tests.test_reply_endings_characterization import (
 from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.llm.messages import Message
@@ -86,7 +86,7 @@ _APPROVAL_FALLBACK = "Tool approval continuation completed"
 class _Tools(Toolkit):
     """One quick tool; ``during`` runs while it does, as a person's message can arrive while a tool runs."""
 
-    during: ClassVar[Callable[[], Awaitable[None]] | None] = None
+    during: ClassVar[Callable[[], None] | None] = None
 
     def __init__(self) -> None:
         super().__init__(name="echo", tools=[self.echo])
@@ -99,7 +99,7 @@ class _Tools(Toolkit):
 
         """
         if type(self).during is not None:
-            await type(self).during()
+            type(self).during()
         return f"echoed {text}"
 
 
@@ -137,15 +137,11 @@ async def _flow(
     return turn
 
 
-def _arrival(
-    turn: _Turn,
-    *,
-    mode: MidTurnMode,
-) -> tuple[list[QueuedHumanNoticeReservation], Callable[[], Awaitable[None]]]:
+def _arrival(turn: _Turn, *, mode: MidTurnMode) -> tuple[list[QueuedHumanNoticeReservation], Callable[[], None]]:
     """Return a callback that reserves the requester's ``$steer`` once, as its ingress does, and its reservations."""
     notices: list[QueuedHumanNoticeReservation] = []
 
-    async def arrive() -> None:
+    def arrive() -> None:
         if notices:
             return
         target = _target(reply_to_event_id=_STEER)
@@ -154,7 +150,7 @@ def _arrival(
             body=_STEER_TEXT,
             origin=message_origin(sender_id=_REQUESTER, requester_id=_REQUESTER),
         )
-        notice = await queued_notice_reservation_if_busy(turn.runner, target=target, envelope=envelope, mode=mode)
+        notice = queued_notice_reservation_if_busy(turn.runner, target=target, envelope=envelope, mode=mode)
         assert notice is not None
         notices.append(notice)
 
@@ -405,7 +401,7 @@ async def test_team_leader_steer_ends_its_run_and_the_team_followup_replays_it(
     notices, arrive = _arrival(turn, mode=MidTurnMode.STEER)
 
     async def arrive_while_member_works() -> None:
-        await arrive()
+        arrive()
 
     turn.models["writer-model"].turns.append([Await(arrive_while_member_works), *answer("Writer fact.")])
 
