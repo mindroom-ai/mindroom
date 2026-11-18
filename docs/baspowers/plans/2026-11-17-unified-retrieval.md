@@ -223,7 +223,7 @@ Held-out halves, shipped vs arm @0.3 (turns_with_relevant Δ in points; relevant
 
 Latency (DevAgent, 200 held-out turns, uncached, sequential, production 1.5 s timeout): A6t p50 +118 ms, p95 +178 ms, 0% fallback; A6o p50 +290 ms, p95 +578 ms, 0% fallback.
 Cost (billed input tokens, list price): A6t $0.00023–0.00033/turn, A6o $0.00060–0.00088/turn.
-Second judge (`google/gemini-3.8-flash`, DevAgent, 199 paired held-out turns): A6t@0.3 +9.0 pt, ×2.19; A6o@0.3 +8.0 pt, ×2.56 — same sign as DeepSeek. (Harry-all second judge: pending, appended when done.)
+Second judge (`google/gemini-3.8-flash`, DevAgent, 199 paired held-out turns): A6t@0.3 +9.0 pt, ×2.19; A6o@0.3 +8.0 pt, ×2.56 — same sign as DeepSeek. Harry all (`google/gemini-3.8-flash`, 200 paired held-out turns): A6t@0.3 +5.0 pt, ×1.45; A6o@0.3 +2.0 pt, ×1.48 — same sign as DeepSeek. Rule 5 holds on both runs judged twice.
 A7 (gate) fails the guard on Harry all and Harry recent; with OpenAI the gate abstains on >90% of turns. Not shipped.
 A5 (bge-reranker-v2-m3): not run (GPU-only per ruling 5; measurement only).
 Search errors (embedder HTTP 500 after 4 retries) were ~1–2% of turns, excluded from every arm alike.
