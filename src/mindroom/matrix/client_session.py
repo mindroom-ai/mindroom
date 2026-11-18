@@ -63,17 +63,20 @@ _STATE_EVENT_STRING_FIELDS = ("type", "state_key", "sender", "event_id")
 
 def _is_state_event(event: object) -> bool:
     """Return whether one room-state entry has the fields nio's room-state schema requires."""
-    return (
-        isinstance(event, dict)
-        and all(isinstance(event.get(field), str) for field in _STATE_EVENT_STRING_FIELDS)
-        and isinstance(event.get("origin_server_ts"), int)
-    )
+    if not isinstance(event, dict):
+        return False
+    fields = cast("dict[str, object]", event)
+    if not all(isinstance(fields.get(field), str) for field in _STATE_EVENT_STRING_FIELDS):
+        return False
+    return isinstance(fields.get("origin_server_ts"), int)
 
 
 class _RoomStateResponse(nio.RoomGetStateResponse):
-    """Room state without nio's JSON schema validation, which blocks the event loop for long in a large room.
+    """Room state checked field by field instead of by nio's JSON schema validation.
 
-    A body that is not a list answers with nio's error response, and an entry without the required fields is dropped.
+    nio validates every event with jsonschema on the event loop, hundreds of milliseconds per read of a room with
+    thousands of state events. A body that is not a list answers with nio's error response, and an entry without the
+    required fields is dropped.
     """
 
     @classmethod
