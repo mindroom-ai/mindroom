@@ -1,8 +1,8 @@
 """The final model request of a response that counts toward skill learning, kept for the review to fork.
 
 Like Hermes' review fork, the review replays that request with its request settings unchanged and appends the review
-prompt. Its tools are the definitions the request offered, so the provider serves the conversation from its prompt
-cache, which it reads by prefix, tools first. Only the ordinary response path records requests, and it builds its
+prompt. Its tools are the definitions the request offered, so the provider can reuse the conversation's cached
+prefix, which it reads tools first. Only the ordinary response path records requests, and it builds its
 provider for that one response, so the review owns the provider once the response has ended.
 """
 

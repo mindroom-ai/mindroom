@@ -3,7 +3,7 @@
 Like Hermes' default review, the fork replays the finished response's final request on the same model with its
 request settings unchanged and appends the review prompt, so the review sees the conversation verbatim. Its tools are
 the definitions that request offered, with the wait budget it offered for calls that could become jobs, so the
-provider serves the conversation from its prompt cache; the review runs its calls itself and ignores that budget.
+provider can reuse the conversation's cached prefix; the review runs its calls itself and ignores that budget.
 Only the skill tools execute; every other tool keeps its definition and answers that it is not available. When the
 review uses another model, or the response left no request to fork, the review replays the stored conversation as a
 digest instead, like Hermes' routed review.
