@@ -300,6 +300,8 @@ def _bound_computer(
         agents = {"writer": writer, unprepared: AgentConfig(display_name="Unprepared")}
         config = Config(agents=agents, authorization=config.authorization)
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_router:example.org"
+    client.rooms = {}
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=joined_rooms)
     client.joined_members.return_value = joined_members_response(ROOM, ALICE, ALIAS, agent_id)
     runtime = ready_runtime(config, paths)
