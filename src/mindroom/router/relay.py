@@ -222,14 +222,15 @@ async def _router_handoff_with_attachments(
     return extra_content
 
 
-async def _voice_transcripts(deps: _RouterRelaySupport, event_ids: list[str]) -> dict[str, str]:
-    """Return the transcript of each routed voice message: its responder posts it, though retention cleared its own."""
-    return {
+async def _voice_transcripts(deps: _RouterRelaySupport, event_ids: list[str]) -> dict[str, dict[str, str]]:
+    """Return route content holding each routed voice message's transcript, which the responder posts first."""
+    transcripts = {
         event_id: voice.body
         for event_id in event_ids
         if (voice := await deps.turn_store.prepared_voice_for_source(event_id)) is not None
         and VOICE_RAW_AUDIO_FALLBACK_KEY not in voice.to_content()
     }
+    return {ROUTE_VOICE_TRANSCRIPTS_KEY: transcripts} if transcripts else {}
 
 
 async def execute_router_relay(  # noqa: PLR0911
@@ -326,9 +327,8 @@ async def execute_router_relay(  # noqa: PLR0911
     }
     if thread_event_id is not None:
         route["thread_id"] = thread_event_id
-    content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route}
-    if transcripts := await _voice_transcripts(deps, route["event_ids"]):
-        content[ROUTE_VOICE_TRANSCRIPTS_KEY] = transcripts
+    transcripts = await _voice_transcripts(deps, route["event_ids"])
+    content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route, **transcripts}
     if scheduled_prompt is not None or thread_event_id is None:
         # A responder in a thread reads the person's messages there. One that answers in the room reads no
         # conversation, and a scheduled task's prompt may be in no visible message, so their route carries the prompt.
