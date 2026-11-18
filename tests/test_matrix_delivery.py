@@ -82,7 +82,7 @@ async def test_send_message_result_ignores_unverified_devices_in_encrypted_room(
 async def test_a_hidden_route_sent_to_an_encrypted_room_keeps_its_event_type() -> None:
     """Nio encrypts an event under the type it is given, so a route in an encrypted room decrypts as a route."""
     client = _mock_client(encrypted=True)
-    content = {"io.mindroom.route": {"entity": "@mindroom_general:localhost", "event_id": "$question"}}
+    content = {"io.mindroom.route": {"entity": "@mindroom_general:localhost", "event_ids": ["$question"]}}
 
     delivered = await send_message_result(client, "!room:localhost", content, message_type="io.mindroom.route")
 

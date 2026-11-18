@@ -514,7 +514,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert mock_send.call_args.kwargs["message_type"] == "io.mindroom.route"
         route = mock_send.call_args.args[2]["io.mindroom.route"]
         assert route["thread_id"] == "$thread_root:localhost"
-        assert route["event_id"] == "$plain_reply:localhost"
+        assert route["event_ids"] == ["$plain_reply:localhost"]
 
     @pytest.mark.asyncio
     async def test_message_with_multiple_relations_handled_correctly(self, bot: AgentBot) -> None:
