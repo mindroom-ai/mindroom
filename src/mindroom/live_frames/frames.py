@@ -50,21 +50,30 @@ def fitted_tools(tools: tuple[dict[str, object], ...], *, bare: int) -> tuple[di
     """Return the tool entries a frame shows: previews cut to the frame cap, and none on the oldest ``bare`` entries.
 
     An entry that lost any of its previews says ``clipped``. A result that is a background job handle keeps the
-    handle, which clients read for the call's status.
+    handle, which clients read for the call's status. A bare entry is never bigger than its cut form, so a frame only
+    shrinks as ``bare`` grows.
     """
     fitted: list[dict[str, object]] = []
     for index, entry in enumerate(tools):
-        previews = {key: text for key in _PREVIEW_KEYS if isinstance(text := entry.get(key), str)}
-        kept = {} if index < bare else {key: _clipped(text) for key, text in previews.items()}
-        handle = _job_handle(previews.get("result_preview"), whole=index >= bare)
-        if handle is not None:
-            kept["result_preview"] = handle
-        if kept == previews:
-            fitted.append(entry)
-            continue
-        others = {key: value for key, value in entry.items() if key not in previews}
-        fitted.append({**others, **kept, "clipped": True})
+        shown = _fitted_entry(entry, bare=False)
+        if index < bare:
+            stripped = _fitted_entry(entry, bare=True)
+            if len(json.dumps(stripped)) < len(json.dumps(shown)):
+                shown = stripped
+        fitted.append(shown)
     return tuple(fitted)
+
+
+def _fitted_entry(entry: dict[str, object], *, bare: bool) -> dict[str, object]:
+    previews = {key: text for key in _PREVIEW_KEYS if isinstance(text := entry.get(key), str)}
+    kept = {} if bare else {key: _clipped(text) for key, text in previews.items()}
+    handle = _job_handle(previews.get("result_preview"), whole=not bare)
+    if handle is not None:
+        kept["result_preview"] = handle
+    if kept == previews:
+        return entry
+    others = {key: value for key, value in entry.items() if key not in previews}
+    return {**others, **kept, "clipped": True}
 
 
 def _job_handle(text: str | None, *, whole: bool) -> str | None:
