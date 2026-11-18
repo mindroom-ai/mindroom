@@ -7,6 +7,8 @@ import ctypes
 import gc
 import mmap
 import os
+import platform
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -264,6 +266,10 @@ def test_page_in_is_a_no_op_without_procfs(tmp_path: Path, monkeypatch: pytest.M
 @pytest.mark.skipif(sys.platform != "linux", reason="madvise(MADV_POPULATE_READ) is Linux-only")
 def test_populate_read_faults_an_untouched_page_in() -> None:
     """The advice value makes the kernel fault a page in; a never-touched page stands in for one in swap."""
+    assert _MADV_POPULATE_READ == 22  # include/uapi/asm-generic/mman-common.h
+    kernel = tuple(int(part) for part in re.findall(r"\d+", platform.release())[:2])
+    if kernel < (5, 14):
+        pytest.skip(f"MADV_POPULATE_READ needs Linux 5.14, this kernel reports {platform.release()}")
     page_size = mmap.PAGESIZE
     region = mmap.mmap(-1, page_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
     address = ctypes.addressof(ctypes.c_char.from_buffer(region))
@@ -272,10 +278,8 @@ def test_populate_read_faults_an_untouched_page_in() -> None:
     mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
     try:
         assert mincore(address, page_size, resident) == 0
-        if resident[0] & 1:
-            pytest.skip("mincore reports untouched pages as resident here, as gVisor does")
-        if _madvise()(address, page_size, _MADV_POPULATE_READ) != 0:
-            pytest.skip(f"kernel rejects MADV_POPULATE_READ (Linux 5.14+): {os.strerror(ctypes.get_errno())}")
+        assert resident[0] & 1 == 0
+        assert _madvise()(address, page_size, _MADV_POPULATE_READ) == 0, os.strerror(ctypes.get_errno())
         assert mincore(address, page_size, resident) == 0
         assert resident[0] & 1 == 1
     finally:
