@@ -49,8 +49,8 @@ The router can send the event only where the room's power levels allow it, which
 See [Model Overrides in Chat](../configuration/models.md#model-overrides-in-chat).
 
 Discovery uses Olm-encrypted to-device events, including for unencrypted rooms, so it needs no room-state advertisement, state permissions, or external endpoint.
-Only the router answers discovery.
-It authenticates the actual requesting device and requires the requester and router to be currently joined, plus at least one configured, joined agent the requester may address.
+Every MindRoom account answers discovery on its own device, so a room without the router has a catalog; today's client addresses the router's device.
+The answering account authenticates the actual requesting device and requires the requester and itself to be currently joined, plus at least one configured, joined agent the requester may address.
 An included thread must be a readable, unredacted root in that room, whether or not it is encrypted.
 Replies go only to the authenticated device, and sending a catalog never verifies a previously untrusted device.
 Blocked devices, malformed requests, and unauthorized room or thread scopes receive no response.
@@ -92,7 +92,7 @@ Models are sorted by stable key; the SHA-256 revision covers only published entr
 Display names may repeat and fall back to the key.
 Icons use Matrix `mxc://` URIs only; other local icon rules are on the [model configuration page](../configuration/models.md).
 
-The router stops processing a request after 12 seconds, but a response already handed to nio is not retracted.
+The answering account stops processing a request after 12 seconds, but a response already handed to nio is not retracted.
 Admission caps queued/in-flight requests at eight, and at two per Matrix user across all of that user's devices, and accepts at most eight fresh requests per user in 12 seconds; concurrent duplicate requests share the active request.
 Authorization is last checked when the response is handed to nio, so a requester who loses room access while nio prepares or retries the send can still receive that already-authorized catalog.
 Clients must independently enforce current joined-agent eligibility and discard expired responses.
@@ -112,7 +112,7 @@ Mutations use the ordinary `m.room.message` / `m.text` path with readable body `
 
 `operation` is `set` or `reset`; reset omits `model`.
 Explicit set permits keys such as `default`, `reset`, or `list`.
-The required runtime device ID comes from authenticated discovery, routes the command, and grants no authority.
+The required runtime device ID comes from authenticated discovery, routes the command to the account that answered that discovery, and grants no authority.
 Actual room and canonical thread come from Matrix event routing.
 Malformed structured metadata is rejected without falling back to text parsing; unrelated runtime users/devices ignore targeted commands.
 Existing authorization, command policy, and durable deduplication still apply.
