@@ -39,10 +39,10 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
 
 1. **One parameter, four values.**
    `matrix_room(action="threads")` takes `workflow`: `needs_you`, `working`, `later` or `all`.
-   Bas's ruling: without `workflow` a `threads` call is unchanged (no state read, no new fields); any `workflow`, `all` included, labels the rows, and a failed state read then returns the tool's error payload (this overrides decision 13's note on unfiltered calls and the last Rejected item).
+   Bas's ruling: without `workflow` a `threads` call is unchanged (no state read, no new fields); any `workflow`, `all` included, labels the rows, and a failed state read then returns the tool's error payload.
    The backend drops the rows of other groups before it builds their previews, so a filtered call costs the model only the rows it asked for.
    No tool and no config option is added.
-2. **Every row is labelled.**
+2. **Every row of a `workflow` call is labelled.**
    A row keeps its fields and gains `workflow`: `needs_you`, `working`, `later` or `done`.
    A needs-you row has `why`: `approval`, `question` or `your_turn`.
    A later row has `back_at`, a millisecond timestamp, when the return time is known; a thread that waits on a recurring task has none, as in the client.
@@ -103,10 +103,10 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
     The tool answers for every thread with replies in the rooms, which is what `/threads` lists and what the client's own eligibility rule keeps (`isCrossRoomThreadEntryEligible`, `crossRoomThreadOrder.ts:7-8`).
     The Threads page's Following scope and its Automations group both depend on who wrote in a thread (`threadGroups.ts:39`, `threadSignals.ts:356-357`), which no bundle carries.
     So against the page's All scope, a thread that agents run alone appears in `working`, `later` or as `your_turn`, where the page files it under Automations; against Following, the tool also lists threads the person took no part in.
-    The approval and question rows are unaffected, since both require the requester as approver or as the thread's starter.
+    Foreground approval and question rows are unaffected, since both require the requester as approver or as the thread's starter; a background approval counts whoever approves it, as in the client.
 13. **Cost.**
     One room: one `/threads` request and one state request, plus the membership request a named other room already costs; approvals and running replies are read from memory and the local journal.
-    This adds the state request to every `threads` call, also an unfiltered one, because every row is labelled.
+    The state request is added only when `workflow` is given, `all` included; a call without `workflow` costs what it does today.
     `all` with N rooms the agent is in, M of them shared: N membership requests, M state requests and M `/threads` requests, at most 3N, six rooms at a time.
     Previews (which may download a sidecar) and `include_summaries` read only the returned threads, after the cut.
 
@@ -119,7 +119,7 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
 - **A cross-room page token.** See decision 11.
 - **Reading the requester's membership from the state read instead of `room_access_allowed`.** It saves N-1 requests but would copy the access rule, which also covers contact rooms and who may talk to the agent.
 - **Room names on the rows of an `all` call.** `room-info` gives a room's name; it can be added when voice use shows the need.
-- **Leaving unfiltered calls unlabelled to save the state read.** The default would then return a different row shape than a filtered call.
+- **Labelling every `threads` call.** It would add a state read and new fields to calls that never asked for groups; only an explicit `workflow` labels rows.
 
 ## Delivery
 
@@ -135,4 +135,4 @@ The estimate for the backend is about 190 product lines, above the 100 to 150 th
 - The case file runs in both repositories and covers each rule's precedence: an approval or a question ahead of resolved, snoozed and working; a background approval in a resolved thread; a snooze that ends exactly now; working ahead of scheduled; a later thread with and without a known return time; an expired snooze with a scheduled run.
 - Backend tool tests through `matrix_room` with a served room state: each filter returns only its group; a resolved, a snoozed, a scheduled and a working thread get the right label; an approval older than the resolve and a question older than seven days do not count; a failed state read is an error.
 - `room_id="all"`: a room the requester is not in contributes nothing, also when the agent is in it; rows carry `room_id`; rows waiting on an approval come first; `page_token` is refused; a failing room is named and the others are returned.
-- Live check on `mindroom-lab.service` from the worktree: snooze one thread, resolve one, leave an approval card open in one, and compare the tool's answer with the Threads page and the room overview.
+- Live check on a fresh throwaway deployment with the backend from the worktree: snooze one thread, resolve one, schedule one, leave a question open in one, and compare the tool's answer with the Threads page.
