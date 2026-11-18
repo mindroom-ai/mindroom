@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import decrypt_media_bytes, download_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
@@ -108,6 +109,30 @@ def _with_event_relation(
     return resolved_content
 
 
+def _with_event_marker(
+    resolved_content: dict[str, Any],
+    event_content: dict[str, Any],
+) -> dict[str, Any]:
+    """Return hydrated content that says an agent wrote the event exactly when the event says so.
+
+    Like its relation, the agent-authored marker is a property of the event the server stored, which admission
+    judged. A payload, such as one uploaded for another event, can neither give the event back the authority its
+    marker took away nor take authority from an event that carries none. So the event's marker, on either layer of
+    an edit, is put on the hydrated content and on its replacement content, which history keeps, and a marker only
+    the payload carries is dropped.
+    """
+    event_layers = (event_content, _normalized_content_dict(event_content.get("m.new_content")))
+    markers = [layer[AGENT_AUTHORED_KEY] for layer in event_layers if AGENT_AUTHORED_KEY in layer]
+    for layer in (resolved_content, resolved_content.get("m.new_content")):
+        if not isinstance(layer, dict):
+            continue
+        if markers:
+            layer[AGENT_AUTHORED_KEY] = markers[0]
+        else:
+            layer.pop(AGENT_AUTHORED_KEY, None)
+    return resolved_content
+
+
 async def _resolve_event_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None,
@@ -117,7 +142,7 @@ async def _resolve_event_content(
     resolved_content = await _resolve_canonical_content(preview_content, client)
     if resolved_content is preview_content:
         return preview_content, False
-    return _with_event_relation(resolved_content, preview_content), True
+    return _with_event_marker(_with_event_relation(resolved_content, preview_content), preview_content), True
 
 
 async def _download_mxc_text(

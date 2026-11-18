@@ -14,6 +14,7 @@ from nio.durable import open_durable_sync
 from structlog.testing import capture_logs
 
 from mindroom.constants import (
+    AGENT_AUTHORED_KEY,
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     CALL_TRANSCRIPT_CONTENT_KEY,
@@ -906,6 +907,38 @@ async def test_a_notices_sidecar_preview_stays_a_quiet_notice(msgtype: str, prev
     assert result[SKIP_MENTIONS_KEY] is True
     assert client.uploaded_data is not None
     assert json.loads(client.uploaded_data.decode("utf-8")) == content
+
+
+@pytest.mark.asyncio
+async def test_a_long_marked_message_keeps_its_marker_on_the_preview() -> None:
+    """The agent-authored marker survives the sidecar rewrite, so the preview still takes no authority."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/file789"))
+    content = {"body": "z" * 70000, "msgtype": "m.text", AGENT_AUTHORED_KEY: True}
+
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+
+    assert "io.mindroom.long_text" in result
+    assert result[AGENT_AUTHORED_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_a_long_marked_edit_keeps_its_marker_on_both_layers() -> None:
+    """An edit's marker stays at the top level and inside its replacement content."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/file790"))
+    text = "z" * 30000
+    edit_content = {
+        "body": "* " + text,
+        "m.new_content": {"body": text, "msgtype": "m.text", AGENT_AUTHORED_KEY: True},
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
+        "msgtype": "m.text",
+        AGENT_AUTHORED_KEY: True,
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
+
+    assert "io.mindroom.long_text" in result["m.new_content"]
+    assert result[AGENT_AUTHORED_KEY] is True
+    assert result["m.new_content"][AGENT_AUTHORED_KEY] is True
 
 
 @pytest.mark.asyncio
