@@ -572,9 +572,7 @@ def test_cancel_whose_state_write_is_refused_is_a_server_error(test_client: Test
 
     assert response.status_code == 500
     assert response.json()["detail"] == (
-        "Failed to cancel task `abc12345`: Failed to persist scheduled task state for task `abc12345`: "
-        f"RoomPutStateError: M_FORBIDDEN denied. Ensure {client.user_id} is joined with permission to write room "
-        "state, then retry."
+        "Failed to cancel task `abc12345`: I need moderator rights in this room to save schedules."
     )
 
 
@@ -670,7 +668,4 @@ def test_edit_whose_state_write_is_refused_is_a_server_error(test_client: TestCl
     response = _send_with(test_client, client, "PUT", json={"room_id": "test_room", "message": "updated"})
 
     assert response.status_code == 500
-    assert response.json()["detail"] == (
-        "Failed to persist scheduled task state for task `abc12345`: RoomPutStateError: M_FORBIDDEN denied. "
-        f"Ensure {client.user_id} is joined with permission to write room state, then retry."
-    )
+    assert response.json()["detail"] == "I need moderator rights in this room to save schedules."
