@@ -17,17 +17,33 @@ from mindroom.ai import ai_response
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.models import ModelConfig
+from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks import EnrichmentItem
+from mindroom.llm.messages import PROMPT_UPDATE_KEY, system_text
+from mindroom.llm.provider import Capabilities, ModelRequest
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import prompt_hold
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.approval_continuation_helpers import RECEIPT_CALLS
-from tests.conftest import bind_runtime_paths, make_turn_context
-from tests.history_helpers import _make_config
+from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context
+from tests.fakes.scripted_model import answer, calls, tool_call, usage
+from tests.fakes.summary_model import summary_model
+from tests.history_helpers import _make_config, compact_runs
 from tests.providers.golden_support import Wire, pipeline_provider, sse_response
 from tests.providers.openai_family_support import openai_family_adapter
+from tests.test_agent_turn_runtime import _Reply, _respond, probe  # noqa: F401 - ``probe`` is a fixture
+from tests.test_agent_turn_runtime import _reply as _scripted_reply
+from tests.test_approval_turn_continuation import (
+    _add,
+    _approve_add,
+    _CheckedModel,
+    _identity,
+    _paused_turn,
+    _usage_config,
+)
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -642,3 +658,102 @@ async def test_an_update_follows_what_a_request_hook_adds_after_it(
     [third] = await conversation.turn("Third question")
     assert [message["role"] for message in _extends(third, replying, _assistant())] == ["user"]
     assert _updates(third) == []
+
+
+def _held_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, turns: list[Any], **settings: Any) -> _Reply:  # noqa: ANN401
+    """Return a reply whose scripted model takes system prompt updates and records what the pipeline sends it."""
+    reply = _scripted_reply(tmp_path, monkeypatch, turns, **settings)
+    reply.model.capabilities = Capabilities(system_updates=True)
+    install_model_providers(monkeypatch, {"default": pipeline_provider(reply.model)})
+    return reply
+
+
+def _told(request: ModelRequest) -> list[str]:
+    """Return the system prompt updates ``request`` holds."""
+    return [str(message.content) for message in request.messages if PROMPT_UPDATE_KEY in (message.provider_data or {})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("folds", [False, True])
+@pytest.mark.usefixtures("probe")
+async def test_a_tool_loop_keeps_its_held_prompt_unless_a_fold_rewrites_what_precedes_its_update(
+    folds: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fold that fails leaves the request as it was, so the warm prefix stays; one that commits sends main's request."""
+    over_window = calls(tool_call("touch", "call_1", label="a"), metrics=usage(1_000_000, 1))
+    turns = [answer("First."), over_window, answer("Done."), answer("Later.")]
+    reply = _held_reply(tmp_path, monkeypatch, turns, context_window=4000)
+    if folds:
+        install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+    reply.config.agents["assistant"].instructions = ["Answer in English."]
+    await _respond(reply)
+    reply.config.agents["assistant"].instructions = ["Answer in Dutch."]
+    await _respond(reply, prompt="Do the work", run_id="run-2")
+    await _respond(reply, prompt="And now?", run_id="run-3")
+
+    _first, opening, after_fold, next_turn = reply.model.requests
+    assert "Answer in English." in system_text(opening.messages)
+    [update] = _told(opening)
+    assert "+ - Answer in Dutch." in update
+    assert any(is_compaction_summary(message) for message in after_fold.messages) == folds
+    if not folds:
+        for request in (after_fold, next_turn):
+            assert system_text(request.messages) == system_text(opening.messages)
+            assert _told(request) == [update]
+        return
+    # The fold replaced the messages before the update, so the request is the one main sends, and so is the next.
+    for request in (after_fold, next_turn):
+        assert "Answer in Dutch." in system_text(request.messages)
+        assert "Answer in English." not in system_text(request.messages)
+        assert _told(request) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compacted", [False, True])
+async def test_an_approval_resumed_by_a_later_runner_sends_the_prompt_its_run_stored(
+    compacted: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a turn's own requests name a hold, so an approval resumed after it sends main's request, compacted or not."""
+    paths, config = _usage_config(tmp_path)
+    # The paused reply runs without background tool jobs, which its tool definitions show: so do the turns before it.
+    config.background_tool_jobs.enabled = False
+    identity = _identity("held-session")
+    turns = [answer("First."), answer("Second."), _add("approved", 10, 1), answer("Done."), answer("Later.")]
+    model = _CheckedModel(turns, capabilities=Capabilities(system_updates=True))
+    install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
+    ctx = replace(
+        make_turn_context(
+            "general",
+            session_id=identity.session_id,
+            room_id=identity.room_id,
+            thread_id=identity.thread_id,
+            requester_id=identity.requester_id,
+        ),
+        execution_identity=identity,
+        show_tool_calls=False,
+        supports_native_tool_approval=True,
+    )
+    config.agents["general"].instructions = ["Answer in English."]
+    await ai_response(replace(ctx, prompt="Hello"), paths, config)
+    config.agents["general"].instructions = ["Answer in Dutch."]
+    await ai_response(replace(ctx, prompt="Hello again"), paths, config)
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    pausing = model.requests[-1]
+    assert "Answer in English." in system_text(pausing.messages)
+    assert len(_told(pausing)) == 1
+    if compacted:
+        store = create_session_storage("general", config, paths, execution_identity=identity)
+        session = store.load_session(identity.session_id)
+        assert session is not None
+        completed = [run.run_id for run in session.runs if run.status.value == "COMPLETED"]
+        compact_runs(store, session, completed, "Earlier greetings.")
+
+    await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+    resumed = model.requests[-1]
+    assert "Answer in Dutch." in system_text(resumed.messages)
+    assert "Answer in English." not in system_text(resumed.messages)
+    assert _told(resumed) == []
