@@ -241,19 +241,17 @@ Coding model training data often lags recent releases, so never trust memorized 
 
 Model IDs were checked against the provider and Codex model catalogs on November 18, 2026.
 OpenRouter uses `anthropic/claude-fable-5.2`, and the direct Anthropic and Vertex APIs use `claude-fable-5-2`.
-MindRoom's `bedrock_claude` provider calls Claude in Amazon Bedrock (the bedrock-mantle endpoint), which does not serve Fable 5.2 (Bedrock offers it on `bedrock-runtime` only), so `bedrock_claude` uses `anthropic.claude-fable-5-1`.
+`bedrock_claude` (bedrock-mantle) uses `anthropic.claude-fable-5-1`: Bedrock serves Fable 5.2 only on `bedrock-runtime`.
 Likewise, OpenRouter uses `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5`, and Bedrock uses `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5`.
 For the direct DeepSeek API, prefer `deepseek-flash` for V4.1 Flash and `deepseek-v4-pro` for Pro; do not substitute the OpenRouter V4.1 ID on the direct API.
 The older `deepseek-v4-flash` name remains accepted as a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 
 For `anthropic`, prefer `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-haiku-5-5` unless you intentionally need a pinned snapshot ID.
-Use `claude-fable-5-2` when you need Anthropic's highest available capability.
-Claude Fable 5.2 is generally available on the direct Anthropic API and the documented cloud platforms.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
 Current Google Cloud docs list bare Vertex IDs for `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
 For Gemini API text and coding work, prefer `gemini-4-hydrogen` as the standard stable model unless you intentionally need the cheaper `gemini-3.5-flash-lite` tier.
-Use `gemini-4-carbon` when you need the highest Gemini API intelligence tier, and `gemini-4-argon` for frontier reasoning at lower latency and token spend than Carbon.
+Use `gemini-4-argon` for faster, cheaper frontier reasoning than `gemini-4-carbon`.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
 Current [Vertex AI image docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-generation) document `gemini-nano-banana-2.1`, `gemini-3-pro-image`, `gemini-3.1-flash-image`, and `gemini-3.1-flash-lite-image`; `gemini-nano-banana-2.1` serves only the `global` location.
