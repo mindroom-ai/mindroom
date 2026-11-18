@@ -2,108 +2,126 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: implement this plan task-by-task with the skill named in **Execution**. Steps use checkbox (`- [ ]`) syntax.
 
-**Execution:** baspowers:subagent-driven-development (six tasks that share one wire contract with a second repo; a wrong byte in the fixture or a missed delivery path ships a widget that only breaks in Chat, so each task gets its own review).
+**Execution:** baspowers:subagent-driven-development (eight tasks that share one wire contract with a second repo and cross the reply lifecycle; a missed write path ships raw JSON or a widget that only breaks in Chat, so each task gets its own review).
 
-**Goal:** Turn valid `ui` blocks in an opted-in agent's reply into a readable fallback block plus `io.mindroom.ui`, on durable edits, live frames and non-streamed finals.
+**Goal:** Stage 1: turn valid `chart` blocks in an opted-in agent's reply into a readable fallback block plus `io.mindroom.ui`, on every write of the reply and on live frames. Stage 2 (form) is outlined at the end and built later.
 
-**Architecture:** A new `mindroom.ui_widgets` package validates blocks (pydantic port of the eval schema) and renders the visible text and the content value in one pure function. `streaming._visible_text` and the non-streamed final call it when `ui_widgets` resolves true for the agent; the value rides in the event content and in `LiveDocs.ui`. A size step next to the reasoning fit drops the key before it could cause a sidecar or a split.
+**Architecture:** A new `mindroom.ui_widgets` package validates blocks (pydantic port of the eval's round-2 schema) and renders the visible text and the content value in one pure, idempotent function. It runs wherever a reply body becomes Matrix content: `streaming._visible_text` (both stream constructors) and the gateway's `send_text` and `edit_text` for reply rows. The value rides in the event content and in `LiveDocs.ui`. The edit builder, a size step next to the reasoning fit, the progress throttle and the frame publisher keep the key from ever causing a sidecar, a split, a slow edit or a stopped live stream.
 
 **Tech Stack:** Python 3.13, pydantic v2, markdown-it-py, pytest, nix-shell + uv.
 
-**Spec:** `docs/baspowers/specs/2026-11-18-genui-widgets-design.md` (sections 4, 5, 6, 8 and 10 are the contract; read it first).
+**Spec:** `docs/baspowers/specs/2026-11-18-genui-widgets-design.md` (sections 4, 5, 6, 8, 9 and 11 are the contract; appendix A says why; read it first).
 
 ## Global Constraints
 
+- Stage 1 knows `chart` only. A `form` block, like any unknown `type`, stays a code block. Nothing in Stage 1 may make Stage 2 a format change.
 - Content key `io.mindroom.ui`, constant `UI_WIDGETS_CONTENT_KEY` in `src/mindroom/constants.py` next to `UI_ACTION_CONTENT_KEY`.
-- Value shape exactly `{"version": 1, "widgets": [{"id", "json"}], "pending"?}`; `pending` in `chart|form|widget`; optional keys omitted, never `null`; no key when there is no widget and nothing pending.
-- Marker: fenced block with info string `mindroom-ui-<id>`; `id` = first 10 hex of SHA-256 of the canonical JSON (sorted keys, `(",", ":")` separators, `ensure_ascii=False`, whole numbers without a fraction, absent optionals left out).
-- Limits: `MAX_BLOCK_BYTES = 16_384`, `MAX_SERIES = 8`, `MAX_POINTS = 200`, `MAX_FIELDS = 12`, `MAX_OPTIONS = 12`, `MAX_WIDGETS = 8`, `MAX_UI_BYTES = 16_384`, `FALLBACK_MAX_ROWS = 40`.
+- Value shape exactly `{"version": 1, "widgets": [{"id", "json"}]}`; no `pending`; no key when there is no entry.
+- Marker: fenced block with info string `mindroom-ui-<id>`, a blank line on each side. `id` = first 10 hex of SHA-256 of the canonical JSON (sorted keys, `(",", ":")` separators, `ensure_ascii=False`, whole numbers below 2^53 without a fraction, absent optionals left out); an id a literal marker block in the text already uses is skipped with the `#1`, `#2` suffix rule of spec 5.1.
+- Only a fence that starts in column 0 with first info word `ui` can be a widget.
+- Limits: `MAX_BLOCK_BYTES = 16_384`, `MAX_SERIES = 8`, `MAX_POINTS = 200`, `MAX_WIDGETS = 8`, `MAX_UI_BYTES = 16_384` (UTF-8 bytes over all `json` strings), `FALLBACK_MAX_ROWS = 40`.
 - The event content must hold no float anywhere: widgets travel as JSON text.
-- A reply text with no `ui` fence, and any reply of an agent without `ui_widgets`, is returned and delivered byte-identical to today.
+- A reply text with no column-0 `ui` fence, and any reply of an agent without `ui_widgets`, is returned and delivered byte-identical to today.
 - No change to what the model sees unless `ui_widgets` is on (prompt cache stays byte-identical for every other agent).
 - `ui_widgets` config field: `agents.<name>.ui_widgets: bool | None`, `defaults.ui_widgets: bool = False`.
-- `UI_WIDGETS_PROMPT` is `genui-eval/prompt_fenced.md` verbatim (spec 6.5; if that file is newer than the spec, the file wins).
-- Source to port: the eval's `schema.py` and `test_schema.py` (local files in the DevAgent workspace under `genui-eval/`, not in this repo); the spec's section 4 and 8 restate every rule.
-- The fixture `tests/ui_widgets/fixtures/ui-widgets-v1.json` is shared with mindroom-chat (`src/app/messages/widgets/__fixtures__/ui-widgets-v1.json`); the two copies must stay byte-identical (`sha256sum` both after any change). Same for `tests/live_frames/fixtures/live-frames-v1.json`.
+- `UI_WIDGETS_PROMPT` in Stage 1 is the chart-only text of spec 6.5, byte for byte.
+- Logs never contain a block's text, a title or a label; errors and sizes only.
+- Source to port: the eval's `schema.py` (v3, round 2) and `test_schema.py`, local files in the DevAgent workspace under `genui-eval/`, not in this repo; the spec's sections 4 and 8 restate every rule.
+- Fixtures shared with mindroom-chat, byte-identical (`sha256sum` after any change): `tests/ui_widgets/fixtures/ui-widgets-v1.json` and `tests/live_frames/fixtures/live-frames-v1.json`. Tasks 1 to 3 complete both; Chat starts after Task 3.
 - Tests: `NIX_PATH=nixpkgs=flake:nixpkgs nix-shell --run 'uv run pytest <files> -x -n 0 --no-cov'`; run each new test file once with the repo's default addopts.
-- Docs: one sentence per line; user docs get only sentences that answer a user question.
-- Never `git add .`; add files by path.
+- Docs: one sentence per line; user docs get only sentences that answer a user question. Never `git add .`.
 
 ## Review Focus
 
-- A reply that continues after a tool approval or restart: the earlier span's marker block is already in the text; it must stay as written, get no entry, and never collide with a new widget (Task 2 test `test_an_existing_marker_block_is_left_alone`, Task 4 resumed-stream test).
-- An unencrypted room: the final content must serialize with no float even for `180.5` and slider `step: 0.5` (Task 4 test walks the content).
-- A title or label holding backticks or newlines must not close the fallback fence or add lines (Task 2).
-- Stop or an error while a `ui` fence is open: the terminal update has no `pending` and shows the partial block as code (Task 4).
-- A chart inside a reply near the edit budget: the key is dropped, the text is intact, and the key itself never triggers a sidecar or a split (Task 5).
+- Stop, restart and approval pause render from the reply's records, which hold raw text: every such write must show the chart's fallback and carry its entry, never the raw `ui` JSON (Task 7 proves it from persisted records).
+- A Stop while a `ui` fence is open: no partial JSON, and the note is outside any code block (Tasks 5 and 7).
+- A reply row prepared before its create was acknowledged becomes an edit without a second fit: no outer key, and the key is dropped if the edit would be over budget (Task 6).
+- An unencrypted room: the final content serializes with no float even for `180.5` (Task 5 walks the content).
+- A title holding backticks, newlines or a literal `mindroom-ui-` id must not close the fence, add lines or make an old marker block draw (Task 2).
 
 ---
 
-### Task 1: Schema port and the fixture's `widgets` section
+### Task 1: Chart schema and the fixture's `widgets` section
 
 **Files:**
 - Create: `src/mindroom/ui_widgets/__init__.py` (docstring only), `src/mindroom/ui_widgets/models.py`
 - Create: `tests/ui_widgets/__init__.py`, `tests/ui_widgets/test_models.py`, `tests/ui_widgets/fixtures/ui-widgets-v1.json`
 
 **Interfaces:**
-- Produces: the limit constants above; models `Series`, `Chart`, `Select`, `Radio`, `Checkbox`, `Slider`, `Text`, `Date`, `Form` (strict, `extra="forbid"`); `parse_widget(json_text: str) -> tuple[Chart | Form | None, list[str]]`, which never raises.
+- Produces: the limit constants; models `Series`, `Chart` (strict, `extra="forbid"`); `parse_widget(json_text: str) -> tuple[Chart | None, list[str]]`, which never raises and never puts input text in an error.
 
-- [ ] **Step 1: Write the fixture's `widgets` section.** File shape: `{"version": 1, "widgets": [...], "renders": [], "responses": []}`; each case `{"name", "json", "valid"}` and, when valid, `"canonical"` and `"id"` (filled in Task 2). Bases: `CHART = {"type":"chart","kind":"bar","title":"Orders","labels":["Q1","Q2"],"series":[{"name":"Orders","data":[120,180.5]}]}` and `FORM` = the six-field form of `test_schema.py` (select, slider, checkbox with options, checkbox without, date with `min`, text with `placeholder` and `required:false`).
+- [ ] **Step 1: Write the fixture's `widgets` section.** File shape: `{"version": 1, "widgets": [...], "wire_invalid": [...], "renders": [], "responses": []}`; each widget case `{"name", "stage": 1, "json", "valid"}` and, when valid, `"canonical"` and `"id"` (filled in Task 2). Base: `CHART = {"type":"chart","kind":"bar","title":"Orders","labels":["Q1","Q2"],"series":[{"name":"Orders","data":[120,180.5]}]}`.
 
-| Valid cases | Invalid cases |
+| Valid | Invalid |
 |---|---|
-| `CHART`; `CHART` + `x`,`y`; 200 labels and points; `labels: [2021, 2022.0]`; `FORM`; a text field with a 120-character label; a label of 120 emoji; slider named `max_tokens` labelled "Max tokens"; text labelled "Destination path or URL (no credentials)"; the spec's 5.4 chart and 5.6 form | `CHART` + `"color":"red"`; one label for two values; `kind: scatter`; data `["1","2"]`; data `[true,2]`; pie with two series; pie with `[-1,2]`; pie with `[0,0]`; two series named alike; 201 points; 9 series; `NaN` in data; `1e400` in data; `labels: [true,null]`; field kind `password`; label "Your password"; name `api_key`; label "GitHub access token"; a 121-character label; slider `min 5 max 1`; slider `min "1"`; slider with 10,001 steps; select with one option; select `value` not in options; date `12/01/2026`; date `2026-02-30`; name `A b`; checkbox `value: ["x"]` without options; a field with an extra `type` key; 13 fields; two fields named alike; `[1]`; `{oops`; `{"type":"map"}`; a chart padded with spaces to 16,385 bytes |
+| `CHART`; `CHART` + `x`,`y`; `CHART` + `"x": null`; 200 labels and points; `labels: [2021, 2022.0]` (canonical `["2021","2022"]`); a title of 80 emoji; data `[1e-320, 1.5e300, -1e308]`; data `[1e21]` (canonical keeps the exponent); the spec's 5.4 chart | `CHART` + `"color":"red"`; one label for two values; `kind: scatter`; data `["1","2"]`; data `[true,2]`; pie with two series; pie with `[-1,2]`; pie with `[0,0]`; two series named alike; 201 points; 9 series; `NaN` in data; `1e400` in data; an integer of 400 digits in data; `labels: [true,null]`; a title of 81 emoji; `[1]`; `{oops`; `{"type":"map"}`; the spec's 5.6 form (Stage 1: unknown type); a chart padded with spaces to 16,385 bytes |
 
+  `wire_invalid` (client only): the 5.4 canonical text with `"labels":[1,2,3]`; the same with `"x":null`.
 - [ ] **Step 2: Write the failing test** in `tests/ui_widgets/test_models.py`:
 
 ```python
-@pytest.mark.parametrize("case", _FIXTURE["widgets"], ids=[c["name"] for c in _FIXTURE["widgets"]])
+@pytest.mark.parametrize("case", _STAGE_1, ids=[c["name"] for c in _STAGE_1])
 def test_parse_widget_agrees_with_the_shared_fixture(case: dict[str, object]) -> None:
     widget, errors = parse_widget(case["json"])
     assert (widget is not None) is case["valid"], errors
     assert bool(errors) is not case["valid"]
 
-def test_parse_widget_never_raises_on_junk() -> None:
-    for text in ("", "null", "[" * 100_000, '{"type":"chart","series":7}', "\ud800"):
-        assert parse_widget(text)[0] is None
+def test_parse_widget_never_raises_and_never_echoes_input() -> None:
+    for text in ("", "null", "[" * 100_000, '{"type":"chart","series":7}', "\ud800", '{"type":"chart","title":"SECRET-TITLE","kind":"x"}'):
+        widget, errors = parse_widget(text)
+        assert widget is None
+        assert "SECRET-TITLE" not in " ".join(errors)
 ```
 
 - [ ] **Step 3: Run it.** Expected: FAIL, `ModuleNotFoundError: mindroom.ui_widgets`.
-- [ ] **Step 4: Implement `models.py`** by porting the eval's models, `SECRET_RE`, the pre-pass that stringifies numeric labels and widens ints where floats are expected, the constant rejection, and `parse` as `parse_widget`. Measure the byte limit so that a lone surrogate cannot raise. Leave the eval's `scan`, `normalize` and `validate` out.
+- [ ] **Step 4: Implement `models.py`** by porting the eval's chart models, the pre-pass that stringifies numeric labels and widens ints where floats are expected (catching `OverflowError`), the constant rejection, and `parse` as `parse_widget`. Measure the byte limit so that a lone surrogate cannot raise. Build error strings from locations and error types only. Leave the form models, `scan`, `normalize` and `validate` out.
 - [ ] **Step 5: Run it.** Expected: PASS. Also run `just check-module-privacy`.
-- [ ] **Step 6: Commit** (`git add` the five files; message `feat(ui-widgets): strict chart and form schema`).
+- [ ] **Step 6: Commit** (message `feat(ui-widgets): strict chart schema`).
 
-### Task 2: Canonical JSON, fallback text and `render_ui_widgets`
+### Task 2: Canonical JSON, ids, fallback text and `render_ui_widgets`
 
 **Files:**
 - Create: `src/mindroom/ui_widgets/render.py`, `tests/ui_widgets/test_render.py`
 - Modify: `src/mindroom/constants.py`, `tests/ui_widgets/fixtures/ui-widgets-v1.json`, `tests/ui_widgets/test_models.py`
 
 **Interfaces:**
-- Consumes: `parse_widget`, `Chart`, `Form` from Task 1.
+- Consumes: `parse_widget`, `Chart`.
 - Produces:
   - `UI_WIDGETS_CONTENT_KEY = "io.mindroom.ui"`
-  - `canonical_widget_json(widget: Chart | Form) -> str`, `widget_id(canonical: str) -> str`
-  - `fallback_block(widget: Chart | Form, widget_id: str) -> str` (the whole fenced block, no trailing newline)
+  - `canonical_widget_json(widget: Chart) -> str`, `widget_id(canonical: str, taken: Collection[str] = ()) -> str`
+  - `fallback_block(widget: Chart, widget_id: str) -> str` (the whole fenced block, no trailing newline)
   - `@dataclass(frozen=True, slots=True) class UiRender: text: str; content: dict[str, object] | None`
   - `render_ui_widgets(text: str, *, in_progress: bool) -> UiRender`
+  - `without_open_ui_fence(text: str) -> str` (the text cut where an open column-0 `ui` fence begins, else the same object)
 
 - [ ] **Step 1: Write the failing tests.**
 
 ```python
 CHART = '{"type":"chart","kind":"line","title":"Signups","labels":["Jan","Feb","Mar"],"series":[{"name":"Signups","data":[120,180.5,150]}],"y":"users"}'
+BLOCK = "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```"
 
 def test_canonical_json_and_id_match_the_spec() -> None:
     widget, _ = parse_widget(CHART)
     canonical = canonical_widget_json(widget)
     assert canonical == '{"kind":"line","labels":["Jan","Feb","Mar"],"series":[{"data":[120,180.5,150],"name":"Signups"}],"title":"Signups","type":"chart","y":"users"}'
     assert widget_id(canonical) == "df4d729a5d"
+    assert widget_id(canonical, taken={"df4d729a5d"}) == hashlib.sha256((canonical + "#1").encode()).hexdigest()[:10]
 
 def test_chart_fallback_is_the_spec_table() -> None:
-    widget, _ = parse_widget(CHART)
-    assert fallback_block(widget, "df4d729a5d") == (
-        "```mindroom-ui-df4d729a5d\nSignups (line chart, users)\n     Signups\nJan      120\nFeb    180.5\nMar      150\n```"
-    )
+    assert fallback_block(parse_widget(CHART)[0], "df4d729a5d") == BLOCK
+
+def test_rendering_is_idempotent_and_keeps_the_widget_only_for_raw_blocks() -> None:
+    raw = f"Before.\n\n```ui\n{CHART}\n```\n\nAfter."
+    once = render_ui_widgets(raw, in_progress=False)
+    assert once.text == f"Before.\n\n{BLOCK}\n\nAfter."
+    twice = render_ui_widgets(once.text, in_progress=False)
+    assert twice.text is once.text and twice.content is None
+
+def test_a_copied_marker_block_stays_inert_beside_an_identical_new_widget() -> None:
+    render = render_ui_widgets(f"{BLOCK}\n\n```ui\n{CHART}\n```", in_progress=False)
+    (entry,) = render.content["widgets"]
+    assert entry["id"] != "df4d729a5d"
+    assert render.text.startswith(BLOCK) and f"mindroom-ui-{entry['id']}" in render.text
 
 def test_text_without_a_ui_fence_is_returned_as_is() -> None:
     text = "Hello\r\n\n```python\nx = '```ui'\n```\n"
@@ -111,16 +129,47 @@ def test_text_without_a_ui_fence_is_returned_as_is() -> None:
     assert render.text is text and render.content is None
 ```
 
-  Plus, in the same file: `test_form_fallback_is_the_spec_text` (spec 5.3 form, id `0fd993d70d`); `test_a_title_of_backticks_gets_a_longer_fence` (title "```" gives a 4-backtick fence and a block that `markdown_to_html` renders as one `<pre>`); `test_strings_are_collapsed_to_one_line` (label `"a\n```\nb"` stays on its line); `test_a_45_point_chart_shows_40_rows` (line 24 of the block is `... 5 more rows ...`, after the fence, the title, the header and 20 rows); `test_entries_stop_at_8_and_at_16384_bytes` (9 small charts give 9 marker blocks and 8 entries; two 9 KB charts give two blocks and one entry); `test_an_existing_marker_block_is_left_alone`; `test_identical_widgets_share_one_entry`.
-- [ ] **Step 2: Add the fixture's `renders` cases** (`{"name", "markdown", "in_progress", "text", "ui", "html"}`, `ui` null when there is no value) and the parametrized test `test_render_agrees_with_the_shared_fixture`, which asserts `render.text == case["text"]`, `render.content == case["ui"]` and `markdown_to_html(case["text"]) == case["html"]`. Cases: the 5.4 reply; the 5.6 form; an unknown `type` (unchanged, null); a block nested in a four-backtick fence, one indented four spaces under a list item, and a valid `~~~ui` block in one text (only the last is replaced); two identical charts; an open chart fence in progress (text cut before the fence, `{"version":1,"widgets":[],"pending":"chart"}`); an open fence with no `type` yet (`pending: "widget"`); a closed chart followed by an open form (one entry and `pending: "form"`); text ending in a bare ```` ```u ```` line in progress (cut, null); the same open chart fence with `in_progress: false` (unchanged, null); only an open fence (text `""`).
-- [ ] **Step 3: Add the fixture's `responses` case** exactly as spec 5.6: `{"name": "trip form", "form": <canonical JSON>, "event_id": "$form:example.org", "thread_id": "$root:example.org", "agent_user_id": "@mindroom_atlas:example.org", "agent_name": "Atlas", "answers": {"pace": "Relaxed", "interests": ["Food", "Museums"], "budget": 150, "start": "2026-12-05"}, "content": <the 5.6 event>}`. The backend has no code for it; it lives here so the wire examples stay in one file.
+  Plus: `test_a_title_of_backticks_gets_a_longer_fence` (one `<pre>` from `markdown_to_html`); `test_strings_are_collapsed_to_one_line` (label `"a\n```\nb"`); `test_a_45_point_chart_shows_40_rows` (line 24 of the block is `... 5 more rows ...`); `test_large_whole_numbers_keep_their_exponent` (`1e300` prints `1e+300` in the canonical JSON and the table); `test_entries_stop_at_8_and_at_16384_bytes` (9 small charts: 9 blocks, 8 entries; two 9 KB charts: two blocks, one entry); `test_identical_blocks_share_one_entry`; `test_only_column_0_fences_count` (a fence indented two spaces under a list item, one in a blockquote and one inside a four-backtick fence are untouched; a `~~~ui` block is replaced); `test_a_block_glued_to_a_paragraph_gets_blank_lines`; `test_an_open_fence_is_cut_only_in_progress` (in progress: text ends before the fence and no content; final: unchanged; a last line of only ```` ``` ```` or ```` ```u ```` is not cut); `test_without_open_ui_fence`; `test_block_results_are_memoized` (two renders of growing text parse the closed block once, counted with a patched `parse_widget`).
+- [ ] **Step 2: Add the fixture's `renders` cases** (`{"name", "stage", "markdown", "in_progress", "text", "ui", "html"}`, `ui` null when there is no value) and `test_render_agrees_with_the_shared_fixture`, asserting `text`, `content` and `markdown_to_html(text) == html`. Cases: the 5.4 reply (hand-pinned from the spec); an unknown `type`; nested, list-indented, quoted and tilde fences in one text; two identical charts; an open chart fence in progress; a closed chart followed by an open fence in progress; the open fence with `in_progress: false`; only an open fence (text `""`); a literal marker block beside a new identical chart; and one `"stage": 2` case hand-pinned from spec 5.3 and 5.6: `text` with the form's marker block and `ui` with the form entry (Python skips it in Stage 1; Chat uses it for "an entry it cannot draw").
+- [ ] **Step 3: Add the fixture's `responses` case** exactly as spec 5.6 with `"stage": 2` (no backend code reads it).
 - [ ] **Step 4: Run.** Expected: FAIL, `ImportError: render`.
-- [ ] **Step 5: Implement `render.py`.** Scan as the eval's `scan` does (top-level fences of backticks or tildes, at most 3 spaces of indent, first info word `ui`, closing fence of the same character and at least the same length with no info), tracking the fence the text ends in. Replace valid closed blocks in place; in progress, cut at an open `ui` fence or at a last line that is an opener with no info, `u` or `ui`; sniff `pending` with `"type"\s*:\s*"(chart|form)"`. Return the input object itself when nothing changed. Fallback rules are spec 5.3. With `in_progress=False`, log one warning per closed `ui` block that failed validation, with its errors (as `interactive` warns about an unparsed block).
-- [ ] **Step 6: Fill `canonical` and `id` for every valid `widgets` case** from the implementation, check the two spec values by eye, and extend `test_models.py` to assert them.
+- [ ] **Step 5: Implement `render.py`.** One pass over the lines tracks the open fence (any column-0 or indented fence opens a code block; only column-0 `ui` fences are candidates). Collect the ids of literal `mindroom-ui-` fences first. Replace valid closed blocks in place with blank-line separation; in progress, cut at an open `ui` fence whose opening line is complete. Memoize `(canonical, fallback lines)` by block text with `functools.lru_cache(maxsize=64)`. With `in_progress=False`, log one warning per closed `ui` block that failed validation, with its error list only. Fallback rules are spec 5.3.
+- [ ] **Step 6: Fill `canonical` and `id` for every valid `widgets` case** from the implementation, check the spec's values by eye, and extend `test_models.py` to assert them.
 - [ ] **Step 7: Run both test files.** Expected: PASS.
-- [ ] **Step 8: Commit** (message `feat(ui-widgets): fallback text, ids and the visible-text render`).
+- [ ] **Step 8: Commit** (message `feat(ui-widgets): fallback text, ids and the idempotent render`).
 
-### Task 3: The `ui_widgets` switch and the prompt
+### Task 3: The live-frame field
+
+**Files:**
+- Modify: `src/mindroom/live_frames/frames.py` (`LiveDocs`, `to_json`, `live_delta`), `src/mindroom/live_frames/publisher.py` (`_send_next`, `_fitted_snapshot`)
+- Modify: `tests/live_frames/fixtures/live-frames-v1.json`
+- Test: `tests/live_frames/test_frames.py`, `tests/live_frames/test_live_streaming.py`
+
+**Interfaces:**
+- Produces: `LiveDocs.ui: dict[str, object] | None = None`; `to_json()` has `"ui"` only when it is not `None`; `live_delta` sets `delta["ui"] = after.ui` (so `None` becomes JSON `null`) when it changed.
+
+- [ ] **Step 1: Add three fixture cases**: a delta that changes `md` and sets `ui` to the 5.4 value; a delta `{"ui": null}`; a snapshot whose `after` has `ui`. Existing cases stay untouched; make `test_frames_match_the_shared_fixture` build `LiveDocs` with `ui` when the case has it.
+- [ ] **Step 2: Write the failing tests.**
+
+```python
+def test_live_frames_carry_ui_in_snapshot_and_delta() -> None:
+    value = {"version": 1, "widgets": [{"id": "df4d729a5d", "json": "{}"}]}
+    before = LiveDocs(md="a", reasoning="", tools=(), status="streaming", activity="")
+    after = replace(before, ui=value)
+    assert "ui" not in before.to_json()
+    assert after.to_json()["ui"] == value
+    assert live_delta(before, after) == {"ui": value}
+    assert live_delta(after, before) == {"ui": None}
+```
+
+  - `test_a_frame_too_big_with_ui_goes_out_without_it_and_restores_it`: with the frame limit patched low, a snapshot that fits only without `ui` is sent without it and frames keep running; `last_sent.ui is None`; once the limit allows, the next frame is a delta that sets `ui`.
+  - `test_ui_is_shed_before_tool_previews`: the same misfit with tools present leaves `bare` unchanged.
+- [ ] **Step 3: Run.** Expected: FAIL.
+- [ ] **Step 4: Implement.** In the publisher, when the frame to send does not fit and the documents have `ui`, retry with `replace(docs, ui=None)` before the tool-preview fitting.
+- [ ] **Step 5: Run `tests/live_frames`.** Expected: PASS.
+- [ ] **Step 6: Commit** (message `feat(ui-widgets): optional ui field on live frames`). Both fixtures are now complete for Chat.
+
+### Task 4: The `ui_widgets` switch and the prompt
 
 **Files:**
 - Modify: `src/mindroom/config/agent.py` (beside `show_reasoning`), `src/mindroom/config/models.py` (defaults, beside `show_reasoning`), `src/mindroom/config/resolution.py`
@@ -134,95 +183,114 @@ def test_text_without_a_ui_fence_is_returned_as_is() -> None:
 
 - [ ] **Step 1: Write the failing tests.**
   - `test_ui_widgets_is_off_unless_the_agent_or_the_defaults_turn_it_on`: unset agent with default defaults gives `False`; `agents.b.ui_widgets: true` gives `True`; `defaults.ui_widgets: true` gives `True` for an unset agent and `False` for an agent with `ui_widgets: false`; a team name, the router name, an unknown name and `None` give `False` even with the default on.
-  - `test_the_widget_prompt_follows_the_interactive_prompt_when_enabled`: `instructions[i + 1] == config.get_prompt("UI_WIDGETS_PROMPT")` where `instructions[i]` is the interactive prompt; with the switch off, or `include_interactive_questions=False`, the widget prompt is not in the instructions and the instructions equal today's.
-  - `test_a_minimal_agent_reads_the_widget_prompt_as_a_context_document`: `minimal_context_documents(build)["ui"]` equals the prompt and the bootstrap contains ``Charts and forms in replies: read `mindroom-agent context read ui` first.``; with the switch off the document is `""` and the bootstrap equals today's.
+  - `test_the_widget_prompt_follows_the_interactive_prompt_when_enabled`: `instructions[i + 1] == config.get_prompt("UI_WIDGETS_PROMPT")` where `instructions[i]` is the interactive prompt; with the switch off, or `include_interactive_questions=False`, the instructions equal today's.
+  - `test_the_stage_1_prompt_is_the_spec_text`: the prompt starts with `To show a native widget`, contains the Signups example and `since some clients show only text`, and contains neither `form` nor `interactive`.
+  - `test_a_minimal_agent_reads_the_widget_prompt_as_a_context_document`: `minimal_context_documents(build)["ui"]` equals the prompt and the bootstrap contains ``Charts in replies: read `mindroom-agent context read ui` first.``; with the switch off the document is `""` and the bootstrap equals today's.
 - [ ] **Step 2: Run.** Expected: FAIL (`ui_widgets` is not a config field).
-- [ ] **Step 3: Implement.** `ui_widgets()` reads only `config.agents`; `ResolvedAgent.ui_widgets` is set in `resolve_agent`; the prompt is appended right after the interactive prompt under `include_interactive_questions and agent.ui_widgets`; the minimal surface sets `ui_prompt` under the same condition; the bootstrap line goes after the skills and memory guidance lines; the `context` help becomes `list, read NAME (read interactive before emitting an interactive question, ui before a chart or form)`.
+- [ ] **Step 3: Implement.** `ui_widgets()` reads only `config.agents`; `ResolvedAgent.ui_widgets` is set in `resolve_agent`; the prompt is appended right after the interactive prompt under `include_interactive_questions and agent.ui_widgets`; the minimal surface sets `ui_prompt` under the same condition; the bootstrap line goes after the skills and memory guidance lines; the `context` help becomes `list, read NAME (read interactive before emitting an interactive question, ui before a chart)`.
 - [ ] **Step 4: Run the three test files and `tests/test_config_schema.py`.** Expected: PASS.
 - [ ] **Step 5: Commit** (message `feat(ui-widgets): per-agent ui_widgets switch and prompt`).
 
-### Task 4: Streaming edits and live frames
+### Task 5: Streamed writes
 
 **Files:**
-- Modify: `src/mindroom/streaming.py` (`_visible_text`, `_StreamingDeliverySnapshot`, `_prepare_delivery_from_snapshot`, `StreamingResponse`, `_delivery_snapshot`, `live_state`, `send_streaming_response`)
-- Modify: `src/mindroom/live_frames/frames.py` (`LiveDocs`, `to_json`, `live_delta`), `src/mindroom/delivery_gateway.py` (the `send_streaming_response` call)
-- Modify: `tests/live_frames/fixtures/live-frames-v1.json`
-- Test: `tests/live_frames/test_frames.py`, `tests/live_frames/test_live_streaming.py`, `tests/test_streaming_edits.py`
+- Modify: `src/mindroom/streaming.py` (`_visible_text`, `_StreamingDeliverySnapshot`, `_prepare_delivery_from_snapshot`, `StreamingResponse`, `_delivery_snapshot`, `live_state`, `send_streaming_response`, `stream_progress_edits`)
+- Modify: `src/mindroom/delivery_gateway.py` (the `send_streaming_response` call, the `stream_progress_edits` call, and `shown()` in the reply stream hooks)
+- Test: `tests/live_frames/test_live_streaming.py`, `tests/test_streaming_edits.py`, `tests/test_response_delivery_gateway.py`
 
 **Interfaces:**
-- Consumes: `render_ui_widgets`, `UI_WIDGETS_CONTENT_KEY`, `ui_widgets()`.
+- Consumes: `render_ui_widgets`, `without_open_ui_fence`, `UI_WIDGETS_CONTENT_KEY`, `ui_widgets()`, `LiveDocs.ui`.
 - Produces:
   - `_visible_text(accumulated_text: str, *, in_progress: bool, ui_widgets: bool) -> tuple[str, interactive.InteractiveMetadata | None, dict[str, object] | None]`
-  - `StreamingResponse.ui_widgets: bool = False`, `_StreamingDeliverySnapshot.ui_widgets: bool`, `send_streaming_response(..., ui_widgets: bool = False)`
-  - `LiveDocs.ui: dict[str, object] | None = None`; `to_json()` has `"ui"` only when it is not `None`; `live_delta` sets `delta["ui"] = after.ui` (so `None` becomes JSON `null`) when it changed.
+  - `StreamingResponse.ui_widgets: bool = False`, `_StreamingDeliverySnapshot.ui_widgets: bool`, `send_streaming_response(..., ui_widgets: bool = False)`, `stream_progress_edits(..., ui_widgets: bool = False)`
 
-- [ ] **Step 1: Add three fixture cases** to `live-frames-v1.json`: a delta that sets `ui` to the 5.4 value with `pending` absent; a delta `{"ui": null}`; a snapshot whose `after` has `ui`. Existing cases stay untouched.
-- [ ] **Step 2: Write the failing tests.**
-
-```python
-def test_live_frames_carry_ui_in_snapshot_and_delta() -> None:
-    value = {"version": 1, "widgets": [], "pending": "chart"}
-    before = LiveDocs(md="a", reasoning="", tools=(), status="streaming", activity="")
-    after = replace(before, ui=value)
-    assert "ui" not in before.to_json()
-    assert after.to_json()["ui"] == value
-    assert live_delta(before, after) == {"ui": value}
-    assert live_delta(after, before) == {"ui": None}
-```
-
-  - `test_an_open_ui_fence_is_hidden_and_signalled` (live streaming): after the chunks `"Signups peaked.\n\n```ui\n{\"type\":\"chart\","` the frame's `md` is `Signups peaked.` and `ui == {"version": 1, "widgets": [], "pending": "chart"}`.
-  - `test_a_closed_ui_block_becomes_its_widget_at_once`: after the block closes, `md` holds the `mindroom-ui-df4d729a5d` block, `ui["widgets"][0]["id"] == "df4d729a5d"`, no `pending`; the final event's `m.new_content` has the same value and `body` has no `{"type"`.
+- [ ] **Step 1: Write the failing tests.**
+  - `test_an_open_ui_fence_is_hidden_without_a_signal` (live streaming): after the chunks `"Signups peaked.\n\n```ui\n{\"type\":\"chart\","` the frame's `md` is `Signups peaked.` and the frame has no `ui`.
+  - `test_a_closed_ui_block_becomes_its_widget_at_once`: after the block closes and before any durable edit, a frame's `md` holds the `mindroom-ui-df4d729a5d` block and `ui["widgets"][0]["id"] == "df4d729a5d"`; the final event's `m.new_content` has the same value and its `body` has no `{"type"`.
   - `test_without_the_switch_a_ui_block_is_delivered_as_written`: the body still holds the `ui` fence and no content has the key.
-  - `test_a_stream_stopped_inside_a_ui_fence_shows_the_partial_block`: the terminal content has no `pending` and its body ends with the partial JSON.
-  - `test_a_resumed_reply_keeps_the_earlier_marker_block`: `resumed_text` holding a `mindroom-ui-aaaaaaaaaa` block plus a new `ui` block gives one entry and both blocks.
-  - `test_widget_content_holds_no_float`: walk the final content of a reply with `180.5` and `"step":0.5`; no value is a `float`.
-- [ ] **Step 3: Run.** Expected: FAIL.
-- [ ] **Step 4: Implement.** In `_visible_text`, when `ui_widgets`, render first and feed `render.text or _PROGRESS_PLACEHOLDER` to the interactive formatting. `_prepare_delivery_from_snapshot` sets `extra_content[UI_WIDGETS_CONTENT_KEY]` when the value is not `None`; `live_state` passes it as `LiveDocs.ui`. The gateway passes `ui_widgets=ui_widgets(config, self.deps.agent_name)`.
-- [ ] **Step 5: Run the three files plus `tests/test_streaming.py` and `tests/test_interactive.py`.** Expected: PASS.
-- [ ] **Step 6: Commit** (message `feat(ui-widgets): widgets on streamed edits and live frames`).
+  - `test_a_reply_that_ends_inside_a_ui_fence_shows_the_partial_block`: a completed stream's final body ends with the partial JSON in a code block.
+  - `test_the_recorded_progress_has_no_open_ui_fence`: the presentation the stream hooks record for the open-fence chunks ends with `Signups peaked.`
+  - `test_progress_edits_of_a_resumed_reply_render_widgets`: text published through `stream_progress_edits(..., ui_widgets=True)` holding a `ui` block is edited with the marker block and the key.
+  - `test_widget_content_holds_no_float`: walk the final content of a reply with `180.5`; no value is a `float`.
+  - `test_the_ui_render_runs_after_the_interactive_formatting`: a reply with an `interactive` block and a chart titled `` ```interactive `` yields the question, the chart entry and no stray text removed.
+- [ ] **Step 2: Run.** Expected: FAIL.
+- [ ] **Step 3: Implement.** In `_visible_text`, after the interactive formatting and the in-progress cuts, when `ui_widgets`: `render = render_ui_widgets(display_text, in_progress=in_progress)`, text `render.text or _PROGRESS_PLACEHOLDER`. `_prepare_delivery_from_snapshot` sets `extra_content[UI_WIDGETS_CONTENT_KEY]` when the value is not `None`; `live_state` passes it as `LiveDocs.ui`. The gateway passes `ui_widgets=ui_widgets(config, self.deps.agent_name)` to both constructors, and `shown()` builds the presentation from `without_open_ui_fence(progress.text)` when the switch is on.
+- [ ] **Step 4: Run the three files plus `tests/test_streaming.py` and `tests/test_interactive.py`.** Expected: PASS.
+- [ ] **Step 5: Commit** (message `feat(ui-widgets): widgets on streamed edits and live frames`).
 
-### Task 5: The non-streamed final and the size rule
+### Task 6: Every other reply write, and size
 
 **Files:**
-- Modify: `src/mindroom/matrix/large_messages.py`, `src/mindroom/matrix/client_delivery.py` (both `fit_reasoning_to_ordinary_event` calls), `src/mindroom/delivery_gateway.py` (the durable prepare beside `fit_reasoning_to_ordinary_event`, and the final delivery where `interactive.parse_and_format_interactive(draft.response_text, ...)` runs)
-- Test: `tests/test_large_messages.py`, `tests/test_response_delivery_gateway.py`
+- Modify: `src/mindroom/delivery_gateway.py` (`send_text`, `edit_text`, the late-bound row in `prepare()`), `src/mindroom/matrix/message_builder.py` (`build_matrix_edit_content`), `src/mindroom/matrix/large_messages.py`, `src/mindroom/matrix/client_delivery.py` (both `fit_reasoning_to_ordinary_event` calls)
+- Test: `tests/test_message_builder.py`, `tests/test_large_messages.py`, `tests/test_response_delivery_gateway.py`
 
 **Interfaces:**
-- Produces: `fit_ui_widgets_to_ordinary_event(client: nio.AsyncClient, room_id: str, content: dict[str, Any], *, room_encrypted: bool, size_limit: int | None = None) -> dict[str, Any]`, the same signature as the reasoning fit, returning `content` itself when it has no key.
+- Produces: `fit_ui_widgets_to_ordinary_event(client: nio.AsyncClient, room_id: str, content: dict[str, Any], *, room_encrypted: bool, size_limit: int | None = None) -> dict[str, Any]`, the reasoning fit's signature, returning `content` itself when it has no key.
 
-- [ ] **Step 1: Write the failing tests** (`UI` = a value of about 8,000 bytes):
-  - `test_an_edit_keeps_ui_only_in_new_content`: `UI_WIDGETS_CONTENT_KEY in fitted["m.new_content"]` and not in `fitted`.
-  - `test_ui_is_dropped_when_it_would_push_an_edit_over_the_budget`: a 5,000-byte body fits as an edit without the key and not with it; the result has the key nowhere, the same `body`, and `calculate_event_size(fitted) <= EDIT_MESSAGE_SIZE_LIMIT`.
-  - `test_ui_stays_when_cutting_reasoning_makes_room`: a small body, the key and 40,000 characters of reasoning; after both fits the key is there and the reasoning is cut.
-  - `test_a_reply_too_large_on_its_own_loses_ui_before_the_sidecar`: a 60,000-byte body; no key after the fit, and `prepare_large_message`'s preview has none either.
-  - `test_ui_is_dropped_at_the_split_target`: with `size_limit=4000` a 3,000-byte body plus the key loses the key.
-  - `test_a_collected_reply_carries_its_widget` (gateway): a non-streamed final for an agent with the switch sends a body with the marker block and the key; without the switch the body is the model's text.
+- [ ] **Step 1: Write the failing tests.** Each size test builds its content, then asserts with `calculate_event_size` that it is over the limit with the key and under it without, before calling the code under test.
+  - `test_an_edit_envelope_has_ui_only_in_new_content` (`build_matrix_edit_content`).
+  - `test_ui_is_dropped_when_it_alone_pushes_an_edit_over_the_budget`: the result has the key nowhere, the same `body`, and is within `EDIT_MESSAGE_SIZE_LIMIT`.
+  - `test_ui_stays_when_cutting_reasoning_makes_room`.
+  - `test_a_reply_too_large_on_its_own_loses_ui_before_the_sidecar`: no key after the fit, none on `prepare_large_message`'s preview.
+  - `test_ui_is_dropped_at_the_split_target` (`size_limit` given).
+  - `test_ui_made_of_non_ascii_text_is_sized_as_sent` (a title of 80 emoji near the limit, encrypted and plain).
+  - `test_a_droppable_ui_key_does_not_throttle_a_progress_edit`: `should_send_oversized_nonterminal_streaming_edit` is true for an edit that is ordinary without the key.
+  - `test_a_collected_reply_carries_its_widget` (gateway): a non-streamed final for an agent with the switch sends the marker block and the key; without the switch, or for a message with no `reply_write`, the text is untouched.
+  - `test_a_row_prepared_before_its_create_is_fitted_as_the_edit_it_becomes`: a final prepared with no event id whose payload fits 55,000 bytes but whose edit would not fit 27,000 is stored without the key; one that fits keeps it, and the envelope `_reply_row_wire_content` builds has it only in `m.new_content`; a retry sends identical bytes.
 - [ ] **Step 2: Run.** Expected: FAIL.
-- [ ] **Step 3: Implement** spec 6.3 in `fit_ui_widgets_to_ordinary_event` (size the candidate without `REASONING_CONTENT_KEY`, with the same `fits` the reasoning fit uses), call it on the content just before each reasoning fit, and render in the final delivery before the interactive formatting, adding the value to `delivery_extra_content`.
-- [ ] **Step 4: Run the two files plus `tests/test_large_messages_integration.py`.** Expected: PASS.
-- [ ] **Step 5: Commit** (message `feat(ui-widgets): widgets on collected replies; never cause a sidecar or split`).
+- [ ] **Step 3: Implement** spec 6.3. In `send_text` and `edit_text`, after `_reply_body` and before `format_message_with_mentions`, for a request with a `reply_write` and the switch on: render with `in_progress=False`, replace the text and add the value to the extra content. The fit sizes its candidate without `REASONING_CONTENT_KEY`, with the `fits` the reasoning fit uses, and runs just before each reasoning fit. For the late-bound row, run the fit on `build_edit_event_content(event_id="$" + "0" * 43, ...)` of the payload and drop the key from the payload when it does not survive. The throttle removes the key from its candidate when the edit is ordinary without it.
+- [ ] **Step 4: Run the three files plus `tests/test_large_messages_integration.py`.** Expected: PASS.
+- [ ] **Step 5: Commit** (message `feat(ui-widgets): widgets on every reply write; never cause a sidecar or split`).
 
-### Task 6: User docs and the live test
+### Task 7: Lifecycle proofs from persisted records
+
+**Files:**
+- Test: `tests/test_user_stop_convergence.py`, `tests/test_approval_turn_continuation.py`, `tests/test_edit_after_restart.py` (one new test each, with the files' existing harnesses)
+- Modify: whatever Tasks 5 and 6 touched, only if a test here fails
+
+The tests assert the Matrix content that was sent (body and `io.mindroom.ui`), read from the fake client or the outbox, never a hand-built `resumed_text`.
+
+- [ ] **Step 1: Write the tests.**
+  - Stop, frames on and off: a stream that closed the 5.4 chart and is inside a second, open `ui` fence is stopped. The terminal content's body holds the first chart's marker block, no `{"type"`, and the cancellation note as its last paragraph outside any fence; `m.new_content` carries the first chart's entry.
+  - Approval: chart, then a tool call that pauses; the pause write, the resumed progress, a second pause and the final each carry the chart's entry and its marker block; the id is the same in all four.
+  - Restart: a reply interrupted after the chart closed gets its restart note on the next start; that write carries the entry, and the reply that continues below it keeps the block.
+  - Regeneration: the same turn regenerated into prose sends a final edit without the key.
+- [ ] **Step 2: Run.** Expected: PASS if Tasks 5 and 6 covered every path; otherwise fix the path the failing test names and add nothing else.
+- [ ] **Step 3: Commit** (message `test(ui-widgets): widgets across stop, approval and restart`).
+
+### Task 8: User docs and the live gate
 
 **Files:**
 - Create: `docs/widgets.md`
 - Modify: `zensical.toml` (nav, after "Interactive Canvases"), `docs/streaming.md`, `docs/interactive.md`, `skills/mindroom-docs/references/` (regenerated by the pre-commit hook)
 
-- [ ] **Step 1: Write `docs/widgets.md`**, at most 30 lines, answering: what a widget is and which two exist; how to turn it on (`ui_widgets: true` on an agent or under `defaults`); what Element and other clients show; the limits (8 series, 200 points, 12 fields, no secrets); that a form's answer is an ordinary message the agent reads; why a widget can show as a text table (other client, very long reply, a reply that resumed after an approval). Add one sentence to `docs/streaming.md` (an unfinished `ui` block is hidden like an unfinished question) and one to `docs/interactive.md` (several answers at once: see widgets).
+- [ ] **Step 1: Write `docs/widgets.md`**, at most 30 lines, answering: what a chart widget is; how to turn it on (`ui_widgets: true` on an agent or under `defaults`); what Element and other clients show; the limits (8 series, 200 points); why a chart can show as a text table (another client, a very long reply); that Chat draws widgets for `mindroom_` accounts on the viewer's homeserver, so the deployment must reserve that namespace. Add one sentence to `docs/streaming.md` (an unfinished `ui` block is hidden like an unfinished question) and one to `docs/interactive.md`.
 - [ ] **Step 2: Run `pre-commit run --files docs/widgets.md docs/streaming.md docs/interactive.md zensical.toml`** (after `uv sync --all-extras`). Expected: the skill references regenerate and the hooks pass.
-- [ ] **Step 3: Run the fresh live test** of spec section 10 (L1 to L10) with the Chat worktree, on a throwaway deployment, and record pass or fail per scenario in the pull request; rerun any failure without `--backend` to see whether `origin/main` has it too. This step needs the Chat plan finished.
-- [ ] **Step 4: Commit** (message `docs: native ui widgets`).
+- [ ] **Step 3: Run the fresh live test** of spec section 11 (L1 to L12) with the Chat worktree, on a throwaway deployment, and record pass or fail per scenario and both commit ids in the pull request; rerun any failure without `--backend`. It is a release gate: the pull request is not ready with a failing or skipped scenario. This step needs the Chat plan's Stage 1 finished.
+- [ ] **Step 4: Commit** (message `docs: native chart widgets`).
 
-## Estimated size
+## Stage 1 estimated size
 
 | Part | Source | Tests, fixtures, docs |
 |---|---|---|
-| Task 1 schema | 170 | 60 + fixture 130 |
-| Task 2 render | 190 | 170 + fixture 120 |
-| Task 3 switch and prompt | 75 | 90 + docs 6 |
-| Task 4 streaming and frames | 45 | 190 + fixture 40 |
-| Task 5 final and size | 55 | 140 |
-| Task 6 docs | 0 | 45 |
-| **Total** | **about 535** | **about 990** |
+| Task 1 chart schema | 80 | 50 + fixture 80 |
+| Task 2 render | 190 | 200 + fixture 110 |
+| Task 3 live frames | 30 | 80 + fixture 40 |
+| Task 4 switch and prompt | 75 | 100 + docs 6 |
+| Task 5 streamed writes | 50 | 170 |
+| Task 6 other writes and size | 85 | 210 |
+| Task 7 lifecycle proofs | 10 | 170 |
+| Task 8 docs | 0 | 45 |
+| **Total** | **about 520** | **about 1,260** |
 
 Generated files (`config-schema.json`, skill references) are not counted.
+
+## Stage 2 (form): later, its own pull request
+
+Not built now; written here so Stage 1 leaves room for it. No wire change.
+
+- **Schema:** add the form models to `models.py` from the eval's round-2 `schema.py`, with `asks_for_secret` (the negated filter) as it is; `parse_widget` returns `Chart | Form`. Fixture: flip the 5.6 form case to valid, add the form cases of `test_schema.py`, paired negated and unnegated labels, `null` optionals, dates in year 0001 and 0000, slider and date boundaries.
+- **Fallback:** the form text of spec 5.3 in `fallback_block`; the Stage 2 `renders` case becomes a Python test.
+- **Prompt:** `UI_WIDGETS_PROMPT` becomes `genui-eval/prompt_fenced.md` (v4) verbatim; the bootstrap line and help text say "charts and forms"; `docs/widgets.md` gains the form paragraph.
+- **Nothing else:** every write path, the size rules and the frames already carry any entry.
+- **Estimate:** about 170 source, about 260 tests and fixtures.
