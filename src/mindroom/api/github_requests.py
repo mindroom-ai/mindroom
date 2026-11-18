@@ -230,7 +230,12 @@ def _read_token(context: OAuthCredentialContext) -> dict[str, str] | None:
     Raises ``CredentialsUnreadableError`` for a saved document that cannot be read or holds no token and login of
     the shapes a save checks.
     """
-    document = _token_store(context).read_saved_credentials(_TOKEN_SERVICE)
+    try:
+        document = _token_store(context).read_saved_credentials(_TOKEN_SERVICE)
+    except ValueError as exc:
+        # The store's path guards refusing its directory, which only tampering with it causes.
+        msg = f"Stored credentials for {_TOKEN_SERVICE} could not be located"
+        raise CredentialsUnreadableError(msg) from exc
     if document is None:
         return None
     token, login = document.get("token"), document.get("login")
@@ -342,7 +347,8 @@ async def save_github_token(payload: GitHubToken, request: Request) -> dict[str,
         return login
     try:
         await asyncio.to_thread(_save_token, context, {"token": payload.token, "login": login})
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # A `ValueError` is the store's path guards refusing its directory; neither answer names the path.
         logger.warning("github_token_save_failed", error_type=type(exc).__name__)
         return _error(503, _UNAVAILABLE)
     logger.info("github_token_saved")

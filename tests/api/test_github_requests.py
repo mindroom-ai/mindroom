@@ -1617,21 +1617,29 @@ def test_replacing_an_unreadable_token_never_lets_the_app_connection_answer(
     assert [r.url.path for r in github.requests] == ["/user"]
 
 
+@pytest.mark.parametrize(
+    "error",
+    [OSError("disk full"), ValueError("Path must stay within its authorized root.")],
+    ids=["os-error", "path-guard"],
+)
 def test_a_failed_publish_keeps_the_unreadable_token(
     app: FastAPI,
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
     monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
 ) -> None:
-    """A new token that cannot be written leaves the old bytes, so requests still fail closed, not as the App."""
+    """A new token that cannot be written leaves the old bytes, so requests still fail closed, not as the App.
+
+    A path guard refusing a tampered store directory answers as a failed write does, naming nothing of it.
+    """
     connect(paths, ALICE)
     github.handler = user_answer()
     damage_token(paths, ALICE, b"not json")
 
     def fail(_path: Path, _data: bytes) -> NoReturn:
-        msg = "disk full"
-        raise OSError(msg)
+        raise error
 
     monkeypatch.setattr(credentials_manager, "_atomic_write_private_file", fail)
 
@@ -1639,6 +1647,7 @@ def test_a_failed_publish_keeps_the_unreadable_token(
     response = ask(client, session(app, ALICE), method="POST", body={"title": "x"})
 
     assert (saved.status_code, saved.json()) == (503, {"error": "github_connection_unavailable"})
+    assert str(error) not in saved.text
     assert (response.status_code, response.json()) == (503, {"error": "github_token_unreadable"})
     path = get_runtime_credentials_manager(paths).for_primary_runtime_scope(ALICE, None)
     assert path.get_credentials_path("github_user_token").read_bytes() == b"not json"
@@ -1655,3 +1664,30 @@ def test_other_saves_still_refuse_to_overwrite_an_unreadable_document(tmp_path: 
     manager.save_credentials("github_user_token", {"token": "x", "login": "y"}, replace_unreadable=True)
 
     assert manager.load_credentials("github_user_token") == {"token": "x", "login": "y"}
+
+
+def test_a_token_store_its_path_guards_refuse_is_unreadable(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store whose path guards refuse it reads as an unreadable token, so nothing falls back to the App."""
+    connect(paths, ALICE)
+    real = github_requests.credential_layers
+
+    def guarded(service: str, **kwargs: Any) -> credentials_manager.CredentialLayers:  # noqa: ANN401
+        if service == "github_user_token":
+            msg = "Path must stay within its authorized root."
+            raise ValueError(msg)
+        return real(service, **kwargs)
+
+    monkeypatch.setattr(github_requests, "credential_layers", guarded)
+
+    status = client.get("/api/github/status", headers=session(app, ALICE))
+    response = ask(client, session(app, ALICE))
+
+    assert (status.status_code, status.json()) == (503, {"error": "github_token_unreadable"})
+    assert (response.status_code, response.json()) == (503, {"error": "github_token_unreadable"})
+    assert github.requests == []
