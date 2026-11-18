@@ -1,4 +1,4 @@
-"""Publish the MindRoom accounts joined to a room as router state, so clients recognize agents by any user name."""
+"""Publish the MindRoom accounts joined to a room as room state, so clients recognize agents by any user name."""
 
 from __future__ import annotations
 
@@ -29,11 +29,11 @@ async def reconcile_room_accounts(
     runtime_paths: RuntimePaths,
     room_id: str,
 ) -> bool:
-    """Write the router's list of the room's joined MindRoom accounts when it changed and return whether it is current.
+    """Write the client's list of the room's joined MindRoom accounts when it changed and return whether it is current.
 
     Failures leave it to the next trigger.
 
-    The state key is the router's user ID, which Matrix lets only the router write.
+    The state key is the writing account's user ID, the room's steward, which Matrix lets only that account write.
     """
     try:
         # The deadline covers the lock wait too, so a sync frame queued behind other triggers stalls at most 10 s.
@@ -55,7 +55,7 @@ async def reconcile_room_accounts(
                     state_key=client.user_id,
                 )
                 if not isinstance(response, nio.RoomPutStateResponse):
-                    # A room whose power levels keep the router from sending this state refuses it on every trigger.
+                    # A room whose power levels keep this account from sending this state refuses it on every trigger.
                     forbidden = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
                     log = logger.debug if forbidden else logger.warning
                     log("room_accounts_publish_failed", room_id=room_id, error=str(response))

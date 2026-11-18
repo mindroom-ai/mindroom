@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
@@ -11,6 +12,7 @@ import nio
 import pytest
 
 import mindroom.hooks as hook_api
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -60,11 +62,21 @@ def _room(room_id: str = "!lobby:localhost") -> MagicMock:
     return room
 
 
-def _router_user() -> AgentMatrixUser:
+# The entity that stewards every room of the running case: the owner account, or an agent in rooms without the owner.
+_STEWARD = ROUTER_AGENT_NAME
+
+
+@pytest.fixture(autouse=True, params=[ROUTER_AGENT_NAME, "helper"], ids=["owner_is_steward", "agent_is_steward"])
+def _steward(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every case with the owner account as steward, and with an agent as steward and no owner in the room."""
+    monkeypatch.setattr(sys.modules[__name__], "_STEWARD", request.param)
+
+
+def _user(name: str) -> AgentMatrixUser:
     return AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id="@mindroom_router:localhost",
-        display_name="Router",
+        agent_name=name,
+        user_id=f"@mindroom_{name}:localhost",
+        display_name=name.title(),
         password=TEST_PASSWORD,
     )
 
@@ -106,16 +118,33 @@ def _room_member_event(
     return event
 
 
-def _router_bot(
+def _steward_bot(
     tmp_path: Path,
     *,
     bot_accounts: list[str] | None = None,
     mindroom_user: dict[str, str] | None = None,
 ) -> AgentBot:
+    """Build the bot that stewards every room of the running case."""
     runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(Config(bot_accounts=bot_accounts or [], mindroom_user=mindroom_user), runtime_paths)
-    persist_entity_accounts(config, runtime_paths, usernames={ROUTER_AGENT_NAME: "mindroom_router"})
-    bot = make_test_agent_bot(_router_user(), config=config, runtime_paths=runtime_paths)
+    config = bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper")},
+            bot_accounts=bot_accounts or [],
+            mindroom_user=mindroom_user,
+        ),
+        runtime_paths,
+    )
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={ROUTER_AGENT_NAME: "mindroom_router", "helper": "mindroom_helper"},
+    )
+    bot = make_test_agent_bot(_user(_STEWARD), config=config, runtime_paths=runtime_paths)
+    bot.orchestrator.steward = _STEWARD
+    return _connect(bot)
+
+
+def _connect(bot: AgentBot) -> AgentBot:
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.homeserver = "http://localhost:8008"
@@ -123,18 +152,10 @@ def _router_bot(
     return bot
 
 
-def _agent_bot(tmp_path: Path) -> AgentBot:
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(Config(), runtime_paths)
-    agent_user = AgentMatrixUser(
-        agent_name="helper",
-        user_id="@mindroom_helper:localhost",
-        display_name="Helper",
-        password=TEST_PASSWORD,
-    )
-    return install_runtime_journal_support(
-        make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths),
-    )
+def _other_bot(steward: AgentBot) -> AgentBot:
+    """Build the case's other entity, which stewards no room, in the steward's runtime."""
+    name = "helper" if _STEWARD == ROUTER_AGENT_NAME else ROUTER_AGENT_NAME
+    return _connect(make_test_agent_bot(_user(name), orchestrator=steward.orchestrator))
 
 
 async def _dispatch_member(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
@@ -178,7 +199,7 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx)
 
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
 
@@ -187,7 +208,7 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
 
     assert len(seen) == 1
     context = seen[0]
-    assert context.agent_name == ROUTER_AGENT_NAME
+    assert context.agent_name == _STEWARD
     assert context.room_id == "!lobby:localhost"
     assert context.event_id == "$join1"
     assert context.user_id == "@alice:localhost"
@@ -196,7 +217,8 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     assert context.prev_membership == "leave"
     assert context.display_name == "Alice"
     assert context.avatar_url == "mxc://localhost/alice"
-    assert context.matrix_admin is not None
+    # The homeserver admin API stays owner-backed, so a room without the owner account has none.
+    assert (context.matrix_admin is not None) == (_STEWARD == ROUTER_AGENT_NAME)
 
 
 @pytest.mark.asyncio
@@ -208,7 +230,7 @@ async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path
     async def left(ctx: RoomMemberLeftContext) -> None:
         seen.append(ctx)
 
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
         [_plugin("personal-room-reinvite", [left])],
     )
@@ -229,7 +251,7 @@ async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path
 
     assert len(seen) == 1
     context = seen[0]
-    assert context.agent_name == ROUTER_AGENT_NAME
+    assert context.agent_name == _STEWARD
     assert context.room_id == "!personal:localhost"
     assert context.event_id == "$leave1"
     assert context.user_id == "@alice:localhost"
@@ -238,7 +260,8 @@ async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path
     assert context.prev_membership == "join"
     assert context.display_name == "Alice"
     assert context.avatar_url == "mxc://localhost/alice"
-    assert context.matrix_admin is not None
+    # The homeserver admin API stays owner-backed, so a room without the owner account has none.
+    assert (context.matrix_admin is not None) == (_STEWARD == ROUTER_AGENT_NAME)
 
 
 @pytest.mark.asyncio
@@ -250,7 +273,7 @@ async def test_router_dispatches_recovered_room_member_self_leave_once(tmp_path:
     async def left(ctx: RoomMemberLeftContext) -> None:
         seen.append(ctx.event_id)
 
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     room = _room("!personal:localhost")
     bot.client.rooms = {room.room_id: room}
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
@@ -285,7 +308,7 @@ async def test_router_ignores_non_human_or_non_self_room_member_leaves(tmp_path:
     async def left(ctx: RoomMemberLeftContext) -> None:
         seen.append(ctx)
 
-    bot = _router_bot(tmp_path, bot_accounts=["@service:localhost"])
+    bot = _steward_bot(tmp_path, bot_accounts=["@service:localhost"])
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
         [_plugin("personal-room-reinvite", [left])],
     )
@@ -334,7 +357,7 @@ async def test_cancelled_room_member_hook_does_not_suppress_durable_retry(tmp_pa
             entered.set()
             await blocker.wait()
 
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
     event = _room_member_event(event_id="$retry")
@@ -352,13 +375,15 @@ async def test_cancelled_room_member_hook_does_not_suppress_durable_retry(tmp_pa
 @pytest.mark.asyncio
 async def test_room_member_joined_supports_router_agent_scope(tmp_path: Path) -> None:
     """room:member_joined hooks should support router agent scoping."""
+    if _STEWARD != ROUTER_AGENT_NAME:
+        pytest.skip("the router alias names the owner account until hooks gain room scope")
     seen: list[str] = []
 
     @hook(EVENT_ROOM_MEMBER_JOINED, agents=[ROUTER_AGENT_NAME])
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx.user_id)
 
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     await _dispatch_member(bot, _room(), _room_member_event())
@@ -375,7 +400,7 @@ async def test_router_emits_live_room_member_join_without_previous_membership(tm
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx)
 
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     await _dispatch_member(bot, _room(), _room_member_event(event_id="$sso-autojoin", prev_membership=None))
@@ -397,7 +422,7 @@ async def test_room_member_joined_save_failure_remains_retryable(
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx.event_id)
 
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
 
@@ -429,7 +454,7 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx.event_id)
 
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
     save_started = asyncio.Event()
@@ -481,7 +506,7 @@ async def test_room_member_joined_ignores_bot_accounts_and_agents(tmp_path: Path
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx.user_id)
 
-    bot = _router_bot(
+    bot = _steward_bot(
         tmp_path,
         bot_accounts=["@bridge:localhost"],
         mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
@@ -491,24 +516,79 @@ async def test_room_member_joined_ignores_bot_accounts_and_agents(tmp_path: Path
     assert internal_user_id is not None
 
     await _dispatch_member(bot, _room(), _room_member_event(event_id="$bridge", user_id="@bridge:localhost"))
-    await _dispatch_member(bot, _room(), _room_member_event(event_id="$agent", user_id="@mindroom_router:localhost"))
+    await _dispatch_member(bot, _room(), _room_member_event(event_id="$agent", user_id=bot.agent_user.user_id))
     await _dispatch_member(bot, _room(), _room_member_event(event_id="$internal", user_id=internal_user_id))
 
     assert seen == []
 
 
 @pytest.mark.asyncio
-async def test_non_router_bots_do_not_emit_room_member_joined(tmp_path: Path) -> None:
-    """Only the router should emit room-member join hooks."""
+async def test_non_steward_bots_do_not_emit_room_member_joined(tmp_path: Path) -> None:
+    """Only the room's steward should emit room-member join hooks."""
     seen: list[str] = []
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx.user_id)
 
-    bot = _agent_bot(tmp_path)
+    bot = _other_bot(_steward_bot(tmp_path))
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     await _dispatch_member(bot, cast("nio.MatrixRoom", _room()), _room_member_event())
 
     assert seen == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_name", "membership", "prev_membership"),
+    [(EVENT_ROOM_MEMBER_JOINED, "join", "leave"), (EVENT_ROOM_MEMBER_LEFT, "leave", "join")],
+)
+async def test_member_joined_runs_once_when_steward_changes(
+    tmp_path: Path,
+    event_name: str,
+    membership: str,
+    prev_membership: str,
+) -> None:
+    """A bot that becomes the room's steward does not run a hook again for an event the earlier steward took."""
+    seen: list[str] = []
+
+    @hook(event_name)
+    async def changed(ctx: RoomMemberJoinedContext | RoomMemberLeftContext) -> None:
+        seen.append(ctx.agent_name)
+
+    first = _steward_bot(tmp_path)
+    second = _other_bot(first)
+    first.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [changed])])
+    room = cast("nio.MatrixRoom", _room())
+    event = _room_member_event(event_id="$change", membership=membership, prev_membership=prev_membership)
+
+    await _dispatch_member(first, room, event)
+    first.orchestrator.steward = second.agent_name
+    await _dispatch_member(second, room, event)
+
+    assert seen == [_STEWARD]
+
+
+@pytest.mark.asyncio
+async def test_same_steward_retry_still_runs(tmp_path: Path) -> None:
+    """The steward that took an event's claim runs the hook again when the event is delivered to it again."""
+    attempts = 0
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise asyncio.CancelledError
+
+    bot = _steward_bot(tmp_path)
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    room = _room()
+    event = _room_member_event(event_id="$retry")
+
+    with pytest.raises(asyncio.CancelledError):
+        await _dispatch_member(bot, room, event)
+    await _dispatch_member(bot, room, event)
+
+    assert attempts == 2

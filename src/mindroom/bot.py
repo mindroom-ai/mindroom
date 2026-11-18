@@ -110,7 +110,7 @@ from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinato
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .router.duties import RouterDuties, RouterDutiesDeps
+from .steward_duties import StewardDuties, StewardDutiesDeps
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
 from .tool_jobs.follow_ups import follow_up_event
@@ -272,7 +272,7 @@ class AgentBot:
     _call_manager: CallManager | None
     _calls_full_reconcile_pending: bool
     _call_rooms_reconcile_pending: set[str]
-    _router: RouterDuties | None
+    _steward: StewardDuties
     _interactive_selections: InteractiveSelections
     _voice_ingress: VoiceIngress
     _turn_dispatcher: TurnDispatcher
@@ -469,20 +469,15 @@ class AgentBot:
             conversation_reader=self._conversation_reader,
             logger=self.logger,
         )
-        self._router = (
-            None
-            if self.agent_name != ROUTER_AGENT_NAME
-            else RouterDuties(
-                RouterDutiesDeps(
-                    runtime=self._runtime_view,
-                    logger=self.logger,
-                    matrix_id=runtime_matrix_id,
-                    hook_context=self._hook_context_support,
-                    journal=principal,
-                    room_lifecycle=self._room_lifecycle,
-                    personal_rooms=self._personal_room_lifecycle,
-                ),
-            )
+        self._steward = StewardDuties(
+            StewardDutiesDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                hook_context=self._hook_context_support,
+                journal=principal,
+                room_lifecycle=self._room_lifecycle,
+                personal_rooms=self._personal_room_lifecycle,
+            ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
             runtime=self._runtime_view,
@@ -1081,8 +1076,7 @@ class AgentBot:
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after configured joins and across restarts."""
         self._request_call_reconciliation(room_id)
-        if self._router is not None:
-            await self._router.room_joined(room_id)
+        await self._steward.room_joined(room_id)
 
     async def _restore_joined_room(self, room_id: str) -> None:
         """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime."""
@@ -1367,8 +1361,7 @@ class AgentBot:
             orchestrator.config,
             orchestrator.refresh_agent_reply_memberships,
         )
-        if self._router is not None:
-            await self._router.publish_joined_room_state()
+        await self._steward.publish_joined_room_state()
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
@@ -1440,8 +1433,8 @@ class AgentBot:
             )
             if joined:
                 self._request_call_reconciliation(room_id)
-        if joined and admission.previous_membership != "join" and self._router is not None:
-            self._router.mark_joined_for_room_state(room_id)
+        if joined and admission.previous_membership != "join":
+            self._steward.mark_joined_for_room_state(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
             if (runtime := get_background_runtime(self.runtime_paths)) is not None:
@@ -1631,6 +1624,10 @@ class AgentBot:
                 self._on_thread_tag_state,  # ty: ignore[invalid-argument-type]
                 nio.UnknownEvent,
             )
+            client.add_event_callback(
+                self._steward.power_levels_event,  # ty: ignore[invalid-argument-type]
+                nio.PowerLevelsEvent,
+            )
             await self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
                 self.config,
@@ -1652,8 +1649,7 @@ class AgentBot:
             # A running bot that does not observe yet may be in rooms no room list names: none stays proven absent.
             self._runtime_view.agent_reply_memberships.forget_joined_rooms()
 
-            if self._router is not None:
-                await self._router.started(client)
+            await self._steward.started(client)
 
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
@@ -1938,8 +1934,7 @@ class AgentBot:
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
-        if self._router is not None:
-            self._router.stopping()
+        self._steward.stopping()
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),
@@ -2109,14 +2104,13 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMemberEvent,
     ) -> None:
-        """Forward one live room member event to the call manager, the personal-room and contact lifecycles, and the router's hooks."""
+        """Forward one live room member event to the call manager, the personal-room and contact lifecycles, and the steward duties."""
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
         await self._personal_room_lifecycle.member_event(room, event)
         await self._room_lifecycle.on_contact_member(room.room_id, event)
-        if self._router is not None:
-            await self._router.member_event(room, event)
+        await self._steward.member_event(room, event)
 
     def _lookup_personal_room_target(self, agent_name: str) -> PersonalRoomTarget | None:
         """Project a connected fleet member into its service and sync readiness."""

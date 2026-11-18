@@ -2083,8 +2083,7 @@ class _WelcomedRoom:
             self.members[:] = [member for member in self.members if member.user_id != user_id]
             self.room.remove_member(user_id)
         previous = "invite" if membership == "join" else "join"
-        assert self.bot._router is not None
-        await self.bot._router.member_event(self.room, _membership_change(user_id, membership, previous))
+        await self.bot._steward.member_event(self.room, _membership_change(user_id, membership, previous))
 
 
 def _membership_change(user_id: str, membership: str, previous: str) -> nio.RoomMemberEvent:

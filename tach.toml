@@ -10298,7 +10298,6 @@ depends_on = [
 path = "mindroom.matrix.room_thread_mode"
 depends_on = [
     "mindroom.matrix.room_membership",
-    "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.room_thread_modes",
 ]

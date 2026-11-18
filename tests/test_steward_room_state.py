@@ -1,4 +1,4 @@
-"""The router-owned room state clients use to choose a conversation view and recognize MindRoom accounts."""
+"""The steward-published room state clients use to choose a conversation view and recognize MindRoom accounts."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.room_thread_modes import clear_room_thread_mode_override, set_room_thread_mode_override
-from mindroom.router.duties import RouterDuties, RouterDutiesDeps
 from mindroom.runtime_shutdown import ShutdownBudget
+from mindroom.steward_duties import StewardDuties, StewardDutiesDeps
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -280,15 +280,6 @@ async def test_a_room_that_refuses_the_routers_state_is_no_warning(
         ("room_accounts_publish_failed", level),
         ("room_thread_mode_reconcile_failed", level),
     ]
-
-
-@pytest.mark.asyncio
-async def test_only_router_publishes(room_state: RoomState) -> None:
-    """A fallback command owner must never publish through an agent account."""
-    config, paths, ids, _, client = room_state
-    client.user_id = ids["agent1"].full_id
-    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
-    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -616,20 +607,21 @@ async def test_membership_recovers_after_initial_state_read_failure(room_state: 
     client.room_get_state.assert_not_awaited()
 
 
-def _router_duties(state: RoomState) -> RouterDuties:
-    config, paths, ids, _, client = state
-    deps = RouterDutiesDeps(
+def _router_duties(state: RoomState) -> StewardDuties:
+    """Build the owner account's duties, the steward of every room."""
+    config, paths, _, _, client = state
+    deps = StewardDutiesDeps(
         runtime=MagicMock(config=config, runtime_paths=paths, client=client),
         logger=MagicMock(),
-        matrix_id=ids[ROUTER_AGENT_NAME],
-        hook_context=MagicMock(),
+        hook_context=MagicMock(agent_name=ROUTER_AGENT_NAME),
         journal=MagicMock(),
         room_lifecycle=MagicMock(send_welcome_message_if_empty=AsyncMock(), refresh_welcome=AsyncMock()),
         personal_rooms=MagicMock(),
     )
     deps.hook_context.registry.has_hooks.return_value = False
     deps.personal_rooms.observes_onboarding_joins = False
-    return RouterDuties(deps)
+    deps.runtime.orchestrator.room_steward.return_value = MagicMock(agent_name=ROUTER_AGENT_NAME)
+    return StewardDuties(deps)
 
 
 def _membership_event(user_id: str, membership: str, previous: str) -> nio.RoomMemberEvent:
@@ -1177,7 +1169,7 @@ async def test_command_reports_a_failed_publication(room_state: RoomState, comma
         assert "failed" in reply
 
 
-async def _hang_a_room_state_retry(duties: RouterDuties, state: RoomState) -> None:
+async def _hang_a_room_state_retry(duties: StewardDuties, state: RoomState) -> None:
     """Fail one trigger's reconcile, so it schedules a retry, and hang that retry on its first write."""
     _, _, ids, _, client = state
     trigger_done = False
@@ -1208,8 +1200,7 @@ async def test_router_stop_cancels_its_room_state_retry_without_waiting(room_sta
     user = AgentMatrixUser(ROUTER_AGENT_NAME, ids[ROUTER_AGENT_NAME].full_id, "Router", TEST_PASSWORD)
     bot = install_runtime_journal_support(make_test_agent_bot(user, config=config, runtime_paths=paths))
     bot.client = client
-    duties = bot._router
-    assert duties is not None
+    duties = bot._steward
     await _hang_a_room_state_retry(duties, room_state)
     budget = bot._sync_shutdown_budget = ShutdownBudget.start(5.0)
     await bot.prepare_for_sync_shutdown()

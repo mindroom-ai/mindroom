@@ -193,6 +193,7 @@ from mindroom.session_storage.store import (
     persist_to,
     runs_without,
 )
+from mindroom.steward_duties import StewardDuties
 from mindroom.thread_summary import schedule as thread_summary_schedule
 from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_utils import decide_agent_response
@@ -3528,9 +3529,9 @@ def patch_response_runner_module(**changes: object) -> Generator[None]:
 
 
 def install_personal_room_shutdown_mock(bot: AgentBot) -> None:
-    """Install lifecycle cancellation for partial shutdown fixtures through one seam; they build no router duties."""
+    """Install lifecycle cancellation for partial shutdown fixtures through one seam, with idle steward duties."""
     bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
-    bot._router = None
+    bot._steward = MagicMock(spec=StewardDuties)
 
 
 def install_shutdown_drain_mocks(
