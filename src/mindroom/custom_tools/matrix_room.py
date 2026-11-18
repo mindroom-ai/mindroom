@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import defaultdict, deque
 from dataclasses import asdict, replace
 from threading import Lock
@@ -16,6 +17,7 @@ from mindroom.custom_tools.attachment_helpers import resolve_requested_room_id, 
 from mindroom.custom_tools.matrix_agent_discovery import available_room_agents
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
+from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import (
     message_preview,
@@ -25,6 +27,7 @@ from mindroom.matrix.client_visible_messages import (
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
 from mindroom.thread_summary.state import current_thread_summary
+from mindroom.thread_workflow import room_thread_facts, thread_workflow
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
@@ -182,6 +185,7 @@ class MatrixRoomTools(Toolkit):
         state_key: str | None,
         page_token: str | None,
         include_summaries: bool,
+        workflow: str | None,
     ) -> str:
         if action == "room-info":
             return await self._room_info(context, room_id=room_id)
@@ -202,6 +206,7 @@ class MatrixRoomTools(Toolkit):
                 limit=self._thread_limit(limit),
                 page_token=(page_token or "").strip() or None,
                 include_summaries=include_summaries,
+                workflow=workflow,
             )
         return await self._state(
             context,
@@ -312,6 +317,51 @@ class MatrixRoomTools(Toolkit):
             members=members_list,
         )
 
+    async def _room_threads(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        limit: int,
+        page_token: str | None,
+        workflow: str | None,
+        trusted_sender_ids: frozenset[str],
+    ) -> tuple[list[dict[str, object]], str | None]:
+        """Read one page of a room's thread roots; with `workflow`, label them and keep that group's rows."""
+        thread_roots, next_token = await get_room_threads_page(
+            context.client,
+            room_id,
+            limit=limit,
+            page_token=page_token,
+        )
+        now = int(time.time() * 1000)
+        facts: dict[str, dict[str, Any]] = {}
+        replying: set[str | None] = set()
+        if workflow is not None:
+            state = await context.client.room_get_state(room_id)
+            if not isinstance(state, nio.RoomGetStateResponse):
+                raise RoomThreadsPageError(response=f"Failed to fetch room state: {state}")
+            bot_ids = persisted_bot_user_ids(context.runtime_paths)
+            facts = room_thread_facts(room_id, state, context.runtime_paths, bot_ids, now)
+            bots = context.orchestrator.agent_bots.values() if context.orchestrator is not None else ()
+            replying = replying.union(*(bot.active_thread_ids_for_room(room_id) for bot in bots))
+        threads_list: list[dict[str, object]] = []
+        for event in thread_roots:
+            label: dict[str, object] = {}
+            if workflow is not None:
+                label = thread_workflow(facts.get(event.event_id, {}), now=now, replying=event.event_id in replying)
+                if workflow not in ("all", label["workflow"]):
+                    continue
+            thread_info = await self._serialize_thread_root(
+                context,
+                room_id=room_id,
+                event=event,
+                trusted_sender_ids=trusted_sender_ids,
+            )
+            if thread_info is not None:
+                threads_list.append(thread_info | label)
+        return threads_list, next_token
+
     async def _threads(
         self,
         context: ToolRuntimeContext,
@@ -320,13 +370,17 @@ class MatrixRoomTools(Toolkit):
         limit: int,
         page_token: str | None,
         include_summaries: bool,
+        workflow: str | None,
     ) -> str:
+        trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
         try:
-            thread_roots, next_token = await get_room_threads_page(
-                context.client,
-                room_id,
+            threads_list, next_token = await self._room_threads(
+                context,
+                room_id=room_id,
                 limit=limit,
                 page_token=page_token,
+                workflow=workflow,
+                trusted_sender_ids=trusted_sender_ids,
             )
         except RoomThreadsPageError as exc:
             error_payload: dict[str, object] = {
@@ -339,18 +393,14 @@ class MatrixRoomTools(Toolkit):
             if exc.retry_after_ms is not None:
                 error_payload["retry_after_ms"] = exc.retry_after_ms
             return self._payload("error", **error_payload)
-
-        threads_list: list[dict[str, object]] = []
-        trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
-        for event in thread_roots:
-            thread_info = await self._serialize_thread_root(
-                context,
+        except (ClientError, TimeoutError) as exc:
+            return self._payload(
+                "error",
+                action="threads",
                 room_id=room_id,
-                event=event,
-                trusted_sender_ids=trusted_sender_ids,
+                message=self._transport_error_message(exc),
             )
-            if thread_info is not None:
-                threads_list.append(thread_info)
+
         if include_summaries:
             await self._add_current_summaries(
                 context,
@@ -466,6 +516,7 @@ class MatrixRoomTools(Toolkit):
         state_key: str | None = None,
         page_token: str | None = None,
         include_summaries: bool = False,
+        workflow: Literal["needs_you", "working", "later", "all"] | None = None,
     ) -> str:
         """Inspect Matrix room metadata, available agents, members, threads, and state.
 
@@ -481,6 +532,9 @@ class MatrixRoomTools(Toolkit):
           summary_pinned (true when the thread's title is pinned, so automatic summaries leave it alone); both are omitted
           when the thread's full history is unavailable. This reads every listed thread, so pass it only when needed.
           Use page_token from a previous response's next_token to paginate.
+          workflow labels each row and keeps one group (all: every row): workflow is needs_you, working, later or done;
+          needs_you rows have why (approval or question: waits on the requester, so lead with these; your_turn: open and idle);
+          later rows have back_at (ms) when known. A filtered page can hold fewer rows than limit.
         - state: Read room state. If event_type is given, return that specific state event.
           If omitted, return a summary of all state events (m.room.member events are elided).
 
@@ -518,4 +572,5 @@ class MatrixRoomTools(Toolkit):
             state_key=state_key,
             page_token=page_token,
             include_summaries=include_summaries,
+            workflow=workflow,
         )

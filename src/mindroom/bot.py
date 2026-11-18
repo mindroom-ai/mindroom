@@ -1013,6 +1013,10 @@ class AgentBot:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
 
+    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
+        """Return the threads of one room in which this bot holds an active reply."""
+        return self._response_runner.active_thread_ids_for_room(room_id)
+
     async def admit_job_follow_up(self, key: ConversationKey, follow_up_id: str) -> None:
         """Admit a follow-up for jobs that ended in one of this bot's conversations, and wake the journal worker."""
         now_ms = int(time.time() * 1000)

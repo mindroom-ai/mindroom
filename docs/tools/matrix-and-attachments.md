@@ -41,7 +41,7 @@ Attachment IDs (`att_*`) are limited to the current conversation and IDs registe
 
 ## [`matrix_room`]
 
-`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False)` reads room data and never writes.
+`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False, workflow=None)` reads room data and never writes.
 Use `matrix_message` or `matrix_api` for writes.
 
 | Action | Returns |
@@ -49,7 +49,7 @@ Use `matrix_message` or `matrix_api` for writes.
 | `room-info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
-| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread |
+| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread; `workflow` (`needs_you`, `working`, `later` or `all`) labels each row with its `workflow` group as MindRoom Chat computes it (`done` for resolved threads), adds `why` (`approval`, `question` or `your_turn`) to `needs_you` rows and `back_at` (ms) to `later` rows when known, and keeps only the named group, so a filtered page can hold fewer rows than `limit` |
 | `state` | With `event_type`, one state event (`state_key` defaults to empty); without it, a summary of up to 100 non-member state events |
 
 Pass an `agents` result's `name` as `recipient` in [`matrix_message`](matrix-message.md#agent-conversations) to address that agent.

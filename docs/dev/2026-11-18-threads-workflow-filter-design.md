@@ -38,7 +38,8 @@ MindRoom's homeserver adds `io.mindroom.latest_reply` to each thread root's `m.t
 ## Decisions
 
 1. **One parameter, four values.**
-   `matrix_room(action="threads")` takes `workflow`: `needs_you`, `working`, `later` or `all` (the default).
+   `matrix_room(action="threads")` takes `workflow`: `needs_you`, `working`, `later` or `all`.
+   Bas's ruling: without `workflow` a `threads` call is unchanged (no state read, no new fields); any `workflow`, `all` included, labels the rows, and a failed state read then returns the tool's error payload (this overrides decision 13's note on unfiltered calls and the last Rejected item).
    The backend drops the rows of other groups before it builds their previews, so a filtered call costs the model only the rows it asked for.
    No tool and no config option is added.
 2. **Every row is labelled.**
