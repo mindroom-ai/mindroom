@@ -16,7 +16,7 @@ from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, SUBMISSION_CONTENT_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.media import Audio
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
@@ -849,3 +849,24 @@ class TestVoiceHandler:
         assert download_started.is_set()
         assert prepared.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
         assert ATTACHMENT_IDS_KEY not in prepared.source["content"]
+
+    def test_build_prepared_voice_message_keeps_the_submission_marker(self) -> None:
+        """The transcript keeps the audio event's submission marker, so the gate still knows more events follow."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        marker = {"id": "upload-1", "more": True}
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$marked_voice"
+        event.sender = "@alice:example.com"
+        event.source = {"content": {"body": "voice.ogg", "msgtype": "m.audio", SUBMISSION_CONTENT_KEY: marker}}
+
+        prepared = voice_handler._build_prepared_voice_message(
+            event,
+            config,
+            runtime_paths_for(config),
+            text="🎤 hello",
+            attachment_id=None,
+            thread_id=None,
+            raw_audio_fallback=False,
+        )
+
+        assert prepared.source["content"][SUBMISSION_CONTENT_KEY] == marker

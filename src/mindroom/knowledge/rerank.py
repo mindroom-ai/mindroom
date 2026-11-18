@@ -155,6 +155,8 @@ def _google_request_auth(credentials_path: Path | None, project: str | None) -> 
 #: Loaded ``sentence_transformers.CrossEncoder`` models by name.
 _cross_encoders: dict[str, Any] = {}
 _cross_encoder_lock = threading.Lock()
+#: Most tokens a query and document pair keeps: bge-reranker-v2-m3 takes 8192, and a batch that long needs tens of GiB.
+_CROSS_ENCODER_MAX_LENGTH = 1024
 
 
 @dataclass(frozen=True)
@@ -177,8 +179,15 @@ class _CrossEncoderReranker:
             if encoder is None:
                 with optional_dependency_environment():
                     from sentence_transformers import CrossEncoder  # noqa: PLC0415
+                    from sentence_transformers.util import get_device_name  # noqa: PLC0415
 
-                encoder = _cross_encoders[self.model] = CrossEncoder(self.model)
+                # SDPA attention on MPS keeps driver memory for every new input length until it runs out; eager does not.
+                model_kwargs = {"attn_implementation": "eager"} if get_device_name() == "mps" else None
+                encoder = CrossEncoder(self.model, model_kwargs=model_kwargs)
+                # Lower a long or unset limit only: raising a 512-token model's limit fails on long pairs.
+                if encoder.max_seq_length is None or encoder.max_seq_length > _CROSS_ENCODER_MAX_LENGTH:
+                    encoder.max_seq_length = _CROSS_ENCODER_MAX_LENGTH
+                _cross_encoders[self.model] = encoder
             return [float(score) for score in encoder.predict([(query, document) for document in documents])]
 
 

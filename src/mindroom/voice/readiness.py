@@ -16,7 +16,7 @@ from mindroom.constants import (
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.inbound_turn_normalizer import VoiceNormalizationRequest
-from mindroom.matrix.media import extract_media_caption
+from mindroom.matrix.media import carried_media_content, extract_media_caption
 from mindroom.timing import attach_dispatch_pipeline_timing
 from mindroom.turn_record import PreparedVoiceSource
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoRequest
@@ -41,21 +41,14 @@ def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> P
     """
     body = f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
     source = dict(event.source) if isinstance(event.source, dict) else {}
-    source_content = source.get("content")
-    original_content = source_content if isinstance(source_content, dict) else {}
     content: dict[str, Any] = {
         "msgtype": "m.text",
         "body": body,
         ORIGINAL_SENDER_KEY: event.sender,
         SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
         VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+        **carried_media_content(event),
     }
-    inherited_mentions = original_content.get("m.mentions")
-    if isinstance(inherited_mentions, dict):
-        content["m.mentions"] = inherited_mentions
-    inherited_relation = original_content.get("m.relates_to")
-    if isinstance(inherited_relation, dict):
-        content["m.relates_to"] = inherited_relation
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     source["content"] = content

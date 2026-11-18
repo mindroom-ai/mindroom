@@ -42,7 +42,8 @@ from mindroom.thread_tag_vocabulary import (
 from mindroom.thread_tags import (
     RESOLVED_THREAD_TAG,
     ThreadTagsPermissionError,
-    get_thread_tags,
+    get_thread_tag_content,
+    parse_thread_tag_record,
     set_thread_tags_if_empty,
 )
 
@@ -120,11 +121,11 @@ async def _thread_is_resolved(
     module: this is a best-effort background read, and the cost of being wrong is
     one summary on a resolved thread. Letting a transport error escape instead
     would abort the pass before it advances the baseline, so a persistently
-    failing room-state read would re-run the full state and history reads on
-    every turn.
+    failing tag read would re-run the tag and history reads on every turn.
     """
     try:
-        tags_state = await get_thread_tags(client, room_id, thread_id)
+        # One state event, not the room's whole state, which a busy room makes large.
+        content = await get_thread_tag_content(client, room_id, thread_id, RESOLVED_THREAD_TAG)
     except Exception as exc:
         # Keep the type and traceback: this catch is broad, and intermittent
         # Matrix failures are otherwise indistinguishable from each other.
@@ -135,7 +136,7 @@ async def _thread_is_resolved(
             error_type=type(exc).__name__,
         )
         return False
-    return tags_state is not None and RESOLVED_THREAD_TAG in tags_state.tags
+    return parse_thread_tag_record(RESOLVED_THREAD_TAG, content) is not None
 
 
 async def _summary_delivery_timestamp(

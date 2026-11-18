@@ -11,17 +11,20 @@ Budgets need prices for the models you pay for and a `budgets` section:
 models:
   astra:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     pricing:
-      input: 5.0
-      output: 30.0
-      cache_read: 0.5
+      input: 8.0
+      output: 40.0
+      cache_read: 0.4
+      cache_write: 10.0
   luna:
     provider: openai
     id: gpt-6-luna
     pricing:
-      input: 0.2
-      output: 1.25
+      input: 0.1
+      output: 0.5
+      cache_read: 0.01
+      cache_write: 0.125
 
 budgets:
   monthly_limit_usd: 20

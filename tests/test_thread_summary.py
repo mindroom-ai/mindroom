@@ -270,8 +270,8 @@ def serve_source_thread(
 class _RoomState:
     """The thread-tag state one room keeps, read and written through a client the way the homeserver serves it.
 
-    ``failing_reads`` names which room-state reads fail, counted from 1 in the order the pass makes them: the
-    vocabulary rebuild reads first, then the resolved check, then each tag write.
+    ``failing_reads`` names which tag-state reads, of the whole room state or of one tag, fail, counted from 1 in the
+    order the pass makes them: the vocabulary rebuild reads first, then the resolved check, then each tag write.
     """
 
     user_id: str
@@ -302,12 +302,19 @@ class _RoomState:
         keys = [(json.loads(key), content) for key, content in self.events.items()]
         return [tag for (root, tag), content in keys if root == thread_id and content]
 
-    async def room_get_state(self, room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+    def _count_read(self) -> nio.RoomGetStateError | None:
+        """Count one tag-state read; raise its failure, or return it when it is an error response."""
         self.reads += 1
-        if self.reads in self.failing_reads:
-            if isinstance(self.read_failure, Exception):
-                raise self.read_failure
-            return self.read_failure
+        if self.reads not in self.failing_reads:
+            return None
+        if isinstance(self.read_failure, Exception):
+            raise self.read_failure
+        return self.read_failure
+
+    async def room_get_state(self, room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        failure = self._count_read()
+        if failure is not None:
+            return failure
         events = [
             {"type": THREAD_TAGS_EVENT_TYPE, "state_key": key, "content": content}
             for key, content in self.events.items()
@@ -330,10 +337,21 @@ class _RoomState:
             if isinstance(rules, nio.RoomGetStateEventError):
                 return rules
             return nio.RoomGetStateEventResponse(rules, event_type, state_key, room_id)
+        if event_type == THREAD_TAGS_EVENT_TYPE:
+            return self._tag_event(room_id, state_key)
         if event_type == "m.room.create":
             return nio.RoomGetStateEventResponse({"room_version": "10"}, event_type, state_key, room_id)
         content = {"users": {self.user_id: self.power_level}, "state_default": 50}
         return nio.RoomGetStateEventResponse(content, event_type, state_key, room_id)
+
+    def _tag_event(self, room_id: str, state_key: str) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        failure = self._count_read()
+        if failure is not None:
+            return nio.RoomGetStateEventError(failure.message)
+        content = self.events.get(state_key)
+        if content is None:
+            return nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        return nio.RoomGetStateEventResponse(content, THREAD_TAGS_EVENT_TYPE, state_key, room_id)
 
     async def room_put_state(
         self,
@@ -1437,6 +1455,35 @@ class TestMaybeGenerateThreadSummary:
 
         assert len(model.requests) == 1
 
+    @pytest.mark.parametrize(
+        ("content", "resolved"),
+        [
+            (None, False),
+            ({"set_by": "@user:localhost", "set_at": "2026-03-21T19:02:03+00:00", "data": {}}, True),
+            ({}, False),
+            ({"set_by": "", "set_at": "not a time"}, False),
+        ],
+        ids=["absent", "set", "removed", "malformed"],
+    )
+    async def test_resolved_check_reads_only_the_resolved_tag_event(
+        self,
+        content: dict[str, object] | None,
+        resolved: bool,
+    ) -> None:
+        """The resolved check reads the one state event of the thread's resolved tag, never the room's whole state."""
+        self.room_state.tag(_THREAD, "bug")
+        if content is not None:
+            self.room_state.tag(_THREAD, "resolved", content=content)
+
+        assert await automatic._thread_is_resolved(self.client, _ROOM, _THREAD) is resolved
+
+        self.client.room_get_state.assert_not_awaited()
+        self.client.room_get_state_event.assert_awaited_once_with(
+            _ROOM,
+            THREAD_TAGS_EVENT_TYPE,
+            json.dumps([_THREAD, "resolved"], separators=(",", ":")),
+        )
+
     async def test_resolved_thread_skips_generation(self) -> None:
         """A resolved thread should stop burning LLM calls on re-titling."""
         model = self._summarizer()
@@ -1457,7 +1504,7 @@ class TestMaybeGenerateThreadSummary:
         """The tag read fails open; a state blip must not suppress summaries.
 
         A raw transport error from the tag read must not abort the pass either. Letting it escape would skip the
-        baseline advance and re-run the full state and history reads on every turn.
+        baseline advance and re-run the tag and history reads on every turn.
         """
         self.room_state.failing_reads = frozenset({1, 2})
         self.room_state.read_failure = read_failure
@@ -2544,7 +2591,14 @@ class TestGenerateSummary:
             ),
             *(
                 pytest.param({"provider": "google", "id": model_id}, False, id=f"google-{model_id}")
-                for model_id in ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
+                for model_id in (
+                    "gemini-4-carbon",
+                    "gemini-4-argon",
+                    "gemini-4-hydrogen",
+                    "gemini-3.8-flash",
+                    "gemini-3.6-flash",
+                    "gemini-3.5-flash-lite",
+                )
             ),
             pytest.param({"provider": "google", "id": "gemini-3.1-pro-preview"}, True, id="google-gemini-3.1-pro"),
         ],

@@ -76,7 +76,7 @@ Otherwise it replies `❌ Config command disabled.` or `❌ Admin only.`
 /config get agents
 /config get agents.analyst.display_name
 /config set agents.analyst.display_name "Research Expert"
-/config set models.default.id gpt-6-astra
+/config set models.default.id gpt-6.2-astra
 /config set defaults.markdown false
 /config set agents.analyst.tools [shell, file]
 ```
