@@ -465,6 +465,44 @@ async def test_receive_loop_child_exit_fences_grants_before_the_sibling_is_drain
 
 
 @pytest.mark.asyncio
+async def test_a_bot_that_starts_running_withdraws_proven_absence_before_its_started_hooks(tmp_path: Path) -> None:
+    """From the moment a bot runs, its rooms are in no census: a room no row covers waits, with no other refresh."""
+    bot = _agent_bot(tmp_path)
+    index = bot.orchestrator.agent_reply_memberships
+    covered, uncovered, member = "!covered:localhost", "!dm:localhost", "@alice:localhost"
+    other = make_matrix_client_mock(user_id="@mindroom_other:localhost")
+    other.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[covered]))
+    other.joined_members = AsyncMock(return_value=joined_members_response(covered, other.user_id, member))
+    await refresh_memberships(index, bot.config, bot.runtime_paths, other)
+    assert not index.grants_pending(bot.config, joined_rooms=[], current_room_id=uncovered)
+    epoch = index._epoch
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    in_started_hook, release = asyncio.Event(), asyncio.Event()
+
+    async def held_started_hook(*_args: object, **_kwargs: object) -> None:
+        in_started_hook.set()
+        await release.wait()
+
+    with (
+        patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
+        patch.object(bot, "refresh_presence", AsyncMock()),
+        patch.object(bot, "_emit_agent_lifecycle_event", held_started_hook),
+    ):
+        starting = asyncio.create_task(bot.start())
+        try:
+            await asyncio.wait_for(in_started_hook.wait(), 5)
+
+            assert bot.running
+            assert index.grants_pending(bot.config, joined_rooms=[], current_room_id=uncovered)
+            # Nothing was revoked and no refresh in flight was voided.
+            assert index._epoch == epoch
+            assert index.is_current_room_member(member, covered, bot.config, bot.runtime_paths)
+        finally:
+            release.set()
+            await asyncio.wait_for(starting, 5)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["armed", "open"])
 @pytest.mark.parametrize("entry", ["process_shutdown", "stop"])
 async def test_shutdown_entry_closes_the_bots_observation_before_any_teardown(

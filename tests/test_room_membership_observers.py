@@ -250,10 +250,9 @@ async def test_observer_eligibility_moves_only_by_its_table(
     assert (_observers(index) == {}, index._epoch != epoch) == (invalidated, invalidated)
     # Only the edge that opens an account asks for discovery at once, and a lost observer for a rebuild.
     assert (membership_sync._refresh_retry_at == 0.0) is (invalidated or (state, next_state) == ("armed", "open"))
-    # While a loop is armed, its account's rooms are in no census, so no room counts as proven absent.
     # A recovered event voids its one room; every other loss voids the account's say in which rooms exist.
-    unknown = event == "loop_started" or (invalidated and event != "recovered_member")
-    assert index.knows_joined_rooms() is not unknown
+    # No other event touches the census: a bot withdraws it when it starts running, before any loop.
+    assert index.knows_joined_rooms() is not (invalidated and event != "recovered_member")
 
 
 @pytest.mark.asyncio
@@ -905,6 +904,8 @@ def _bot(account: _Account, *, running: bool = True, observing: bool = True) -> 
         (False, False, False, "b_starts", False),
         (True, False, False, "b_catches_up", False),
         (True, False, False, "b_stops_running", True),
+        # A bot that starts running after a complete census withdraws it at once, without another refresh.
+        (False, False, False, "b_starts_afterwards", False),
     ],
 )
 async def test_census_proves_absence_only_when_every_running_bot_observes_and_answers(
@@ -937,6 +938,10 @@ async def test_census_proves_absence_only_when_every_running_bot_observes_and_an
     assert a.hold is not None
     a.hold.set()
     await asyncio.wait_for(refresh, 5)
+    if during_refresh == "b_starts_afterwards":
+        assert index.knows_joined_rooms()
+        bots["b"].running = True
+        index.forget_joined_rooms()
 
     assert index.knows_joined_rooms() is known
     assert index.needs_refresh(config) is not known

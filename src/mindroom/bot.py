@@ -1649,6 +1649,8 @@ class AgentBot:
             )
             await self.refresh_presence()
             self.running = True
+            # A running bot that does not observe yet may be in rooms no room list names: none stays proven absent.
+            self._runtime_view.agent_reply_memberships.forget_joined_rooms()
 
             if self._router is not None:
                 await self._router.started(client)

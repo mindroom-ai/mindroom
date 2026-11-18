@@ -75,10 +75,9 @@ class AgentReplyMembershipSync:
         self._grants_lost()
 
     def observer_loop_started(self, config: Config, observer_user_id: str) -> None:
-        """Arm one account's receive loop; until it opens, no census holds a room proven absent."""
+        """Arm one account's receive loop, whose first settled frame opens it."""
         self.observer_closed(config, observer_user_id, reason="sync_loop_started")
         self._observer_open[observer_user_id] = False
-        self._memberships.forget_joined_rooms()
 
     def observer_frame_settled(self, observer_user_id: str) -> None:
         """Open an armed account as an observer and ask for its rooms' read; a closed loop's late frame opens nothing."""
