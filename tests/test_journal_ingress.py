@@ -14,6 +14,8 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
+    HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTE_EVENT_TYPE,
     SILENT_SCHEDULE_EVENT_TYPE,
@@ -4816,11 +4818,22 @@ class TestRouteDispatch:
         self,
         alice: PrincipalStore,
     ) -> None:
-        """The responder answers the event the route names, in the thread it names, and reads no text for people."""
+        """The responder answers the event the route names, in the thread it names, and reads no text for people.
+
+        Only the relay context a responder reads comes along: a route cannot make its message a hook's, a
+        finished reply, or one written for somebody else.
+        """
         event = route_event(
             "$route",
-            route={"entity": BOT, "event_id": "$question", "thread_id": "$root"},
-            extra_content={"com.example.kept": 4},
+            route={"entity": BOT, "event_id": "$question", "thread_id": "$root", "unknown": "dropped"},
+            extra_content={
+                "com.example.unknown": 4,
+                ACTING_REQUESTER_KEY: "@mallory:example.org",
+                HOOK_SOURCE_KEY: "plugin/hook",
+                STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+                "m.mentions": {"user_ids": ["@mallory:example.org"]},
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$other"}},
+            },
         )
 
         [delivered] = await self._delivered(alice, event)
@@ -4841,11 +4854,11 @@ class TestRouteDispatch:
                 "is_falling_back": False,
                 "m.in_reply_to": {"event_id": "$question"},
             },
-            ROUTE_EVENT_TYPE: {"entity": BOT, "event_id": "$question", "thread_id": "$root"},
             SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             ORIGINAL_SENDER_KEY: ALICE,
-            "com.example.kept": 4,
         }
+        # What makes the message a route is outside its content, where only this dispatch writes.
+        assert delivered.source[ROUTE_EVENT_TYPE] == ["$question"]
 
     async def test_a_route_outside_a_thread_carries_the_prompt_its_scheduled_task_relays(
         self,

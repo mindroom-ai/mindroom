@@ -181,9 +181,10 @@ class IngressValidator:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        route = trusted_content.get(ROUTE_EVENT_TYPE)
-        routed_event_id = route.get("event_id") if isinstance(route, dict) else None
-        routed_event_id = routed_event_id if isinstance(routed_event_id, str) else None
+        # Journal dispatch names what a managed account's route event routes outside the content, so a message
+        # that only carries route content is no route.
+        routed = source_dict.get(ROUTE_EVENT_TYPE) if sender_entity_name is not None else None
+        routed_event_id = routed[-1] if isinstance(routed, list) and routed else None
         # An old visible relay names the human message it relays by replying to it; see `IngressFacts.routed`.
         visible_relay_original_event_id = (
             reply_to_event_id_from_content(content)

@@ -42,6 +42,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
+from mindroom.journal_dispatch import _route_as_message
 from mindroom.turn_origin import TurnIntent
 from mindroom.turns.facts import command_for, is_router_voice_echo
 from tests.access_schema_support import with_current_room_member_access
@@ -367,17 +368,9 @@ def test_a_route_is_trusted_from_any_managed_account_and_names_the_message_it_ro
 ) -> None:
     """The room's steward is the owner account or an agent, and its route runs for the person it names."""
     validator, ids = _validator(tmp_path)
-    route = _text(
-        ids[steward].full_id,
-        "could you help with this?",
-        **{
-            ROUTE_EVENT_TYPE: {"entity": ids["general"].full_id, "event_id": "$human"},
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-        },
-    )
+    route = _route(ids[steward].full_id, ids["general"].full_id)
 
-    facts = validator.classify(route, room_id="!room:localhost")
+    facts = validator.classify(_route_as_message(route), room_id="!room:localhost")
 
     assert (facts.routed_event_id, facts.discovery_event_id) == ("$human", "$human")
     assert facts.run_requester_id == "@user:localhost"
@@ -385,24 +378,50 @@ def test_a_route_is_trusted_from_any_managed_account_and_names_the_message_it_ro
     assert facts.origin.intent is TurnIntent.ROUTER_HANDOFF
 
 
+def _route(sender: str, entity: str) -> nio.UnknownEvent:
+    """Return the hidden route event one account sent to route `$human` to an entity."""
+    event = nio.Event.parse_event(
+        {
+            "type": ROUTE_EVENT_TYPE,
+            "event_id": "$route",
+            "sender": sender,
+            "origin_server_ts": 1,
+            "content": {
+                ROUTE_EVENT_TYPE: {"entity": entity, "event_id": "$human"},
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            },
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
+    return event
+
+
 def test_route_content_from_an_unmanaged_account_is_not_a_route(tmp_path: Path) -> None:
     """Only an account the identity registry manages may route."""
     validator, ids = _validator(tmp_path)
-    forged = _text(
-        "@user:localhost",
-        "hello",
-        **{
-            ROUTE_EVENT_TYPE: {"entity": ids["general"].full_id, "event_id": "$other"},
-            ORIGINAL_SENDER_KEY: "@victim:localhost",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-        },
-    )
+    forged = _route_as_message(_route("@user:localhost", ids["general"].full_id))
 
     facts = validator.classify(forged, room_id="!room:localhost")
 
     assert (facts.routed_event_id, facts.discovery_event_id, facts.router_relay) == (None, None, False)
     assert facts.run_requester_id == "@user:localhost"
     assert facts.origin.intent is TurnIntent.USER_MESSAGE
+
+
+def test_a_message_that_carries_route_content_is_not_a_route(tmp_path: Path) -> None:
+    """Only a route event is a route: the same content in a managed account's ordinary message routes nothing."""
+    validator, ids = _validator(tmp_path)
+    content = _route(ids["research"].full_id, ids["general"].full_id).source["content"]
+
+    facts = validator.classify(_text(ids["research"].full_id, "hello", **content), room_id="!room:localhost")
+
+    assert (facts.routed_event_id, facts.discovery_event_id, facts.routed, facts.router_relay) == (
+        None,
+        None,
+        False,
+        False,
+    )
 
 
 def _entity_final_reply_with_tool_markers(validator: IngressValidator, sender: str) -> nio.RoomMessageFormatted:
