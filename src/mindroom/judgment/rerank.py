@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.judgment.answers import JudgmentError
 from mindroom.judgment.evaluator import create_batch_evaluator
 from mindroom.judgment.execution import JudgmentCapacity
-from mindroom.judgment.state import JudgmentQuestion, build_batch_request, clip_judgment_text
+from mindroom.judgment.state import JudgmentQuestion, build_batch_request, clip_judgment_text, is_unredacted
 from mindroom.redaction import REDACTION_FAILED, redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -69,16 +69,18 @@ class _JudgmentReranker:
         message = _redacted(query)
         if message is None:
             raise JudgmentError(failure="incomplete_state")
-        passages = [(index, _redacted(document)) for index, document in enumerate(documents)]
-        judged = [(index, passage) for index, passage in passages if passage is not None]
-        count, request = self._packed([_candidate_question(index, passage) for index, passage in judged], message)
+        passages = ((index, _redacted(document)) for index, document in enumerate(documents))
+        questions = ((index, _candidate_question(index, passage)) for index, passage in passages if passage is not None)
+        # A clean passage can still end like a credential's key, which makes its question read as key and value.
+        judged = [(index, question) for index, question in questions if is_unredacted(question.instructions)]
+        count, request = self._packed([question for _index, question in judged], message)
         result = await self.batch.evaluate(request)
         if result.failure is not None or result.decision is None:
             raise JudgmentError(failure=result.failure or "invalid_response")
         probabilities = [0.0 if probability is None else probability for probability in result.decision]
         cap = probabilities.pop() if self.gate else 1.0
         scores = [0.0] * len(documents)
-        for (index, _passage), probability in zip(judged[:count], probabilities, strict=True):
+        for (index, _question), probability in zip(judged[:count], probabilities, strict=True):
             scores[index] = min(probability, cap)
         return scores
 

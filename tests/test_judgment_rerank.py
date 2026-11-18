@@ -196,6 +196,21 @@ async def test_candidate_redaction_cannot_read_is_not_sent_and_scores_zero() -> 
 
 
 @pytest.mark.asyncio
+async def test_a_passage_that_ends_like_a_credential_key_is_left_out_alone() -> None:
+    """A passage the redactor reads as clean, but whose question it would redact, is not sent and scores 0.0.
+
+    Wrapped in its question, a passage ending in ``password:`` reads as that password's key followed by a value, so
+    the question would fail the request's redaction check; the other candidates are still judged.
+    """
+    seen: list[httpx.Request] = []
+    reranker = _reranker(_answers({"c0": 0.9, "c2": 0.8}), seen)
+    scores = await reranker.ascore("query", ["a", "Remember the password:", "c"])
+
+    assert [question["name"] for question in json.loads(seen[0].content)["questions"]] == ["c0", "c2"]
+    assert scores == [0.9, 0.0, 0.8]
+
+
+@pytest.mark.asyncio
 async def test_backend_failure_raises() -> None:
     """A failed batch raises, so retrieval falls back to the hybrid selection."""
     with pytest.raises(JudgmentError):
