@@ -410,6 +410,17 @@ async def test_a_stop_note_too_large_for_one_event_keeps_its_compactions_in_prev
 
     bot.client.upload = AsyncMock(side_effect=upload)
     compacting = asyncio.Event()
+    oversized_progress = asyncio.Event()
+    send = bot.client.room_send.side_effect
+
+    async def watched_send(*args: object, **kwargs: object) -> object:
+        response = send(*args, **kwargs)
+        content = kwargs["content"]
+        if str(content.get("m.new_content", content).get("body", "")).startswith("Partial "):
+            oversized_progress.set()
+        return response
+
+    bot.client.room_send.side_effect = watched_send
 
     async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
         yield "Partial " + "x" * 70_000
@@ -436,6 +447,8 @@ async def test_a_stop_note_too_large_for_one_event_keeps_its_compactions_in_prev
     ):
         response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
         await asyncio.wait_for(compacting.wait(), timeout=5)
+        # Stop only once Matrix holds the oversized progress edit, so the note has a reply too large for one event.
+        await asyncio.wait_for(oversized_progress.wait(), timeout=5)
         reply = await _reply(bot)
         assert reply.event_id is not None
         stop = await _stop(bot, reply.event_id, 7)
