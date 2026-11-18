@@ -63,7 +63,7 @@ _JUDGMENT_RECALL_THRESHOLD_DESCRIPTION = (
 )
 
 
-class TypeSafeRerankerConfig(TypeSafeJudgmentConfig):
+class _TypeSafeRerankerConfig(TypeSafeJudgmentConfig):
     """System One as the reranker: one probability per candidate, and recall keeps those at its threshold."""
 
     threshold: float = Field(
@@ -75,7 +75,7 @@ class TypeSafeRerankerConfig(TypeSafeJudgmentConfig):
     )
 
 
-class OpenAIDecisionsRerankerConfig(OpenAIDecisionsJudgmentConfig):
+class _OpenAIDecisionsRerankerConfig(OpenAIDecisionsJudgmentConfig):
     """OpenAI Decisions as the reranker: one probability per candidate, and recall keeps those at its threshold."""
 
     threshold: float = Field(
@@ -90,7 +90,7 @@ class OpenAIDecisionsRerankerConfig(OpenAIDecisionsJudgmentConfig):
 #: A judgment provider scores each candidate with its probability. As the reranker its ``threshold`` defaults to 0.3,
 #: not the 0.8 other judgment users keep.
 type RerankerConfig = Annotated[
-    KnowledgeRerankerConfig | TypeSafeRerankerConfig | OpenAIDecisionsRerankerConfig,
+    KnowledgeRerankerConfig | _TypeSafeRerankerConfig | _OpenAIDecisionsRerankerConfig,
     Field(discriminator="provider"),
 ]
 
