@@ -1179,22 +1179,51 @@ def test_a_token_is_used_when_the_app_connection_cannot_be_read(
 
 
 @pytest.mark.parametrize("status_code", [401, 403])
-def test_a_token_github_refuses_is_not_stored(
+def test_a_token_github_refuses_keeps_the_token_saved_before(
     app: FastAPI,
     client: TestClient,
     paths: RuntimePaths,
     github: GitHubPeer,
     status_code: int,
 ) -> None:
-    """GitHub's 401 or 403 answers 400 and keeps whatever was saved before."""
-    connect(paths, ALICE)
-    github.handler = lambda _request: httpx.Response(status_code, json={"message": "Bad credentials"})
+    """GitHub's 401 or 403 answers 400, and requests keep going out with the token saved before."""
+    github.handler = user_answer()
+    save_token(client, session(app, ALICE))
 
-    response = save_token(client, session(app, ALICE))
+    def refuse_new_tokens(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            return httpx.Response(status_code, json={"message": "Bad credentials"})
+        return httpx.Response(200, json={"ok": True})
+
+    github.handler = refuse_new_tokens
+    response = save_token(client, session(app, ALICE), "ghp_refused-token")
+    ask(client, session(app, ALICE))
 
     assert (response.status_code, response.json()) == (400, {"error": "github_token_rejected"})
-    assert stored_token(paths, ALICE) is None
-    assert client.get("/api/github/status", headers=session(app, ALICE)).json()["via"] == "app"
+    assert stored_token(paths, ALICE) == {"token": ALICE_PAT, "login": "pat-gh"}
+    assert github.requests[-1].headers["authorization"] == f"Bearer {ALICE_PAT}"
+
+
+@pytest.mark.parametrize("source", [{"_source": "ui"}, {"_source": "env"}, {}], ids=["ui", "env", "unmarked"])
+def test_a_global_or_shared_token_document_is_never_the_users(
+    app: FastAPI,
+    client: TestClient,
+    paths: RuntimePaths,
+    github: GitHubPeer,
+    source: dict[str, str],
+) -> None:
+    """A `github_user_token` document outside the user's own store answers for no one, and nothing is sent."""
+    manager = get_runtime_credentials_manager(paths)
+    document = {"token": "ghp_global-token", "login": "global-gh"} | source
+    manager.save_credentials("github_user_token", document)
+    manager.shared_manager().save_credentials("github_user_token", document)
+
+    status = client.get("/api/github/status", headers=session(app, ALICE))
+    response = ask(client, session(app, ALICE))
+
+    assert status.json() == {"connected": False}
+    assert (response.status_code, response.json()) == (409, {"error": "github_not_connected"})
+    assert github.requests == []
 
 
 @pytest.mark.parametrize(
@@ -1462,7 +1491,9 @@ def test_a_token_check_reads_no_body_of_a_failed_answer(
     """GitHub's status alone decides a failed check, so its body is never downloaded."""
     body = CountedStream(b'{"message": "Bad credentials"}')
     github.handler = lambda _request: httpx.Response(
-        status_code, stream=body, headers={"content-type": "application/json"}
+        status_code,
+        stream=body,
+        headers={"content-type": "application/json"},
     )
 
     assert save_token(client, session(app, ALICE)).status_code in {400, 502}
