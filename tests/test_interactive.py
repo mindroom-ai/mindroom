@@ -342,6 +342,41 @@ Second question:
         ]
         assert response.interactive_metadata.option_labels == {"❓": "Option", "1": "Option"}
 
+    def test_parse_and_format_interactive_replaces_repeated_emojis(self) -> None:
+        """A repeated emoji would merge two options into one reaction, so later repeats get a free keycap."""
+        response_text = """```interactive
+{
+    "question": "How?",
+    "options": [
+        {"emoji": "🛟", "label": "Backup and PR", "value": "both"},
+        {"emoji": "🛟", "label": "Backup only", "value": "backup"},
+        {"emoji": "2️⃣", "label": "Cleanup", "value": "cleanup"},
+        {"emoji": "🛟", "label": "Nothing", "value": "nothing"}
+    ]
+}
+```"""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.interactive_metadata is not None
+        assert [opt["emoji"] for opt in response.interactive_metadata.options_as_list()] == [
+            "🛟",
+            "1️⃣",
+            "2️⃣",
+            "4️⃣",
+        ]
+        assert response.interactive_metadata.option_map == {
+            "🛟": "both",
+            "1️⃣": "backup",
+            "2️⃣": "cleanup",
+            "4️⃣": "nothing",
+            "1": "both",
+            "2": "backup",
+            "3": "cleanup",
+            "4": "nothing",
+        }
+        assert "2. 1️⃣ Backup only" in response.formatted_text
+
     def test_parse_and_format_interactive_removes_malformed_extra_blocks(self) -> None:
         """Malformed extra blocks should not leak raw interactive fences into the message."""
         response_text = """First question:

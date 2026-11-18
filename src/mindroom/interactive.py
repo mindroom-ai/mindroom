@@ -163,6 +163,7 @@ _INTERACTIVE_PATTERN = re.compile(
 )
 _INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
 _MAX_OPTIONS = 5
+_KEYCAP_EMOJIS = tuple(f"{digit}\ufe0f\u20e3" for digit in "123456789")
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
 
@@ -301,7 +302,20 @@ def _coerce_interactive_payload(raw_json: str) -> tuple[str, list[dict[str, str]
             break
     if not options:
         return None
-    return question, options
+    return question, _with_distinct_emojis(options)
+
+
+def _with_distinct_emojis(options: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Give each option its own emoji, since the emoji is the option's reaction key."""
+    used = {opt["emoji"] for opt in options}
+    seen: set[str] = set()
+    for position, opt in enumerate(options):
+        if opt["emoji"] in seen:
+            candidates = (_KEYCAP_EMOJIS[position], *_KEYCAP_EMOJIS)
+            opt["emoji"] = next(key for key in candidates if key not in used)
+            used.add(opt["emoji"])
+        seen.add(opt["emoji"])
+    return options
 
 
 def _render_question_text(question: str, options: list[dict[str, str]], *, include_instruction: bool) -> str:
