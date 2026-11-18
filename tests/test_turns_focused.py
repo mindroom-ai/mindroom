@@ -187,6 +187,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.response_runner import ResponseRunner
     from mindroom.turns.facts import IngressFacts
+    from tests.runtime_fakes import ReadyRuntime
 
 _ROOM_ID = "!focused:localhost"
 _SENDER = "@user:localhost"
@@ -574,14 +575,15 @@ def _build_harness(
     agent_name: str = "general",
     thread_history: ThreadHistoryResult | None = None,
     debounce_seconds: float = 0.0,
+    process: ReadyRuntime | None = None,
 ) -> _Harness:
-    """Construct the turn owners from typed collaborators without booting a bot."""
+    """Construct the turn owners from typed collaborators without booting a bot; bots of one process share it."""
     runtime_paths = runtime_paths_for(config)
     registry = entity_identity_registry(config, runtime_paths)
     matrix_id = registry.current_id(agent_name)
     logger = get_logger("test_turns_focused")
     runtime = BotRuntimeState(
-        orchestrator=ready_runtime(config, runtime_paths),
+        orchestrator=process or ready_runtime(config, runtime_paths),
         client=make_matrix_client_mock(user_id=matrix_id.full_id),
     )
 
@@ -1987,6 +1989,89 @@ async def test_a_relay_of_an_answered_original_is_settled_unless_it_was_answered
     assert outcome is (TurnDispatchOutcome.DEFERRED if answered else TurnDispatchOutcome.INTENTIONALLY_IGNORED)
     assert not harness.turn_store.has_live_turn_claim("$second-relay:localhost")
     assert harness.retried_dispatch_sources == []
+
+
+@pytest.mark.asyncio
+async def test_bots_that_batch_a_burst_differently_leave_no_message_unanswered(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot that batched two messages answers the one selected for it, though the other went to another bot.
+
+    The other bot planned the messages apart, so each has its own saved choice; the batch must not follow the first
+    message's choice into ignoring the second, which nobody else answers.
+    """
+    general = _build_harness(config, tmp_path)
+    research = _build_harness(config, tmp_path, agent_name="research", process=general.runtime.orchestrator)
+    room = _room_with_members(config, "general", "research")
+    first = _text_event("first message", event_id="$first:localhost")
+    second = _text_event("second message", event_id="$second:localhost", origin_server_ts=1_000_001)
+    selector = AsyncMock(side_effect=[ResponderSelection("general"), ResponderSelection("research")])
+    monkeypatch.setattr("mindroom.turn_policy.suggest_responder_for_message", selector)
+
+    await general.deliver(room, first)
+    await general.deliver(room, second)
+    batch = build_prepared_turn(
+        requester_coalescing_key(room.room_id, None, _SENDER),
+        [
+            make_pending_event(event, room, source_kind=MESSAGE_SOURCE_KIND, requester_user_id=_SENDER)
+            for event in (first, second)
+        ],
+        queues_other_run=nothing_else_queued,
+    )
+    await research.dispatcher.handle_prepared_turn(batch)
+    await research.runner.settle_inbox_responses()
+
+    assert [request.response_envelope.source_event_id for request in general.runner.requests] == ["$first:localhost"]
+    assert general.ignored_dispatch_sources == [("$second:localhost",)]
+    assert len(research.runner.requests) == 1
+    assert research.ignored_dispatch_sources == []
+    assert await research.turn_store.is_handled(_ROOM_ID, "$second:localhost") is True
+    assert selector.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_original_the_old_router_already_relayed_gets_no_second_answer(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At upgrade, a message one bot still holds unplanned is answered through its relay only.
+
+    The old router relayed it to `general` and recorded the relay as its answer; `research` plans its own copy of the
+    message after the upgrade and must not select itself for it.
+    """
+    general = _build_harness(config, tmp_path)
+    research = _build_harness(config, tmp_path, agent_name="research", process=general.runtime.orchestrator)
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+    original = _text_event("untagged message with multiple visible responders")
+    relay = _router_relay_event(
+        config,
+        event_id="$router-relay:localhost",
+        original_event_id=original.event_id,
+        body="@general could you help with this?",
+        origin_server_ts=1_000_001,
+    )
+    relay.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
+    await (
+        general.runtime.orchestrator.event_journal_store()
+        .turn_records(ROUTER_AGENT_NAME)
+        .write(
+            turn_rows.record_responded_turn,
+            TurnRecord.create([original.event_id], response_event_id=relay.event_id),
+            room_id=_ROOM_ID,
+        )
+    )
+    selector = _select_responder(monkeypatch, "research")
+
+    await research.deliver(room, original)
+    await general.deliver(room, relay)
+
+    selector.assert_not_awaited()
+    assert research.runner.requests == []
+    assert research.ignored_dispatch_sources == [(original.event_id,)]
+    assert [request.user_id for request in general.runner.requests] == [_SENDER]
 
 
 @pytest.mark.asyncio

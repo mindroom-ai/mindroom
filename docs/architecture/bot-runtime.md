@@ -110,7 +110,7 @@ Shutdown closes callback admission before withdrawing runtime capabilities, and 
 A cleanup that outlasts its budget keeps its owners, and the Matrix client and journal stay open until it finishes.
 Shutdown invalidates membership readiness only after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
 Replay does not wait for a later sync token or Sliding Sync position: recovered callbacks may rely on the room ID, but cached membership and state are best-effort.
-Recovery intent travels with queued ingress, so lane and coalescing workers cannot turn a recovered turn whose router target is temporarily unavailable into a terminal fallback response.
+A replayed message that mentions nobody reads the responder saved for it in `room_event_claims`, so a replay, a different batch, or a smaller set of candidates never gives it a second responder.
 
 ### Delivery and membership
 
@@ -160,7 +160,7 @@ A voice message's batching scope and its echo thread are distinct: a root audio 
 The user-visible history behavior is on [Conversation history](../configuration/history.md#compacted-history-and-redaction).
 
 - A redaction is recorded once per agent, in the transaction that admits it, and applied there to every Matrix login of that agent and to the agent's turns; it is kept when the bot leaves the room, because an earlier login the agent returns to, or a rejoin the server does not replay the redaction to, would otherwise show the deleted text again.
-- Deleting the human message a router relayed deletes the relay that answers for it: the routed reply ends, and its approval wait with it, exactly as for a directly sent message, because reply discovery matches exact logical ids and the redacted alias is resolved to its sources first.
+- Deleting a human message that an old router relay answers for (the router relayed through v2026.11.394) deletes that relay: the routed reply ends, and its approval wait with it, exactly as for a directly sent message, because reply discovery matches exact logical ids and the redacted alias is resolved to its sources first.
 - Nothing durable records that history cleanup is owed: every response derives it from the recorded redactions, so a crash between redaction and cleanup, or a redacted event no turn owns, needs no recovery path.
 - Approval creation and source-redaction admission serialize, so an approval cannot acquire a source that a deletion already settled.
 - Redacted replay can stay in local session storage until its history scope next serves a response, because cleanup runs only then.

@@ -351,7 +351,8 @@ async def _answers(config: Config, turn: _Turn) -> dict[str, str]:
                 _text_event("hello agents"),
                 dispatch,
                 has_active_response_for_target=lambda _target, bot=bot: bot == turn.answering,
-                source_event_ids=("$event",),
+                # Each turn is its own message, with its own saved responder.
+                source_event_ids=(f"$event-{turn}",),
             )
             if plan.kind == "respond":
                 answers[bot] = plan.response_action.kind

@@ -1,10 +1,13 @@
-"""One saved responder choice per source event, which every bot of the process reads."""
+"""One saved responder per source event, which every bot of the process reads before it answers an unmentioned turn."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.event_journal import turn_rows
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -18,7 +21,7 @@ _PURPOSE = "responder"
 
 @dataclass
 class ResponderSelections:
-    """Pick who answers an unmentioned turn once, however many bots ask and however often the turn replays."""
+    """Save who answers an unmentioned turn once, however many bots ask and however often the turn replays."""
 
     _journal: Callable[[], EventJournalStore]
     _room_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
@@ -28,20 +31,43 @@ class ResponderSelections:
         room_id: str,
         source_event_ids: Sequence[str],
         choose: Callable[[], Awaitable[str]],
-    ) -> str | None:
-        """Return the entity saved for this turn's first source, or None when the saved choice is ``NO_RESPONDER``.
+    ) -> frozenset[str]:
+        """Return the entities saved for this turn's sources; a bot answers the turn only when it is one of them.
 
-        The first source in turn order that has a saved choice decides, and the sources without one inherit it, so a
-        later, larger batch keeps the choice an earlier, smaller batch made. Only a turn none of whose sources has one
-        awaits ``choose``. The room's lock makes the bots that ask at once wait for the first and read its rows.
+        The first source in turn order that has a saved choice decides for the sources without one, so a later, larger
+        batch keeps the choice an earlier, smaller batch made. Only a turn none of whose sources has one awaits
+        ``choose``. The room's lock makes the bots that ask at once wait for the first and read its rows. Bots that
+        batched a burst differently can have saved different entities for its messages; each then answers its whole
+        batch, so a message can get two answers but is never left to nobody. ``NO_RESPONDER`` names nobody.
         """
         async with self._room_locks.setdefault(room_id, asyncio.Lock()):
             journal = self._journal()
             saved = await journal.room_event_claims(room_id, source_event_ids, _PURPOSE)
             choice = next((saved[event_id] for event_id in source_event_ids if event_id in saved), None)
             if choice is None:
-                choice = await choose()
+                relayed = await _relayed_by_the_old_router(journal, source_event_ids)
+                choice = NO_RESPONDER if relayed else await choose()
             for event_id in source_event_ids:
                 if event_id not in saved:
-                    await journal.claim_room_event(room_id, event_id, _PURPOSE, choice)
-        return None if choice == NO_RESPONDER else choice
+                    saved[event_id] = await journal.claim_room_event(room_id, event_id, _PURPOSE, choice)
+        return frozenset(saved.values()) - {NO_RESPONDER}
+
+
+# LEGACY_COMPAT: a person's message the relaying router already answered with its relay ("@agent could you help with
+# this?") or its routing notice, which a bot that had not planned its own copy before the upgrade must not answer too.
+# Legacy format: the router's turn row for the message, completed with a response event that is not its voice echo.
+# Last legacy release: v2026.11.394, the newest release whose router relays; see `IngressFacts.router_relay`.
+# Handling: such a message is saved as `NO_RESPONDER`, so the relay stays its one delivery.
+# Coverage: tests/test_responder_selection.py::test_message_the_old_router_relayed_is_left_to_its_relay and
+# tests/test_turns_focused.py::test_original_the_old_router_already_relayed_gets_no_second_answer
+async def _relayed_by_the_old_router(journal: EventJournalStore, source_event_ids: Sequence[str]) -> bool:
+    router_turns = journal.turn_records(ROUTER_AGENT_NAME)
+    for event_id in source_event_ids:
+        turn = await router_turns.read(turn_rows.get_turn_record, event_id)
+        if turn is None or turn.response_event_id is None:
+            continue
+        # Until the answering agent posts the transcript, the router records its echo of a voice message as its answer.
+        echoes = [await router_turns.read(turn_rows.visible_echo, source) for source in turn.source_event_ids]
+        if turn.response_event_id not in {echo.event_id for echo in echoes if echo is not None}:
+            return True
+    return False

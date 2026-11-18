@@ -88,7 +88,7 @@ class IngressFacts:
     # LEGACY_COMPAT: router relay messages ("@agent could you help with this?") already in room history.
     # Legacy format: a router-sent message with the trusted-relay source kind and `com.mindroom.original_sender`, which
     # mentions the agent the router chose and replies to the person's message.
-    # Last legacy release: v2026.11.390, the newest release when relays stopped; the next, still unreleased, release
+    # Last legacy release: v2026.11.394, the newest release when relays stopped; the next, still unreleased, release
     # selects the responder in the process, and that agent answers the person's own message.
     # Handling: the mentioned agent still answers such a relay for its original sender, from the context the relay
     # names (`ConversationResolver.extract_trusted_router_relay_context`), exactly as before.

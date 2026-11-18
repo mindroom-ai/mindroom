@@ -530,7 +530,8 @@ async def _dispatch_plan(
             envelope=envelope,
         ),
         has_active_response_for_target=lambda _target: False,
-        source_event_ids=("$event",),
+        # Each writer's message is its own event, with its own saved responder.
+        source_event_ids=(f"$event-{sender}",),
     )
 
 

@@ -565,6 +565,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.reaction_dispatch",
     "mindroom.reply_scope",
+    "mindroom.responder_selection",
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.follow_ups",
@@ -4748,7 +4749,10 @@ depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.responder_selection"
-depends_on = []
+depends_on = [
+    "mindroom.constants",
+    "mindroom.event_journal",
+]
 
 [[modules]]
 path = "mindroom.room_modes"

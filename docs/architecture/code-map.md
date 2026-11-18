@@ -20,7 +20,7 @@ Matrix sync callback
        -> coalescing/ingress_lanes.py                            (per-(room, sender) receipt-order FIFO; STT readiness waits here)
        -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
   -> turns/dispatch.py (owns one turn from gate exit: prepare -> decide -> execute -> record)
-       -> turn_policy.py + command_turn_executor.py              (ignore / route / respond decision, command execution)
+       -> turn_policy.py + command_turn_executor.py              (ignore / respond decision, command execution)
        -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
        -> reply_turn/locked_turn.py                              (one settlement for agent, team, and approval turns)
             -> response_turn.py                                  (shared streaming turn driver; blocking replies collect it)
@@ -78,7 +78,7 @@ Matrix sync callback
 | `coalescing/ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
 | `coalescing/gate.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `coalescing/batch.py` | Coalesced dispatch batch construction |
-| `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `turn_policy.py` | Turn policy: decide ignore or respond for inbound turns, claiming an unmentioned turn's saved responder before answering it |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
 | `participation_hook.py` | The reply's participation check as a pre-request loop hook: the configured judgment backend on a projection with tool calls and files as placeholders, or a decision request on the reply's exact messages, ending the run when it stays silent |
 | `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, the bounded HTTP client, and LLM, System One, and OpenAI Decisions adapters |
@@ -269,7 +269,7 @@ Matrix sync callback
 | `config/personal_agents.py` | `personal_agents` templates, the roster store, and expansion of roster entries into ordinary agents before config validation |
 | `config/slack.py` | The top-level `slack:` section: the email domain and Matrix user ID template that map Slack workspace members to Matrix users; also validates the `slack` tool's `channels` and `room` across agents and lists the agents that answer Slack channels |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
-| `responder_selection.py` | The process-wide saved responder choice per source event, so every bot that could answer an unmentioned turn agrees on the one that does |
+| `responder_selection.py` | The process-wide saved responder per source event, which every bot reads or writes before it answers an unmentioned turn, so they agree on the one that does |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
 | `teams/members.py` | Resolving a team's exact members without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, job controls, call budget, and history settings with each member's roster entry and the build its first delegation makes |

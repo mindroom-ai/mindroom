@@ -727,8 +727,14 @@ class TurnPolicy:
             single_visible_self = (
                 len(available_responders_in_room) == 1 and available_responders_in_room[0] == agent_matrix_id
             )
-            answers = should_continue_active_thread or single_visible_self
-            return ResponseAction(kind="individual" if answers else "skip")
+            if not should_continue_active_thread and not single_visible_self:
+                return ResponseAction(kind="skip")
+            return await self._claimed_response_action(
+                dispatch,
+                available_responders_in_room,
+                source_event_ids,
+                selects=False,
+            )
         participation_action = self._adaptive_response_action(dispatch, available_responders_in_room)
         if participation_action is not None:
             return participation_action
@@ -776,17 +782,15 @@ class TurnPolicy:
             agents_in_thread=agents_in_thread,
             require_resolved_membership=True,
         )
-        if not agent_response_decision.should_respond and agent_is_responder_candidate:
-            if self._should_queue_follow_up_in_active_response_thread(
+        answers, selects = agent_response_decision.should_respond, False
+        if not answers and agent_is_responder_candidate:
+            answers = self._should_queue_follow_up_in_active_response_thread(
                 context=context,
                 target=dispatch.target,
                 source_envelope=dispatch.envelope,
                 has_active_response_for_target=has_active_response_for_target,
-            ):
-                return ResponseAction(kind="individual")
-            if agent_response_decision.skip_reason == "not_single_responder":
-                return await self._selected_response_action(dispatch, available_responders_in_room, source_event_ids)
-            self._log_multi_agent_thread_skip(context, agent_response_decision)
+            )
+            selects = not answers and self._may_have_a_responder_selected(dispatch, agent_response_decision)
         if rejection := self._unlisted_room_mention_rejection(
             context,
             room,
@@ -794,43 +798,75 @@ class TurnPolicy:
             available_responders_in_room,
         ):
             return rejection
-        return ResponseAction(kind="individual" if agent_response_decision.should_respond else "skip")
+        if context.am_i_mentioned or not (answers or selects):
+            return ResponseAction(kind="individual" if answers else "skip")
+        return await self._claimed_response_action(
+            dispatch,
+            available_responders_in_room,
+            source_event_ids,
+            selects=selects,
+        )
 
-    async def _selected_response_action(
-        self,
-        dispatch: PreparedDispatch,
-        candidates: list[MatrixID],
-        source_event_ids: tuple[str, ...],
-    ) -> ResponseAction:
-        """Answer a turn that names no responder among several candidates only when the saved selection names this bot.
-
-        Every candidate reaches this point for the same turn and asks the process's one selection service, so the
-        selector runs once and one candidate answers the person's own message.
-        """
+    def _may_have_a_responder_selected(self, dispatch: PreparedDispatch, decision: AgentResponseDecision) -> bool:
+        """Return whether this turn names no responder among several candidates and may have one selected."""
         config, runtime_paths = self.deps.runtime.config, self.deps.runtime_paths
-        context, room_id = dispatch.context, dispatch.target.room_id
-        skip = ResponseAction(kind="skip")
+        context = dispatch.context
+        if decision.skip_reason != "not_single_responder":
+            self._log_multi_agent_thread_skip(context, decision)
+            return False
         if context.is_thread and has_multiple_non_agent_users_in_thread(
             context.planning_thread_history,
             config,
             runtime_paths,
             current_sender_id=dispatch.requester_user_id,
         ):
-            return skip
+            return False
         # `router.access`, when set, stays an extra restriction on who may have a message routed.
-        if config.router.access is not None and not is_sender_allowed_for_agent_reply_in_room(
+        return config.router.access is None or is_sender_allowed_for_agent_reply_in_room(
             dispatch.requester_user_id,
             ROUTER_AGENT_NAME,
             config,
-            room_id,
+            dispatch.target.room_id,
             runtime_paths,
             self.deps.agent_reply_memberships,
             require_resolved_membership=True,
-        ):
-            return skip
+        )
+
+    async def _claimed_response_action(
+        self,
+        dispatch: PreparedDispatch,
+        candidates: list[MatrixID],
+        source_event_ids: tuple[str, ...],
+        *,
+        selects: bool,
+    ) -> ResponseAction:
+        """Answer an unmentioned turn only as a responder the process saved for it.
+
+        A bot that would answer such a turn by itself, and every candidate of a turn that names no responder
+        (``selects``), asks the process's one selection service first. The first to ask saves who answers: a candidate
+        still answering in the thread, else the asker that would answer by itself, else the selector's choice. So one
+        bot answers the person's own message, also on a replay and when another bot sees other candidates.
+        """
+        config, runtime_paths = self.deps.runtime.config, self.deps.runtime_paths
+        context, room_id = dispatch.context, dispatch.target.room_id
         registry = entity_identity_registry(config, runtime_paths)
+        orchestrator = self.deps.runtime.orchestrator
+
+        def answering_candidate() -> str | None:
+            if not context.is_thread or not dispatch.envelope.origin.may_answer_interactive_prompt:
+                return None
+            for candidate in sorted(candidates, key=lambda value: value.full_id):
+                name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
+                bot = orchestrator.agent_bots.get(name) if name is not None else None
+                if bot is not None and bot.has_active_response_for_target(dispatch.target):
+                    return name
+            return None
 
         async def choose() -> str:
+            if (answering := answering_candidate()) is not None:
+                return answering
+            if not selects:
+                return self.deps.agent_name
             self.deps.logger.info("Selecting a responder", event_id=dispatch.envelope.source_event_id)
             selection = await suggest_responder_for_message(
                 dispatch.envelope.body,
@@ -848,8 +884,8 @@ class TurnPolicy:
             assert fallback is not None
             return registry.current_entity_name_for_user_id(fallback.full_id, include_router=False) or NO_RESPONDER
 
-        selected = await self.deps.runtime.orchestrator.responder_selections.select(room_id, source_event_ids, choose)
-        return ResponseAction(kind="individual") if selected == self.deps.agent_name else skip
+        owners = await orchestrator.responder_selections.select(room_id, source_event_ids, choose)
+        return ResponseAction(kind="individual" if self.deps.agent_name in owners else "skip")
 
     def _unlisted_room_mention_rejection(
         self,

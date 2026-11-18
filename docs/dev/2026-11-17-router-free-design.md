@@ -83,7 +83,8 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
 14. **Selection agreement (question C): one process-wide service, one row per source event.**
     All bots run in one process, so a candidate that reaches "several candidates, nobody mentioned, the thread names no responder" asks one orchestrator-owned service under a per-room lock.
     The service reads the saved rows of the turn's source events; when the first source that has a row names an entity, that is the answer and the turn's other sources inherit it; otherwise it runs the selector once and saves the result for every source of the turn.
-    A bot answers only when the row of its turn's first source names it.
+    A bot answers a turn when the row of any of its sources names it, so a bot that batched a burst differently never ignores a message saved for it.
+    A bot that would answer an unmentioned turn by itself (the only candidate, the thread's one agent, a follow-up to its running reply) saves itself through the same service first, and a candidate still answering in the thread is saved before the selector runs, so a replay or a bot that sees other candidates reads one owner.
     Bots coalesce on their own timers, so two bots can group a burst differently; rows per source keep a later, larger batch on the choice an earlier, smaller batch made.
     Accepted limitation: when two bots split a burst at different points and both splits reach the service before any larger batch does, two rows can name different agents, and a message at the split point can get an answer from each.
     This errs toward a second answer, never toward silence; the router could likewise send the two halves of a burst it split to different agents.
