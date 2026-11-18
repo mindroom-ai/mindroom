@@ -1172,7 +1172,10 @@ async def test_a_fresh_attempt_after_an_approved_run_sends_its_resume_s_system_e
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The attempt a model switch starts after the approved run holds the resume's system enrichment in its prompt."""
+    """The attempt a model switch starts after the approved run carries the resume's system enrichment.
+
+    Volatile enrichment follows the prompt, so it never changes the system prompt the conversation's cache starts with.
+    """
     paths, config = _usage_config(tmp_path)
     identity = _identity("enrich-session")
     model = _CheckedModel([_add("approved", 10, 1), _continue_call("continue"), answer("Done.")])
@@ -1185,7 +1188,8 @@ async def test_a_fresh_attempt_after_an_approved_run_sends_its_resume_s_system_e
     assert isinstance(result, CompletedApprovalRun)
     assert result.response_text.endswith("Done.")
     *_, fresh = model.requests
-    assert instruction.text in system_text(fresh.messages)
+    assert instruction.text not in system_text(fresh.messages)
+    assert any(instruction.text in str(message.content) for message in fresh.messages)
 
 
 @pytest.mark.asyncio

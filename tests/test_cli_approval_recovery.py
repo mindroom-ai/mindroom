@@ -348,7 +348,9 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         assert "Recovered with knowledge." in result.response_text
         assert len(model.requests) == 1
         assert carries_approval_receipt(model.requests[0])
-        assert instruction.text in system_text(model.requests[0].messages)
+        # Volatile enrichment a minimal turn requires follows the prompt instead of changing the system prompt.
+        assert instruction.text not in system_text(model.requests[0].messages)
+        assert any(instruction.text in str(message.content) for message in model.requests[0].messages)
         assert len(builds) == 2
         # The fresh minimal turn is built with the knowledge the recovery resolved.
         assert [source.description for source in builds[-1].surface.knowledge_sources] == ["Saved notes"]

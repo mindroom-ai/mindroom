@@ -1059,7 +1059,10 @@ async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its
     assert not await turn.pending()
     _first, *after_pause = turn.models["default"].requests
     assert len(after_pause) == len(resumed)
-    assert all(_QUIET_DELIVERY in system_text(request.messages) for request in after_pause)
+    # The guidance differs from turn to turn, so it follows the prompt instead of changing the system prompt.
+    for request in after_pause:
+        assert _QUIET_DELIVERY not in system_text(request.messages)
+        assert any(_QUIET_DELIVERY in str(message.content) for message in request.messages)
 
 
 @pytest.mark.usefixtures("echo_tool")
