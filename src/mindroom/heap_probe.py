@@ -7,10 +7,12 @@ runtime is ready, and then every ``MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS``,
 the primary unfreezes, collects once, and freezes the survivors again. Routine
 full collections then only walk objects created since the last refreeze, and
 bots a config reload replaced are collected at the next refreeze instead of
-staying frozen. After the first refreeze the primary also raises CPython's
-full-collection threshold, because each routine full collection walks the whole
-unfrozen heap to find little garbage; how much rarer they get depends on the
-workload.
+staying frozen. A refreeze touches every object, so it first reads swapped-out
+memory back in on a worker thread; otherwise the whole process would wait on
+swap one page fault at a time while the collector holds the GIL. After the
+first refreeze the primary also raises CPython's full-collection threshold,
+because each routine full collection walks the whole unfrozen heap to find
+little garbage; how much rarer they get depends on the workload.
 
 A long-running primary can grow for hours without saying what it holds, and
 external memory profilers cannot attach inside hardened containers. When
@@ -71,6 +73,9 @@ _MIN_HEAP_TASK_INTERVAL_SECONDS = 60.0
 # full pass ran every few seconds, walked every object since the refreeze and found little garbage.
 _FROZEN_HEAP_FULL_COLLECTION_THRESHOLD = 100
 _TOP_TYPE_COUNT = 25
+_SMAPS_PATH = Path("/proc/self/smaps")
+# madvise(2) advice that faults a range in as reads would, including pages in swap (Linux 5.14 and later).
+_MADV_POPULATE_READ = 22
 
 
 def _interval_seconds(runtime_paths: RuntimePaths, env_name: str, *, default: float | None, task: str) -> float | None:
@@ -162,6 +167,38 @@ def _malloc_stats() -> dict[str, int] | None:
     }
 
 
+@functools.cache
+def _madvise() -> Callable[[int, int, int], int]:
+    """Return libc's ``madvise``; ctypes releases the GIL for each call."""
+    function = ctypes.CDLL(None, use_errno=True).madvise
+    function.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    function.restype = ctypes.c_int
+    return function
+
+
+def _read_swapped_memory_back() -> None:
+    """Fault this process's swapped-out private memory back in; run it on a worker thread.
+
+    A full collection reads every object's header, so on a partly swapped
+    heap it takes one major page fault per swapped page while holding the
+    GIL, which stopped a production process for over a minute. Faulting
+    those mappings in from a thread first lets the loop keep running. Kernels
+    without ``MADV_POPULATE_READ`` reject the advice and nothing changes.
+    """
+    try:
+        smaps = _SMAPS_PATH.read_text()
+    except OSError:  # no procfs, such as on macOS
+        return
+    mapping: tuple[int, int] | None = None
+    for line in smaps.splitlines():
+        field, _, rest = line.partition(" ")
+        if not field.endswith(":"):  # a mapping header: "start-end perms offset device inode [path]"
+            start, end = (int(address, 16) for address in field.split("-"))
+            mapping = (start, end - start) if rest.startswith("r") and rest[3] == "p" else None
+        elif field == "Swap:" and mapping is not None and int(rest.split()[0]) > 0:
+            _madvise()(*mapping, _MADV_POPULATE_READ)
+
+
 def freeze_startup_heap() -> None:
     """Collect garbage, then exclude every surviving object from later collections.
 
@@ -240,10 +277,12 @@ async def _run_heap_refreeze(
 ) -> None:
     """Refreeze once the runtime is ready, then after each interval until cancelled."""
     await ready()
+    await asyncio.to_thread(_read_swapped_memory_back)
     _refreeze_runtime_heap()
     _raise_full_collection_threshold()
     while True:
         await sleep(interval_seconds)
+        await asyncio.to_thread(_read_swapped_memory_back)
         _refreeze_runtime_heap()
 
 

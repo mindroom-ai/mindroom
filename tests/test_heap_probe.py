@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import gc
+import mmap
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,10 +18,13 @@ from mindroom.constants import RuntimePaths
 from mindroom.heap_probe import (
     _HEAP_PROBE_INTERVAL_ENV,
     _HEAP_REFREEZE_INTERVAL_ENV,
+    _MADV_POPULATE_READ,
     _heap_probe_interval_seconds,
     _heap_refreeze_interval_seconds,
     _log_heap_type_probe,
+    _madvise,
     _raise_full_collection_threshold,
+    _read_swapped_memory_back,
     _refreeze_runtime_heap,
     _run_heap_refreeze,
     _run_heap_type_probe,
@@ -155,6 +160,7 @@ async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_in
     steps: list[object] = []
     ready = asyncio.Event()
     parked = asyncio.Event()
+    monkeypatch.setattr(heap_probe, "_read_swapped_memory_back", lambda: steps.append("page_in"))
     monkeypatch.setattr(
         heap_probe,
         "gc",
@@ -184,7 +190,80 @@ async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_in
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert steps == ["unfreeze", "freeze", (2000, 10, 100), 600.0, "unfreeze", "freeze", 600.0]
+    assert steps == [
+        "page_in",
+        "unfreeze",
+        "freeze",
+        (2000, 10, 100),
+        600.0,
+        "page_in",
+        "unfreeze",
+        "freeze",
+        600.0,
+    ]
+
+
+_SMAPS = """\
+55d0c8a5b000-55d0c8a7d000 rw-p 00000000 00:00 0                          [heap]
+Size:                136 kB
+Swap:                120 kB
+SwapPss:             120 kB
+VmFlags: rd wr mr mw me ac
+7f0000000000-7f0000100000 rw-p 00000000 00:00 0
+Swap:                  0 kB
+7f0000100000-7f0000200000 rw-s 00000000 00:01 42                         /dev/shm/shared
+Swap:                 64 kB
+7f0000200000-7f0000201000 ---p 00000000 00:00 0
+Swap:                  8 kB
+7f0000300000-7f0000304000 r--p 00010000 fd:01 99                         /usr/lib/libexample.so
+Swap:                  4 kB
+"""
+
+
+def test_page_in_advises_each_swapped_private_mapping_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only readable private mappings with pages in swap are faulted back in; shared memory and guards are not."""
+    smaps = tmp_path / "smaps"
+    smaps.write_text(_SMAPS)
+    calls: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(heap_probe, "_SMAPS_PATH", smaps)
+    monkeypatch.setattr(heap_probe, "_madvise", lambda: lambda *args: calls.append(args) or 0)
+
+    _read_swapped_memory_back()
+
+    assert calls == [
+        (0x55D0C8A5B000, 0x22000, _MADV_POPULATE_READ),
+        (0x7F0000300000, 0x4000, _MADV_POPULATE_READ),
+    ]
+
+
+def test_page_in_is_a_no_op_without_procfs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Platforms without /proc keep refreezing; they only skip the page-in."""
+    monkeypatch.setattr(heap_probe, "_SMAPS_PATH", tmp_path / "missing")
+    monkeypatch.setattr(heap_probe, "_madvise", lambda: pytest.fail("no mapping to advise"))
+
+    _read_swapped_memory_back()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="madvise(MADV_POPULATE_READ) is Linux-only")
+def test_populate_read_faults_an_untouched_page_in() -> None:
+    """The advice value must make the kernel fault pages in, as it does for pages in swap."""
+    page_size = mmap.PAGESIZE
+    region = mmap.mmap(-1, page_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    address = ctypes.addressof(ctypes.c_char.from_buffer(region))
+    resident = (ctypes.c_ubyte * 1)()
+    mincore = ctypes.CDLL(None, use_errno=True).mincore
+    mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+    try:
+        assert mincore(address, page_size, resident) == 0
+        assert resident[0] & 1 == 0
+        assert _madvise()(address, page_size, _MADV_POPULATE_READ) == 0
+        assert mincore(address, page_size, resident) == 0
+        assert resident[0] & 1 == 1
+    finally:
+        region.close()
 
 
 @pytest.mark.skipif((3, 14) <= sys.version_info < (3, 14, 5), reason="3.14.0-3.14.4's incremental GC ignores it")
