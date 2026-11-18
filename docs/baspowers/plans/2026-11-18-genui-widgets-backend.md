@@ -19,7 +19,7 @@
 - Value shape exactly `{"version": 1, "widgets": [{"id", "json"}]}`; no `pending`; no key when there is no entry.
 - Marker: fenced block with info string `mindroom-ui-<id>`, a blank line on each side. `id` = first 10 hex of SHA-256 of the canonical JSON (sorted keys, `(",", ":")` separators, `ensure_ascii=False`, whole numbers below 2^53 without a fraction, absent optionals left out); an id a literal marker block in the text already uses is skipped with the `#1`, `#2` suffix rule of spec 5.1.
 - Only a fence that starts in column 0 with first info word `ui` can be a widget.
-- Limits: `MAX_BLOCK_BYTES = 16_384`, `MAX_SERIES = 8`, `MAX_POINTS = 200`, `MAX_WIDGETS = 8`, `MAX_UI_BYTES = 16_384` (UTF-8 bytes over all `json` strings), `FALLBACK_MAX_ROWS = 40`.
+- Limits, each private to the module that enforces it (privata rejects a public name nothing else imports): `_MAX_BLOCK_BYTES = 16_384`, `_MAX_SERIES = 8`, `_MAX_POINTS = 200` in `models.py`; `_MAX_WIDGETS = 8`, `_MAX_UI_BYTES = 16_384` (UTF-8 bytes over all `json` strings), `_FALLBACK_MAX_ROWS = 40` in `render.py`.
 - The event content must hold no float anywhere: widgets travel as JSON text.
 - A reply text with no column-0 `ui` fence, and any reply of an agent without `ui_widgets`, is returned and delivered byte-identical to today.
 - No change to what the model sees unless `ui_widgets` is on (prompt cache stays byte-identical for every other agent).
@@ -48,7 +48,7 @@
 - Create: `tests/ui_widgets/__init__.py`, `tests/ui_widgets/test_models.py`, `tests/ui_widgets/fixtures/ui-widgets-v1.json`
 
 **Interfaces:**
-- Produces: the limit constants; models `Series`, `Chart` (strict, `extra="forbid"`); `parse_widget(json_text: str) -> tuple[Chart | None, list[str]]`, which never raises and never puts input text in an error.
+- Produces: models `Series`, `Chart` (strict, `extra="forbid"`); `parse_widget(json_text: str) -> tuple[Chart | None, list[str]]`, which never raises and never puts input text in an error.
 
 - [ ] **Step 1: Write the fixture's `widgets` section.** File shape: `{"version": 1, "widgets": [...], "wire_invalid": [...], "renders": [], "responses": []}`; each widget case `{"name", "stage": 1, "json", "valid"}` and, when valid, `"canonical"` and `"id"` (filled in Task 2). Base: `CHART = {"type":"chart","kind":"bar","title":"Orders","labels":["Q1","Q2"],"series":[{"name":"Orders","data":[120,180.5]}]}`.
 
@@ -74,7 +74,7 @@ def test_parse_widget_never_raises_and_never_echoes_input() -> None:
 ```
 
 - [ ] **Step 3: Run it.** Expected: FAIL, `ModuleNotFoundError: mindroom.ui_widgets`.
-- [ ] **Step 4: Implement `models.py`** by porting the eval's chart models, the pre-pass that stringifies numeric labels and widens ints where floats are expected (catching `OverflowError`), the constant rejection, and `parse` as `parse_widget`. Measure the byte limit so that a lone surrogate cannot raise. Build error strings from locations and error types only. Leave the form models, `scan`, `normalize` and `validate` out.
+- [ ] **Step 4: Implement `models.py`** by porting the eval's chart models, the pre-pass that stringifies numeric labels, the constant rejection, and `parse` as `parse_widget`. The eval's int-to-float pre-pass is not ported: strict pydantic already takes an int for a float and reports an integer too large for a double as `float_type`. Measure the byte limit so that a lone surrogate cannot raise. Build error strings from locations and error types only: the cross-field rules raise `PydanticCustomError` whose type names the rule, and the location of an unknown key leaves the key out. Leave the form models, `scan`, `normalize` and `validate` out.
 - [ ] **Step 5: Run it.** Expected: PASS. Also run `just check-module-privacy`.
 - [ ] **Step 6: Commit** (message `feat(ui-widgets): strict chart schema`).
 
