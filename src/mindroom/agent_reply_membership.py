@@ -667,12 +667,17 @@ async def _build_authoritative_snapshot(
 
     state = matrix_state_for_runtime(runtime_paths)
     rooms: list[_GrantRoomMembership] = []
+    # Config keys that name one room share its row: one observer pick and one members read per room ID.
+    rows_by_room_id: dict[str, _GrantRoomMembership] = {}
     for room_key in room_keys:
         managed_room = state.rooms.get(room_key)
         if managed_room is None:
             rooms.append(_unready_room(room_key, None, reason="managed_room_unresolved"))
-        else:
-            rooms.append(await room_membership(room_key, managed_room.room_id))
+            continue
+        room_id = managed_room.room_id
+        if room_id not in rows_by_room_id:
+            rows_by_room_id[room_id] = await room_membership(room_key, room_id)
+        rooms.append(replace(rows_by_room_id[room_id], room_key=room_key))
     if requires_current_rooms:
         current_room_ids = sorted(joined_user_ids_by_room_id.keys() - {room.room_id for room in rooms})
         rooms.extend([await room_membership(None, room_id) for room_id in current_room_ids])

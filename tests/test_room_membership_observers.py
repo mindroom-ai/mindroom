@@ -68,11 +68,13 @@ class _Account:
         return joined_members_response(room_id, *self.answers[room_id])
 
 
-def _config(tmp_path: Path, *, grant_room: bool = False) -> tuple[Config, RuntimePaths]:
+def _config(tmp_path: Path, *, grant_room: bool = False, second_key: bool = False) -> tuple[Config, RuntimePaths]:
     """Build one agent whose reply access is the members of the room it is asked in.
 
     With ``grant_room`` its access is the members of the managed room ``project`` instead, which is ``_ROOM``.
+    With ``second_key`` the managed room ``mirror`` grants too, and is ``_ROOM`` as well.
     """
+    grant_keys = ["project", "mirror"] if second_key else ["project"] if grant_room else []
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
@@ -85,17 +87,17 @@ def _config(tmp_path: Path, *, grant_room: bool = False) -> tuple[Config, Runtim
                 "assistant": {
                     "display_name": "Assistant",
                     "role": "Test assistant",
-                    "rooms": ["project"] if grant_room else [],
-                    "access": {"current_room_members": not grant_room, "members_of_rooms": []}
-                    | ({"members_of_rooms": ["project"]} if grant_room else {}),
+                    "rooms": grant_keys,
+                    "access": {"current_room_members": not grant_keys, "members_of_rooms": grant_keys},
                 },
             },
         },
         runtime_paths,
     )
-    if grant_room:
+    if grant_keys:
         state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_room("project", _ROOM, "#project:example.com", "Project")
+        for key in grant_keys:
+            state.add_room(key, _ROOM, f"#{key}:example.com", key.title())
         save_matrix_state(state, runtime_paths)
     return config, runtime_paths
 
@@ -478,6 +480,33 @@ async def test_grant_room_no_account_joined_stays_unready(tmp_path: Path) -> Non
         for log in logs
         if log["event"] == "agent_reply_grant_room_unready"
     ] == [("warning", "project", "no_observer_joined")]
+
+
+@pytest.mark.asyncio
+async def test_two_config_keys_for_one_room_share_one_observer_and_one_read(tmp_path: Path) -> None:
+    """Two grant keys that name the same room get one observer pick and one members read, and both grant."""
+    config, runtime_paths = _config(tmp_path, second_key=True)
+    a = _Account(_A, {_ROOM: (_A, _B, _ALICE)})
+    b = _Account(_B, {_ROOM: (_A, _B, _ALICE)})
+    picks: list[str] = []
+
+    def pick_observer(room_id: str, user_ids: Sequence[str]) -> str | None:
+        """Rank the accounts differently at each call, as cached power that changes between two picks would."""
+        picks.append(room_id)
+        return user_ids[(len(picks) - 1) % len(user_ids)]
+
+    index = AgentReplyMembershipIndex()
+    await index.refresh(config, runtime_paths, cast("list[nio.AsyncClient]", [a, b]), pick_observer=pick_observer)
+
+    assert picks == [_ROOM]
+    assert (a.reads, b.reads) == ([_ROOM], [])
+    assert {(room.room_key, room.observer_user_id) for room in index.snapshot.rooms} == {
+        ("project", _A),
+        ("mirror", _A),
+    }
+    assert index.is_allowed(_ALICE, ["project"], config, runtime_paths)
+    assert index.is_allowed(_ALICE, ["mirror"], config, runtime_paths)
+    assert not index.needs_refresh(config)
 
 
 @pytest.mark.asyncio
