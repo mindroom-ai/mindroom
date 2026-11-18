@@ -1169,15 +1169,16 @@ class StreamingResponse:
     def _delivery_extra_content(self, *, is_final: bool) -> dict[str, Any]:
         """Return the extra content of one durable write: the caller's, the live watermark, and the reasoning.
 
-        Reasoning rides the terminal write, and every write made while live frames do not carry the reply's progress
-        (no relay, or frames stopped), so the reply keeps showing its reasoning. A still-open segment counts its time
-        so far.
+        Reasoning rides the terminal write, and every edit made while live frames do not carry the reply's progress
+        (no relay, frames switched off, or frames stopped), so the reply keeps showing its reasoning. The first send
+        leaves it to frames or the next edit. A still-open segment counts its time so far.
         """
         extra_content = dict(deepcopy(self.extra_content)) if self.extra_content is not None else {}
         checkpoint = self.live.checkpoint() if self.live is not None else None
         if checkpoint is not None:
             extra_content[LIVE_CHECKPOINT_KEY] = checkpoint
-        if (is_final or not self.live_active) and self.reasoning_text.strip():
+        durable_reasoning = is_final or (self.event_id is not None and not self.live_active)
+        if durable_reasoning and self.reasoning_text.strip():
             reasoning_seconds = self._reasoning_seconds
             if self._reasoning_segment_started_at is not None:
                 reasoning_seconds += time.monotonic() - self._reasoning_segment_started_at
@@ -1650,8 +1651,10 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
     async with closing_async_stream(response_stream):
         async for chunk in response_stream:
             if isinstance(chunk, ReasoningDelta):
-                # Reasoning is shown live and kept by the terminal update; no progress edit carries it.
+                # Live frames show reasoning; without them, progress edits carry it at their ordinary cadence.
                 streaming.add_reasoning(chunk.text, started_at=chunk.started_at)
+                if streaming.event_id is not None and streaming._shows_stream and not streaming.live_active:
+                    _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
             if isinstance(chunk, ToolProgress):
                 # Only live frames show a running call's output; no write carries it.
@@ -2092,8 +2095,13 @@ async def _run_live_frames(
             _queue_delivery_request(delivery_queue)
 
     def catch_up_after_frames_stopped() -> None:
-        # Frames stopped, so the durable reply catches up at once and resumes the ordinary cadence.
-        _queue_delivery_request(delivery_queue, force_refresh=True)
+        # Frames stopped, so the durable reply catches up at once and resumes the ordinary cadence; reasoning alone is
+        # worth the edit.
+        _queue_delivery_request(
+            delivery_queue,
+            force_refresh=True,
+            allow_empty_progress=bool(streaming.reasoning_text.strip()),
+        )
 
     await streaming.live.run(
         current=streaming.live_state,

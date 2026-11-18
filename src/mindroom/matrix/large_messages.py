@@ -303,14 +303,17 @@ def should_send_oversized_nonterminal_streaming_edit(
     if not isinstance(source_content, dict) or not _is_nonterminal_stream_content(source_content):
         return True
 
-    # Reasoning is cut to fit an edit that is ordinary without it, so only the rest can make one oversized.
-    without_reasoning = {key: value for key, value in edit_content.items() if key != REASONING_CONTENT_KEY}
-    without_reasoning["m.new_content"] = {
-        key: value for key, value in source_content.items() if key != REASONING_CONTENT_KEY
-    }
-    if calculate_event_size(without_reasoning) <= EDIT_MESSAGE_SIZE_LIMIT:
-        return True
     event_size = calculate_event_size(edit_content)
+    if event_size <= EDIT_MESSAGE_SIZE_LIMIT:
+        return True
+    if REASONING_CONTENT_KEY in source_content:
+        # Reasoning is cut to fit an edit that is ordinary without it, so only the rest can make one oversized.
+        without_reasoning = {key: value for key, value in edit_content.items() if key != REASONING_CONTENT_KEY}
+        without_reasoning["m.new_content"] = {
+            key: value for key, value in source_content.items() if key != REASONING_CONTENT_KEY
+        }
+        if calculate_event_size(without_reasoning) <= EDIT_MESSAGE_SIZE_LIMIT:
+            return True
 
     key = (room_id, original_event_id)
     now = monotonic()
