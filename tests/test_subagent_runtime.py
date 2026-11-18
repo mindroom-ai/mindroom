@@ -266,7 +266,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Shutdown owns detached tasks and removes the managed runtime lookup."""
+    """Shutdown owns detached tasks and removes the managed runtime lookup; a subagent's job stays to be continued."""
     monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
     coordinator = team_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.sync()
@@ -293,6 +293,10 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
     restored = team_coordinator(tmp_path, managed_team_config(tmp_path))
     await restored.initialize()
     await restored.runtime.recover()
+    job = await lookup(restored.runtime, fixture.job_id, owner=fixture.owner, depth=0)
+    assert job.status == "running"
+    assert [kept.job_id for kept in restored.runtime.awaiting_continuation()] == [fixture.job_id]
+    await restored.runtime.continue_stopped(fixture.job_id, None)
     job = await lookup(restored.runtime, fixture.job_id, owner=fixture.owner, depth=0)
     assert job.status == "interrupted"
     await restored.stop()
@@ -722,7 +726,7 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
     tmp_path: Path,
     restart: bool,
 ) -> None:
-    """A crash-interrupted child reads like any restart interruption; a cancelled recovered child stays cancelled."""
+    """A crash-interrupted child interrupts its job like any restart; a cancelled recovered child stays cancelled."""
     coordinator = ToolJobRuntimeCoordinator(
         test_runtime_paths(tmp_path),
         lambda: managed_team_config(tmp_path),
@@ -751,4 +755,4 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
         if restart
         else ("Background execution was cancelled; tools were not replayed.", "cancelled"),
     ]
-    assert outcome.status == ("failed" if restart else "cancelled")
+    assert outcome.status == ("interrupted" if restart else "cancelled")

@@ -66,6 +66,8 @@ type EncodedResultPayload = dict[str, Any]
 # An accepted job's execution, and the adapter cleanup that settles it after cancellation or interruption.
 type _Operation = Callable[[], Awaitable[BackgroundOutcome]]
 type _Cleanup = Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]]
+# Whether a job a restart stops while it runs is kept for the runtime's creator to continue, instead of ending.
+type _Continues = Callable[[BackgroundJob], bool]
 # A job's current access: proven allowed, proven denied, or still resolving, such as while room membership loads.
 type JobGrant = Literal["allowed", "denied", "pending"]
 
@@ -136,6 +138,8 @@ class BackgroundJob:
     consumed: bool = False
     # Whether the call that started it saved the outcome as its own result, so it never became a job to list.
     returned_inline: bool = False
+    # Whether a Stop reached the reply that started it while it ran, so no restart continues it.
+    reply_stopped: bool = False
     # The latest progress its running tool reported, as of this snapshot; live state that is never saved.
     progress: str | None = None
 
@@ -256,6 +260,9 @@ class _Entry:
     # its calls wait for at once (`human_decision_wait`); the job is `awaiting_approval` while either is set.
     approval_cards_open: bool = False
     human_waits: int = 0
+    # How the restart that stopped the job would have ended it, set once this process kept the job running instead;
+    # without a task the job waits to be continued, or to end this way.
+    interruption: BackgroundOutcome | None = None
 
     def __post_init__(self) -> None:
         """Give the job's control its ID, which a call running in the job reads (`current_job_id`)."""
@@ -362,6 +369,7 @@ class ToolJobRuntime:
         grant: Callable[[BackgroundJob], JobGrant],
         authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
         cancel: _Cleanup,
+        continues: _Continues = lambda _job: False,
     ) -> None:
         # Saves land only while this runtime's generation owns the jobs, which its creator takes before recovery.
         self._store = store
@@ -369,6 +377,7 @@ class ToolJobRuntime:
         # Rechecks a retained function's current authority immediately before application entry; raises if revoked.
         self.authorize_execution = authorize_execution
         self._cancel = cancel
+        self._continues = continues
         self._entries: dict[str, _Entry] = {}
         # Conversation lookups read this instead of scanning every entry; `_add_entry` and `_remove_entry` keep it.
         # Jobs are keyed by their recipient, room, thread, and requester.
@@ -517,9 +526,10 @@ class ToolJobRuntime:
         return await asyncio.to_thread(json.loads, payload_json)
 
     async def recover(self) -> None:
-        """Restore the outcomes of the jobs this runtime took over, never replaying execution.
+        """Restore the jobs this runtime took over, never replaying execution.
 
-        A runtime that a newer one replaced refuses, rather than adopting that runtime's jobs.
+        An unfinished job ends as the restart left it, except one kept for `continue_stopped` (`_keeps`). A runtime
+        that a newer one replaced refuses, rather than adopting that runtime's jobs.
         """
         async with self._lock:
             self._ensure_open()
@@ -529,13 +539,76 @@ class ToolJobRuntime:
                     continue
                 entry = _Entry(await asyncio.to_thread(_parse_saved_job, saved))
                 if entry.job.status not in TERMINAL_STATUSES:
-                    # Only work the restart cut short is interrupted by it; a cancellation saved before it is not.
-                    cancelled = entry.job.status == "cancel_requested"
-                    entry.control.cancel(shutdown=not cancelled)
-                    outcome = await self._cleanup(entry)
-                    default = _stopped_outcome(cancelled=cancelled, cause="restart")
-                    await self._publish_outcome(entry, self._settled(entry, outcome, default))
+                    await self._settle_stopped(entry)
                 self._add_entry(entry)
+
+    def _may_continue(self, job: BackgroundJob) -> bool:
+        """Whether a restart may leave ``job`` running: only one that worked, of a kind the runtime's creator continues.
+
+        A job with a cancel request or awaiting a person's decision ends, as does one whose reply was stopped.
+        """
+        return job.status == "running" and not job.reply_stopped and self._continues(job)
+
+    def _keeps(self, entry: _Entry, settled: BackgroundOutcome) -> bool:
+        """Whether a job a restart stopped stays running, to be continued, instead of ending as ``settled``.
+
+        Only an interruption is undecided: an outcome the job's own work or its cleanup reached stands.
+        """
+        return settled.status == "interrupted" and self._may_continue(entry.job)
+
+    async def _settle_stopped(self, entry: _Entry) -> None:
+        """Clean up what a restart stopped and end the job, or keep it for `continue_stopped`; the caller holds the lock.
+
+        Only work the restart cut short is interrupted by it; a cancellation saved before it is not.
+        """
+        cancelled = entry.job.status == "cancel_requested"
+        entry.control.cancel(shutdown=not cancelled)
+        outcome = await self._cleanup(entry)
+        settled = self._settled(entry, outcome, _stopped_outcome(cancelled=cancelled, cause="restart"))
+        if self._keeps(entry, settled):
+            # Its next cause of stopping, a cancel or another restart, is told apart from this one.
+            entry.control, entry.interruption = JobControl(job_id=entry.job.job_id), settled
+        else:
+            await self._publish_outcome(entry, settled)
+
+    @staticmethod
+    def _awaits_continuation(entry: _Entry) -> bool:
+        return entry.interruption is not None and entry.task is None and entry.job.status == "running"
+
+    def awaiting_continuation(self) -> tuple[BackgroundJob, ...]:
+        """Return the jobs a restart stopped that wait for `continue_stopped`, which continues or settles each."""
+        return tuple(entry.job for entry in self._entries.values() if self._awaits_continuation(entry))
+
+    def stopped_by_restart(self, key: ConversationKey) -> tuple[BackgroundJob, ...]:
+        """Return one conversation's unfinished jobs that a restart stopped: they continue on their own, or wait to."""
+        entries = self._by_conversation.get((key.recipient, key.room_id, key.thread_id, key.requester_id), {})
+        return tuple(
+            entry.job
+            for entry in entries.values()
+            if entry.interruption is not None and entry.job.status not in TERMINAL_STATUSES
+        )
+
+    async def continue_stopped(self, job_id: str, spec: JobSpec | None) -> None:
+        """Run a job a restart stopped on as ``spec``, under its own ID, or end it interrupted when ``spec`` is None.
+
+        The job is saved with ``spec``'s adapter before its operation starts, so a later restart finds what it ran.
+        A job that was continued, cancelled, or settled since it was listed is left alone.
+        """
+        async with self._lock:
+            self._ensure_open(accepting=True)
+            entry = self._entries.get(job_id)
+            if entry is None or entry.interruption is None or not self._awaits_continuation(entry):
+                return
+            if spec is None:
+                await self._publish_outcome(entry, entry.interruption)
+            else:
+                await run_coroutine_until_complete(self._relaunch(entry, spec))
+
+    async def _relaunch(self, entry: _Entry, spec: JobSpec) -> None:
+        """Save a stopped job with the adapter it continues on, then launch it; callers finish this first."""
+        await self._publish(entry, _updated(entry.job, adapter=spec.adapter))
+        entry.cancel = spec.cancel
+        entry.task = asyncio.create_task(self._run(entry, spec.operation), name=f"tool-job:{entry.job.job_id}")
 
     async def start(
         self,
@@ -879,9 +952,14 @@ class ToolJobRuntime:
         for entry in stopped:
             entry.control.reply_stopped = True
         async with self._lock:
+            if self._closed or self._shutdown_task is not None:
+                return
             for entry in stopped:
-                if entry.job.status == "awaiting_approval" and not self._closed and self._shutdown_task is None:
+                if entry.job.status == "awaiting_approval":
                     await self._request_cancel(entry)
+                elif self._may_continue(entry.job):
+                    # Saved, so a restart that stops the job later does not continue it against the Stop.
+                    await self._publish(entry, _updated(entry.job, reply_stopped=True))
 
     async def _request_cancel(self, entry: _Entry) -> asyncio.Task[BackgroundJob]:
         """Durably request cancellation and return its one drain; the caller holds the runtime lock."""
@@ -912,13 +990,18 @@ class ToolJobRuntime:
             # A failed drain leaves the job for the next canceller, recovery, or shutdown to settle.
             entry.drain = None
 
-    async def _settle(self, entry: _Entry, default: BackgroundOutcome) -> None:
-        """Clean up stopped execution and publish its terminal outcome, or retry saving one that already settled."""
+    async def _settle(self, entry: _Entry, default: BackgroundOutcome, *, keep: bool = False) -> None:
+        """Clean up stopped execution and publish its terminal outcome, or retry saving one that already settled.
+
+        With ``keep``, a job the shutdown stopped that the next start may continue (`_keeps`) stays as it is saved.
+        """
         settling = entry.job.status not in TERMINAL_STATUSES
         outcome = await self._cleanup(entry) if settling else None
         async with self._lock:
             if settling:
-                await self._publish_outcome(entry, self._settled(entry, outcome, default))
+                settled = self._settled(entry, outcome, default)
+                if not (keep and self._keeps(entry, settled)):
+                    await self._publish_outcome(entry, settled)
             elif not entry.saved:
                 await self._publish(entry, entry.job)
 
@@ -1059,7 +1142,9 @@ class ToolJobRuntime:
             # A job cancelled before the shutdown ends cancelled, as its cleanup was told.
             stopped = entry.control.cancelled and not entry.control.shutdown
             try:
-                await self._settle(entry, _stopped_outcome(cancelled=stopped, cause="shutdown"))
+                # Work the shutdown itself cut short may stay running in the saved job, as after a crash.
+                keep = entry.control.shutdown
+                await self._settle(entry, _stopped_outcome(cancelled=stopped, cause="shutdown"), keep=keep)
             except Exception as error:
                 # A blocked native child stays unsettled for the next recovery; other jobs still settle.
                 failures.append(error)

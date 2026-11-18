@@ -997,7 +997,7 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(
     monkeypatch: pytest.MonkeyPatch,
     shutdown: bool,
 ) -> None:
-    """Only a cancellation request cancels a running child; shutdown records the restart interruption."""
+    """Only a cancellation request cancels a running child; shutdown records the restart, which interrupts its job."""
     runtime = await tool_job_runtime(tmp_path)
     child = _BlockingChild()
 
@@ -1011,7 +1011,7 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(
     await _drive_background_child(tmp_path, monkeypatch, runtime, child, while_waiting=stop)
     (job,) = (await saved_jobs(tmp_path)).values()
     assert (job.status, job.result) == (
-        ("failed", "Subagent turn was interrupted by a restart. Send a follow-up to continue its history.")
+        ("interrupted", "Subagent turn was interrupted by a restart. Send a follow-up to continue its history.")
         if shutdown
         else ("cancelled", "Delegation cancelled.")
     )

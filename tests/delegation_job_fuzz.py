@@ -2,8 +2,8 @@
 
 The leader's replies and the children's turns run scripted models on the owned loop: each subagent call runs as an
 ordinary managed call's job, with the approval cards each job posts for its child, parent waits, cancellation, client
-cancels, orderly restart, and crash recovery. The child's approval-gated tool records every execution, so the oracle
-compares effects with the decisions given.
+cancels, orderly restart, and crash recovery, after which the worker's pass continues the children a restart cut short.
+The child's approval-gated tool records every execution, so the oracle compares effects with the decisions given.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from mindroom.delegation.background import delegation_child
 from mindroom.delegation.recovery import read_child_run
 from mindroom.event_journal import BackgroundApprovalDecision, EventJournalStore, tool_job_run_id
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.orchestration.tool_job_runtime import _is_subagent_job
 from mindroom.session_storage import lanes
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, register_background_runtime
@@ -37,6 +38,7 @@ from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls,
 from tests.tool_job_helpers import (
     DELEGATING_REQUESTER,
     DelegatingLeader,
+    continue_stopped_jobs,
     delegating_config,
     job_card_decision,
     lookup,
@@ -64,6 +66,8 @@ _IDLE_ROUNDS = 20_000
 # Each child's task names the child, which its model's requests carry.
 _TASK = re.compile(r"script(\d+)")
 _TIMER_HORIZON = 1.0
+# How many restarts may cut one job short before the next one ends it, as the continuation's own limit says.
+_CONTINUATION_LIMIT = 2
 # More cards than any generated child can request.
 _MAX_CARDS = 20
 
@@ -219,7 +223,8 @@ class DelegationFuzzRunner:
         self.executed: Counter[str] = Counter()
         # Notes of calls some resolution approved; only those may ever run.
         self.approved: set[str] = set()
-        # What first stopped each job's work: a cancellation or a restart; the first cause stands.
+        # What first stopped each job's work: a cancellation or a restart; the first cause stands, until a restart's
+        # continuation takes the job's work up again.
         self.causes: dict[str, Literal["cancel", "restart"]] = {}
         # Each child's session, by the child it belongs to.
         self.sessions: dict[str, int] = {}
@@ -245,6 +250,7 @@ class DelegationFuzzRunner:
         runtime = await tool_job_runtime(
             self.paths.storage_root,
             cancel=settle_stopped_subagent(self.config, self.paths),
+            continues=_is_subagent_job,
         )
         register_background_runtime(self.paths, runtime)
         return runtime
@@ -323,9 +329,10 @@ class DelegationFuzzRunner:
         self._start_turn(f"delegate{index}", self._drive(calls(call), answer("Parent done")))
 
     def _find_jobs(self) -> None:
-        """Note each child's job, which its call's admission named, by the task the child was given."""
+        """Note each child's job, which its call's admission named, by the task the child was first given."""
+        known = {child.job_id for child in self.children}
         for job in self.runtime.retained_jobs():
-            if job.kind == "delegation":
+            if job.kind == "delegation" and job.job_id not in known:
                 self.children[int(_TASK.fullmatch(delegation_child(job).task)[1])].job_id = job.job_id
 
     def _job(self, index: int) -> str | None:
@@ -401,14 +408,26 @@ class DelegationFuzzRunner:
 
     async def _reopen(self) -> None:
         requests = [child.requests for child in self.children]
+        # Each step ends idle, so a job still running holds a child the restart cut short at work.
+        working = {
+            job.job_id
+            for job in self.runtime.retained_jobs()
+            if job.status == "running" and job.adapter.get("restart_continuations", 0) < _CONTINUATION_LIMIT
+        }
         # The previous process is gone, and so is its connection.
         await self.runtime.close_journal()
         self.runtime = await self._open()
         await self.runtime.recover()
-        # Recovery never runs a child again, and settles every job a restart cut short.
+        # Recovery never runs a child again; the worker's pass then continues or settles every job it kept.
         assert [child.requests for child in self.children] == requests
-        for job in await self._jobs():
-            assert job.status in TERMINAL_STATUSES, (job.job_id, job.status)
+        context = _delegate_runtime_context(self.config, self.paths, execution_identity=self.identity)
+        await continue_stopped_jobs(self.runtime, self.config, self.paths, context)
+        assert not self.runtime.awaiting_continuation()
+        continued = {job.job_id for job in self.runtime.retained_jobs() if job.status not in TERMINAL_STATUSES}
+        # Exactly the children cut short at work continue, each under its job, until restarts keep stopping one.
+        assert continued == working, (continued, working)
+        for job_id in continued:
+            self.causes.pop(job_id, None)
 
     async def _end_turns(self) -> None:
         for turn in self.turns:

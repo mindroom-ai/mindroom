@@ -786,11 +786,15 @@ def delegation_call_job(
         await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result)
         return delegation_outcome(status, result)
 
-    return delegation_job(
+    job = delegation_job(
         child,
         operation,
         cleanup=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
     )
+    if (output_path := arguments.get(OUTPUT_PATH_ARGUMENT)) is not None:
+        # Saved with the job, so a continuation after a restart writes the child's answer where the call asked.
+        job.adapter[OUTPUT_PATH_ARGUMENT] = output_path
+    return job
 
 
 def _validate_child_scope(

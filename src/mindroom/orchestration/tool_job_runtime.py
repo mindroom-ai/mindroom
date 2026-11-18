@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -13,12 +13,14 @@ from uuid import uuid4
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
+from mindroom.delegation.continuation import continued_subagent_job
 from mindroom.delegation.lifecycle import active_delegation_edges, caller_grants_child, delegation_grant
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import turn_rows
 from mindroom.logging_config import get_logger
+from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals
 from mindroom.tool_jobs.authorization import locally_allowed
 from mindroom.tool_jobs.conversation import ConversationKey
@@ -36,6 +38,7 @@ from mindroom.tool_jobs.runtime import (
     register_background_runtime,
 )
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -47,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
     from mindroom.tool_jobs.execution_authority import JobTool
     from mindroom.tool_jobs.instances import ToolJobInstance
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -64,6 +68,11 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
     # Ad hoc teams use an ordinary agent's Matrix account. Their actual members
     # are materialized by the team driver; requester access is rechecked below.
     return recipient in config.agents and actor in config.agents
+
+
+def _is_subagent_job(job: BackgroundJob) -> bool:
+    """Return whether a restart leaves the job running to continue it: a subagent's turn continues, a tool call never."""
+    return job.kind == "delegation"
 
 
 def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey, tuple[BackgroundJob, ...]]:
@@ -142,6 +151,7 @@ class ToolJobRuntimeCoordinator:
                 grant=self._grant,
                 authorize_execution=self._authorize_execution,
                 cancel=self._interrupt,
+                continues=_is_subagent_job,
             )
         self._initialized = True
 
@@ -331,11 +341,53 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def _reconcile(self) -> None:
-        """Stop revoked work, publish live jobs, and admit follow-ups."""
+        """Stop revoked work, continue what a restart stopped, publish live jobs, and admit follow-ups."""
         await self.runtime.cancel_revoked()
         runtime = self.runtime
+        await self._continue_stopped_jobs(runtime)
         await self._publisher.publish(self.bot_provider, runtime.retained_jobs(), awaited=runtime.awaited_job_ids())
         await self._admit_follow_ups(self.runtime)
+
+    async def _continue_stopped_jobs(self, runtime: ToolJobRuntime) -> None:
+        """Continue each subagent job a restart stopped, or end it interrupted when its child's turn cannot continue.
+
+        A job waits for a later pass while its requester's access still resolves or its bot has no Matrix client: the
+        first pass runs before the first sync, when room-backed reply grants are unresolved.
+        """
+        for job in runtime.awaiting_continuation():
+            context = self._conversation_context(job) if self._grant(job) == "allowed" else None
+            if context is None:
+                continue
+            try:
+                # The job's task starts in this context, so its child runs in its conversation as a reply's job does.
+                with tool_runtime_context(context):
+                    try:
+                        spec = await continued_subagent_job(job, runtime)
+                    except Exception:
+                        logger.exception("Subagent job could not continue after a restart", job_id=job.job_id)
+                        spec = None
+                    await runtime.continue_stopped(job.job_id, spec)
+            except Exception:
+                logger.exception("Subagent job a restart stopped was not settled; retrying", job_id=job.job_id)
+
+    def _conversation_context(self, job: BackgroundJob) -> ToolRuntimeContext | None:
+        """Rebuild the tool context of the conversation a job belongs to, or None while its bot has no Matrix client."""
+        owner = job.owner
+        bot = self.bot_provider(owner.recipient)
+        if bot is None or not bot.running or owner.room_id is None or owner.session_id is None:
+            return None
+        target = MessageTarget(
+            room_id=owner.room_id,
+            source_thread_id=owner.thread_id,
+            resolved_thread_id=owner.resolved_thread_id,
+            reply_to_event_id=None,
+            session_id=owner.session_id,
+        )
+        context = bot.tool_runtime_support.build_context(target, user_id=owner.requester_id, agent_name=owner.agent_name)
+        if context is None:
+            return None
+        # The job keeps the turn that started it, so a silent schedule's subagent stays silent.
+        return replace(context, membership_turn_id=job.source_event_id, source_kind=job.source_kind)
 
     async def _admit_follow_ups(self, runtime: ToolJobRuntime) -> None:
         """Admit one follow-up per conversation whose ended jobs no reply collected, at most the limit in a row.
