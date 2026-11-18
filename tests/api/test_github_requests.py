@@ -1431,15 +1431,15 @@ def test_an_unreadable_saved_token_never_falls_back_to_the_app_connection(
     github: GitHubPeer,
     payload: bytes,
 ) -> None:
-    """Losing a saved token is no request to switch accounts: status and requests answer 503 and nothing is sent."""
+    """Losing a saved token is no request to switch accounts: both answer 503, named apart from a busy App store."""
     connect(paths, ALICE)
     damage_token(paths, ALICE, payload)
 
     status = client.get("/api/github/status", headers=session(app, ALICE))
     response = ask(client, session(app, ALICE), method="POST", body={"title": "x"})
 
-    assert (status.status_code, status.json()) == (503, {"error": "github_connection_unavailable"})
-    assert (response.status_code, response.json()) == (503, {"error": "github_connection_unavailable"})
+    assert (status.status_code, status.json()) == (503, {"error": "github_token_unreadable"})
+    assert (response.status_code, response.json()) == (503, {"error": "github_token_unreadable"})
     assert github.requests == []
 
 

@@ -84,6 +84,8 @@ _MAX_REDIRECTS = 3
 _MAX_PATH_LENGTH = 4096
 # The stored connection could not be read or refreshed for a reason a retry may fix.
 _UNAVAILABLE = "github_connection_unavailable"
+# The saved token could not be read; only saving another or removing it helps, so a retry does not.
+_TOKEN_UNREADABLE = "github_token_unreadable"  # noqa: S105
 _PASSED_HEADERS = ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after", "x-github-request-id")
 # One RFC 3986 path character, a `%` always followed by two hex digits. This leaves out controls, spaces, `\`, `#`,
 # and anything outside ASCII, and since every segment is non-empty, `//`, so no path can name another host.
@@ -264,7 +266,7 @@ async def _status(context: OAuthCredentialContext | None) -> dict[str, object] |
     try:
         saved = await _stored_token(context)
     except CredentialsUnreadableError:
-        return _error(503, _UNAVAILABLE)
+        return _error(503, _TOKEN_UNREADABLE)
     try:
         credentials = await _usable_credentials(context)
     except OAuthProviderError:
@@ -350,8 +352,8 @@ async def github_request(payload: GitHubRequest, request: Request) -> dict[str, 
     try:
         saved = await _stored_token(context)
         token = saved["token"] if saved is not None else await _access_token(context)
-    except (CredentialsUnreadableError, OAuthProviderError):
-        return _error(503, _UNAVAILABLE)
+    except (CredentialsUnreadableError, OAuthProviderError) as exc:
+        return _error(503, _TOKEN_UNREADABLE if isinstance(exc, CredentialsUnreadableError) else _UNAVAILABLE)
     if token is None:
         return _error(409, "github_not_connected")
     headers = {
