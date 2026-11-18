@@ -660,7 +660,7 @@ Matrix sync callback
 | `knowledge/utils.py` | Resolves the knowledge bases an agent searches: published indexes, availability notices, and refresh scheduling |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
 | `custom_tools/react.py` | Reaction-only agent tool: reacts in the current room under `matrix_message`'s per-room rate limit |
-| `custom_tools/matrix_user.py` | The `matrix_user` toolkit: a personal agent reads Matrix as its owner, and writes as them behind the tool's own confirmation, on a client created per call |
+| `custom_tools/matrix_user.py` | The `matrix_user` toolkit: a personal agent reads Matrix as its owner, and writes as them, on a client created per call |
 | `custom_tools/matrix_user_authority.py` | Whom a `matrix_user` call acts as: the owner of the personal agent making it, decided by the call's identity and room alone |
 | `custom_tools/matrix_user_reads.py` | What `matrix_user_read` reads as the owner: rooms, messages, search, people, files, and read markers |
 | `custom_tools/matrix_user_writes.py` | What `matrix_user_write` does as the owner, one event per call: a message or a file, a reaction, an edit, or a redaction, each marked agent-authored, and joins, leaves, invitations, and new rooms, which carry no marker; logs one audit line per write |

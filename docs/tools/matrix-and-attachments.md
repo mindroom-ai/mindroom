@@ -21,7 +21,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](../configuration/models.md#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
-- [`matrix_user`] - Read Matrix as a personal agent's owner and, when they approve, write as them.
+- [`matrix_user`] - Read Matrix as a personal agent's owner and, when they ask, write as them.
 - [`attachments`](../attachments.md#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -309,7 +309,7 @@ matrix_api(
 
 ## [`matrix_user`]
 
-`matrix_user` lets a [personal agent](../personal-agents.md) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in, and writes as the owner when they confirm it.
+`matrix_user` lets a [personal agent](../personal-agents.md) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in, and writes as the owner when they ask.
 It acts only for the agent's owner, in any turn that runs for them, such as a chat with the agent or one of their scheduled tasks, or, for reads, through the [MCP gateway](../deployment/mcp-gateway.md), and refuses, saying why, anyone else, any other agent, and a [contact conversation](../agent-contacts.md).
 
 `matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
@@ -326,13 +326,23 @@ It acts only for the agent's owner, in any turn that runs for them, such as a ch
 
 Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
 
-`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachment=None, name=None)` acts as the owner, and each call is approved by the owner on its card, or within an [`!auto_approve`](../tool-approval.md#auto-approve-everything) window they opened themselves, whatever the [approval rules](../tool-approval.md) say, so the MCP gateway does not offer it.
+`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachment=None, name=None)` acts as the owner, only in a chat with the agent, so not through the MCP gateway.
+Whether a call asks the owner first is decided by the [approval rules](../tool-approval.md), as for any tool; a deployment that wants a card for every write sets:
+
+```yaml
+tool_approval:
+  rules:
+    - match: matrix_user_write
+      action: require_approval
+```
+
+A `script` rule can decide per call from the arguments, for example asking for `send` and letting `react` through, and an approval the owner gives for a period, [on a card](../tool-approval.md#auto-approval-for-a-few-minutes) or with [`!auto_approve`](../tool-approval.md#auto-approve-everything), covers later calls.
 
 | Action | Does |
 |--------|------|
 | `send` | Sends one message into `room_id`, or into the owner's DM with `user_id`, which is made and added to the owner's DMs if they have none: the text `message`, or the file `attachment` names, an attachment ID of the conversation, so a text and a file are two calls; `thread_id` sends into that thread, and `event_id` makes `message` a reply to that message |
 | `react` | Reacts to the message `event_id` in `room_id` with `emoji`, one emoji of at most 8 characters and without spaces |
-| `edit` | Replaces the text of the owner's own message `event_id` in `room_id` with `message` |
+| `edit` | Replaces the text of the owner's own text message `event_id` in `room_id` with `message`; a photo, file, or audio message cannot be edited |
 | `redact` | Deletes the owner's own message or reaction `event_id` in `room_id`, with `message` as the reason |
 | `join`, `leave` | Joins or leaves `room_id` |
 | `invite` | Invites `user_id` into `room_id` |
@@ -341,7 +351,7 @@ Messages in encrypted rooms are not readable: each shows as `[encrypted, not rea
 A DM made for a `send` that was not added to the owner's DMs, because that failed or the call was stopped right after the room was made, is not found by a later `send` to that person, which makes another; the first call's result names the room when it can.
 
 What it sends shows as the owner's to everyone, but MindRoom never takes it as the owner speaking: it starts no reply, runs no command, and approves or denies nothing, so the agent talks to other agents as itself.
-A message sent this way, or the name of a file sent, cannot start with `!` or `\`, even after quoted lines, which bridges and homeservers run as the sender's commands, and nothing is sent, reacted, or edited into an encrypted room.
+Nothing is sent, reacted, or edited into an encrypted room.
 
 To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
 That token can act as every account the `users` pattern covers, administrators included.
