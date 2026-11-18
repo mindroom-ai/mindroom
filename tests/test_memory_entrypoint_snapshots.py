@@ -4,25 +4,37 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mindroom.memory import ConversationRef
+import pytest
+
+from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS as HOUR
+from mindroom.memory import ConversationRef, entrypoint_snapshot_path
 from mindroom.memory import _entrypoint_snapshots as snapshots
 
 MEMORY = Path("/workspace/MEMORY.md")
 
 
+@pytest.fixture(autouse=True)
+def _state_root_in_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the relative state roots each test writes inside its own directory."""
+    monkeypatch.chdir(tmp_path)
+
+
+def _snapshot(session: str = "thread-1", root: str = "agent") -> Path:
+    return entrypoint_snapshot_path(Path(root) / "sessions" / "agent.db", session)
+
+
 def _preamble(
     text: str,
     *,
-    agent: str = "mind",
     session: str = "thread-1",
     summary: str | None = None,
     path: Path = MEMORY,
     now: float = 0.0,
+    root: str = "agent",
 ) -> str:
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text."""
     return snapshots.stable_entrypoint_preamble(
-        agent,
-        ConversationRef(session, (summary, None)),
+        ConversationRef((summary, None), _snapshot(session, root)),
         path,
         text,
         f"preamble of {text!r}",
@@ -49,15 +61,24 @@ def test_edited_or_deleted_lines_load_the_file_again() -> None:
 def test_empty_copy_loads_the_file_once_it_gains_lines() -> None:
     """An emptied file sends no header, so its first new line must load the header that points at the file."""
     _preamble("")
-    assert _preamble("a") == "preamble of 'a'"
-    assert _preamble("a\nb") == "preamble of 'a'"
+    assert _preamble("header\na") == "preamble of 'header\\na'"
 
 
 def test_idle_conversation_loads_the_file_again() -> None:
     """Once the cache has gone cold, a fresh file costs nothing, so the conversation catches up."""
     _preamble("a", now=0)
-    assert _preamble("a\nb", now=3600) == "preamble of 'a\\nb'"
-    assert _preamble("a\nb\nc", now=3700) == "preamble of 'a\\nb'"
+    assert _preamble("a\nb", now=HOUR) == "preamble of 'a\\nb'"
+    assert _preamble("a\nb\nc", now=HOUR + 100) == "preamble of 'a\\nb'"
+
+
+def test_a_request_that_sent_the_copy_starts_its_idle_time_again() -> None:
+    """A long turn reads the cache on each request, so its conversation stays warm past the turn's start."""
+    _preamble("a", now=0)
+    snapshots.stamp_entrypoint_snapshot(_snapshot(), now=3000)
+    assert _preamble("a\nb", now=3000 + HOUR - 1) == "preamble of 'a'"
+    # A request of a conversation that keeps no copy has nothing to stamp.
+    snapshots.stamp_entrypoint_snapshot(_snapshot("unknown"), now=0)
+    assert not _snapshot("unknown").exists()
 
 
 def test_compaction_loads_the_file_again() -> None:
@@ -68,17 +89,37 @@ def test_compaction_loads_the_file_again() -> None:
     assert _preamble("a\nb\nc\nd", summary="second summary") == "preamble of 'a\\nb\\nc\\nd'"
 
 
-def test_snapshots_are_kept_per_agent_conversation_and_file() -> None:
-    """Another conversation, agent, or private memory file never receives this conversation's copy."""
+def test_snapshots_are_kept_per_state_root_conversation_and_file() -> None:
+    """Another conversation, requester's state root, or memory file never receives this conversation's copy."""
     _preamble("a")
     assert _preamble("a\nb", session="thread-2") == "preamble of 'a\\nb'"
-    assert _preamble("a\nb", agent="other") == "preamble of 'a\\nb'"
-    assert _preamble("private", path=Path("/private/MEMORY.md")) == "preamble of 'private'"
+    assert _preamble("secret", root="bob/agent") == "preamble of 'secret'"
     assert _preamble("a\nb") == "preamble of 'a'"
+    assert _preamble("other file", path=Path("/private/MEMORY.md")) == "preamble of 'other file'"
+    assert "secret" not in "".join(path.read_text(encoding="utf-8") for path in _snapshot().parent.iterdir())
 
 
-def test_idle_snapshots_are_dropped() -> None:
-    """Copies of idle conversations are released, so the store stays as small as the active conversations."""
+def test_copies_idle_for_a_day_are_deleted() -> None:
+    """A copy idle past the cache lifetime is not reused, and its file is deleted once it has been idle for a day."""
     _preamble("a", session="old", now=0)
-    _preamble("a", session="new", now=4000)
-    assert list(snapshots._snapshots) == [("mind", "new", MEMORY)]
+    _preamble("a", session="other", now=2 * HOUR)
+    assert _snapshot("old").exists()
+    assert _preamble("a\nb", session="old", now=2 * HOUR) == "preamble of 'a\\nb'"
+    _preamble("a", session="new", now=30 * HOUR)
+    assert list(_snapshot().parent.glob("*.json")) == [_snapshot("new")]
+
+
+@pytest.mark.parametrize("content", ["[[", "{}", "null", '["/workspace/MEMORY.md"]'])
+def test_unreadable_snapshot_loads_the_file_again(content: str) -> None:
+    """A malformed copy costs one cache write, never the turn."""
+    _preamble("a")
+    _snapshot().write_text(content, encoding="utf-8")
+    assert _preamble("a\nb") == "preamble of 'a\\nb'"
+    assert _preamble("a\nb\nc") == "preamble of 'a\\nb'"
+
+
+def test_state_root_that_cannot_be_written_sends_the_fresh_preamble() -> None:
+    """A state root under a regular file fails every read and save, and turns still get their preamble."""
+    Path("not-a-dir").write_text("", encoding="utf-8")
+    assert _preamble("a", root="not-a-dir/agent") == "preamble of 'a'"
+    assert _preamble("a\nb", root="not-a-dir/agent") == "preamble of 'a\\nb'"

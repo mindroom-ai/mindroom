@@ -110,6 +110,7 @@ from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinato
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
+from .room_reply_modes import observe_room_settings_event, refresh_room_reply_mode
 from .router.duties import RouterDuties, RouterDutiesDeps
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
@@ -173,7 +174,12 @@ _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
 _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS = 60 * 60
 
 
+# Agents never read presence from sync; `is_user_online` asks the homeserver.
+# Delivered presence would end an extra long poll every cycle, as each room
+# member's sync refreshes its presence. Tuwunel ignores `types` in a presence
+# filter, so this one lists no senders.
 _SYNC_FILTER: dict[str, object] = {
+    "presence": {"senders": []},
     "room": {"timeline": {"limit": constants.CLASSIC_SYNC_TIMELINE_LIMIT}},
 }
 
@@ -1091,9 +1097,20 @@ class AgentBot:
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
-    def _on_thread_tag_state(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-        """Index a live thread tag state event from sync; never raise into nio's callback loop."""
-        if event.type != THREAD_TAGS_EVENT_TYPE or "state_key" not in event.source or event.decrypted:
+    async def _reread_reply_mode(self, client: nio.AsyncClient, room_id: str) -> None:
+        await refresh_room_reply_mode(client, self.runtime_paths, room_id, force=True)
+
+    def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop."""
+        if "state_key" not in event.source or event.decrypted:
+            return
+        if observe_room_settings_event(self.runtime_paths, room.room_id, event.source) and self.client is not None:
+            # The event may be a late copy of an older change: the room's state decides, read at once.
+            self.create_owned_task(
+                self._reread_reply_mode(self.client, room.room_id),
+                name=f"room_reply_mode_reread:{room.room_id}",
+            )
+        if event.type != THREAD_TAGS_EVENT_TYPE:
             return
         try:
             self.orchestrator.thread_snooze.observe_state_event(room.room_id, event.source)
@@ -1578,7 +1595,7 @@ class AgentBot:
 
         Both happen before journal replay, so a message to a held conversation waits for its approval after a restart.
         """
-        await self._reply_runtime.start()
+        self._response_runner.note_continued_sources(await self._reply_runtime.start())
         self._response_runner.follow_approval_holds(self._journal_store.approval_signals, self._journal_principal_id)
 
     async def start(self) -> None:
@@ -1610,7 +1627,7 @@ class AgentBot:
                 nio.RoomSpaceChildEvent,
             )
             client.add_event_callback(
-                self._on_thread_tag_state,  # ty: ignore[invalid-argument-type]
+                self._on_room_state_event,  # ty: ignore[invalid-argument-type]
                 nio.UnknownEvent,
             )
             await self._register_call_manager_callbacks(client)
@@ -1731,6 +1748,8 @@ class AgentBot:
         """Stop the agent bot."""
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
+        elif shutdown_intent.config_reload:
+            self._reply_runtime.retire_for_config_change()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -2020,7 +2039,7 @@ class AgentBot:
                 after_sync=self._on_ingestion_frame_completion,
                 after_ack=self._ingestion_admission_progress.set,
                 on_decryption_failure=self._decryption_diagnostics.schedule,
-                schedule_trigger_sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
+                sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
             ),
             name=f"matrix_ingestion_pump_{self.agent_name}",
         )

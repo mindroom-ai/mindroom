@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import CredentialServiceName  # noqa: TC001
 from mindroom.path_globs import validate_safe_relative_pattern
@@ -18,7 +19,7 @@ def _validate_relative_patterns(value: list[str], *, field_name: str) -> list[st
 
 
 class KnowledgeRerankerConfig(BaseModel):
-    """Reranker that reorders ``search_knowledge_base`` results by how well each chunk answers the query."""
+    """Reranker that reorders search results by how well each one answers the query."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -47,6 +48,48 @@ class KnowledgeRerankerConfig(BaseModel):
         default=None,
         description="Credential service holding the 'cohere' provider's API key; defaults to 'cohere'",
     )
+    threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Minimum score, from 0 to 1, of a memory recalled without being asked for (memory.search.rerank)",
+    )
+
+
+#: A judgment reranker's recall threshold: 0.3, the value the recall benchmark picked, not the judgment default 0.8.
+_RecallThreshold = Annotated[
+    float,
+    Field(
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description=(
+            "Minimum probability, from 0 to 1, of a memory recalled without being asked for; "
+            "0.3 is the value the recall benchmark picked"
+        ),
+    ),
+]
+
+
+class _TypeSafeRerankerConfig(TypeSafeJudgmentConfig):
+    """System One as the reranker: one probability per candidate, and recall keeps those at its threshold."""
+
+    threshold: _RecallThreshold = 0.3
+
+
+class _OpenAIDecisionsRerankerConfig(OpenAIDecisionsJudgmentConfig):
+    """OpenAI Decisions as the reranker: one probability per candidate, and recall keeps those at its threshold."""
+
+    threshold: _RecallThreshold = 0.3
+
+
+#: A judgment provider scores each candidate with its probability. As the reranker its ``threshold`` defaults to 0.3,
+#: not the 0.8 other judgment users keep.
+type RerankerConfig = Annotated[
+    KnowledgeRerankerConfig | _TypeSafeRerankerConfig | _OpenAIDecisionsRerankerConfig,
+    Field(discriminator="provider"),
+]
 
 
 class KnowledgeGitConfig(BaseModel):

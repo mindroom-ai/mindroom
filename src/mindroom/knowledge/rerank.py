@@ -1,20 +1,22 @@
-"""Rerank knowledge search hits with a Cohere-compatible rerank API, Vertex AI ranking, or a local cross-encoder."""
+"""Rerank search hits with a Cohere-compatible rerank API, Vertex AI ranking, a local cross-encoder, or a judgment backend."""
 
 from __future__ import annotations
 
 import asyncio
 import functools
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
+from mindroom.config.knowledge import KnowledgeRerankerConfig
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.embeddings.signatures import ensure_sentence_transformers_dependencies
+from mindroom.judgment.rerank import create_judgment_reranker
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.tool_system.dependencies import optional_dependency_environment
 
@@ -22,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.config.knowledge import KnowledgeRerankerConfig
+    from mindroom.config.knowledge import RerankerConfig
     from mindroom.constants import RuntimePaths
 
 _COHERE_RERANK_URL = "https://api.cohere.com/v2/rerank"
@@ -33,13 +35,23 @@ _VERTEX_AI_RANK_URL = (
 )
 #: Records per Vertex AI ranking request: Google bills each 100 as one query, and smaller requests answer sooner.
 _VERTEX_AI_RECORDS_PER_REQUEST = 100
+#: Runs every blocking reranker step: building a reranker, which may install the sentence-transformers extra, signing
+#: in to Google, and cross-encoder scoring, which is serialized anyway. A step that outlasts its caller's deadline then
+#: holds up later reranking only, never the shared default executor the rest of a reply needs.
+_rerank_thread = ThreadPoolExecutor(1, thread_name_prefix="knowledge-rerank")
+#: The latest build of each reranker config, so a build still running is awaited instead of started again.
+_builds: dict[str, Future[Reranker]] = {}
 
 
 class Reranker(Protocol):
     """Scores how well each document answers a query; higher is better."""
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
-        """Return one relevance score per document, in the documents' order."""
+        """Return one relevance score in [0, 1] per document, in the documents' order; ``-inf`` for one it could not judge.
+
+        Ordering never depends on the scale, but a recall threshold does: ``retrieve`` falls back to the hybrid
+        selection when a finite score outside [0, 1] meets a threshold. ``-inf`` ranks last and passes no threshold.
+        """
         ...
 
 
@@ -75,7 +87,12 @@ class _VertexAIReranker:
     project: str | None
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
-        headers, project = await asyncio.to_thread(_google_request_auth, self.credentials_path, self.project)
+        headers, project = await asyncio.get_running_loop().run_in_executor(
+            _rerank_thread,
+            _google_request_auth,
+            self.credentials_path,
+            self.project,
+        )
         records = [{"id": str(index), "content": document} for index, document in enumerate(documents)]
         async with httpx.AsyncClient(timeout=_RERANK_TIMEOUT_SECONDS) as client, asyncio.TaskGroup() as group:
             requests = [
@@ -138,18 +155,21 @@ def _google_request_auth(credentials_path: Path | None, project: str | None) -> 
 #: Loaded ``sentence_transformers.CrossEncoder`` models by name.
 _cross_encoders: dict[str, Any] = {}
 _cross_encoder_lock = threading.Lock()
-_cross_encoder_thread = ThreadPoolExecutor(1, thread_name_prefix="knowledge-rerank")
 
 
 @dataclass(frozen=True)
 class _CrossEncoderReranker:
-    """Scores query and document pairs with a sentence-transformers cross-encoder in process."""
+    """Scores query and document pairs with a sentence-transformers cross-encoder in process.
+
+    ``CrossEncoder.predict`` applies the model's activation, a sigmoid by default for a one-label model such as
+    ``BAAI/bge-reranker-v2-m3``, so its scores are already in [0, 1] and get no second sigmoid.
+    """
 
     model: str
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
         # Scoring is serialized, so queued calls wait on their own thread, not in the shared default executor.
-        return await asyncio.get_running_loop().run_in_executor(_cross_encoder_thread, self._score, query, documents)
+        return await asyncio.get_running_loop().run_in_executor(_rerank_thread, self._score, query, documents)
 
     def _score(self, query: str, documents: Sequence[str]) -> list[float]:
         with _cross_encoder_lock:
@@ -162,8 +182,14 @@ class _CrossEncoderReranker:
             return [float(score) for score in encoder.predict([(query, document) for document in documents])]
 
 
-def create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
+def _create_reranker(config: RerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
     """Build the configured reranker."""
+    if not isinstance(config, KnowledgeRerankerConfig):
+        reranker = create_judgment_reranker(config, runtime_paths)
+        if reranker is None:
+            msg = f"The {config.provider} reranker has no API key"
+            raise RuntimeError(msg)
+        return reranker
     if config.provider == "sentence_transformers":
         ensure_sentence_transformers_dependencies(runtime_paths)
         return _CrossEncoderReranker(model=config.model)
@@ -175,3 +201,16 @@ def create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths
         )
     api_key = config.api_key or get_api_key_for_service(config.credentials_service or "cohere", runtime_paths)
     return _CohereReranker(model=config.model, url=config.url or _COHERE_RERANK_URL, api_key=api_key)
+
+
+async def build_reranker(config: RerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
+    """Build the configured reranker on the reranker thread.
+
+    At most one build of a config is in flight: a caller that finds one running, such as a first install, waits for
+    it within its own deadline. A caller that gives up never cancels the build the others wait for.
+    """
+    key = config.model_dump_json()
+    build = _builds.get(key)
+    if build is None or build.done():
+        build = _builds[key] = _rerank_thread.submit(_create_reranker, config, runtime_paths)
+    return await asyncio.shield(asyncio.wrap_future(build))

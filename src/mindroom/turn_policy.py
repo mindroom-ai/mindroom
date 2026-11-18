@@ -20,6 +20,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
+from mindroom.room_reply_modes import ReplyModeRead, refresh_room_reply_mode
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.teams.formation import (
     TeamIntent,
@@ -646,7 +647,10 @@ class TurnPolicy:
         router_event: DispatchEvent | None = None,
     ) -> DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
-        if self._reply_mode_awaits_mention(dispatch, has_active_response_for_target=has_active_response_for_target):
+        if await self._reply_mode_awaits_mention(
+            dispatch,
+            has_active_response_for_target=has_active_response_for_target,
+        ):
             if dispatch.context.planning_thread_history_unavailable:
                 # As the router's own skip below does, say when an unread thread, not the message, decided it.
                 self.deps.logger.info("Skipping response: reply mode needs a mention; thread history unavailable")
@@ -675,7 +679,7 @@ class TurnPolicy:
             return DispatchPlan(kind="ignore")
         return DispatchPlan(kind="respond", response_action=action)
 
-    def _reply_mode_awaits_mention(
+    async def _reply_mode_awaits_mention(
         self,
         dispatch: PreparedDispatch,
         *,
@@ -688,10 +692,14 @@ class TurnPolicy:
         wrote follow the room's ordinary rules.
         """
         context = dispatch.context
+        read = None
+        if (client := self.deps.runtime.client) is not None:
+            read = await refresh_room_reply_mode(client, self.deps.runtime_paths, dispatch.target.room_id)
         if not self._reply_mode_requires_mention(
             dispatch.target.room_id,
             dispatch.envelope,
             mentions_an_agent=bool(context.mentioned_agents),
+            read=read,
         ):
             return False
         # A thread whose history could not be read in full proves no reply, so it needs a mention too.
@@ -765,11 +773,21 @@ class TurnPolicy:
         responder_pool = self._filter_materializable_responders(sender_visible_responders, availability)
         return self._response_owner_for_team_resolution(form_team, responder_pool) == self.deps.matrix_id
 
-    def _reply_mode_requires_mention(self, room_id: str, envelope: MessageEnvelope, *, mentions_an_agent: bool) -> bool:
-        """Return whether this is a person's message that mentions no agent or team in a `mentions` room."""
+    def _reply_mode_requires_mention(
+        self,
+        room_id: str,
+        envelope: MessageEnvelope,
+        *,
+        mentions_an_agent: bool,
+        read: ReplyModeRead | None = None,
+    ) -> bool:
+        """Return whether this is a person's message that mentions no agent or team in a `mentions` room.
+
+        ``read`` is the room's setting as a refresh just found it; without it, the runtime's copy decides.
+        """
         if mentions_an_agent or not envelope.origin.may_answer_interactive_prompt:
             return False
-        return self.deps.runtime.config.get_room_reply_mode(self.deps.runtime_paths, room_id) == "mentions"
+        return self.deps.runtime.config.get_room_reply_mode(self.deps.runtime_paths, room_id, read) == "mentions"
 
     def _only_the_contact_answerer(
         self,

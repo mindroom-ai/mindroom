@@ -1630,6 +1630,24 @@ class TestConsolidatedConfigManager:
         result = cm.manage_agent(operation="validate", agent_name="test_agent")
         assert "Invalid tools" not in result
 
+    def test_manage_agent_validate_accepts_a_model_at_one_of_its_levels(self, tmp_path: Path) -> None:
+        """A model reference at a listed reasoning level is a configured model."""
+        config_path = tmp_path / "config.yaml"
+        reasoning = {"levels": ["low", "high"], "default": "low"}
+        config = Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test role", model="sol@high")},
+            models={
+                "default": {"provider": "openai", "id": "m"},
+                "sol": {"provider": "codex", "id": "s", "reasoning": reasoning},
+            },
+        )
+        write_config_yaml(config, config_path)
+
+        result = _config_manager(config_path).manage_agent(operation="validate", agent_name="test_agent")
+
+        assert "Model: sol@high" in result
+        assert "not in configured models" not in result
+
     def test_manage_agent_create_rejects_unknown_knowledge_bases(self, tmp_path: Path) -> None:
         """Create must fail when knowledge base IDs are not configured."""
         config_path = tmp_path / "config.yaml"

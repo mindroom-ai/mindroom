@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -19,6 +19,7 @@ from mindroom.matrix.client_delivery import edit_message_result, send_message_re
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix_openid import homeserver_openid_binding, openid_audience
 from mindroom.origins import allowed_client_origins
+from mindroom.reply_scope import current_reply_event_id
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
@@ -31,6 +32,7 @@ from mindroom.secret_requests import (
 )
 from mindroom.tool_jobs.control import current_job_id, job_checkpoint
 from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_system.invocation import current_tool_call
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -71,6 +73,9 @@ class SecretRequestCard:
     label: str = ""
     url: str = ""
     placeholder: str = ""
+    # The event of the reply whose tool call asks and that call's id, both set when that reply shows an event.
+    response_event_id: str | None = None
+    tool_call_id: str | None = None
 
     def message(
         self,
@@ -106,6 +111,8 @@ class SecretRequestCard:
             label=self.label,
             url=self.url,
             placeholder=self.placeholder,
+            response_event_id=self.response_event_id,
+            tool_call_id=self.tool_call_id,
         )
         return build_message_content(
             body,
@@ -179,7 +186,16 @@ async def ask_with_card(
     """Post `card` in the call's conversation and wait for the requester's answer, or say why no card was posted.
 
     The request returned is settled: its `outcome` is done and the posted card shows it.
+
+    The card, and each edit of it, names the reply whose tool call asks and that call, when the reply shows an event.
+    A call made through the CLI from a Bash call has a line of its own in the reply, so the card names that call.
     """
+    call = current_tool_call()
+    card = replace(
+        card,
+        response_event_id=current_reply_event_id(),
+        tool_call_id=None if call is None else call.context.call_id,
+    )
     thread_id = context.resolved_thread_id
     latest_thread_event_id = context.reply_to_event_id
     if thread_id is not None and latest_thread_event_id is None:

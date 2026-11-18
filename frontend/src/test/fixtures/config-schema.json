@@ -691,6 +691,19 @@
           "default": null,
           "description": "Per-agent MEMORY.md indexing override",
           "title": "Include Entrypoint"
+        },
+        "rerank": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent memory reranking override",
+          "title": "Rerank"
         }
       },
       "title": "AgentMemorySearchConfig",
@@ -3009,7 +3022,7 @@
     },
     "KnowledgeRerankerConfig": {
       "additionalProperties": false,
-      "description": "Reranker that reorders ``search_knowledge_base`` results by how well each chunk answers the query.",
+      "description": "Reranker that reorders search results by how well each one answers the query.",
       "properties": {
         "provider": {
           "description": "'cohere' calls a Cohere-compatible rerank API (Cohere, Jina, vLLM, Infinity); 'sentence_transformers' runs a cross-encoder locally; 'vertex_ai' calls Google's Vertex AI ranking API with Application Default Credentials",
@@ -3067,6 +3080,14 @@
           "default": null,
           "description": "Credential service holding the 'cohere' provider's API key; defaults to 'cohere'",
           "title": "Credentials Service"
+        },
+        "threshold": {
+          "default": 0.5,
+          "description": "Minimum score, from 0 to 1, of a memory recalled without being asked for (memory.search.rerank)",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
         }
       },
       "required": [
@@ -3860,7 +3881,8 @@
               "memory/**/*.md"
             ],
             "exclude": [],
-            "include_entrypoint": false
+            "include_entrypoint": false,
+            "rerank": null
           },
           "description": "Search behavior for file-backed memory"
         },
@@ -3934,6 +3956,19 @@
           "description": "When true, include MEMORY.md in file-memory semantic search",
           "title": "Include Entrypoint",
           "type": "boolean"
+        },
+        "rerank": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When true, semantic file-memory searches rerank their hits with the root reranker, and recall keeps only hits that score at least its threshold; unset reranks with an openai_decisions or typesafe reranker",
+          "title": "Rerank"
         }
       },
       "title": "MemorySearchConfig",
@@ -4141,6 +4176,18 @@
           ],
           "default": null,
           "description": "Provider prices in USD per million tokens, used to measure spend against budgets"
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasoningConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reasoning levels this model offers; its provider's reasoning key in extra_kwargs then follows the level"
         }
       },
       "required": [
@@ -4745,6 +4792,73 @@
       ],
       "title": "RealtimeCallProfile",
       "type": "object"
+    },
+    "ReasoningConfig": {
+      "additionalProperties": false,
+      "description": "The reasoning levels one model offers and the level its plain name runs at.",
+      "properties": {
+        "levels": {
+          "description": "Levels clients offer for this model, in order; `name@level` runs the model at one of them",
+          "items": {
+            "enum": [
+              "off",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Levels",
+          "type": "array"
+        },
+        "default": {
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "type": "string",
+          "description": "Level the plain model name runs at; one of levels",
+          "title": "Default"
+        }
+      },
+      "required": [
+        "levels",
+        "default"
+      ],
+      "title": "ReasoningConfig",
+      "type": "object"
+    },
+    "RerankerConfig": {
+      "discriminator": {
+        "mapping": {
+          "cohere": "#/$defs/KnowledgeRerankerConfig",
+          "openai_decisions": "#/$defs/_OpenAIDecisionsRerankerConfig",
+          "sentence_transformers": "#/$defs/KnowledgeRerankerConfig",
+          "typesafe": "#/$defs/_TypeSafeRerankerConfig",
+          "vertex_ai": "#/$defs/KnowledgeRerankerConfig"
+        },
+        "propertyName": "provider"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/KnowledgeRerankerConfig"
+        },
+        {
+          "$ref": "#/$defs/_TypeSafeRerankerConfig"
+        },
+        {
+          "$ref": "#/$defs/_OpenAIDecisionsRerankerConfig"
+        }
+      ]
     },
     "ResponderAccessConfig": {
       "additionalProperties": false,
@@ -5848,6 +5962,85 @@
       "title": "_MemoryLLMConfig",
       "type": "object"
     },
+    "_OpenAIDecisionsRerankerConfig": {
+      "additionalProperties": false,
+      "description": "OpenAI Decisions as the reranker: one probability per candidate, and recall keeps those at its threshold.",
+      "properties": {
+        "threshold": {
+          "default": 0.3,
+          "description": "Minimum probability, from 0 to 1, of a memory recalled without being asked for; 0.3 is the value the recall benchmark picked",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 1.5,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "provider": {
+          "const": "openai_decisions",
+          "description": "Judge with the OpenAI Decisions API; uses the OpenAI API key",
+          "title": "Provider",
+          "type": "string"
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Credential service holding the OpenAI API key; defaults to the OpenAI provider credential, which may hold a proxy key that api.openai.com rejects",
+          "title": "Credentials Service"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "_OpenAIDecisionsRerankerConfig",
+      "type": "object"
+    },
+    "_TypeSafeRerankerConfig": {
+      "additionalProperties": false,
+      "description": "System One as the reranker: one probability per candidate, and recall keeps those at its threshold.",
+      "properties": {
+        "threshold": {
+          "default": 0.3,
+          "description": "Minimum probability, from 0 to 1, of a memory recalled without being asked for; 0.3 is the value the recall benchmark picked",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 1.5,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "provider": {
+          "const": "typesafe",
+          "description": "Judge with System One; requires TYPESAFE_API_KEY",
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "_TypeSafeRerankerConfig",
+      "type": "object"
+    },
     "_VoiceLLMConfig": {
       "additionalProperties": false,
       "description": "Configuration for voice transcript normalization.",
@@ -6068,7 +6261,8 @@
             "memory/**/*.md"
           ],
           "include_entrypoint": false,
-          "mode": "keyword"
+          "mode": "keyword",
+          "rerank": null
         },
         "auto_flush": {
           "batch": {
@@ -6123,17 +6317,17 @@
       "title": "Knowledge Bases",
       "type": "object"
     },
-    "knowledge_reranker": {
+    "reranker": {
       "anyOf": [
         {
-          "$ref": "#/$defs/KnowledgeRerankerConfig"
+          "$ref": "#/$defs/RerankerConfig"
         },
         {
           "type": "null"
         }
       ],
       "default": null,
-      "description": "Optional reranker for search_knowledge_base results; searches keep hybrid ranking without one"
+      "description": "Optional reranker for search_knowledge_base results, and for memory searches with memory.search.rerank; searches keep hybrid ranking without one"
     },
     "mcp_servers": {
       "additionalProperties": {

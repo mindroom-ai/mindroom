@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.authorization import addressable_responder_names
 from mindroom.model_selection import model_selection_result, parse_model_selection
-from mindroom.model_selection_scope import validate_model_picker_scope
+from mindroom.model_selection_scope import ModelPickerScope, validate_model_picker_scope
 from mindroom.thread_models import (
     clear_thread_model_override,
     resolve_thread_model_override,
@@ -128,7 +128,7 @@ async def handle_structured_model_command(
         if thread_id is not None
         else None
     )
-    if scope is None or thread_id is None:
+    if not isinstance(scope, ModelPickerScope) or thread_id is None:
         error = "This thread is unavailable for model selection. Refresh the model picker."
         text = f"❌ {error}"
     else:
@@ -150,8 +150,12 @@ async def handle_structured_model_command(
     )
 
 
-def _available_models_text(config: Config) -> str:
-    return "\n".join(f"- `{name}` ({model.provider} {model.id})" for name, model in config.models.items())
+def available_models_text(config: Config) -> str:
+    """List the configured models with their provider, ID, and reasoning levels."""
+    return "\n".join(
+        f"- `{name}` ({model.provider} {model.id}{f'; {model.reasoning.describe()}' if model.reasoning else ''})"
+        for name, model in config.models.items()
+    )
 
 
 def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: str | None) -> str:
@@ -169,8 +173,9 @@ def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: s
     else:
         current = "No thread model override is set; room-level model selection applies."
     return (
-        f"{current}\n\n**Available models:**\n{_available_models_text(config)}\n\n"
-        "Use `/model <name>` inside a thread to switch it, or `/model reset` to remove the override."
+        f"{current}\n\n**Available models:**\n{available_models_text(config)}\n\n"
+        "Use `/model <name>` or `/model <name>@<level>` inside a thread to switch it, "
+        "or `/model reset` to remove the override."
     )
 
 
@@ -200,7 +205,7 @@ def handle_model_command(
                 thread_id,
                 addressable_responder_names(requester_user_id, room_id, config, runtime_paths, membership_index),
             )
-        return f"❌ Unknown model `{requested}`. Available models:\n{_available_models_text(config)}"
+        return f"❌ Unknown model `{requested}`. Available models:\n{available_models_text(config)}"
     if thread_id is None:
         return _THREAD_REQUIRED_MESSAGE
     return _set_thread_model(

@@ -870,7 +870,7 @@ def _persist_interrupted(
 ) -> None:
     """Store the turn's interrupted record into the scope its runs are stored in, loading it when the turn had not.
 
-    A turn its user stopped keeps the run its attempt stored instead, when that run holds work
+    A turn its user stopped keeps the run its attempt stored instead, once a response of that run had begun
     (``recover_stopped_run``): the next turn's request then starts with what the stopped run sent, which a provider's
     prompt cache still holds, where the record's prose account of the same work would be new input.
     """

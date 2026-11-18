@@ -35,7 +35,7 @@ from mindroom.thread_export.storage import (
 from mindroom.thread_summary.state import SummaryState
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 
@@ -309,6 +309,30 @@ def test_markerless_destructive_operations_fail_closed(
         "Refusing destructive operation on markerless thread export root",
         output_dir=str(output_dir),
     )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda output_dir: remove_stale_thread_exports(output_dir, _room(), []),
+        lambda output_dir: write_room_index(output_dir, _room()),
+        lambda output_dir: thread_export_storage.thread_file_identities(output_dir, _room()),
+    ],
+    ids=["stale removal", "room index", "file identities"],
+)
+def test_room_operations_refuse_a_markerless_root(tmp_path: Path, operation: Callable[[Path], object]) -> None:
+    """Pruning a room, rebuilding its index, and listing its files all require the root's marker."""
+    output_dir = tmp_path / "thread_exports"
+    room_dir = output_dir / "lobby"
+    room_dir.mkdir(parents=True)
+    thread_file = room_dir / _thread_filename("$gone:localhost")
+    thread_file.write_text("messages: []\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unowned thread export root"):
+        operation(output_dir)
+
+    assert thread_file.exists()
+    assert not (room_dir / "index.json").exists()
 
 
 def test_reconcile_deletes_only_recognizable_room_directories(

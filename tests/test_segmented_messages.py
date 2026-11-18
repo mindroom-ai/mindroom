@@ -4,7 +4,7 @@ import random
 
 import pytest
 
-from mindroom.constants import REASONING_CONTENT_KEY
+from mindroom.constants import COMPACTIONS_CONTENT_KEY, REASONING_CONTENT_KEY
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, markdown_to_html
@@ -195,6 +195,23 @@ def test_split_reply_keeps_no_reasoning() -> None:
     parts = [segmented.first, segmented.first["m.new_content"], *segmented.continuations]
     assert all("io.mindroom.reasoning" not in part for part in parts)
     assert "".join(part["body"] for part in [segmented.first["m.new_content"], *segmented.continuations]) == body
+
+
+def test_split_reply_keeps_compactions_on_first_segment_only() -> None:
+    """The compaction markers belong to the reply once, so only its first segment carries them."""
+    body = _body()
+    entries = [{"id": "c1", "phase": "pre_turn", "mode": "auto", "after_tool": 0, "status": "success"}]
+    content = build_matrix_edit_content(
+        event_id="$placeholder",
+        new_content=build_message_content(body, extra_content={COMPACTIONS_CONTENT_KEY: entries}),
+    )
+
+    segmented = segment_matrix_content(content, room_encrypted=True, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    assert segmented.continuations
+    assert segmented.first["m.new_content"][COMPACTIONS_CONTENT_KEY] == entries
+    assert all(COMPACTIONS_CONTENT_KEY not in part for part in segmented.continuations)
 
 
 def _fence_balance(text: str) -> int:

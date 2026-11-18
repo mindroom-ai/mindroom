@@ -26,8 +26,14 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Every durable write of a reply that sent frames carries `io.mindroom.live_checkpoint: {sid, seq}`, the last frame it covers.
   Publisher ids start with zero-padded start milliseconds, so `(sid, seq)` orders live state across a restart.
   Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
-  Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
-- A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
+  Checkpoints never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
+  Without frames (no relay, switched off, or stopped), progress edits carry the reasoning so far, fitted to an ordinary edit, so the reply keeps its thinking dropdown.
+- Frames cut each tool entry's `args_preview` and `result_preview` to 200 characters (ending in `…`), and a snapshot that still does not fit the 60,000-byte limit (encrypted size in an encrypted room) leaves out the previews of the fewest oldest entries that make it fit (oldest first, up to all of them), and `progress` is untouched.
+  An entry that lost any preview carries `clipped: true`; the durable trace keeps the whole previews, which Chat shows once the reply ends.
+  A result that is a background job handle (`{job_id, tool, status}`) keeps that handle, since Chat reads it for the call's status.
+  Only a snapshot widens that cut, every 5 s or when a delta would not fit, so fitting never strips previews from earlier entries in a delta.
+  Before this, whole traces stopped frames 17 times in production on 2026-11-17 (one reply: 61 calls, a 48 KB trace).
+- A frame too large to send even so, as when its Markdown and reasoning alone pass the limit, stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
 - Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms, segments}` (sidecar-only for large messages).
   Its duration runs from the start of each reasoning segment to the model's next output.
   OpenAI's Responses API streams a reasoning summary in parts, the first well after the model began reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
@@ -59,6 +65,7 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Sync: `{type, content, sender, origin_server_ts}` in `rooms.join.*.ephemeral.events`, never on initial sync, only after `since`; clients take the room from the enclosing sync room.
 - Frame: `{"v": 1, "reply", "sid", "seq", "snapshot": {md, reasoning, tools, status, activity}}` or the same with `"delta"`, whose `md` and `reasoning` are splices `{at, del, ins, len}` in UTF-16 code units, `tools` is `{len, set: [[index, entry]]}`, and `status`/`activity` are new values.
   A snapshot also carries `segments: [{start, after_tool}]`, where each reasoning segment begins (`start` in UTF-16 code units into `reasoning`), and a delta carries the whole list only when it changed; old clients ignore the key.
+  A snapshot also carries `compactions`, the reply's `io.mindroom.compactions` entries in start order (the reply keeps only its newest 8, fewer when they exceed 8 KiB of JSON), and a delta carries the whole list only when it changed; old clients ignore the key.
   `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
 - Cadence: a frame per 100 ms tick when something changed, one send in flight, a snapshot first, after a failed send, and every 5 s.
 

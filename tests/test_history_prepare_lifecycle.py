@@ -23,6 +23,7 @@ from mindroom.history.replay import (
     estimate_summary_tokens,
     prompt_visible_history,
 )
+from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
 from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer, request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
@@ -1204,14 +1205,23 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("second_chunk", ["fails", "outrun"])
-async def test_prepare_history_for_run_persists_successful_compaction_chunks_before_later_failure(
-    tmp_path: Path,
-    second_chunk: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A later chunk's failure, or a writer outrunning it, keeps the chunks already stored."""
+_FIRST_SUMMARY = "first pass summary"
+
+
+@dataclass(frozen=True)
+class _TwoChunkCase:
+    """A stored session of three runs and a plan whose compaction summarizes them in two chunks."""
+
+    config: Config
+    runtime_paths: RuntimePaths
+    storage: ConversationStore
+    session: ConversationSession
+    history_settings: ResolvedHistorySettings
+    execution_plan: ResolvedHistoryExecutionPlan
+
+
+def _two_chunk_case(tmp_path: Path, *, force: bool) -> _TwoChunkCase:
+    """Seed three runs; the first chunk folds two of them into ``_FIRST_SUMMARY``, the second the last one."""
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -1244,22 +1254,22 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
             ),
         ],
     )
-    session.metadata = with_force_compaction(session.metadata)
+    if force:
+        session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
     history_settings = config.resolve_scope("test_agent").history_settings
     visible_runs = list(session.runs)
-    first_summary_text = "first pass summary"
 
     summary_input_budget = next(
         budget
         for budget in range(1, 10_000)
         if _included_run_count(None, visible_runs, budget) == 2
-        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+        and _included_run_count(_FIRST_SUMMARY, visible_runs[2:], budget) == 1
     )
     after_first_session = _session(
         "session-1",
         runs=visible_runs[2:],
-        summary=ScopeSummary(text=first_summary_text, updated_at=datetime.now(UTC)),
+        summary=ScopeSummary(text=_FIRST_SUMMARY, updated_at=datetime.now(UTC)),
     )
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
@@ -1272,10 +1282,24 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         limit_history=replay_budget,
         summary_input_budget=summary_input_budget,
     )
+    return _TwoChunkCase(config, runtime_paths, storage, session, history_settings, execution_plan)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_chunk", ["fails", "outrun"])
+async def test_prepare_history_for_run_persists_successful_compaction_chunks_before_later_failure(
+    tmp_path: Path,
+    second_chunk: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later chunk's failure, or a writer outrunning it, keeps the chunks already stored."""
+    case = _two_chunk_case(tmp_path, force=True)
+    config, runtime_paths, storage, session = case.config, case.runtime_paths, case.storage, case.session
+    history_settings, execution_plan = case.history_settings, case.execution_plan
 
     async def summarize(**_kwargs: object) -> str:
         if summary_mock.await_count == 1:
-            return first_summary_text
+            return _FIRST_SUMMARY
         if second_chunk == "fails":
             msg = "summary failed"
             raise RuntimeError(msg)
@@ -1307,7 +1331,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.text == first_summary_text
+    assert persisted.summary.text == _FIRST_SUMMARY
     assert [run.run_id for run in persisted.runs] == (["run-3"] if second_chunk == "fails" else [])
     assert summary_mock.await_count == 2
     assert read_scope_state(persisted).force_compact_before_next_run is False
@@ -1316,8 +1340,71 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     else:
         assert prepared.compaction_reply_outcome == "success"
         outcome = completed_outcome(lifecycle)
-        assert outcome.summary == first_summary_text
+        assert outcome.summary == _FIRST_SUMMARY
         assert outcome.compacted_run_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_chunk", [1, 2])
+async def test_a_failed_reply_compaction_records_the_runs_its_stored_chunks_folded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_chunk: int,
+) -> None:
+    """A failed entry carries ``compacted_run_count`` exactly when earlier chunks stood: a partial fold.
+
+    A failure on the first chunk folded nothing, and its entry has no count.
+    """
+    case = _two_chunk_case(tmp_path, force=False)
+    config, runtime_paths, storage, session = case.config, case.runtime_paths, case.storage, case.session
+    history_settings, execution_plan = case.history_settings, case.execution_plan
+
+    async def summarize(**_kwargs: object) -> str:
+        if summary_mock.await_count < failing_chunk:
+            return _FIRST_SUMMARY
+        msg = "summary failed"
+        raise RuntimeError(msg)
+
+    summary_mock = AsyncMock(side_effect=summarize)
+
+    install_model_providers(monkeypatch, {"summary-model": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=summary_mock,
+    ):
+        recorder = ReplyCompactions()
+        lifecycle = ReplyCompactionLifecycle(recorder, RecordingCompactionLifecycle())
+        prepared = await prepare_history_for_run_for_test(
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            compaction_lifecycle=lifecycle,
+            history_settings=history_settings,
+            execution_plan=execution_plan,
+        )
+
+    persisted = storage.load_session("session-1")
+    assert persisted is not None
+    assert prepared.compaction_reply_outcome == "failed"
+    content = recorder.content()
+    assert content is not None
+    [entry] = content
+    assert entry["mode"] == "auto"
+    assert entry["status"] == "failed"
+    assert "runs_remaining" not in entry
+    if failing_chunk == 1:
+        assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
+        assert "compacted_run_count" not in entry
+        assert "after_tokens" not in entry
+    else:
+        assert [run.run_id for run in persisted.runs] == ["run-3"]
+        assert entry["compacted_run_count"] == 2
+        assert isinstance(entry["after_tokens"], int)
 
 
 @pytest.mark.asyncio

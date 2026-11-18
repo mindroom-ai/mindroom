@@ -3,8 +3,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
 import os
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,11 +18,14 @@ from unittest.mock import patch
 
 import pytest
 import tiktoken
+from pydantic import TypeAdapter
 
+import mindroom.knowledge.rerank as rerank_module
+import mindroom.memory._file_backend as file_backend_module
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig, RerankerConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import AgentMemorySearchConfig
 from mindroom.constants import resolve_runtime_paths
@@ -1056,6 +1064,305 @@ async def test_team_keyword_hits_share_the_recall_token_budget(config: Config, m
     assert sorted(injected[1:]) == sorted(team_memories[1:])
 
 
+def test_each_added_hit_is_charged_against_the_recall_budget() -> None:
+    """Two hits of more than half the budget each: only the first fits."""
+    load_o200k()
+    half = {"memory": " ".join(["paint"] * 500)}
+    assert file_backend_module._add_within_recall_budget([], [half, half]) == [half]
+
+
+class _StubReranker:
+    """Returns fixed ``scores``, after ``delay`` seconds; ``failing`` raises instead."""
+
+    def __init__(self, scores: Sequence[float] = (), *, delay: float = 0.0, failing: bool = False) -> None:
+        self.scores = list(scores)
+        self.delay = delay
+        self.failing = failing
+        self.documents: list[list[str]] = []
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        del query
+        self.documents.append(list(documents))
+        await asyncio.sleep(self.delay)
+        if self.failing:
+            msg = "rerank service down"
+            raise RuntimeError(msg)
+        return self.scores
+
+
+def _configure_reranker(
+    monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    settings: dict[str, object] | None,
+    reranker: _StubReranker,
+) -> None:
+    """Configure the root reranker as a config file would set it, served by ``reranker`` whatever the settings."""
+    config.reranker = None if settings is None else TypeAdapter(RerankerConfig).validate_python(settings)
+    monkeypatch.setattr(file_backend_module, "configured_reranker", lambda _config, _runtime_paths: reranker)
+
+
+#: A reranker with the default 0.5 threshold.
+_COHERE: dict[str, object] = {"provider": "cohere", "model": "rerank-v3.5"}
+# Hybrid scores the 0.05 gap keeps both of.
+_SHED_MEMORIES = [("The shed is painted green", 0.90), ("The shed roof is copper", 0.89)]
+_SHED_TEXTS = [memory for memory, _score in _SHED_MEMORIES]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("global_rerank", "agent_rerank", "reranked"),
+    [(True, None, True), (False, True, True), (True, False, False), (False, None, False)],
+)
+async def test_recall_uses_reranker_when_enabled(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    global_rerank: bool,
+    agent_rerank: bool | None,
+    reranked: bool,
+) -> None:
+    """With `rerank` set, globally or for the agent, recall keeps the hits the reranker scores at its threshold."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = global_rerank
+    config.agents["general"].memory_search = AgentMemorySearchConfig(rerank=agent_rerank)
+    reranker = _StubReranker([0.9, 0.4])
+    _configure_reranker(monkeypatch, config, _COHERE, reranker)
+    index_limits = _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert index_limits == [20]
+    assert reranker.documents == ([_SHED_TEXTS] if reranked else [])
+    assert _injected(prompt_parts, _SHED_TEXTS) == (_SHED_TEXTS[:1] if reranked else _SHED_TEXTS)
+
+
+_OTHER_RERANKERS = [
+    _COHERE,
+    {"provider": "vertex_ai", "model": "semantic-ranker-default@latest"},
+    {"provider": "sentence_transformers", "model": "BAAI/bge-reranker-v2-m3"},
+    None,
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("settings", "reranked"),
+    [({"provider": "typesafe"}, True), ({"provider": "openai_decisions"}, True)]
+    + [(settings, False) for settings in _OTHER_RERANKERS],
+)
+async def test_recall_reranks_by_default_only_for_a_passing_provider(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: dict[str, object] | None,
+    reranked: bool,
+) -> None:
+    """With `rerank` unset, a judgment reranker reranks recall and keeps the hits it scores at least 0.3.
+
+    Any other reranker, or none, leaves recall to the hybrid selection.
+    """
+    config.memory.search.mode = "semantic"
+    reranker = _StubReranker([0.9, 0.2])
+    _configure_reranker(monkeypatch, config, settings, reranker)
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert reranker.documents == ([_SHED_TEXTS] if reranked else [])
+    assert _injected(prompt_parts, _SHED_TEXTS) == (_SHED_TEXTS[:1] if reranked else _SHED_TEXTS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("global_rerank", "agent_rerank", "provider", "reranked"),
+    [
+        (False, None, "typesafe", False),
+        (None, False, "openai_decisions", False),
+        (False, True, "typesafe", True),
+        (None, True, "cohere", True),
+    ],
+)
+async def test_explicit_rerank_setting_overrides_the_provider_default(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    global_rerank: bool | None,
+    agent_rerank: bool | None,
+    provider: str,
+    reranked: bool,
+) -> None:
+    """An explicit `rerank`, globally or for the agent, wins over the default the reranker's provider gives."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = global_rerank
+    config.agents["general"].memory_search = AgentMemorySearchConfig(rerank=agent_rerank)
+    reranker = _StubReranker([0.9, 0.2])
+    _configure_reranker(monkeypatch, config, _COHERE if provider == "cohere" else {"provider": provider}, reranker)
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert bool(reranker.documents) == reranked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("threshold", "kept"),
+    [(None, 2), (0.8, 1)],
+)
+async def test_judgment_reranker_recall_threshold(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    threshold: float | None,
+    kept: int,
+) -> None:
+    """A judgment reranker's recall threshold is 0.3 when unset, and an explicitly set threshold is honored."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = True
+    settings: dict[str, object] = {"provider": "typesafe"}
+    if threshold is not None:
+        settings["threshold"] = threshold
+    _configure_reranker(monkeypatch, config, settings, _StubReranker([0.9, 0.35]))
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert _injected(prompt_parts, _SHED_TEXTS) == _SHED_TEXTS[:kept]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reranker", [_StubReranker(failing=True), _StubReranker([0.9, 0.4], delay=1.0)])
+async def test_recall_reranker_failure_matches_hybrid_recall(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    reranker: _StubReranker,
+) -> None:
+    """A reranker that raises or passes the recall deadline gives exactly the recall it would without reranking."""
+    config.memory.search.mode = "semantic"
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+    hybrid = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+    config.memory.search.rerank = True
+    _configure_reranker(monkeypatch, config, _COHERE, reranker)
+    monkeypatch.setattr(file_backend_module, "_RECALL_RERANK_DEADLINE_SECONDS", 0.05)
+
+    reranked = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert reranker.documents
+    assert reranked == hybrid
+    assert _injected(reranked, _SHED_TEXTS) == _SHED_TEXTS
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_reranker_build_holds_up_no_recall(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A build that outlasts the deadline, such as a first sentence-transformers install, holds up no recall.
+
+    It runs on the reranker's own thread, so the default executor, here one worker, still serves team memory; a second
+    recall while it runs starts no second build. Both recalls give the hybrid recall within the deadline.
+    """
+    config.memory.search.mode = "semantic"
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    team_memory = "Team note about the shed"
+    await store_conversation_memory(team_memory, ["general", "calculator"], "session-team", config)
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+    hybrid = await build_memory_prompt_parts(team_memory, "general", config)
+    assert team_memory in _injected(hybrid, [team_memory])
+    config.memory.search.rerank = True
+    config.reranker = KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model")
+    release = threading.Event()
+    builds: list[str] = []
+
+    def stuck_build(reranker_config: KnowledgeRerankerConfig, _runtime_paths: object) -> _StubReranker:
+        builds.append(reranker_config.model)
+        release.wait(timeout=10)
+        return _StubReranker([0.9, 0.4])
+
+    monkeypatch.setattr(rerank_module, "_create_reranker", stuck_build)
+    monkeypatch.setattr(file_backend_module, "_RECALL_RERANK_DEADLINE_SECONDS", 0.05)
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(1))
+    try:
+        for _turn in range(2):
+            started = time.monotonic()
+            reranked = await build_memory_prompt_parts(team_memory, "general", config)
+            assert time.monotonic() - started < 2
+            assert reranked == hybrid
+    finally:
+        release.set()
+
+    assert builds == ["local-model"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scores",
+    [[0.9], [0.9, 0.4, 0.3], [math.nan, 0.4], [math.inf, 0.4], [1.5, 0.4], [0.9, -0.2]],
+)
+async def test_recall_keeps_hybrid_recall_for_invalid_reranker_scores(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    scores: list[float],
+) -> None:
+    """A wrong score count, NaN, +inf or a finite score outside [0, 1] gives exactly the hybrid recall."""
+    config.memory.search.mode = "semantic"
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+    hybrid = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+    config.memory.search.rerank = True
+    _configure_reranker(monkeypatch, config, _COHERE, _StubReranker(scores))
+
+    assert await build_memory_prompt_parts("Tell me about the shed", "general", config) == hybrid
+
+
+@pytest.mark.asyncio
+async def test_recall_injects_nothing_when_every_hit_is_below_the_threshold(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The configured threshold, not the 0.5 default, decides; with every hit below it no memory block is added."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = True
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+    _configure_reranker(monkeypatch, config, {**_COHERE, "threshold": 0.95}, _StubReranker([0.9, 0.4]))
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert prompt_parts.transient_turn_context == ""
+
+
+@pytest.mark.asyncio
+async def test_memory_search_reranks_twenty_candidates(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An asked-for memory search with reranking fetches 20 candidates and returns the best `limit` by its scores."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = True
+    _configure_reranker(monkeypatch, config, _COHERE, _StubReranker([0.1, 0.3, 0.9]))
+    scored = [("The shed is painted green", 0.9), ("The shed roof is copper", 0.8), ("Pixel eats kibble", 0.7)]
+    index_limits = _semantic_index(monkeypatch, scored)
+
+    results = await search_agent_memories("shed", "general", config, limit=2)
+
+    assert index_limits == [20]
+    assert [(result["memory"], result["score"]) for result in results] == [
+        ("Pixel eats kibble", 0.9),
+        ("The shed roof is copper", 0.3),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", [False, True])
+async def test_reranked_memory_search_above_twenty_returns_its_whole_limit(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: bool,
+) -> None:
+    """A default-reranked search for more than 20 fetches its `limit`, reranked or, when reranking fails, hybrid."""
+    config.memory.search.mode = "semantic"
+    scored = [(f"Shed note {index}", 0.9 - index / 100) for index in range(30)]
+    reranker = _StubReranker([index / 100 for index in range(30)], failing=failing)
+    _configure_reranker(monkeypatch, config, {"provider": "typesafe"}, reranker)
+    index_limits = _semantic_index(monkeypatch, scored)
+
+    results = await search_agent_memories("shed", "general", config, limit=30)
+
+    memories = [memory for memory, _score in scored]
+    assert index_limits == [30]
+    assert reranker.documents == [memories]
+    assert [result["memory"] for result in results] == (memories if failing else memories[::-1])
+
+
 @pytest.mark.asyncio
 async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_enabled(
     config: Config,
@@ -1567,23 +1874,25 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
         )
         return prompt_parts.session_preamble
 
-    first = await preamble(ConversationRef("thread", (None, None)))
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    other_thread = replace(thread, snapshot=storage_path / "snapshots" / "other-thread.json")
+    first = await preamble(thread)
     await add_agent_memory("Added fact.", "general", config)
 
-    assert await preamble(ConversationRef("thread", (None, None))) == first
+    assert await preamble(thread) == first
     assert "Added fact." not in first
-    assert "Added fact." in await preamble(ConversationRef("other-thread", (None, None)))
+    assert "Added fact." in await preamble(other_thread)
     assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] in first
     fresh = await preamble(None)
     assert "Added fact." in fresh
     assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] not in fresh
 
     (workspace / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-    assert "Curated fact." not in await preamble(ConversationRef("thread", (None, None)))
+    assert "Curated fact." not in await preamble(thread)
 
     # A prompt override applies through hot reload, so an edited header loads again.
     config.prompts["FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"] = "Edited header for `{memory_path}`."
-    assert (await preamble(ConversationRef("thread", (None, None)))).startswith("Edited header")
+    assert (await preamble(thread)).startswith("Edited header")
 
 
 @pytest.mark.asyncio

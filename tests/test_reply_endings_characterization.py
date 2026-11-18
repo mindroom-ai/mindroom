@@ -42,7 +42,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import Owed, Suppressed, Suppression
 from mindroom.history.interrupted_replay import is_interrupted_replay_run, persist_interrupted_replay_snapshot
-from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, STOPPED_BY_USER_NOTE
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, STOPPED_BY_USER_NOTE, is_recovered_run
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -717,11 +717,9 @@ async def test_a_user_stop_mid_stream_cancels_the_streamed_reply(
         ("cancelled", {"event_id": "$sent0", "failure_reason": "cancelled_by_user", "kind": "ai"}),
     ]
     [run] = turn.agent_runs()
-    assert is_interrupted_replay_run(run)
-    assert _original_status(run) == "cancelled"
-    assert run.content == "Partial answer\n\n(turn stopped before completion)"
-    # CHARACTERIZATION: current behavior; an interrupted row stores the bare message tag, not the model prompt.
-    assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
+    # The stopped run keeps its own messages: the prompt as the model read it, then what it showed and the stop note.
+    assert is_recovered_run(run)
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", f"Partial answer\n\n{STOPPED_BY_USER_NOTE}")]
     assert not await turn.pending()
 
 
@@ -817,11 +815,10 @@ async def test_a_user_stop_while_a_whole_delivery_runs_the_model(
     assert turn.hooks.fired == [
         ("cancelled", {"event_id": "$sent0", "failure_reason": "cancelled_by_user", "kind": "ai"}),
     ]
-    run = _interrupted(turn.agent_runs())
-    assert _original_status(run) == "cancelled"
+    [run] = turn.agent_runs()
+    assert is_recovered_run(run)
     # CHARACTERIZATION: current behavior; history keeps model text the room never showed.
-    assert run.content == "Partial answer\n\n(turn stopped before completion)"
-    assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", f"Partial answer\n\n{STOPPED_BY_USER_NOTE}")]
     assert not await turn.pending()
 
 

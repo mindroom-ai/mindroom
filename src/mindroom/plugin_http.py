@@ -48,11 +48,7 @@ from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
 from mindroom.requester_identity import is_access_checked_requester_id, resolve_human_requester_alias
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces, room_execution_identity
 from mindroom.room_modes import change_room_thread_mode
-from mindroom.room_reply_modes import (
-    clear_room_reply_mode_override,
-    resolve_room_reply_mode_override,
-    set_room_reply_mode_override,
-)
+from mindroom.room_reply_modes import resolve_room_reply_mode_override, write_room_reply_mode
 from mindroom.room_thread_modes import (
     RoomThreadMode,
     resolve_room_thread_mode_override,
@@ -277,7 +273,7 @@ class RoomModes:
     thread: RoomThreadMode | None
     """The room's thread mode override, None while each agent uses its configured mode."""
     reply: RoomReplyMode | None
-    """The room's reply mode override, None while the room uses its configured one."""
+    """The room's reply mode override, its ``reply_mode`` room setting as the runtime last read it; None while unset."""
     reply_in_effect: RoomReplyMode
     """The reply mode the room uses: its override, else its ``rooms`` entry's, else ``auto``."""
 
@@ -340,17 +336,21 @@ class RoomReader:
 
         Before anything is written it answers 403 unless the caller holds room admin power by a ``power()`` read, 503
         when that read fails, and 503 unless the router, which republishes the thread mode, runs and is in the room.
-        A thread mode change the router cannot publish stays saved and answers 503.
+        A reply mode the room refuses from the router answers 503 before the thread mode changes; a thread mode change
+        the router cannot publish stays saved and answers 503.
         """
         if not (await self.power()).is_admin(self.user.user_id):
             raise HTTPException(403, "Only room admins change the room's modes.")
         router = self._router()
         if router is None or not router.running or router.client is None or self._room_id not in router.client.rooms:
             raise HTTPException(503, _ROUTER_NOT_RUNNING)
-        if reply is None:
-            clear_room_reply_mode_override(router.runtime_paths, self._room_id)
-        elif reply is not ...:
-            set_room_reply_mode_override(router.runtime_paths, room_id=self._room_id, mode=reply)
+        if reply is not ... and not await write_room_reply_mode(
+            router.client,
+            router.runtime_paths,
+            self._room_id,
+            reply,
+        ):
+            raise HTTPException(503, "The room did not take its reply mode; nothing was changed.")
         if thread is not ... and not await change_room_thread_mode(
             router.client,
             router.config,

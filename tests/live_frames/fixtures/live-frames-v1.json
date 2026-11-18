@@ -22,7 +22,8 @@
           "tools": [],
           "status": "streaming",
           "activity": "",
-          "segments": []
+          "segments": [],
+          "compactions": []
         }
       }
     },
@@ -345,7 +346,8 @@
           ],
           "status": "streaming",
           "activity": "w",
-          "segments": []
+          "segments": [],
+          "compactions": []
         }
       }
     },

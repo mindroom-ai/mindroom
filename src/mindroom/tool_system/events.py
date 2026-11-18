@@ -45,8 +45,10 @@ class ToolTraceEntry:
     args_preview: str | None = None
     result_preview: str | None = None
     truncated: bool = False
-    # Internal continuation identity; public Matrix metadata omits these fields.
+    # The call's id, which public Matrix metadata carries too, so a client draws a card that names its call (a secret
+    # request's) at the call's line.
     tool_call_id: str | None = field(default=None, compare=False)
+    # Internal continuation identity; public Matrix metadata omits these fields.
     # The team member whose slot shows the call, by config name; None for a team leader's call and any call outside a
     # team.
     member_id: str | None = field(default=None, compare=False)
@@ -263,6 +265,14 @@ class CollectedStreamPresentation:
             self.response_text += text
         elif self.response_text:
             self.separate_next_text = True
+
+    def visible_tool_count(self) -> int:
+        """Return how many tool calls the reply shows so far."""
+        return len(self.tool_trace) if self.show_tool_calls else 0
+
+    def has_progress(self) -> bool:
+        """Return whether the reply collected any text or tool call yet; a tracked hidden call counts."""
+        return bool(self.response_text or self.tool_trace)
 
     def show_tool_progress(self, tool_call_id: str, text: str) -> None:
         """Keep a running call's latest output for the live reply until the call completes."""
@@ -893,7 +903,7 @@ def serialize_tool_trace(
     *,
     include_internal: bool = False,
 ) -> tuple[dict[str, object], ...]:
-    """Serialize trace entries, optionally retaining restart-only identity and failure."""
+    """Serialize trace entries with their call ids, optionally retaining restart-only identity and failure."""
     serialized: list[dict[str, object]] = []
     for entry in tool_trace:
         event: dict[str, object] = {
@@ -908,6 +918,8 @@ def serialize_tool_trace(
             event["truncated"] = True
         if include_internal:
             event.update(_internal_fields(entry))
+        elif entry.tool_call_id is not None:
+            event["tool_call_id"] = entry.tool_call_id
         serialized.append(event)
     return tuple(serialized)
 

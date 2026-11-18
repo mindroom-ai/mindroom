@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls
 from mindroom.delegation.lifecycle import live_delegation_config, report_child_approval_wait
+from mindroom.delegation.state import child_card_id
 from mindroom.event_journal import ApprovalDecision
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.approvals import ask_job_approvals
@@ -61,11 +62,14 @@ async def request_child_approvals(
     gated = any(call.decision is None for call in plan.calls)
     if gated:
         report_child_approval_wait(child, awaiting=True)
+    # A job keeps its ID when a restart continues it on a new turn of its child, where a provider may reuse a call
+    # ID: each card names the turn with the call, so a decision of one turn never answers another turn's call.
+    cards = [replace(call, tool_call_id=child_card_id(child.delegation_id, call.tool_call_id)) for call in plan.calls]
     decided = await ask_job_approvals(
         runtime,
         job_id,
         plan.tools,
-        plan.calls,
+        cards,
         owner=owner,
         config=config,
         runtime_paths=runtime_paths,

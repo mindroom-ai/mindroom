@@ -18,7 +18,7 @@ def _payload(status: str, **kwargs: object) -> str:
     return custom_tool_payload("react", status, **kwargs)
 
 
-def _key_error(emoji: str) -> str | None:
+def reaction_key_error(emoji: str) -> str | None:
     """Return why ``emoji`` cannot be a reaction key, or None when it can.
 
     A reaction acknowledges a message, so a key longer than the cap, or with spaces in it, is refused.
@@ -64,7 +64,7 @@ class ReactTools(Toolkit):
         emoji = emoji.strip()
         if not event_id:
             return _payload("error", message="event_id must be a non-empty string.")
-        if (key_error := _key_error(emoji)) is not None:
+        if (key_error := reaction_key_error(emoji)) is not None:
             return _payload("error", message=key_error)
         room_id = context.room_id
         # A reaction that cannot be sent spends none of the budget below.

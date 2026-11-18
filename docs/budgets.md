@@ -17,15 +17,18 @@ models:
     provider: openai
     id: gpt-6-astra
     pricing:
-      input: 5.0
-      output: 30.0
-      cache_read: 0.5
+      input: 10.0
+      output: 50.0
+      cache_read: 1.0
+      cache_write: 12.5
   luna:
     provider: openai
     id: gpt-6-luna
     pricing:
-      input: 0.2
-      output: 1.25
+      input: 0.1
+      output: 0.5
+      cache_read: 0.01
+      cache_write: 0.125
 
 budgets:
   monthly_limit_usd: 20
@@ -76,6 +79,7 @@ A reply that already started finishes on its model, so the reply that reaches th
 ## Over-Budget Replies
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
+When `fallback_model` names no [reasoning level](configuration/models.md#reasoning-levels), a reply that already names the fallback model at a level, such as `luna@high` for `fallback_model: luna`, keeps that level; a `fallback_model` with a level, such as `luna@low`, replaces it.
 This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](openai-api.md) keys mapped to a requester.
 The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.

@@ -34,7 +34,10 @@ from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import drain_tasks, run_blocking_until_complete, wait_for_future_until_complete
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
-from mindroom.history.interrupted_replay import persist_interrupted_replay
+from mindroom.history.interrupted_replay import (
+    build_interrupted_replay_snapshot,
+    persist_interrupted_replay_snapshot,
+)
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -338,7 +341,7 @@ class _CallResponseTracker:
         original_status: RunStatus,
         storage: ConversationStore,
     ) -> None:
-        persist_interrupted_replay(
+        persist_interrupted_replay_snapshot(
             storage=storage,
             # The session only names the run's row, which the save creates when the call's conversation has none yet.
             session=new_scope_session(
@@ -346,13 +349,15 @@ class _CallResponseTracker:
                 scope=HistoryScope(kind="agent", scope_id=self.agent_name),
             ),
             run_id=state.run_id,
-            user_message=state.user_message,
-            user_message_is_structured=False,
-            partial_text=spoken_text,
-            completed_tools=state.completed_tools,
-            interrupted_tools=state.interrupted_tools,
-            run_metadata=state.run_metadata,
-            original_status=original_status,
+            snapshot=build_interrupted_replay_snapshot(
+                user_message=state.user_message,
+                user_message_is_structured=False,
+                partial_text=spoken_text,
+                completed_tools=state.completed_tools,
+                interrupted_tools=state.interrupted_tools,
+                run_metadata=state.run_metadata,
+                original_status=original_status,
+            ),
         )
 
 

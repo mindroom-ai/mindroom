@@ -359,6 +359,33 @@ def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: 
     assert actual == _PROJECTION_MATRIX_EXPECTATIONS
 
 
+def test_the_user_appservice_token_never_reaches_a_worker(tmp_path: Path) -> None:
+    """The token that lets an agent act as a person stays in the primary, out of every worker and tool env."""
+    names = {
+        runtime_env_policy.MATRIX_USER_APPSERVICE_TOKEN_ENV,
+        runtime_env_policy.MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV,
+    }
+    env = {name: f"value:{name}" for name in names}
+    runtime_paths = constants.RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "storage",
+        process_env=env,
+        env_file_values=env,
+    )
+    tool_runtime_paths = [
+        sandbox_exec.tool_runtime_paths_with_request_env(runtime_paths, {}, include_base_execution_env=include_base)
+        for include_base in (True, False)
+    ]
+
+    assert runtime_env_policy.public_worker_startup_env(env) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(env) == {}
+    assert runtime_env_policy.worker_extra_env(env) == {}
+    assert runtime_env_policy.shell_passthrough_env(env, patterns=("*",)) == {}
+    assert {name for paths in tool_runtime_paths for name in names if paths.env_value(name) is not None} == set()
+
+
 def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_control() -> None:
     """Sandbox execution reconstruction uses the centralized control deny policy."""
     env = {

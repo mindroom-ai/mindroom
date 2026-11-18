@@ -1,7 +1,8 @@
 """One portable summary call and its bounded retry policy.
 
 The summary request goes through the provider pipeline as one call, with every retry below this module and the prompt
-cache turned off, and on the Claude routes without the model's authored thinking setting, bounded by the compaction
+cache turned off, and on the Claude routes without the model's authored thinking setting unless the model runs at its
+``off`` reasoning level, bounded by the compaction
 deadline. This module owns the call's lifecycle, cancellation, complete-output validation,
 and the retry decision chunk execution uses.
 """
@@ -9,7 +10,7 @@ and the retry decision chunk execution uses.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.cancellation import request_task_cancel
@@ -212,12 +213,16 @@ async def generate_compaction_summary(
     summary_prompt: str,
     timeout_seconds: float,
     on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
+    keep_thinking_setting: bool = False,
 ) -> str:
-    """Bound the provider request, then persist returned usage before validating the summary text it returns."""
+    """Bound the provider request, then persist returned usage before validating the summary text it returns.
+
+    ``keep_thinking_setting`` sends the model's thinking setting, which the request omits otherwise.
+    """
     provider_done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     request = ModelRequest(
         messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
-        overrides=_SUMMARY_OVERRIDES,
+        overrides=replace(_SUMMARY_OVERRIDES, omit_thinking_setting=not keep_thinking_setting),
     )
     response_task = asyncio.create_task(
         _request_summary(model, request, provider_done, on_usage),

@@ -1391,9 +1391,8 @@ class ConfigManagerTools(Toolkit):
                 issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 
         # Check model
-        available_models = list(config.models.keys()) if config.models else []
-        if available_models and agent.model not in available_models:
-            warnings.append(f"Model '{agent.model}' not in configured models: {', '.join(available_models)}")
+        if config.models and agent.model not in config.models:
+            warnings.append(f"Model '{agent.model}' not in configured models: {', '.join(config.models)}")
 
         # Format results
         output = [f"## Validation Results for '{agent_name}':\n"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 import time
 from dataclasses import dataclass
@@ -9,6 +10,9 @@ from dataclasses import dataclass
 LIVE_EVENT_TYPE = "io.mindroom.live"
 LIVE_CHECKPOINT_KEY = "io.mindroom.live_checkpoint"
 FRAME_VERSION = 1
+# Each tool preview a frame shows at most, so a long tool-heavy turn's trace fits; durable edits keep whole previews.
+_FRAME_PREVIEW_CHARACTERS = 200
+_PREVIEW_KEYS = ("args_preview", "result_preview")
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +20,7 @@ class LiveDocs:
     """What one reply shows live: Markdown, reasoning, public tool-trace events, stream status, and worker activity.
 
     ``segments`` says where each reasoning segment begins in ``reasoning`` and how many tool calls preceded it.
+    ``compactions`` holds the reply's automatic compaction entries, in start order.
     """
 
     md: str
@@ -24,6 +29,7 @@ class LiveDocs:
     status: str
     activity: str
     segments: tuple[dict[str, int], ...] = ()
+    compactions: tuple[dict[str, object], ...] = ()
 
     def to_json(self) -> dict[str, object]:
         """Return the snapshot form of these documents."""
@@ -34,12 +40,67 @@ class LiveDocs:
             "status": self.status,
             "activity": self.activity,
             "segments": [dict(segment) for segment in self.segments],
+            "compactions": [dict(entry) for entry in self.compactions],
         }
 
 
 def new_publisher_id() -> str:
     """Return a publisher id whose string order is its start order: zero-padded start milliseconds, then random hex."""
     return f"{time.time_ns() // 1_000_000:013d}-{secrets.token_hex(4)}"
+
+
+def fitted_tools(tools: tuple[dict[str, object], ...], *, bare: int) -> tuple[dict[str, object], ...]:
+    """Return the tool entries a frame shows: previews cut to the frame cap, and none on the oldest ``bare`` entries.
+
+    An entry that lost any of its previews says ``clipped``. A result that is a background job handle keeps the
+    handle, which clients read for the call's status. A bare entry is never bigger than its cut form, so a frame only
+    shrinks as ``bare`` grows.
+    """
+    fitted: list[dict[str, object]] = []
+    for index, entry in enumerate(tools):
+        shown = _fitted_entry(entry, bare=False)
+        if index < bare:
+            stripped = _fitted_entry(entry, bare=True)
+            if len(json.dumps(stripped, separators=(",", ":"))) < len(json.dumps(shown, separators=(",", ":"))):
+                shown = stripped
+        fitted.append(shown)
+    return tuple(fitted)
+
+
+def _fitted_entry(entry: dict[str, object], *, bare: bool) -> dict[str, object]:
+    previews = {key: text for key in _PREVIEW_KEYS if isinstance(text := entry.get(key), str)}
+    kept = {} if bare else {key: _clipped(text) for key, text in previews.items()}
+    handle = _job_handle(previews.get("result_preview"), whole=not bare)
+    if handle is not None:
+        kept["result_preview"] = handle
+    if kept == previews:
+        return entry
+    others = {key: value for key, value in entry.items() if key not in previews}
+    return {**others, **kept, "clipped": True}
+
+
+def _job_handle(text: str | None, *, whole: bool) -> str | None:
+    """Return the ``{job_id, tool, status}`` handle a result is, None for any other result.
+
+    With ``whole``, a result within the preview cap stays as it is; otherwise only those three fields are kept.
+    """
+    if text is None or not text.lstrip().startswith("{"):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(value, dict) or not all(isinstance(value.get(key), str) for key in ("job_id", "tool", "status")):
+        return None
+    if whole and len(text) <= _FRAME_PREVIEW_CHARACTERS:
+        return text
+    return json.dumps({key: value[key] for key in ("job_id", "tool", "status")})
+
+
+def _clipped(text: str) -> str:
+    if len(text) <= _FRAME_PREVIEW_CHARACTERS:
+        return text
+    return f"{text[: _FRAME_PREVIEW_CHARACTERS - 1]}…"
 
 
 def utf16_length(text: str) -> int:
@@ -90,6 +151,8 @@ def live_delta(before: LiveDocs, after: LiveDocs) -> dict[str, object]:
         delta["activity"] = after.activity
     if before.segments != after.segments:
         delta["segments"] = [dict(segment) for segment in after.segments]
+    if before.compactions != after.compactions:
+        delta["compactions"] = [dict(entry) for entry in after.compactions]
     return delta
 
 

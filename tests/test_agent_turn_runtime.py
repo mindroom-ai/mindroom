@@ -696,8 +696,8 @@ async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_it
 ) -> None:
     """A reply that fails on its first request records no partial text, though its input carries an earlier reply.
 
-    The thread's earlier reply reaches the run's input, and is stored with the run, as an assistant message no model
-    of this run answered.
+    The thread's earlier reply reaches the run's input, and is stored with the run, as a thread message from the
+    agent, so the run holds no assistant message a model of it did not answer.
     """
     reply = _reply(tmp_path, monkeypatch, [[_raising(RateLimited("slow down", provider="openai"))]])
     agent_id = entity_identity_registry(reply.config, reply.runtime_paths).current_ids["assistant"].full_id
@@ -712,8 +712,8 @@ async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_it
 
     assert "Rate limited" in text
     [failed] = replaced
-    stored_replies = [message for message in failed.messages if message.role == "assistant"]
-    assert ["green pixel" in str(message.content) for message in stored_replies] == [True]
+    assert [message.role for message in failed.messages if "green pixel" in str(message.content)] == ["user"]
+    assert not [message for message in failed.messages if message.role == "assistant"]
     assert reply.recorder.outcome == "interrupted"
     assert reply.recorder.assistant_text == ""
 
@@ -1690,6 +1690,41 @@ async def test_a_reply_posts_its_mid_turn_compaction_notices_and_seeds_no_earlie
     assert metadata is not None
     assert metadata["room_topic"] == "kept"
     assert [request["metrics"]["input_tokens"] for request in metadata[COMPACTED_REQUESTS_METADATA_KEY]] == [1_000_000]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_an_interrupted_record_leaves_out_the_calls_an_earlier_attempt_of_its_turn_folded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record of a turn cut short in a later attempt quotes no call a fold of an earlier attempt summarized.
+
+    The stored folds name the attempt that made them, so only the turn's recorder knows them once another attempt runs.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            # The first response reports a request far over the 4,000-token window, so the second request compacts.
+            calls(tool_call("touch", "call_1", label="FOLDED"), metrics=usage(1_000_000, 1)),
+            calls(_switch_now("call_2")),
+            [Await(_cancel_current_task)],
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+        context_window=4000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+
+    with pytest.raises(asyncio.CancelledError):
+        await _stream(reply)
+
+    [record] = [run for run in reply.storage.list_runs(SESSION_ID) if is_interrupted_replay_run(run)]
+    assert record.run_id != "run-1"
+    content = str(record.messages[-1].content)
+    assert "1 tool call(s) had finished" in content
+    assert "switch_thread_model" in content
+    assert "FOLDED" not in content
 
 
 @pytest.mark.asyncio

@@ -198,7 +198,10 @@ class TestAgentBot(AgentBotTestBase):
         ingestion_config = login_kwargs["config"]
         assert isinstance(ingestion_config, DurableSyncConfig)
         assert ingestion_config.sync_timeout_ms == 12_345
-        assert ingestion_config.sync_filter == {"room": {"timeline": {"limit": 5000}}}
+        assert ingestion_config.sync_filter == {
+            "presence": {"senders": []},
+            "room": {"timeline": {"limit": 5000}},
+        }
         # The owned ingestion pump is the sole durable source owner. The
         # public client keeps only compatibility callbacks; it must not retain
         # either of the superseded public sync/admission engines.
@@ -207,7 +210,7 @@ class TestAgentBot(AgentBotTestBase):
         assert mock_client.add_event_callback.call_args_list == [
             call(bot._room_lifecycle.on_invite, nio.InviteEvent),
             call(bot._room_lifecycle.on_space_child, nio.RoomSpaceChildEvent),
-            call(bot._on_thread_tag_state, nio.UnknownEvent),
+            call(bot._on_room_state_event, nio.UnknownEvent),
         ]
         assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member
 
@@ -316,7 +319,7 @@ class TestAgentBot(AgentBotTestBase):
             before_admission: object,
             after_admission: object,
             on_decryption_failure: object,
-            schedule_trigger_sender_is_managed: object,
+            sender_is_managed: object,
         ) -> None:
             assert after_sync == bot._on_ingestion_frame_completion
             assert after_ack == bot._ingestion_admission_progress.set
@@ -324,7 +327,7 @@ class TestAgentBot(AgentBotTestBase):
             assert wait_for_delivery_projection == bot._wait_for_delivery_projection
             assert after_admission == bot._after_ingestion_admission
             assert on_decryption_failure == bot._decryption_diagnostics.schedule
-            assert schedule_trigger_sender_is_managed == bot._ingress_validator.sender_is_trusted_for_ingress_metadata
+            assert sender_is_managed == bot._ingress_validator.sender_is_trusted_for_ingress_metadata
             pump_calls.append(
                 (
                     session,

@@ -26,6 +26,8 @@ DELEGATION_STATE_KEY = "mindroom_delegation"
 # The functions of the ``delegate`` toolkit, each of which runs one child turn.
 RUN_SUBAGENT = "run_subagent"
 CONTINUE_SUBAGENT = "continue_subagent"
+# What a child turn that a restart cut short is settled with, as failed.
+RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
 DELEGATION_FUNCTIONS = (RUN_SUBAGENT, CONTINUE_SUBAGENT)
 
 
@@ -181,6 +183,11 @@ class DelegationChild:
         fields: dict[str, Any] = dict(data)
         persona = fields.pop("persona")
         return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))
+
+
+def interrupted_by_restart(child: DelegationChild) -> bool:
+    """Return whether a restart cut the child's turn short, which only that settlement ends with this reason."""
+    return child.status == "failed" and child.result == RESTART_INTERRUPTION_REASON
 
 
 def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:

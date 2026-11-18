@@ -54,9 +54,9 @@ _COMMAND_DOCS = {
     CommandType.RELOAD_PLUGINS: ("/reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("/config <operation>", "Manage configuration"),
     CommandType.DESKTOP: ("/desktop [setup|status|confirm|rotate|disconnect]", "Manage your Desktop target"),
-    CommandType.MODEL: ("/model [name|list|reset]", "Show or switch the model used in the current thread"),
+    CommandType.MODEL: ("/model [name|name@level|list|reset]", "Show or switch the model used in the current thread"),
     CommandType.ROOM_MODEL: (
-        "/room_model [name|list|reset]",
+        "/room_model [name|name@level|list|reset]",
         "Show the room model default or switch it (set/reset require a room admin)",
     ),
     CommandType.THREAD_MODE: (
@@ -490,28 +490,30 @@ How it works:
     if topic == "model":
         return """**Model Command**
 
-Usage: `/model [name|list|reset]` - Show or switch the model used in the current thread
+Usage: `/model [name|name@level|list|reset]` - Show or switch the model used in the current thread
 
 **Examples:**
 - `/model` or `/model list` - Show the current thread's model overrides, each with the entities it applies to, and the available models
 - `/model opus` - Make the agents and teams you may address in this thread use the `opus` model
+- `/model sol@high` - Use `sol` at its `high` reasoning level, for a model whose config lists reasoning levels
 - `/model reset` - Remove the override of the agents and teams you may address so room-level model selection applies to them again
 
 How it works:
 - The override applies from the next message in the thread to the agents, teams, and router you may address
 - Every other entity keeps its own thread override or room-level model
-- Model names come from the `models:` section of config.yaml
+- Model names come from the `models:` section of config.yaml; `/model list` shows each model's reasoning levels
 - The override is scoped to one thread and survives restarts; other threads and rooms are unaffected
 - Use `/room_model` for a runtime room default, or `room_models` in config.yaml for an authored room default"""
 
     if topic in {"room_model", "room-model", "roommodel"}:
         return """**Room Model Command**
 
-Usage: `/room_model [name|list|reset]` - Show or switch the default model used in the current room
+Usage: `/room_model [name|name@level|list|reset]` - Show or switch the default model used in the current room
 
 **Examples:**
 - `/room_model` or `/room_model list` - Show the current room override and available models
 - `/room_model opus` - Make `opus` the default for every agent, team, and the router in this room
+- `/room_model sol@high` - Make `sol` at its `high` reasoning level the room default
 - `/room_model reset` - Remove the runtime override so the room default returns to configured room or entity models
 
 How it works:

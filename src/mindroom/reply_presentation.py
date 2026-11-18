@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from mindroom.reply_lifecycle import NoteKind
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
+    CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE,
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -91,6 +92,11 @@ def note_segment(kind: NoteKind, text: str | None = None) -> Segment:
         msg = f"Note kind {kind.value!r} needs explicit text"
         raise ValueError(msg)
     return Segment(kind="note", text=resolved, note=kind)
+
+
+def restart_note(*, config_change: bool = False) -> Segment:
+    """Return the note of a reply a restart cut short, which names a config reload that replaced only its agent."""
+    return note_segment(NoteKind.RESTART, CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE if config_change else None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +219,7 @@ def _shown_work(possibly_shown: Presentation) -> Segment | None:
     return _cut_short(Segment(kind="answer", text=text, tool_trace=trace))
 
 
-def after_restart(possibly_shown: Presentation) -> Presentation:
+def after_restart(possibly_shown: Presentation, *, config_change: bool = False) -> Presentation:
     """Return what a replay continues below: the shown work and the restart note, or nothing.
 
     A reply that showed only its placeholder is replaced rather than
@@ -222,7 +228,7 @@ def after_restart(possibly_shown: Presentation) -> Presentation:
     work = _shown_work(possibly_shown)
     if work is None:
         return replace(possibly_shown, segments=(), trailing_note=None)
-    return replace(possibly_shown, segments=(work, note_segment(NoteKind.RESTART)), trailing_note=None)
+    return replace(possibly_shown, segments=(work, restart_note(config_change=config_change)), trailing_note=None)
 
 
 def with_answer(presentation: Presentation, answer: Segment) -> Presentation:

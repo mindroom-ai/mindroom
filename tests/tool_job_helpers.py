@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 from mindroom.agent_loop.build import prompt_for_turn
@@ -123,6 +123,10 @@ async def _no_cleanup(_job: BackgroundJob) -> None:
     return None
 
 
+def _never_continues(_job: BackgroundJob) -> bool:
+    return False
+
+
 def always_owned(*_args: object, **_kwargs: object) -> bool:
     """Own every call's execution, as a turn with background jobs on does."""
     return True
@@ -163,12 +167,16 @@ class ProcessRuntime(ToolJobRuntime):
         grant: Callable[[BackgroundJob], JobGrant],
         authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
         cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
+        continues: Callable[[BackgroundJob], bool] = _never_continues,
+        reply_stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__(
             journal.tool_jobs(uuid4().hex),
             grant=grant,
             authorize_execution=authorize_execution,
             cancel=cancel,
+            continues=continues,
+            reply_stopped=reply_stopped,
         )
         self._journal = journal
 
@@ -255,16 +263,22 @@ async def tool_job_runtime(
     grant: Callable[[BackgroundJob], JobGrant] = _grant_all,
     authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None] = _allow_execution,
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
+    continues: Callable[[BackgroundJob], bool] = _never_continues,
+    reply_stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
 ) -> ProcessRuntime:
     """Start one process's runtime whose grants allow every job and call and whose adapters need no extra cleanup.
 
-    It owns the saved jobs, fencing any earlier runtime, but leaves restoring them to `recover`.
+    It owns the saved jobs, fencing any earlier runtime, but leaves restoring them to `recover`. With ``continues``
+    naming subagent jobs, as the coordinator's runtime does, it keeps those a restart stopped for
+    `continue_stopped_jobs`; without, every job a restart stops ends.
     """
     runtime = ProcessRuntime(
         tool_job_journal(storage_root),
         grant=grant,
         authorize_execution=authorize_execution,
         cancel=cancel,
+        continues=continues,
+        reply_stopped=reply_stopped,
     )
     await runtime._store.take_ownership()
     return runtime
@@ -708,6 +722,99 @@ def settle_stopped_subagent(
         cleanup=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
         runtime_paths=runtime_paths,
     )
+
+
+class ResolvingMembership(AgentReplyMembershipIndex):
+    """Room membership that is still resolving until a test proves it either way."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.state = "pending"
+
+    def is_current_room_member(
+        self,
+        sender_id: str,
+        room_id: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
+        """Return whether the test proved the sender a member."""
+        del sender_id, room_id, config, runtime_paths
+        return self.state == "member"
+
+    def grants_pending(
+        self,
+        config: Config,
+        *,
+        joined_rooms: Sequence[str],
+        current_room_id: str | None,
+    ) -> bool:
+        """Return whether membership is still resolving."""
+        del config, joined_rooms, current_room_id
+        return self.state == "pending"
+
+
+# The journal principal of the bot whose replies start the jobs `stopped_job_coordinator` continues.
+JOB_BOT_PRINCIPAL = "leader@test"
+
+
+def stopped_job_coordinator(
+    runtime: ProcessRuntime,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    context: ToolRuntimeContext | None,
+    *,
+    synced: bool = True,
+    joined: bool = True,
+    unavailable: bool = False,
+    memberships: AgentReplyMembershipIndex | None = None,
+) -> ToolJobRuntimeCoordinator:
+    """Return a coordinator over ``runtime`` whose one bot is a stand-in with the real journal principal.
+
+    ``context`` is the tool context the conversation's bot rebuilds, None for a bot without a Matrix client yet;
+    ``synced`` is whether that bot completed its first sync, ``joined`` whether it is still in the jobs' rooms, and
+    ``unavailable`` whether its start failed for good.
+    Access is the coordinator's own check of ``config`` and ``memberships``.
+    """
+    bot = MagicMock(running=True, first_sync_complete=synced, admit_job_follow_up=AsyncMock())
+    bot.tool_runtime_support.build_context.return_value = context
+    bot.client.rooms.__contains__.return_value = joined
+    bot.journal_principal.return_value = runtime.journal.principal(JOB_BOT_PRINCIPAL)
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _name: bot,
+        agent_reply_memberships=memberships or AgentReplyMembershipIndex(),
+        journal_provider=lambda: runtime.journal,
+        entity_unavailable=lambda _name: unavailable,
+    )
+    coordinator._runtime = runtime
+    return coordinator
+
+
+async def continue_stopped_jobs(
+    runtime: ProcessRuntime,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    context: ToolRuntimeContext | None,
+    *,
+    synced: bool = True,
+    joined: bool = True,
+    unavailable: bool = False,
+    memberships: AgentReplyMembershipIndex | None = None,
+) -> None:
+    """Run the coordinator's pass that continues or settles the subagent jobs a restart stopped."""
+    coordinator = stopped_job_coordinator(
+        runtime,
+        config,
+        runtime_paths,
+        context,
+        synced=synced,
+        joined=joined,
+        unavailable=unavailable,
+        memberships=memberships,
+    )
+    await coordinator._continue_stopped_jobs(runtime)
 
 
 def subagent_job_id(runtime: ToolJobRuntime, child: DelegationChild) -> str:

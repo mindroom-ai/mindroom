@@ -840,13 +840,13 @@ def test_decrypted_thread_tag_event_is_ignored() -> None:
     room = nio.MatrixRoom(ROOM, "@mindroom_router:localhost")
     observe = bot.orchestrator.thread_snooze.observe_state_event
 
-    AgentBot._on_thread_tag_state(bot, room, _tag_event(_snooze_source(), decrypted=True))
+    AgentBot._on_room_state_event(bot, room, _tag_event(_snooze_source(), decrypted=True))
     timeline_source = {key: value for key, value in _snooze_source().items() if key != "state_key"}
-    AgentBot._on_thread_tag_state(bot, room, _tag_event(timeline_source))
-    AgentBot._on_thread_tag_state(bot, room, _tag_event({**_snooze_source(), "type": "com.example.other"}))
+    AgentBot._on_room_state_event(bot, room, _tag_event(timeline_source))
+    AgentBot._on_room_state_event(bot, room, _tag_event({**_snooze_source(), "type": "com.example.other"}))
     observe.assert_not_called()
 
-    AgentBot._on_thread_tag_state(bot, room, _tag_event(_snooze_source()))
+    AgentBot._on_room_state_event(bot, room, _tag_event(_snooze_source()))
     observe.assert_called_once_with(ROOM, _snooze_source())
 
 
@@ -855,7 +855,7 @@ def test_thread_tag_callback_never_raises_into_nio() -> None:
     bot = MagicMock()
     bot.orchestrator.thread_snooze.observe_state_event.side_effect = RuntimeError("boom")
 
-    AgentBot._on_thread_tag_state(bot, nio.MatrixRoom(ROOM, "@mindroom_router:localhost"), _tag_event(_snooze_source()))
+    AgentBot._on_room_state_event(bot, nio.MatrixRoom(ROOM, "@mindroom_router:localhost"), _tag_event(_snooze_source()))
 
     bot.logger.exception.assert_called_once()
 

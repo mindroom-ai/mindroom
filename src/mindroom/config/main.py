@@ -44,7 +44,7 @@ from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents
 from mindroom.config.judgment import LLMJudgmentConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, RerankerConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphConfig
 from mindroom.config.legacy_access import (
     AccessMigrationError,
@@ -52,6 +52,7 @@ from mindroom.config.legacy_access import (
     persist_access_migration,
     validate_access_migration_source,
 )
+from mindroom.config.legacy_fields import rename_legacy_knowledge_reranker
 from mindroom.config.matrix import (
     EventJournalConfig,
     MatrixSpaceConfig,
@@ -66,6 +67,7 @@ from mindroom.config.models import (
     DebugConfig,
     DefaultsConfig,
     ModelConfig,
+    ModelTable,
     RouterConfig,
     ToolConfigEntry,
 )
@@ -155,6 +157,7 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.agent import RoomReplyMode
     from mindroom.config.personal_agents import PersonalAgentRoster
+    from mindroom.room_reply_modes import ReplyModeRead
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -407,9 +410,12 @@ class Config(BaseModel):
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
     )
-    knowledge_reranker: KnowledgeRerankerConfig | None = Field(
+    reranker: RerankerConfig | None = Field(
         default=None,
-        description="Optional reranker for search_knowledge_base results; searches keep hybrid ranking without one",
+        description=(
+            "Optional reranker for search_knowledge_base results, and for memory searches with memory.search.rerank; "
+            "searches keep hybrid ranking without one"
+        ),
     )
     mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict,
@@ -419,7 +425,12 @@ class Config(BaseModel):
         default_factory=ExternalTriggerPolicyConfig,
         description="Global policy for tool-managed signed external triggers",
     )
-    models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
+    # Validating the default turns it into a ``ModelTable`` too, so an omitted ``models`` still reads references.
+    models: dict[str, ModelConfig] = Field(
+        default_factory=dict,
+        validate_default=True,
+        description="Model configurations",
+    )
     tool_approval: ToolApprovalConfig = Field(
         default_factory=ToolApprovalConfig,
         description="Tool-approval rules for agent-initiated tool calls",
@@ -485,14 +496,17 @@ class Config(BaseModel):
 
     @field_validator("models")
     @classmethod
-    def validate_model_names(cls, models: dict[str, ModelConfig]) -> dict[str, ModelConfig]:
-        """Reject an empty model name, or one with a character its dashboard key ``model:<name>`` cannot carry."""
+    def validate_model_names(cls, models: dict[str, ModelConfig]) -> ModelTable:
+        """Reject an empty model name, or one with a character its dashboard key ``model:<name>`` cannot carry.
+
+        The names cannot carry ``@``, so the returned table reads ``name@level`` as the model at that level.
+        """
         invalid = sorted(name for name in models if not SERVICE_NAME_PATTERN.fullmatch(name))
         if invalid:
             keys = ", ".join(f"models.{name}" for name in invalid)
             msg = f"Model names can only include {SERVICE_NAME_CHARACTERS}; rename {keys} and update every reference"
             raise ValueError(msg)
-        return models
+        return ModelTable(models)
 
     @model_validator(mode="after")
     def validate_budgets(self) -> Config:
@@ -557,10 +571,10 @@ class Config(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_root_config(cls, data: object) -> object:
-        """Replace explicit YAML nulls in optional root sections and migrate retired access settings."""
+        """Replace explicit YAML nulls in optional root sections and migrate retired settings."""
         if not isinstance(data, dict):
             return data
-        normalized = cast("dict[str, Any]", data.copy())
+        normalized = rename_legacy_knowledge_reranker(cast("dict[str, Any]", data.copy()))
         for name in _OPTIONAL_SECTION_NAMES:
             if normalized.get(name) is None:
                 normalized[name] = {}
@@ -1699,9 +1713,17 @@ class Config(BaseModel):
         member_modes = {resolve_agent_thread_mode(self.agents[name], room_id, runtime_paths) for name in member_names}
         return next(iter(member_modes)) if len(member_modes) == 1 else "thread"
 
-    def get_room_reply_mode(self, runtime_paths: RuntimePaths, room_id: str) -> RoomReplyMode:
-        """Return one room's reply mode: its `!reply_mode` override, else its `rooms` entry, else `auto`."""
-        runtime_room_override = resolve_room_reply_mode_override(runtime_paths, room_id)
+    def get_room_reply_mode(
+        self,
+        runtime_paths: RuntimePaths,
+        room_id: str,
+        read: ReplyModeRead | None = None,
+    ) -> RoomReplyMode:
+        """Return one room's reply mode: its `reply_mode` room setting, else its `rooms` entry, else `auto`.
+
+        ``read`` is the setting a refresh just found, to decide by; without it, the runtime's copy of the setting.
+        """
+        runtime_room_override = resolve_room_reply_mode_override(runtime_paths, room_id) if read is None else read.mode
         if runtime_room_override is not None:
             return runtime_room_override
         room = resolve_room_scoped_value(self.rooms, room_id, runtime_paths)

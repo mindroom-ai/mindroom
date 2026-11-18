@@ -72,7 +72,12 @@ from mindroom.plugin_lifecycle import PluginLifespans
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, gather_shutdown_phase, run_process_shutdown_closers
+from mindroom.runtime_shutdown import (
+    CONFIG_RELOAD_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    gather_shutdown_phase,
+    run_process_shutdown_closers,
+)
 from mindroom.runtime_state import (
     clear_api_server_address,
     reset_runtime_state,
@@ -404,6 +409,7 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
             agent_reply_memberships=self.agent_reply_memberships,
             journal_provider=self.event_journal_store,
+            entity_unavailable=self.fleet.is_disabled,
         )
         self._thread_export_runner = WorkspaceThreadExportRunner(
             WorkspaceThreadExportDeps(
@@ -1361,7 +1367,7 @@ class _MultiAgentOrchestrator:
                     # Removal first, while the current router still delivers its approval notices
                     # and before a replacement router's orphan cleanup could kick the removed accounts.
                     unsettled_removals = await self.fleet.remove(plan.remove)
-                    await self.fleet.stop(plan.restart)
+                    await self.fleet.stop(plan.restart, intent=CONFIG_RELOAD_SHUTDOWN)
                 except BaseException:
                     if staged is not None:
                         dispose_plugins(staged.generation)

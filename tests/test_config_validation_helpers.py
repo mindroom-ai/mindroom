@@ -488,3 +488,22 @@ def test_a_room_mindroom_recorded_keeps_its_alias_and_key_after_its_key_leaves_t
     }
 
     assert Config.validate_with_runtime(authored, runtime_paths).agents["general"].rooms == ["#lobby:localhost"]
+
+
+def test_knowledge_reranker_key_still_loads() -> None:
+    """A config that still names the reranker `knowledge_reranker` loads it as `reranker`, and a save renames it."""
+    config = Config.model_validate({"knowledge_reranker": {"provider": "cohere", "model": "rerank-v3.5"}})
+
+    assert config.reranker == KnowledgeRerankerConfig(provider="cohere", model="rerank-v3.5")
+    assert config.reranker.threshold == 0.5
+    dumped = config.model_dump(exclude_unset=True)
+    assert "knowledge_reranker" not in dumped
+    assert dumped["reranker"] == {"provider": "cohere", "model": "rerank-v3.5"}
+
+
+def test_both_reranker_keys_rejected() -> None:
+    """Setting both the retired and the current reranker key fails, naming both."""
+    reranker = {"provider": "cohere", "model": "rerank-v3.5"}
+
+    with pytest.raises(ValidationError, match=r"'knowledge_reranker'.*'reranker'"):
+        Config.model_validate({"knowledge_reranker": reranker, "reranker": reranker})

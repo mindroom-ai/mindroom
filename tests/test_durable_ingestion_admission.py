@@ -17,7 +17,7 @@ from nio.durable import RecordKind, SyncBatch, SyncRecord
 from nio.durable.codec import restore_event
 from nio.durable.model import CryptoEvidence, OwnMembership
 
-from mindroom.constants import STREAM_STATUS_KEY
+from mindroom.constants import AGENT_AUTHORED_KEY, STREAM_STATUS_KEY
 from mindroom.event_journal import (
     AdmissionFacts,
     DeliveryProjectionPendingError,
@@ -39,7 +39,10 @@ from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch, valid
 from mindroom.matrix.journal_ingress import parse_journal_event
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.pending_event_worker import PendingEventWorker
+from tests import test_event_journal_store as event_journal_store_tests
 from tests.journal_helpers import membership_position
+from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -66,6 +69,18 @@ def message(event_id: str) -> SyncRecord:
         },
         provenance=nio.TimelineEventProvenance.LIVE,
     )
+
+
+def own_streaming_edit(event_id: str) -> SyncRecord:
+    """Return this bot's own in-progress streaming edit, which ingestion skips as transport progress."""
+    source = message(event_id).source | {
+        "sender": ACCOUNT,
+        "content": {
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            "m.new_content": {"msgtype": "m.text", "body": "...", STREAM_STATUS_KEY: "streaming"},
+        },
+    }
+    return replace(message(event_id), source=source)
 
 
 class Session:
@@ -98,6 +113,35 @@ async def principal_for(store: EventJournalStore, stream: UUID) -> PrincipalStor
     return principal
 
 
+class ScriptedSession(Session):
+    """Hand out each batch once the one before it is acknowledged, then go idle for good."""
+
+    def __init__(self, batches: list[SyncBatch]) -> None:
+        super().__init__(batches[0])
+        self.batches = batches
+        self.idle = asyncio.Event()
+
+    async def next_batch(self) -> SyncBatch | None:
+        return self.batches[len(self.acked)] if len(self.acked) < len(self.batches) else None
+
+    async def wait_for_work(self) -> None:
+        self.idle.set()
+        await asyncio.Event().wait()
+
+
+def signal_each_scan(worker: PendingEventWorker, monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
+    """Return an event set after each scan of ``worker`` completes."""
+    scanned = asyncio.Event()
+    dispatch = worker._dispatch_ready_rooms
+
+    async def dispatch_and_signal() -> None:
+        await dispatch()
+        scanned.set()
+
+    monkeypatch.setattr(worker, "_dispatch_ready_rooms", dispatch_and_signal)
+    return scanned
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
 async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
@@ -109,7 +153,6 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
     batch = SyncBatch(uuid4(), 1, (message("$interrupted"),))
     principal = await principal_for(journal_database(), batch.stream_id)
     session = Session(batch)
-    worker_idle = asyncio.Event()
     pump_idle = asyncio.Event()
     handled = asyncio.Event()
 
@@ -118,13 +161,7 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
         return True
 
     worker = PendingEventWorker(store=principal, handle=handle)
-    dispatch = worker._dispatch_ready_rooms
-
-    async def dispatch_and_signal() -> None:
-        await dispatch()
-        worker_idle.set()
-
-    monkeypatch.setattr(worker, "_dispatch_ready_rooms", dispatch_and_signal)
+    worker_idle = signal_each_scan(worker, monkeypatch)
 
     async def interrupt_after_commit(
         _record: IngestionRecordAdmission,
@@ -169,6 +206,152 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
         if retry is not None:
             retry.cancel()
             await asyncio.gather(retry, return_exceptions=True)
+        await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_pump_wakes_the_dispatcher_at_once_only_for_new_actionable_work_or_a_replay(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """Within the recheck interval, an empty sync, the bot's own streaming edit or a redelivered event wakes nothing."""
+    stream = uuid4()
+    principal = await principal_for(journal_database(), stream)
+    redelivered = SyncBatch(stream, 4, (message("$new"),))
+    batches = [
+        SyncBatch(stream, 1, ()),
+        SyncBatch(stream, 2, (own_streaming_edit("$progress"),)),
+        SyncBatch(stream, 3, (message("$new"),)),
+        redelivered,
+        # The same batch again: acknowledging it may finish a commit whose wake was lost.
+        redelivered,
+    ]
+    session = ScriptedSession(batches)
+    wakes: list[int] = []
+    pump = asyncio.create_task(
+        durable_ingestion.run_ingestion_pump(
+            session,
+            principal,
+            account_id=ACCOUNT,
+            wait_for_work=session.wait_for_work,
+            wake_semantic_dispatch=lambda: wakes.append(len(session.acked)),
+        ),
+    )
+    try:
+        await asyncio.wait_for(session.idle.wait(), 1)
+    finally:
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+    assert session.acked == batches
+    assert await principal.load_event("$progress") is None
+    assert wakes == [3, 5]
+
+
+@pytest.mark.asyncio
+async def test_pump_counts_the_recheck_from_the_last_wake(
+    journal_database: Callable[[], EventJournalStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch that brings nothing right after a wake waits a whole interval, however long the pump has run."""
+    monkeypatch.setattr(durable_ingestion, "_RECHECK_SECONDS", 0.5)
+    stream = uuid4()
+    principal = await principal_for(journal_database(), stream)
+
+    class Late(ScriptedSession):
+        async def next_batch(self) -> SyncBatch | None:
+            if not self.acked:
+                # The pump has been running for longer than one interval when the new event arrives.
+                await asyncio.sleep(0.6)
+            return await super().next_batch()
+
+    session = Late([SyncBatch(stream, 1, (message("$new"),)), SyncBatch(stream, 2, ())])
+    wakes: list[int] = []
+    woken_at: list[float] = []
+    rechecked = asyncio.Event()
+
+    def wake() -> None:
+        wakes.append(len(session.acked))
+        woken_at.append(asyncio.get_running_loop().time())
+        if len(wakes) == 2:
+            rechecked.set()
+
+    pump = asyncio.create_task(
+        durable_ingestion.run_ingestion_pump(
+            session,
+            principal,
+            account_id=ACCOUNT,
+            wait_for_work=session.wait_for_work,
+            wake_semantic_dispatch=wake,
+        ),
+    )
+    try:
+        await asyncio.wait_for(session.idle.wait(), 2)
+        assert wakes == [1]
+        await asyncio.wait_for(rechecked.wait(), 2)
+    finally:
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+    assert wakes == [1, 2]
+    assert 0.45 <= woken_at[1] - woken_at[0] < 0.9
+
+
+@pytest.mark.asyncio
+async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batches_that_bring_nothing(
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A departing router fails an agent's paused approval without waking it; the agent's next syncs lead to a wake.
+
+    The syncs arrive before the recheck is due and then stop, so only the scheduled wake can find the source.
+    """
+    approvals = event_journal_store_tests.TestApprovalContinuations
+    alice = journal_store.principal("agent@alice")
+    router = journal_store.principal("router@shared")
+    await approvals.admit_sources(alice)
+    await paused_for_approval(alice, replace(approvals.continuation(state="waiting"), runtime_generation="runtime-a"))
+    await approvals.remember_card(router)
+    stream = uuid4()
+    consumer = await alice.load_or_create_ingestion_consumer(new_generation=uuid4())
+    await alice.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
+    monkeypatch.setattr(durable_ingestion, "_RECHECK_SECONDS", 1.0)
+    handed: list[str] = []
+    handed_over = asyncio.Event()
+
+    async def handle(event: JournalEvent) -> bool:
+        handed.append(event.event_id)
+        handed_over.set()
+        return True
+
+    worker = PendingEventWorker(store=alice, handle=handle, runtime_generation="runtime-a")
+    scanned = signal_each_scan(worker, monkeypatch)
+    batches = [SyncBatch(stream, 1, ()), SyncBatch(stream, 2, ())]
+    session = ScriptedSession(batches)
+    worker.start()
+    pump: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(scanned.wait(), 1)
+        assert handed == []
+        await admit_room_membership(router, ROOM, "leave")
+        started = asyncio.get_running_loop().time()
+        pump = asyncio.create_task(
+            durable_ingestion.run_ingestion_pump(
+                session,
+                alice,
+                account_id=ACCOUNT,
+                wait_for_work=session.wait_for_work,
+                wake_semantic_dispatch=worker.wake,
+            ),
+        )
+        await asyncio.wait_for(session.idle.wait(), 1)
+        assert session.acked == batches
+        assert handed == []
+        await asyncio.wait_for(handed_over.wait(), 5)
+        assert handed == ["$source-1"]
+        # The pump woke the dispatcher one interval after it started, not at once and not much later.
+        assert 1.0 <= asyncio.get_running_loop().time() - started < 1.9
+    finally:
+        if pump is not None:
+            pump.cancel()
+            await asyncio.gather(pump, return_exceptions=True)
         await worker.stop()
 
 
@@ -321,6 +504,42 @@ async def test_redaction_naming_no_event_settles_and_later_input_is_delivered(
     assert session.acked == [batch]
     assert session.dispatched == [redaction]
     assert [event.event_id for event in await principal.pending()] == ["$valid"]
+
+
+@pytest.mark.asyncio
+async def test_a_marked_message_is_kept_as_history_and_never_dispatched(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """A person's message an agent wrote is settled at admission, so no drain or restart can replay it as work."""
+    agent = "@mindroom_helper:example.org"
+    marked = message("$marked")
+    marked.source["content"][AGENT_AUTHORED_KEY] = agent
+    batch = SyncBatch(uuid4(), 1, (marked,))
+    principal = await principal_for(journal_database(), batch.stream_id)
+    session = Session(batch)
+    handled: list[str] = []
+
+    async def handle(event: JournalEvent) -> bool:
+        handled.append(event.event_id)
+        return True
+
+    await consume_one_ingestion_batch(
+        session,
+        principal,
+        account_id=ACCOUNT,
+        sender_is_managed=lambda sender: sender == agent,
+    )
+
+    stored = await principal.load_event("$marked")
+    assert stored is not None
+    assert stored.source == {}
+    assert not await principal.is_pending("$marked")
+    assert await PendingEventWorker(store=principal, handle=handle).drain_once() == 0
+    assert handled == []
+    page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+    assert [(visible.logical_event_id, visible.content["body"]) for visible in page.messages] == [("$marked", "hello")]
+    assert session.dispatched == []
+    assert session.acked == [batch]
 
 
 @pytest.mark.asyncio
