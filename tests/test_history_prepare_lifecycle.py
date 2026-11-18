@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -23,6 +23,7 @@ from mindroom.history.replay import (
     estimate_summary_tokens,
     prompt_visible_history,
 )
+from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
 from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer, request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
@@ -91,6 +92,7 @@ from tests.providers.openai_family_support import responses_adapter
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delivery_gateway import MatrixCompactionLifecycle
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
@@ -1319,6 +1321,128 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         outcome = completed_outcome(lifecycle)
         assert outcome.summary == first_summary_text
         assert outcome.compacted_run_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_chunk", [1, 2])
+async def test_a_failed_reply_compaction_records_the_runs_its_stored_chunks_folded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_chunk: int,
+) -> None:
+    """A failed entry carries ``compacted_run_count`` exactly when earlier chunks stood: a partial fold.
+
+    A failure on the first chunk folded nothing, and its entry has no count.
+    """
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-3",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+        ],
+    )
+    seed_session(storage, session)
+    history_settings = config.resolve_scope("test_agent").history_settings
+    visible_runs = list(session.runs)
+    first_summary_text = "first pass summary"
+
+    summary_input_budget = next(
+        budget
+        for budget in range(1, 10_000)
+        if _included_run_count(None, visible_runs, budget) == 2
+        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+    )
+    after_first_session = _session(
+        "session-1",
+        runs=visible_runs[2:],
+        summary=ScopeSummary(text=first_summary_text, updated_at=datetime.now(UTC)),
+    )
+    replay_budget = estimate_prompt_visible_history_tokens(
+        session=after_first_session,
+        history_settings=history_settings,
+        model=estimate_only_model(),
+    )
+
+    execution_plan = _compaction_plan(
+        trigger_history=replay_budget,
+        limit_history=replay_budget,
+        summary_input_budget=summary_input_budget,
+    )
+
+    async def summarize(**_kwargs: object) -> str:
+        if summary_mock.await_count < failing_chunk:
+            return first_summary_text
+        msg = "summary failed"
+        raise RuntimeError(msg)
+
+    summary_mock = AsyncMock(side_effect=summarize)
+
+    install_model_providers(monkeypatch, {"summary-model": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=summary_mock,
+    ):
+        recorder = ReplyCompactions()
+        lifecycle = ReplyCompactionLifecycle(
+            recorder,
+            cast("MatrixCompactionLifecycle", RecordingCompactionLifecycle()),
+        )
+        prepared = await prepare_history_for_run_for_test(
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            compaction_lifecycle=lifecycle,
+            history_settings=history_settings,
+            execution_plan=execution_plan,
+        )
+
+    persisted = storage.load_session("session-1")
+    assert persisted is not None
+    assert prepared.compaction_reply_outcome == "failed"
+    content = recorder.content()
+    assert content is not None
+    [entry] = content
+    assert entry["mode"] == "auto"
+    assert entry["status"] == "failed"
+    assert "runs_remaining" not in entry
+    if failing_chunk == 1:
+        assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
+        assert "compacted_run_count" not in entry
+        assert "after_tokens" not in entry
+    else:
+        assert [run.run_id for run in persisted.runs] == ["run-3"]
+        assert entry["compacted_run_count"] == 2
+        assert isinstance(entry["after_tokens"], int)
 
 
 @pytest.mark.asyncio

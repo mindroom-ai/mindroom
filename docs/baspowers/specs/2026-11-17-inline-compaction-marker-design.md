@@ -40,9 +40,9 @@ New key on the agent's reply event, on the original send and on every `m.replace
     "after_tokens": 6336,         // optional; present on success (and progress)
     "history_budget_tokens": 351792, // optional
     "runs_before": 24,
-    "compacted_run_count": 24,    // optional; present on success (and progress)
+    "compacted_run_count": 24,    // optional; present on success (and progress); on failed/timeout it means a partial fold
     "runs_remaining": 15,         // optional; only while running
-    "failure_reason": "..."       // optional; only on failed/timeout
+    "failure_reason": "..."       // optional; only on failed/timeout; at most 300 characters plus "…"
   }
 ]
 ```
@@ -52,6 +52,8 @@ New key on the agent's reply event, on the original send and on every `m.replace
 - Live frames (`io.mindroom.live`) carry the same list as `compactions` in snapshots and, whole-list replace, in deltas (like `segments`). Frame version stays 1 (additive).
 - Split (segmented) replies carry the key on the first segment only.
 - The old key `io.mindroom.compaction` (singular) keeps its meaning: a standalone `m.notice`. It is still sent for `mode == "manual"` compactions, and old events keep it.
+
+Partial fold: a pre-turn compaction stores each chunk before summarizing the next, so a failure after the first chunk leaves those runs folded. Such a failed or timed-out entry keeps `compacted_run_count` (> 0) and `after_tokens` from its last progress; one that folded nothing has no `compacted_run_count`. "kept full history" copy fits only the latter.
 
 Client tolerance: parse defensively. Drop an entry that lacks a string `id`, a known `status`, a non-negative integer `after_tool`, or a number `before_tokens`; ignore unknown keys; a missing or malformed list means no seams. An entry still `running` on a reply whose `io.mindroom.stream_status` is terminal (or no longer streaming) renders as interrupted (failed styling, label "Compaction interrupted · kept full history", card reason "The reply ended before the summary finished."), never ticking forever.
 
