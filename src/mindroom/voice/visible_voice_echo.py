@@ -55,10 +55,7 @@ class VisibleVoiceEchoLifecycle:
         target: MessageTarget,
         transcript: PreparedIngress,
     ) -> None:
-        """Return once the transcript is in the room, or when none is posted; raise when it could not be sent.
-
-        The caller holds the reply decision's admission, so the config read here stays the one it decided on.
-        """
+        """Return once the transcript is in the room, or when none is posted; raise when it could not be sent."""
         content = transcript.source["content"]
         # A contact room takes only the sends its message policy approved, and no transcript is one.
         unposted = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True or send_refused(room_id)
@@ -95,5 +92,4 @@ class VisibleVoiceEchoLifecycle:
                 msg = "The voice transcript could not be sent"
                 raise RuntimeError(msg)
             await self.turn_store.record_visible_echo(room_id, source_event_id, event_id)
-            await self.turn_store.record_finalized_visible_echo(source_event_id, event_id, is_fallback=False)
             posting.notify_all()
