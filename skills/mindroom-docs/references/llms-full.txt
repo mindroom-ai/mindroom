@@ -2713,9 +2713,10 @@ MindRoom sends the level in the setting the provider reads, and the block wins o
 
 | Provider | A level `L` | `off` |
 |----------|-------------|-------|
-| `openai`, `codex`, `azure`, `openrouter`, `zai`, `llama_cpp`, `kimi` | `reasoning_effort: L` | `reasoning_effort: none` |
+| `openai`, `codex`, `azure`, `openrouter`, `llama_cpp`, `kimi` | `reasoning_effort: L` | `reasoning_effort: none` |
+| `zai` | `reasoning_effort: L` | `extra_body.thinking: {type: disabled}`, no `reasoning_effort` |
 | `deepseek` | `reasoning_effort: L`, `use_thinking: true` | `use_thinking: false` |
-| `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L` | `thinking: {type: disabled}` |
+| `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L`, and an authored `thinking: {type: disabled}` is dropped | `thinking: {type: disabled}`, and an authored `output_config.effort` is dropped |
 | `google` | `thinking_level: L` | `thinking_budget: 0` |
 | `ollama` | `think: L` | `think: false` |
 

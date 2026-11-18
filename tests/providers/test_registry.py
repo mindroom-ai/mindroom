@@ -771,6 +771,36 @@ async def test_a_model_reference_at_a_level_sends_that_level(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "authored", "sent", "absent"),
+    [
+        ("zai", {"reasoning_effort": "high"}, {"thinking": {"type": "disabled"}}, "reasoning_effort"),
+        ("anthropic", {"output_config": {"effort": "xhigh"}}, {"thinking": {"type": "disabled"}}, "output_config"),
+    ],
+)
+async def test_off_sends_the_route_s_thinking_switch_without_an_effort(
+    provider: str,
+    authored: dict[str, Any],
+    sent: dict[str, Any],
+    absent: str,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    levels = {"levels": ["off", "high"], "default": "high"}
+    model = ModelConfig(provider=provider, id="m", api_key="sk-config", reasoning=levels, extra_kwargs=authored)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model}), runtime_paths, "target@off"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert _sends(wire.body(), sent), wire.body()
+    assert absent not in wire.body()
+
+
+@pytest.mark.asyncio
 async def test_a_model_reference_at_a_level_uses_the_dashboard_key_of_its_model(
     runtime_paths: RuntimePaths,
     wire: Wire,

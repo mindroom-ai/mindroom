@@ -149,7 +149,8 @@ def _applied(provider: str, level: str, extra_kwargs: dict[str, Any] | None = No
         ("openai_codex", "off", {"reasoning_effort": "none"}),
         ("azure", "low", {"reasoning_effort": "low"}),
         ("openrouter", "max", {"reasoning_effort": "max"}),
-        ("zai", "off", {"reasoning_effort": "none"}),
+        ("zai", "high", {"reasoning_effort": "high"}),
+        ("zai", "off", {"extra_body": {"thinking": {"type": "disabled"}}}),
         ("llama_cpp", "medium", {"reasoning_effort": "medium"}),
         ("kimi", "high", {"reasoning_effort": "high"}),
         ("deepseek", "high", {"reasoning_effort": "high", "use_thinking": True}),
@@ -182,6 +183,54 @@ def test_the_level_wins_over_the_same_key_and_keeps_every_other_one() -> None:
         "thinking_budget": 0,
         "include_thoughts": True,
     }
+
+
+def test_a_claude_level_drops_the_authored_setting_it_conflicts_with() -> None:
+    """``off`` drops an authored effort, which Claude rejects beside disabled thinking; a level drops disabled thinking."""
+    output_config = {"effort": "xhigh", "format": {"type": "json_schema"}}
+    assert _applied("anthropic", "off", {"output_config": output_config, "max_tokens": 9}) == {
+        "output_config": {"format": {"type": "json_schema"}},
+        "thinking": {"type": "disabled"},
+        "max_tokens": 9,
+    }
+    assert _applied("anthropic", "off", {"output_config": {"effort": "low"}}) == {"thinking": {"type": "disabled"}}
+    assert _applied("vertexai_claude", "low", {"thinking": {"type": "disabled"}, "max_tokens": 9}) == {
+        "output_config": {"effort": "low"},
+        "max_tokens": 9,
+    }
+    assert _applied("anthropic", "low", {"thinking": {"type": "enabled", "budget_tokens": 2048}}) == {
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
+        "output_config": {"effort": "low"},
+    }
+    raw = {"request_params": {"thinking": {"type": "disabled"}}}
+    assert _applied("anthropic", "low", raw) == {**raw, "output_config": {"effort": "low"}}
+
+
+def test_zai_off_keeps_the_authored_extra_body() -> None:
+    assert _applied(
+        "zai",
+        "off",
+        {"reasoning_effort": "high", "extra_body": {"thinking": {"type": "enabled"}, "x": 1}},
+    ) == {
+        "extra_body": {"thinking": {"type": "enabled"}, "x": 1},
+    }
+    assert _applied("zai", "off", {"extra_body": {"x": 1}}) == {
+        "extra_body": {"thinking": {"type": "disabled"}, "x": 1},
+    }
+
+
+@pytest.mark.parametrize("output_config", ["high", True])
+def test_a_claude_output_config_that_is_no_mapping_fails_config_load_naming_it(
+    output_config: object,
+    runtime_paths: RuntimePaths,
+) -> None:
+    model = {"provider": "anthropic", "id": "m", "reasoning": _LEVELS, "extra_kwargs": {"output_config": output_config}}
+
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"models\.claude: extra_kwargs\.output_config must be a mapping",
+    ):
+        Config.validate_with_runtime({"models": {"claude": model}}, runtime_paths)
 
 
 def test_a_model_without_the_block_is_unchanged() -> None:
