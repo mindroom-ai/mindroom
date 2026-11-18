@@ -287,8 +287,9 @@ pip_install_package("rich")
 Every `old_text` matches the file as it was before the call, not the results of the other edits, and must match exactly one place unless its edit sets `replace_all`; whitespace and quote differences are tolerated.
 Edits must not overlap, and when one fails none is written: the error names the edit, lists the lines of an `old_text` that matches several places, and shows the closest line of one that matches none.
 On success it returns the lines each edit changed in the new file, numbered as `read_file()` numbers them, not a diff.
-A file whose lines all end in CRLF keeps CRLF whichever ending `old_text` and `new_text` use, a file with mixed endings keeps each line's own, and a byte order mark stays.
-`edit_file()` and `write_file()` calls on files in one directory run one after another, from any thread or worker process, so no edit is lost to another call's write.
+In a file whose lines all end in CRLF, `old_text` and `new_text` may use LF or CRLF and the file keeps CRLF, unless the file or an edit holds a lone CR; then, as with mixed endings, the file is matched and edited byte for byte.
+A byte order mark stays out of matching and stays in the file, also when `old_text` or `new_text` copies it.
+`edit_file()` and `write_file()` calls on files in one directory run one after another, from any thread or worker process, so no edit is lost to another call's write; a directory the agent may enter but not read cannot hold that lock, so calls there run unlocked.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
 Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
