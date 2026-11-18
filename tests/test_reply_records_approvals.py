@@ -1145,3 +1145,29 @@ async def test_a_second_pause_inside_an_open_ui_block_shows_what_the_resume_show
         shown = list(dict.fromkeys(body for body in _sent_bodies(bot) if body != "Thinking..."))
         assert shown == [_UI_CHART_SHOWN, f"{_UI_CHART_SHOWN}\n\nA second chart:", f"{_UI_CHART_SHOWN}\n\nBoth read."]
         assert [_widget_ids(content) for content in _sent_contents(bot)[-2:]] == [["df4d729a5d"]] * 2
+
+
+@pytest.mark.parametrize("streams", [True, False], ids=["streamed", "collected"])
+async def test_an_open_ui_block_keeps_the_marker_of_the_call_a_pause_asks_about(tmp_path: Path, streams: bool) -> None:
+    """A tool call shown inside an open `ui` block stays shown: the block is left as written, and the reply pauses."""
+
+    async def pausing_on_its_call(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield _UI_CHART_REPLY + _OPEN_UI_BLOCK
+        yield ToolStarted(ReportedCall(tool_call_id="call-run-1", tool_name="read_document", tool_args={}))
+        raise ResponsePausedForApproval(_paused())
+
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        bot.config.defaults.show_tool_calls = True
+        bot.config.agents["general"].ui_widgets = True
+        with patch_response_runner_module(
+            stream_agent_response=pausing_on_its_call,
+            should_use_streaming=AsyncMock(return_value=streams),
+            typing_indicator=_noop_typing,
+        ):
+            await unwrap_extracted_collaborator(bot._response_runner).generate_response(_plain_request(_target()))
+
+        assert (await _reply(bot)).state is rl.ReplyState.PAUSED
+        paused = _sent_bodies(bot)[-1]
+        assert paused.startswith(_UI_CHART_SHOWN)
+        assert paused.rstrip().endswith('```ui\n{"type":"chart",\n\n🔧 `read_document` [1] ⏳')
+        assert _widget_ids(_sent_contents(bot)[-1]) == ["df4d729a5d"]

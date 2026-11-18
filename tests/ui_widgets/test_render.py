@@ -219,6 +219,10 @@ def test_without_open_ui_fence() -> None:
     assert without_open_ui_fence(inside_another) is inside_another
     prose = "No fence here."
     assert without_open_ui_fence(prose) is prose
+    # A tool call's marker inside the open block would go with it, so that block stays as written.
+    with_a_call = f"{closed}\n\n{OPEN}\n\n🔧 `read_document` [1] ⏳"
+    assert without_open_ui_fence(with_a_call) is with_a_call
+    assert render_ui_widgets(with_a_call, in_progress=True).text.endswith(f"{OPEN}\n\n🔧 `read_document` [1] ⏳")
 
 
 def test_text_a_stream_already_rendered_gets_its_widgets_from_the_text_as_written() -> None:

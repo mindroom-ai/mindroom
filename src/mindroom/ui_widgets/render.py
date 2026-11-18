@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.message_builder import fenced_code_blocks
+from mindroom.tool_system.events import is_visible_tool_marker_line
 from mindroom.ui_widgets.models import Chart, parse_widget
 
 if TYPE_CHECKING:
@@ -128,7 +129,8 @@ def _ui_fences(lines: list[str]) -> tuple[list[tuple[int, int]], int | None, set
         # An open top-level fence runs to the last line, which then is not a closing fence.
         if end - 1 > start and re.fullmatch(f" {{0,3}}{fence}{fence[0]}*[ \t]*", lines[end - 1]):
             closed.append((start, end - 1))
-        else:
+        elif not any(is_visible_tool_marker_line(line) for line in lines[start:]):
+            # A block that holds a tool call's marker stays as written: cutting it would hide the call.
             open_at = start
     return closed, open_at, marker_ids
 
