@@ -121,7 +121,9 @@ def _summary_model(
     input_budget_tokens: int,
 ) -> SummaryModel:
     model = _load_compaction_model(config, runtime_paths, model_name)
-    reasoning = config.models[model_name].reasoning
+    # Loading the model already rejected a name the config lacks, so only a stand-in loader gets past it with one.
+    model_config = config.models.get(model_name)
+    reasoning = model_config.reasoning if model_config is not None else None
     return SummaryModel(
         model=model,
         name=model_name,
