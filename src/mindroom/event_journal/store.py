@@ -20,6 +20,7 @@ from . import (
     reads,
     replies,
     room_claims,
+    routing_handoffs,
     tool_jobs,
     turn_rows,
 )
@@ -29,6 +30,7 @@ from .models import (
     IngestionConsumer,
     IngestionConsumerBindingError,
 )
+from .routing_handoffs import RoutingHandoff  # noqa: TC001 - part of this module's runtime return types
 from .tool_jobs import SavedToolJob  # noqa: TC001 - part of this module's runtime return types
 from .views import (
     ApprovalDeliveryView,
@@ -157,6 +159,10 @@ class PrincipalStore(
         """Atomically transfer the oldest eligible selection to one text source."""
         return await self._write(interactive_questions.claim_text, source_event_id=source_event_id)
 
+    async def accept_routing_handoff(self, event: InboundEvent) -> None:
+        """Take a routing handoff, as the journal event its ID names, into this bot's journal; again changes nothing."""
+        await self._write(routing_handoffs.accept, event)
+
     async def deleted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
         """Return which of these events are deleted: redacted, or answering for a relayed message that was."""
         return await self._read(_deleted_events, room_id, event_ids)
@@ -262,6 +268,22 @@ class EventJournalStore:
         """Return the saved owner of each of these room events that has one for ``purpose``."""
         return await self.backend.read(
             lambda transaction: room_claims.claims(transaction, room_id, event_ids, purpose),
+        )
+
+    async def hold_routing_lane(self, room_id: str, owner: str) -> int:
+        """Make ``owner`` the room's routing-lane owner; return the lane's generation, which grows with each change."""
+        return await self.backend.write(lambda transaction: routing_handoffs.hold_lane(transaction, room_id, owner))
+
+    async def save_routing_handoff(self, handoff: RoutingHandoff, *, owner: str, generation: int) -> None:
+        """Save one handoff as the lane's owner at ``generation``; ``StaleLaneOwnerError`` once another bot took it."""
+        await self.backend.write(
+            lambda transaction: routing_handoffs.save(transaction, handoff, owner=owner, generation=generation),
+        )
+
+    async def routing_handoffs(self, room_id: str, source_event_ids: Sequence[str]) -> tuple[RoutingHandoff, ...]:
+        """Return the handoffs of these sources and the room's handoffs no recipient holds yet, oldest first."""
+        return await self.backend.read(
+            lambda transaction: routing_handoffs.for_turn(transaction, room_id, source_event_ids),
         )
 
     async def generation(self, *, new_generation: str) -> str:

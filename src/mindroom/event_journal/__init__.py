@@ -78,6 +78,7 @@ from .models import (
 )
 from .outbox import matrix_delivery_payload
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
+from .routing_handoffs import RoutingHandoff, StaleLaneOwnerError
 from .scheduled_approvals import (
     SCHEDULED_APPROVAL_WINDOW_NS,
     ScheduledApprovalArmState,
@@ -166,6 +167,7 @@ __all__ = [
     "RoomHistoryRecovery",
     "RoomMembershipPosition",
     "RoomPage",
+    "RoutingHandoff",
     "SavedToolJob",
     "ScheduledApprovalArmState",
     "ScheduledCall",
@@ -174,6 +176,7 @@ __all__ = [
     "ScheduledCallOutcome",
     "ScheduledCallRefusal",
     "SemanticConsumer",
+    "StaleLaneOwnerError",
     "ToolJobExistsError",
     "ToolJobOwnershipLostError",
     "ToolJobStore",

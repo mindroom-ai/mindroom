@@ -588,6 +588,30 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS routing_lanes (
+        -- Which bot owns each room's routing lane. The generation grows
+        -- whenever the owner changes, so a bot that lost the lane cannot
+        -- save a handoff it decided before the change.
+        room_id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        generation BIGINT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS routing_handoffs (
+        -- One turn a room's lane owner handed to a responder. The payload
+        -- rebuilds the prepared turn until the recipient holds it in its own
+        -- journal; it is NULL from then on, and for a turn nobody fits.
+        handoff_id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        source_event_ids_json TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        generation BIGINT NOT NULL,
+        payload_json TEXT,
+        created_at_ns BIGINT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS journal_identity (
         -- Stable database identity checked against the install's journal
         -- binding before opening its turn, delivery, and recovery state.
@@ -710,6 +734,9 @@ _INDEXES = (
     """,
     """
     CREATE INDEX IF NOT EXISTS approval_cards_room ON approval_cards (principal_id, room_id) WHERE retired = 0
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS routing_handoffs_pending ON routing_handoffs (room_id) WHERE payload_json IS NOT NULL
     """,
     """
     CREATE INDEX IF NOT EXISTS interactive_selections_revision
