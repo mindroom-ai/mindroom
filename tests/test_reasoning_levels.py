@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -221,18 +222,29 @@ def test_zai_off_keeps_the_authored_extra_body() -> None:
     }
 
 
-@pytest.mark.parametrize("output_config", ["high", True])
-def test_a_claude_output_config_that_is_no_mapping_fails_config_load_naming_it(
-    output_config: object,
+@pytest.mark.parametrize(
+    ("provider", "extra_kwargs", "field"),
+    [
+        ("anthropic", {"output_config": "high"}, "output_config"),
+        ("anthropic", {"output_config": True}, "output_config"),
+        ("zai", {"extra_body": "bad"}, "extra_body"),
+        ("zai", {"request_params": {"extra_body": []}}, "request_params.extra_body"),
+    ],
+)
+def test_a_setting_that_is_no_mapping_fails_config_load_naming_it(
+    provider: str,
+    extra_kwargs: dict[str, Any],
+    field: str,
     runtime_paths: RuntimePaths,
 ) -> None:
-    model = {"provider": "anthropic", "id": "m", "reasoning": _LEVELS, "extra_kwargs": {"output_config": output_config}}
+    reasoning = {"levels": ["off", "low"], "default": "low"}
+    model = {"provider": provider, "id": "m", "reasoning": reasoning, "extra_kwargs": extra_kwargs}
 
     with pytest.raises(
         ConfigRuntimeValidationError,
-        match=r"models\.claude: extra_kwargs\.output_config must be a mapping",
+        match=rf"models\.m: extra_kwargs\.{re.escape(field)} must be a mapping",
     ):
-        Config.validate_with_runtime({"models": {"claude": model}}, runtime_paths)
+        Config.validate_with_runtime({"models": {"m": model}}, runtime_paths)
 
 
 def test_a_model_without_the_block_is_unchanged() -> None:

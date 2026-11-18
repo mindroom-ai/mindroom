@@ -20,6 +20,17 @@ def _without(settings: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {key: value for key, value in settings.items() if key not in keys}
 
 
+def _mapping(settings: Mapping[str, Any], key: str, prefix: str = "") -> Mapping[str, Any]:
+    """Return the mapping at ``key``, ``{}`` when unset; any other value raises a ``ValueError`` naming the field."""
+    value = settings.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        msg = f"extra_kwargs.{prefix}{key} must be a mapping, not {type(value).__name__}"
+        raise ValueError(msg)  # noqa: TRY004 - config load reports a ValueError as a validation error
+    return value
+
+
 def _claude_settings(level: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Return Claude settings at ``level``, without the authored setting it conflicts with.
 
@@ -43,12 +54,17 @@ def _claude_settings(level: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]
 def _zai_settings(level: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Return Z.ai settings at ``level``: Z.ai takes no ``none`` effort, so ``off`` sends its thinking switch.
 
-    An authored ``extra_body`` wins over the switch, as it wins over every typed setting.
+    An authored ``thinking`` in the body the request sends wins over the switch.
     """
     if level != "off":
         return {**extra_kwargs, "reasoning_effort": level}
-    extra_body = {"thinking": {"type": "disabled"}, **(extra_kwargs.get("extra_body") or {})}
-    return {**_without(extra_kwargs, "reasoning_effort"), "extra_body": extra_body}
+    settings = _without(extra_kwargs, "reasoning_effort")
+    request_params = _mapping(extra_kwargs, "request_params")
+    if "extra_body" in request_params:
+        # A raw extra_body replaces the typed one in the request, so the switch goes where it is sent.
+        extra_body = {"thinking": {"type": "disabled"}, **_mapping(request_params, "extra_body", "request_params.")}
+        return {**settings, "request_params": {**request_params, "extra_body": extra_body}}
+    return {**settings, "extra_body": {"thinking": {"type": "disabled"}, **_mapping(extra_kwargs, "extra_body")}}
 
 
 def _level_settings(route: str, level: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]:

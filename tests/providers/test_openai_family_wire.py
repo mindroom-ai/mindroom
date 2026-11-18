@@ -22,7 +22,7 @@ from openai.types.responses import ResponseOutputItemAddedEvent, ResponseReasoni
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ReasoningConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
@@ -60,6 +60,7 @@ from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesStream
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
+from mindroom.providers.reasoning import apply_reasoning_level
 from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport, pipeline_provider
 from tests.providers.openai_family_support import (
     golden_provider,
@@ -442,6 +443,39 @@ async def test_a_route_that_can_force_a_tool_asks_for_structured_output_with_a_f
     assert [tool["function"]["name"] for tool in body["tools"]] == ["structured_output"]
     assert body["tools"][0]["function"]["parameters"] == _Packing.model_json_schema()
     assert [call["function"]["arguments"] for call in turn.tool_calls] == ['{"item": "coat"}']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_body", "thinking"),
+    [({"x": 1}, {"type": "disabled"}), ({"x": 1, "thinking": {"type": "enabled"}}, {"type": "enabled"})],
+    ids=["switch", "authored-thinking"],
+)
+async def test_zai_off_sends_its_thinking_switch_in_the_raw_body_that_replaces_extra_body(
+    tmp_path: Path,
+    raw_body: dict[str, Any],
+    thinking: dict[str, Any],
+) -> None:
+    """A raw ``request_params.extra_body`` replaces ``extra_body``, so Z.ai's off switch goes in it; authored thinking wins."""
+    extra_kwargs = {"extra_body": {"y": 2}, "request_params": {"extra_body": raw_body}}
+    model = ModelConfig(
+        provider="zai",
+        id="glm-5.3",
+        reasoning=ReasoningConfig(levels=["off", "high"], default="off"),
+        extra_kwargs=extra_kwargs,
+    )
+    config = {
+        "provider": "zai",
+        "id": "glm-5.3",
+        "api_key": "k",
+        "extra_kwargs": apply_reasoning_level(model).extra_kwargs,
+    }
+    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    body = built.body()
+    assert (body["thinking"], body["x"]) == (thinking, 1)
 
 
 @pytest.mark.parametrize(
