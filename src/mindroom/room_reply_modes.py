@@ -1,9 +1,9 @@
 """A room's reply mode override: the `reply_mode` room setting, set by `!reply_mode`, plugin routes, or a client.
 
 The setting is the room's `io.mindroom.room_settings` state with state key `reply_mode` and content `{"value": mode}`;
-`{}` or no event leaves it unset. The runtime keeps the newest value it read, wrote, or saw arrive in sync per room, so
-checks that cannot wait for the homeserver use it, and reads the state again when its copy is missing, old, or a change
-arrived in sync.
+`{}` or no event leaves it unset. The runtime keeps a copy per room, so checks that cannot wait for the homeserver use
+it. Only a read or write of the room's state confirms the copy; a change arriving in sync applies at once but leaves the
+copy unconfirmed, since each bot's sync delivers it on its own schedule, and the next refresh reads the room.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, NamedTuple, cast, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
 from mindroom.config.agent import RoomReplyMode
 from mindroom.constants import tracking_dir
@@ -20,7 +20,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
     from pathlib import Path
 
     import nio
@@ -37,23 +37,11 @@ _REREAD_AFTER_SECONDS = 600.0
 _REQUEST_TIMEOUT_SECONDS = 5.0
 # Runtimes before the room setting stored overrides in this file; each moves into its room's state when first read.
 _LEGACY_FILENAME = "room_reply_modes.json"
-_STALE = float("-inf")
+_UNCONFIRMED = float("-inf")
 
-
-class _Copy(NamedTuple):
-    """What the runtime knows of one room's setting.
-
-    ``mode`` is the newest value it knows: from the newest live event by server time, or from its own read or write.
-    ``read_at`` is when a read or write that no other change overlapped confirmed it, ``_STALE`` otherwise, so the next
-    refresh reads the room. ``event_ts`` is the server time of the newest live event taken, to drop older copies.
-    """
-
-    mode: RoomReplyMode | None
-    read_at: float
-    event_ts: int | None
-
-
-_known: dict[tuple[Path, str], _Copy] = {}
+# Per room: the mode, and when a read or write confirmed it, _UNCONFIRMED until one does.
+_known: dict[tuple[Path, str], tuple[RoomReplyMode | None, float]] = {}
+# Per room: bumped by each change arriving in sync and each write, so a read or write overlapping one confirms nothing.
 _changes: defaultdict[tuple[Path, str], int] = defaultdict(int)
 
 
@@ -66,44 +54,53 @@ def _mode_from_content(content: object) -> RoomReplyMode | None:
     return cast("RoomReplyMode", value) if value in ROOM_REPLY_MODES else None
 
 
+def _is_setting(source: Mapping[str, object]) -> bool:
+    return source.get("type") == ROOM_SETTINGS_EVENT_TYPE and source.get("state_key") == _SETTING_KEY
+
+
 def resolve_room_reply_mode_override(runtime_paths: RuntimePaths, room_id: str) -> RoomReplyMode | None:
     """Return the room's reply mode setting as the runtime last knew it, None while unset or never read."""
     known = _known.get(_key(runtime_paths, room_id))
-    return None if known is None else known.mode
+    return None if known is None else known[0]
 
 
-def observe_room_settings_event(runtime_paths: RuntimePaths, room_id: str, source: Mapping[str, object]) -> None:
-    """Take a live `reply_mode` event's value until the next refresh reads the room; ignore any other event.
-
-    Each bot's sync delivers the event on its own schedule, so a copy no newer than one already taken changes nothing,
-    and only a read of the room's state makes the value fresh again.
-    """
-    if source.get("type") != ROOM_SETTINGS_EVENT_TYPE or source.get("state_key") != _SETTING_KEY:
-        return
+def observe_room_settings_event(runtime_paths: RuntimePaths, room_id: str, source: Mapping[str, object]) -> bool:
+    """Take a live `reply_mode` event's value, unconfirmed; return whether it was one, which the caller reads again."""
+    if not _is_setting(source):
+        return False
     key = _key(runtime_paths, room_id)
-    known = _known.get(key)
-    ts = source.get("origin_server_ts")
-    ts = ts if isinstance(ts, int) else None
-    if known is not None and known.event_ts is not None and (ts is None or ts <= known.event_ts):
-        return
     _changes[key] += 1
-    _known[key] = _Copy(_mode_from_content(source.get("content")), _STALE, ts)
+    _known[key] = (_mode_from_content(source.get("content")), _UNCONFIRMED)
+    return True
+
+
+def seed_room_reply_mode(runtime_paths: RuntimePaths, room_id: str, events: Iterable[Mapping[str, object]]) -> None:
+    """Take the setting from a full read of the room's state made for something else, unless the room is known already.
+
+    A room without the setting keeps no copy, so its first turn reads it and moves any override an older runtime stored.
+    """
+    key = _key(runtime_paths, room_id)
+    if key in _known:
+        return
+    for source in events:
+        if _is_setting(source):
+            _known[key] = (_mode_from_content(source.get("content")), time.monotonic())
+            return
 
 
 def _confirm(key: tuple[Path, str], mode: RoomReplyMode | None, changes: int, *, wrote: bool) -> bool:
-    """Keep what a read or write found, fresh only if no change or write came in while it was in flight.
+    """Keep what a read or write found, confirmed only if no change or write came in while it was in flight.
 
-    When one did, which of the two is newer is unknown: the copy stays as it is, stale, and the next refresh reads.
-    A write counts as a change for reads still in flight; reads of the same state do not unsettle each other.
-    Returns whether the copy is fresh.
+    When one did, which of the two is newer is unknown: the copy keeps what it has, unconfirmed, and the next refresh
+    reads. Returns whether the copy is confirmed.
     """
-    known = _known.get(key)
     if _changes[key] != changes:
-        _known[key] = _Copy(mode, _STALE, None) if known is None else known._replace(read_at=_STALE)
+        known = _known.get(key)
+        _known[key] = (mode if known is None else known[0], _UNCONFIRMED)
         return False
     if wrote:
         _changes[key] += 1
-    _known[key] = _Copy(mode, time.monotonic(), None if known is None else known.event_ts)
+    _known[key] = (mode, time.monotonic())
     return True
 
 
@@ -114,7 +111,7 @@ async def refresh_room_reply_mode(
     *,
     force: bool = False,
 ) -> bool:
-    """Read the room's reply mode setting unless the copy is fresh; return whether the copy is confirmed current.
+    """Read the room's reply mode setting unless a read or write confirmed the copy recently; return whether it is now.
 
     ``force`` reads it whatever the copy's age. A failed read keeps the copy.
     """
@@ -122,7 +119,7 @@ async def refresh_room_reply_mode(
 
     key = _key(runtime_paths, room_id)
     known = _known.get(key)
-    if not force and known is not None and time.monotonic() - known.read_at < _REREAD_AFTER_SECONDS:
+    if not force and known is not None and time.monotonic() - known[1] < _REREAD_AFTER_SECONDS:
         return True
     changes = _changes[key]
     try:
@@ -139,7 +136,7 @@ async def refresh_room_reply_mode(
         mode = _legacy_override(runtime_paths, room_id)
         if mode is not None and await write_room_reply_mode(client, runtime_paths, room_id, mode):
             _drop_legacy_override(runtime_paths, room_id)
-            return _known[key].read_at != _STALE
+            return _known[key][1] != _UNCONFIRMED
     else:
         logger.warning("room_reply_mode_read_failed", room_id=room_id, error=str(response))
         return False

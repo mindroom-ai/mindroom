@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import active_follow_up_coalescing_key, requester_coalescing_key
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, command_parser, get_command_help
@@ -44,6 +45,7 @@ from mindroom.room_reply_modes import (
     observe_room_settings_event,
     refresh_room_reply_mode,
     resolve_room_reply_mode_override,
+    seed_room_reply_mode,
     write_room_reply_mode,
 )
 from tests.authorization_helpers import make_test_command_handler_context
@@ -70,7 +72,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
 
-    from mindroom.bot import AgentBot
     from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
     from mindroom.judgment.state import JudgmentRequest
@@ -225,29 +226,62 @@ async def test_the_override_is_the_rooms_reply_mode_setting(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_a_live_change_applies_at_once_and_a_late_older_copy_changes_nothing(tmp_path: Path) -> None:
-    """A change sync brings is the room's value until a read confirms it; a slower bot's older copy is dropped."""
+async def test_a_live_change_applies_at_once_and_a_read_of_the_room_decides(tmp_path: Path) -> None:
+    """A change sync brings applies at once, unconfirmed, as does a slower bot's late copy; a read of the room decides.
+
+    Event timestamps decide nothing: servers' clocks differ.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     homeserver = _Homeserver()
     client = homeserver.client()
     older = _setting_event({"value": "auto"})
-    newer = _setting_event({"value": "mentions"})
+    newer = _setting_event({"value": "mentions"}, ts=1)
     homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "mentions"}
+    assert await write_room_reply_mode(client, runtime_paths, ROOM_ID, "mentions")
 
-    observe_room_settings_event(runtime_paths, ROOM_ID, older)
-    observe_room_settings_event(runtime_paths, ROOM_ID, newer)
+    assert observe_room_settings_event(runtime_paths, ROOM_ID, newer)
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
-    observe_room_settings_event(runtime_paths, ROOM_ID, older)
-    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
-    assert await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
-
-    # After the runtime's own write, a late copy of a change older than one it saw changes nothing either.
-    assert await write_room_reply_mode(client, runtime_paths, ROOM_ID, "auto")
-    reads = client.room_get_state_event.await_count
-    observe_room_settings_event(runtime_paths, ROOM_ID, newer)
+    assert observe_room_settings_event(runtime_paths, ROOM_ID, older)
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "auto"
     assert await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
-    assert client.room_get_state_event.await_count == reads
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+
+
+def test_a_live_setting_event_has_the_bot_read_the_room_again(tmp_path: Path) -> None:
+    """Each bot that sees a `reply_mode` event reads the room at once; other state events start no read."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = SimpleNamespace(
+        runtime_paths=runtime_paths,
+        client=MagicMock(),
+        create_owned_task=MagicMock(),
+        _reread_reply_mode=MagicMock(return_value="reread"),
+    )
+    room = nio.MatrixRoom(ROOM_ID, "@mindroom_general:localhost")
+
+    def state_event(source: dict[str, object]) -> nio.UnknownEvent:
+        return nio.UnknownEvent.from_dict({"event_id": "$e", "sender": ADMIN, **source})
+
+    AgentBot._on_room_state_event(bot, room, state_event({**_setting_event({"value": "mentions"}), "type": "x.other"}))
+    bot.create_owned_task.assert_not_called()
+    AgentBot._on_room_state_event(bot, room, state_event(_setting_event({"value": "mentions"})))
+    bot._reread_reply_mode.assert_called_once_with(bot.client, ROOM_ID)
+    assert bot.create_owned_task.call_args.args == ("reread",)
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+
+
+def test_a_full_state_read_made_at_startup_seeds_rooms_the_runtime_does_not_know(tmp_path: Path) -> None:
+    """The room state a restore reads gives plugins the setting before any turn, and never overrides a known copy."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    other_room = "!other:localhost"
+    state = [{"type": "m.room.create", "state_key": "", "content": {}}, _setting_event({"value": "mentions"})]
+
+    seed_room_reply_mode(runtime_paths, ROOM_ID, state)
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+    observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "auto"}))
+    seed_room_reply_mode(runtime_paths, ROOM_ID, state)
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "auto"
+    seed_room_reply_mode(runtime_paths, other_room, state[:1])
+    assert resolve_room_reply_mode_override(runtime_paths, other_room) is None
 
 
 @pytest.mark.asyncio

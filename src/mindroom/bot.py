@@ -110,7 +110,7 @@ from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinato
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .room_reply_modes import observe_room_settings_event
+from .room_reply_modes import observe_room_settings_event, refresh_room_reply_mode
 from .router.duties import RouterDuties, RouterDutiesDeps
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
@@ -1092,11 +1092,19 @@ class AgentBot:
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
+    async def _reread_reply_mode(self, client: nio.AsyncClient, room_id: str) -> None:
+        await refresh_room_reply_mode(client, self.runtime_paths, room_id, force=True)
+
     def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop."""
         if "state_key" not in event.source or event.decrypted:
             return
-        observe_room_settings_event(self.runtime_paths, room.room_id, event.source)
+        if observe_room_settings_event(self.runtime_paths, room.room_id, event.source) and self.client is not None:
+            # The event may be a late copy of an older change: the room's state decides, read at once.
+            self.create_owned_task(
+                self._reread_reply_mode(self.client, room.room_id),
+                name=f"room_reply_mode_reread:{room.room_id}",
+            )
         if event.type != THREAD_TAGS_EVENT_TYPE:
             return
         try:
