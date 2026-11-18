@@ -41,7 +41,7 @@ Size limits:
 
 ## When Workspace Exports Update
 
-MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, and runs a full pass at startup and after every config reload.
+MindRoom re-exports a room about a minute after a message, edit, redaction, or membership change in it, and runs a full pass at startup and after every config reload.
 A full pass removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any agent whose `thread_exports` was removed.
 Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
 

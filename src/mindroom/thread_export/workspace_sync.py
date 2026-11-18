@@ -45,7 +45,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _WORKSPACE_EXPORT_DIRNAME = "thread_exports"
-_DEBOUNCE_SECONDS = 2.0
+# A busy room otherwise starts a pass about every 10 seconds, nearly every one finding all its threads unchanged.
+_DEBOUNCE_SECONDS = 60.0
 
 
 class _ThreadExportBot(Protocol):
