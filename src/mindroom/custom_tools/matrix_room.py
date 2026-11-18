@@ -593,10 +593,12 @@ class MatrixRoomTools(Toolkit):
           when the thread's full history is unavailable. This reads every listed thread, so pass it only when needed.
           Use page_token from a previous response's next_token to paginate.
           workflow labels rows (workflow: needs_you, working, later, done) and keeps one group, or every row with all.
-          needs_you rows have why: approval or question (waits on the requester; lead with these) or your_turn (idle).
+          needs_you rows have why: approval or question (waits on the requester; lead with these) or your_turn
+          (idle: the requester's move, not yours).
           later rows have back_at (ms) when known. A filtered page can hold fewer rows than limit.
           Approximate: questions show only in unencrypted rooms; other runtimes' approvals and replies are unseen.
           room_id="all" (threads only) covers every room the requester shares with you; rows carry room_id.
+          Use it with workflow="needs_you" for "what needs me?".
           It reads one page per room, so name a room and use page_token to go further.
         - state: Read room state. If event_type is given, return that specific state event.
           If omitted, return a summary of all state events (m.room.member events are elided).
