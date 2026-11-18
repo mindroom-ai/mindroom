@@ -94,7 +94,7 @@ from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_sources import Owned, SourceFate
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
@@ -393,7 +393,7 @@ def _respond_dispatch_plan(action: object | None = None) -> DispatchPlan:
     """Return a plan that continues into the response executor path."""
     return DispatchPlan(
         kind="respond",
-        response_action=action or MagicMock(kind="individual"),
+        response_action=action or ResponseAction(kind="individual"),
     )
 
 

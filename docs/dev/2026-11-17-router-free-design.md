@@ -85,7 +85,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     The service reads the saved rows of the turn's source events; when the first source that has a row names an entity, that is the answer and the turn's other sources inherit it; otherwise it runs the selector once and saves the result for every source of the turn.
     A bot answers a turn when the row of any of its sources names it, so a bot that batched a burst differently never ignores a message saved for it.
     A bot that would answer an unmentioned turn by itself (the only candidate, the thread's one agent, a follow-up to its running reply, the agent that surfaces a team nobody mentioned) saves itself through the same service first, and a candidate still answering in the thread is saved before the selector runs, so a replay or a bot that sees other candidates reads one owner.
-    A candidate that would not answer by itself saves nothing but reads the rows, and answers when one names it.
+    A candidate that would not answer by itself saves nothing but reads the rows, and answers only the sources whose own row names it: they go back to the journal and are answered as their own turn, and the other sources of its batch inherit nothing.
     Turns that mention an agent or a person, and adaptive participation in threads with several people, take no row.
     Bots coalesce on their own timers, so two bots can group a burst differently; rows per source keep a later, larger batch on the choice an earlier, smaller batch made.
     Accepted limitation: when two bots split a burst at different points and both splits reach the service before any larger batch does, two rows can name different agents, and a message at the split point can get an answer from each.

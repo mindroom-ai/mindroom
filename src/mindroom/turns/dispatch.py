@@ -478,6 +478,14 @@ class TurnDispatcher:
 
         response_action = plan.response_action
         assert response_action is not None
+        if response_action.sources is not None:
+            # Each of these comes back from the journal as its own turn once this turn's claim releases.
+            rest = [
+                source for source in prepared.handled_turn.source_event_ids if source not in response_action.sources
+            ]
+            await visible_responses.settle_source_events_ignored(TurnRecord.create(rest))
+            self.deps.turn_store.retry_when_claim_releases(room.room_id, response_action.sources)
+            return
         # Orderly shutdown has closed task ownership, so no response is planned after it.
         if self.deps.runtime.phase is RunPhase.SHUTTING_DOWN:
             raise ResponseAdmissionRefusedError

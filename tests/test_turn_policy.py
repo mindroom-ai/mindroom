@@ -37,7 +37,7 @@ from mindroom.teams.formation import TeamIntent, TeamOutcome
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.turn_origin import TurnIntent
-from mindroom.turn_policy import PreparedDispatch, TurnPolicy
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, TurnPolicy
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
@@ -1033,6 +1033,64 @@ async def test_follow_up_saved_for_an_agent_whose_reply_ended_is_still_answered(
     later = await _plans(config, process, room, context, selector, names=("research",))
 
     assert (first, later) == ({"general": "ignore"}, {"research": "individual"})
+    selector.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("silenced_by", ["second_person", "router_access"])
+async def test_saved_message_does_not_carry_a_fresh_one_past_a_rule_that_silences_it(
+    config: Config,
+    process: ReadyRuntime,
+    silenced_by: str,
+) -> None:
+    """An agent answers the message saved for it, alone, when the message batched with it needs a mention.
+
+    The fresh message is left to nobody by a second person in the thread or by `router.access`; the saved choice of
+    the older message is not passed on to it.
+    """
+    room = _room_with_members(
+        _SENDER,
+        "@other:localhost",
+        _entity_id(config, "general").full_id,
+        _entity_id(config, "research").full_id,
+    )
+    for agent in config.agents.values():
+        agent.access = ResponderAccessConfig(users=[_SENDER])
+    if silenced_by == "second_person":
+        context = _context(
+            thread_id="$thread:localhost",
+            thread_history=[make_visible_message(sender="@other:localhost", body="me too")],
+        )
+    else:
+        config.router.access = ResponderAccessConfig(current_room_members=False, users=["@someone-else:localhost"])
+        context = _context()
+    journal = process.event_journal_store()
+    await journal.claim_room_event(_ROOM_ID, "$saved:localhost", "responder", "research")
+    batch = ("$saved:localhost", "$fresh:localhost")
+    selector = _selector("research")
+
+    async def plan(source_event_ids: tuple[str, ...]) -> DispatchPlan:
+        with patch("mindroom.turn_policy.suggest_responder_for_message", selector):
+            return await _policy_for(config, "research", process).plan_turn(
+                room,
+                _text_event("hello agents"),
+                _dispatch(context, agent_name="research"),
+                has_active_response_for_target=lambda _target: False,
+                source_event_ids=source_event_ids,
+            )
+
+    batched = await plan(batch)
+    alone = await plan(batch[:1])
+
+    assert (batched.kind, batched.response_action.kind, batched.response_action.sources) == (
+        "respond",
+        "individual",
+        batch[:1],
+    )
+    assert (alone.kind, alone.response_action.kind, alone.response_action.sources) == ("respond", "individual", None)
+    assert (await plan(batch[1:])).kind == "ignore"
+    assert await journal.room_event_claims(_ROOM_ID, batch, "responder") == {"$saved:localhost": "research"}
     selector.assert_not_awaited()
 
 

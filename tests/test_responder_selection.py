@@ -114,6 +114,19 @@ async def test_a_bot_without_a_choice_of_its_own_only_reads(journal_store: Event
     assert await selections.select(_ROOM, ["$e1"], None) == {"alpha"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved", ["alpha", NO_RESPONDER])
+async def test_a_read_never_passes_a_saved_choice_on_to_another_message(
+    journal_store: EventJournalStore,
+    saved: str,
+) -> None:
+    """A read of a batch names the owners its messages already have and saves nothing for the ones that have none."""
+    selections = ResponderSelections(lambda: journal_store)
+    await selections.select(_ROOM, ["$e1"], _Chooser(saved))
+    assert await selections.select(_ROOM, ["$e1", "$e2"], None) == frozenset({saved} - {NO_RESPONDER})
+    assert await journal_store.room_event_claims(_ROOM, ["$e1", "$e2"], "responder") == {"$e1": saved}
+
+
 async def _record_router_answer(journal_store: EventJournalStore, source_event_id: str, response_event_id: str) -> None:
     """Record that the router answered one source with a message of its own, as the relaying router did."""
     await journal_store.turn_records(ROUTER_AGENT_NAME).write(

@@ -36,29 +36,41 @@ class ResponderSelections:
 
         The first source in turn order that has a saved choice decides for the sources without one, so a later, larger
         batch keeps the choice an earlier, smaller batch made. Only a turn none of whose sources has one awaits
-        ``choose``; a bot that would not answer by itself passes None, which saves nothing and reads what another bot
-        saved. The room's lock makes the bots that ask at once wait for the first and read its rows. Bots that
+        ``choose``. The room's lock makes the bots that ask at once wait for the first and read its rows. Bots that
         batched a burst differently can have saved different entities for its messages; each then answers its whole
         batch, so a message can get two answers but is never left to nobody. ``NO_RESPONDER`` names nobody.
+
+        A bot that would not answer by itself passes None as ``choose``. That only reads: it saves nothing, and a
+        source without a saved choice of its own inherits none.
         """
         async with self._room_locks.setdefault(room_id, asyncio.Lock()):
             journal = self._journal()
             saved = await journal.room_event_claims(room_id, source_event_ids, _PURPOSE)
-            choice = next((saved[event_id] for event_id in source_event_ids if event_id in saved), None)
-            if choice is None and choose is None:
-                return frozenset()
-            unsaved = [
-                event_id
-                for event_id in source_event_ids
-                if event_id not in saved and not await _relayed_by_the_old_router(journal, event_id)
-            ]
-            if unsaved:
-                if choice is None:
-                    assert choose is not None, "a read without a saved choice returned above"
-                    choice = await choose()
-                for event_id in unsaved:
-                    saved[event_id] = await journal.claim_room_event(room_id, event_id, _PURPOSE, choice)
+            if choose is not None:
+                await self._save_missing(room_id, source_event_ids, saved, choose)
         return frozenset(saved.values()) - {NO_RESPONDER}
+
+    async def _save_missing(
+        self,
+        room_id: str,
+        source_event_ids: Sequence[str],
+        saved: dict[str, str],
+        choose: Callable[[], Awaitable[str]],
+    ) -> None:
+        """Save a choice for each source that has none: the first saved one in turn order, else ``choose``'s."""
+        journal = self._journal()
+        unsaved = [
+            event_id
+            for event_id in source_event_ids
+            if event_id not in saved and not await _relayed_by_the_old_router(journal, event_id)
+        ]
+        if not unsaved:
+            return
+        choice = next((saved[event_id] for event_id in source_event_ids if event_id in saved), None)
+        if choice is None:
+            choice = await choose()
+        for event_id in unsaved:
+            saved[event_id] = await journal.claim_room_event(room_id, event_id, _PURPOSE, choice)
 
 
 # LEGACY_COMPAT: a person's message the relaying router already answered with its relay ("@agent could you help with

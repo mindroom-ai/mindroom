@@ -2032,6 +2032,59 @@ async def test_bots_that_batch_a_burst_differently_leave_no_message_unanswered(
 
 
 @pytest.mark.asyncio
+async def test_message_saved_for_an_agent_is_answered_without_the_fresh_one_batched_with_it(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """An agent that leaves a fresh message to nobody still answers the older one saved for it, as its own turn.
+
+    A second person wrote in the thread, so the fresh message needs a mention. The batch is not answered: the fresh
+    message is settled, the saved one goes back to the journal, and its own turn answers it alone.
+    """
+    history = thread_history_result(
+        [make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT)],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, agent_name="research", thread_history=history)
+    room = _room_with_members(config, "general", "research")
+    saved = _text_event("saved message", event_id="$saved:localhost", thread_id=_THREAD_ROOT)
+    fresh = _text_event(
+        "fresh message",
+        event_id="$fresh:localhost",
+        thread_id=_THREAD_ROOT,
+        origin_server_ts=1_000_001,
+    )
+    journal = harness.runtime.orchestrator.event_journal_store()
+    await journal.claim_room_event(_ROOM_ID, saved.event_id, "responder", "research")
+
+    async def dispatch(*events: nio.RoomMessageText) -> None:
+        turn = build_prepared_turn(
+            requester_coalescing_key(room.room_id, _THREAD_ROOT, _SENDER),
+            [
+                make_pending_event(event, room, source_kind=MESSAGE_SOURCE_KIND, requester_user_id=_SENDER)
+                for event in events
+            ],
+            queues_other_run=nothing_else_queued,
+        )
+        await harness.dispatcher.handle_prepared_turn(turn)
+        await harness.runner.settle_inbox_responses()
+
+    await dispatch(saved, fresh)
+
+    assert harness.runner.requests == []
+    assert harness.ignored_dispatch_sources == [(fresh.event_id,)]
+    assert harness.retried_dispatch_sources == [(saved.event_id,)]
+    assert await journal.room_event_claims(_ROOM_ID, [saved.event_id, fresh.event_id], "responder") == {
+        saved.event_id: "research",
+    }
+
+    await dispatch(saved)
+
+    assert [request.prompt for request in harness.runner.requests] == ["saved message"]
+    assert harness.ignored_dispatch_sources == [(fresh.event_id,)]
+
+
+@pytest.mark.asyncio
 async def test_original_the_old_router_already_relayed_gets_no_second_answer(
     config: Config,
     tmp_path: Path,

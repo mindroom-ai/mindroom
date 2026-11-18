@@ -68,6 +68,9 @@ class ResponseAction:
     form_team: TeamResolution | None = None
     rejection_message: str | None = None
     participation: ParticipationConfig | None = None
+    # The only sources of the turn this action answers: the dispatcher hands each back to be answered as its own turn
+    # and leaves the turn's other sources unanswered.
+    sources: tuple[str, ...] | None = None
 
 
 _INDIVIDUAL = ResponseAction(kind="individual")
@@ -842,6 +845,9 @@ class TurnPolicy:
         by itself (``self``); the selector's choice when the turn names no responder among several (``select``). A
         candidate that would not answer by itself saves nothing and reads what another saved (``saved``). So one bot
         answers the person's own message, also on a replay and when another bot sees other candidates or another thread.
+
+        A read answers only the sources whose own saved choice names this bot. The other sources of its batch get
+        nothing from that choice: whatever keeps this bot from answering by itself keeps it from answering them.
         """
         config, runtime_paths = self.deps.runtime.config, self.deps.runtime_paths
         context, room_id = dispatch.context, dispatch.target.room_id
@@ -869,11 +875,14 @@ class TurnPolicy:
             assert fallback is not None
             return registry.current_entity_name_for_user_id(fallback.full_id, include_router=False) or NO_RESPONDER
 
-        selections = self.deps.runtime.orchestrator.responder_selections
-        owners = await selections.select(room_id, source_event_ids, None if claim == "saved" else choose)
-        if self.deps.agent_name not in owners:
+        selections, me = self.deps.runtime.orchestrator.responder_selections, self.deps.agent_name
+        if claim != "saved":
+            owners = await selections.select(room_id, source_event_ids, choose)
+            return action if me in owners else ResponseAction(kind="skip")
+        mine = tuple([source for source in source_event_ids if me in await selections.select(room_id, (source,), None)])
+        if not mine:
             return ResponseAction(kind="skip")
-        return _INDIVIDUAL if action.kind == "skip" else action
+        return _INDIVIDUAL if mine == source_event_ids else replace(_INDIVIDUAL, sources=mine)
 
     def _answering_candidate(self, dispatch: PreparedDispatch, candidates: list[MatrixID]) -> str | None:
         """Return the candidate whose reply in this turn's thread still runs: the lowest Matrix ID of several."""
