@@ -1237,6 +1237,7 @@ visibility = [
 [[modules]]
 path = "mindroom.providers.credentials"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.config.schema_hints",
     "mindroom.constants",
     "mindroom.providers.names",
@@ -5327,6 +5328,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.room_model_commands"
 depends_on = [
+    "mindroom.commands.model_commands",
     "mindroom.matrix.client_room_admin",
     "mindroom.room_model_overrides",
 ]
@@ -8744,6 +8746,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.model_catalog_receiver"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.constants",
     "mindroom.matrix.olm_to_device",
     "mindroom.model_catalog",

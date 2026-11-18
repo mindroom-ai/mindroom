@@ -54,9 +54,9 @@ _COMMAND_DOCS = {
     CommandType.RELOAD_PLUGINS: ("/reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("/config <operation>", "Manage configuration"),
     CommandType.DESKTOP: ("/desktop [setup|status|confirm|rotate|disconnect]", "Manage your Desktop target"),
-    CommandType.MODEL: ("/model [name|list|reset]", "Show or switch the model used in the current thread"),
+    CommandType.MODEL: ("/model [name|name@level|list|reset]", "Show or switch the model used in the current thread"),
     CommandType.ROOM_MODEL: (
-        "/room_model [name|list|reset]",
+        "/room_model [name|name@level|list|reset]",
         "Show the room model default or switch it (set/reset require a room admin)",
     ),
     CommandType.THREAD_MODE: (
@@ -490,7 +490,7 @@ How it works:
     if topic == "model":
         return """**Model Command**
 
-Usage: `/model [name|list|reset]` - Show or switch the model used in the current thread
+Usage: `/model [name|name@level|list|reset]` - Show or switch the model used in the current thread
 
 **Examples:**
 - `/model` or `/model list` - Show the current thread's model overrides, each with the entities it applies to, and the available models
@@ -508,7 +508,7 @@ How it works:
     if topic in {"room_model", "room-model", "roommodel"}:
         return """**Room Model Command**
 
-Usage: `/room_model [name|list|reset]` - Show or switch the default model used in the current room
+Usage: `/room_model [name|name@level|list|reset]` - Show or switch the default model used in the current room
 
 **Examples:**
 - `/room_model` or `/room_model list` - Show the current room override and available models

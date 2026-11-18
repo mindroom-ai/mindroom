@@ -790,7 +790,7 @@ class ModelPricing(BaseModel):
         return self.input if self.cache_write is None else self.cache_write
 
 
-type ReasoningLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+_ReasoningLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 class ReasoningConfig(BaseModel):
@@ -798,11 +798,11 @@ class ReasoningConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    levels: list[ReasoningLevel] = Field(
+    levels: list[_ReasoningLevel] = Field(
         min_length=1,
         description="Levels clients offer for this model, in order; `name@level` runs the model at one of them",
     )
-    default: ReasoningLevel = Field(description="Level the plain model name runs at; one of levels")
+    default: _ReasoningLevel = Field(description="Level the plain model name runs at; one of levels")
 
     @model_validator(mode="after")
     def _validate_levels(self) -> Self:
@@ -974,7 +974,7 @@ class ModelConfig(BaseModel):
         """Return the key set through ``api_key`` or ``extra_kwargs.api_key``, if any."""
         return self.api_key or (self.extra_kwargs or {}).get("api_key")
 
-    def at_level(self, level: ReasoningLevel) -> ModelConfig:
+    def at_level(self, level: _ReasoningLevel) -> ModelConfig:
         """Return this model running at ``level``, named ``"<display name> (<level>)"``."""
         assert self.reasoning is not None
         return self.model_copy(
@@ -999,23 +999,28 @@ class ModelTable(dict[str, ModelConfig]):
     """
 
     def _at_level(self, reference: object) -> ModelConfig | None:
+        """Return the model a ``name@level`` reference names, or None for any other key."""
         if not isinstance(reference, str):
             return None
         name, level = split_model_reference(reference)
         model = super().get(name)
         if level is None or model is None or model.reasoning is None or level not in model.reasoning.levels:
             return None
-        return model if level == model.reasoning.default else model.at_level(cast("ReasoningLevel", level))
+        return model if level == model.reasoning.default else model.at_level(cast("_ReasoningLevel", level))
 
     def __contains__(self, reference: object) -> bool:
+        """Return whether ``reference`` names a configured model or one of its levels."""
         return super().__contains__(reference) or self._at_level(reference) is not None
 
     def __getitem__(self, reference: str) -> ModelConfig:
+        """Return the model ``reference`` names, at its level for ``name@level``."""
         model = self._at_level(reference)
         return super().__getitem__(reference) if model is None else model
 
-    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # type: ignore[override]
-        return self[reference] if reference in self else default
+    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # ty: ignore[invalid-method-override]
+        """Return the model ``reference`` names, at its level for ``name@level``, or ``default``."""
+        model = self._at_level(reference)
+        return super().get(reference, default) if model is None else model
 
 
 class RouterConfig(BaseModel):

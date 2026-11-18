@@ -207,7 +207,12 @@ class _Receiver:
         shared_overrides = {thread_overrides.get(name) for name in scope.entity_names}
         override = shared_overrides.pop() if len(shared_overrides) == 1 else None
         inherited = {
-            name: resolve_turn_model(config, self.paths, ModelScope(entity=name, room_id=request.room_id), None).model_name
+            name: resolve_turn_model(
+                config,
+                self.paths,
+                ModelScope(entity=name, room_id=request.room_id),
+                None,
+            ).model_name
             for name in scope.entity_names
         }
         return {

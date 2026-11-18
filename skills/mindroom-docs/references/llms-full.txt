@@ -2098,6 +2098,7 @@ The [macOS app's local model setup](https://docs.mindroom.chat/installation/maco
 | `context_window` | No | `null` | Provider context window in tokens, at least 1; budgets history replay and compaction (see [Context Window](https://docs.mindroom.chat/configuration/history/#context-window)); a `compaction.model` or `compaction.fallback_model` needs its own value |
 | `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](https://docs.mindroom.chat/budgets/) and [reply costs](https://docs.mindroom.chat/usage/#reply-cost): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price; set `cache_write` for Claude models, whose cache writes cost more than input |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
+| `reasoning` | No | `null` | Reasoning levels the model offers: `levels` (non-empty, no repeats) and `default` (one of `levels`), each one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (see [Reasoning Levels](#reasoning-levels)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
 It may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load; name it `gpt-6-1` instead and set `display_name` to show the dotted name.
@@ -2688,6 +2689,44 @@ models:
     stream_idle_timeout_seconds: 0  # never cut off long silent reasoning
 ```
 
+## Reasoning Levels
+
+A `reasoning` block lets one model entry run at several reasoning levels, so `sol` and `sol_high` need not be two entries:
+
+```yaml
+models:
+  sol:
+    provider: codex
+    id: gpt-6.2-sol
+    display_name: Sol
+    reasoning:
+      levels: [low, medium, high, xhigh]  # what clients offer, in this order
+      default: high                       # what plain `sol` runs at
+```
+
+Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
+`sol@high` here is the same as `sol`, and a level the model does not list is an unknown model.
+A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
+`!model list` and the `thread_model` tool's `list_models()` show each model's levels and default.
+
+MindRoom sends the level in the setting the provider reads, and the block wins over the same key in `extra_kwargs`:
+
+| Provider | A level `L` | `off` |
+|----------|-------------|-------|
+| `openai`, `codex`, `azure`, `openrouter`, `zai`, `llama_cpp`, `kimi` | `reasoning_effort: L` | `reasoning_effort: none` |
+| `deepseek` | `reasoning_effort: L`, `use_thinking: true` | `use_thinking: false` |
+| `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L` | `thinking: {type: disabled}` |
+| `google` | `thinking_level: L` | `thinking_budget: 0` |
+| `ollama` | `think: L` | `think: false` |
+
+`groq`, `cerebras`, and `synthetic` take no level, so a `reasoning` block on them fails config load.
+MindRoom does not know which levels each model accepts, so list only levels the model supports; a level it rejects fails the reply with the provider's error, like a wrong `extra_kwargs` value.
+For example, Claude 5 models reject disabled thinking, so do not list `off` for them.
+`request_params` and `extra_body` still win over the block.
+
+To replace per-level entries such as `opus` and `opus_high`, add a `reasoning` block to `opus`, point references at `opus@high`, and delete `opus_high`.
+Thread and room overrides that named the deleted entry, or a level later removed from `levels`, are ignored like any override naming a removed model, so room-level model selection applies again.
+
 ## Hot Reload
 
 After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent, team, or router response without restarting the bot.
@@ -2707,7 +2746,7 @@ Users can change that per thread or per room, and the most specific choice wins:
 Thread and room overrides name models from the `models:` section and survive restarts.
 A Matrix client's model picker lists the configured models and changes the thread override like `!model`.
 The picker works in encrypted and unencrypted rooms when the router and at least one agent you may address are joined; teams alone do not qualify.
-It shows each model's key, display name, provider, model ID, and icon, never API keys, hosts, local paths, or `extra_kwargs`.
+It shows each model's key, display name, provider, model ID, icon, and [reasoning levels](#reasoning-levels), never API keys, hosts, local paths, or `extra_kwargs`.
 Catalogs with more than 256 models or over 64 KiB are not offered to the picker; `!model` still works.
 The client protocol is described in [Model Selection Protocol](https://docs.mindroom.chat/architecture/matrix/#model-selection-protocol).
 
@@ -2719,6 +2758,7 @@ Show or switch the model that the agents, teams, and router you may address use 
 !model
 !model list
 !model opus
+!model sol@high
 !model reset
 ```
 
@@ -2765,9 +2805,9 @@ agents:
       - thread_model
 ```
 
-- `list_models()` returns every configured model name with its provider and model ID and works outside a thread.
+- `list_models()` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
 - `get_thread_model()` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
-- `switch_thread_model(model_name, when)` accepts a configured model name and rejects unknown names with the available list.
+- `switch_thread_model(model_name, when)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
   `when` is `next-turn` (default), which keeps the current response on its model, or `after-toolcall`, which continues the current response with the new model after the tool call.
 - `reset_thread_model()` removes the thread override so room-level selection applies again.
 
@@ -3713,7 +3753,7 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
+An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies or its history is compacted; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their size in the turn model's tokens ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)).
 Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
 Only whole lines are inlined, never part of a line.
@@ -5257,8 +5297,8 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `/desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
 | `/mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
-| `/model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
-| `/room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
+| `/model [name\|name@level\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
+| `/room_model [name\|name@level\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
 | `/thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |
 | `/reply_mode [auto\|mentions\|reset\|show]` | Show or switch whether agents need a mention to start a conversation in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#reply_mode) |
 | `/auto_approve [<minutes>\|<hours>h\|off]` | Run your tool calls in this thread without approval for a while, or show or end that window | [Tool Approval](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) |
@@ -15542,7 +15582,7 @@ continue_subagent(subagent_id: str, message: str) -> str
 The child starts with no history from the caller's conversation but keeps its own configured tools, workspace, memory, and tool policy.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Omitting `agent_name` selects the caller itself, which still requires its own name in `delegate_to`.
-Set `model` to an alias from `models:` to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
+Set `model` to an alias from `models:`, or `name@level` for one of its [reasoning levels](https://docs.mindroom.chat/configuration/models/#reasoning-levels), to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
 Set `minimal=True` to run the child in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents), which saves tokens when the child does not need its full system prompt.
 Set `dedicated_worker=True` to run the child's worker tools in a worker of its own; see [Dedicated Workers](#dedicated-workers).
 The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.

@@ -4765,15 +4765,34 @@
         "levels": {
           "description": "Levels clients offer for this model, in order; `name@level` runs the model at one of them",
           "items": {
-            "$ref": "#/$defs/ReasoningLevel"
+            "enum": [
+              "off",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
           },
           "minItems": 1,
           "title": "Levels",
           "type": "array"
         },
         "default": {
-          "$ref": "#/$defs/ReasoningLevel",
-          "description": "Level the plain model name runs at; one of levels"
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "type": "string",
+          "description": "Level the plain model name runs at; one of levels",
+          "title": "Default"
         }
       },
       "required": [
@@ -4782,18 +4801,6 @@
       ],
       "title": "ReasoningConfig",
       "type": "object"
-    },
-    "ReasoningLevel": {
-      "enum": [
-        "off",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max"
-      ],
-      "type": "string"
     },
     "ResponderAccessConfig": {
       "additionalProperties": false,

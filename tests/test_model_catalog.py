@@ -53,7 +53,9 @@ async def test_catalog_entries_carry_reasoning_levels(tmp_path: Path) -> None:
     """A model with levels lists them and its default; the revision follows them."""
     catalog = ModelCatalog(client=AsyncMock(spec=nio.AsyncClient), runtime_paths=test_runtime_paths(tmp_path))
     reasoning = {"levels": ["low", "high"], "default": "low"}
-    config = Config.model_validate({"models": {"sol": {"provider": "codex", "id": "gpt-6.2-sol", "reasoning": reasoning}}})
+    config = Config.model_validate(
+        {"models": {"sol": {"provider": "codex", "id": "gpt-6.2-sol", "reasoning": reasoning}}},
+    )
 
     entries, revision = await catalog.snapshot(config)
 

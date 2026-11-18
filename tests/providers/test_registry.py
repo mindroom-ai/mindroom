@@ -727,7 +727,9 @@ _LEVELS = {"levels": ["low", "high"], "default": "low"}
 def _sends(body: Any, expected: Any) -> bool:  # noqa: ANN401 - JSON values
     """Return whether ``body`` carries every value of ``expected``, recursing into objects."""
     if isinstance(expected, dict):
-        return isinstance(body, dict) and all(key in body and _sends(body[key], value) for key, value in expected.items())
+        return isinstance(body, dict) and all(
+            key in body and _sends(body[key], value) for key, value in expected.items()
+        )
     return body == expected
 
 
@@ -752,7 +754,9 @@ async def test_a_model_reference_at_a_level_sends_that_level(
     """``name@level`` sends the level the route reads, where plain ``name`` sends the default."""
     extra_kwargs: dict[str, Any] = {
         "codex": {"codex_home": write_cli_logins(tmp_path)["<codex_home>"]},
-        "google": {"client_params": {"http_options": {"httpx_async_client": httpx.AsyncClient(transport=wire.transport)}}},
+        "google": {
+            "client_params": {"http_options": {"httpx_async_client": httpx.AsyncClient(transport=wire.transport)}},
+        },
     }.get(provider, {})
     model = ModelConfig(provider=provider, id="m", api_key="sk-config", reasoning=_LEVELS, extra_kwargs=extra_kwargs)
     config = Config(models={"target": model})

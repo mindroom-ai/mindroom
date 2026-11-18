@@ -80,7 +80,7 @@ continue_subagent(subagent_id: str, message: str) -> str
 The child starts with no history from the caller's conversation but keeps its own configured tools, workspace, memory, and tool policy.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Omitting `agent_name` selects the caller itself, which still requires its own name in `delegate_to`.
-Set `model` to an alias from `models:` to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
+Set `model` to an alias from `models:`, or `name@level` for one of its [reasoning levels](https://docs.mindroom.chat/configuration/models/#reasoning-levels), to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
 Set `minimal=True` to run the child in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents), which saves tokens when the child does not need its full system prompt.
 Set `dedicated_worker=True` to run the child's worker tools in a worker of its own; see [Dedicated Workers](#dedicated-workers).
 The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.

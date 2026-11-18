@@ -138,11 +138,16 @@ async def test_subagent_model_selection(
 
 
 def test_the_subagent_tool_description_lists_each_model_s_reasoning_levels(tmp_path: Path) -> None:
+    """The model list in the tool description tells the caller each model's levels and how to name one."""
     config = Config(
         agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])},
         models={
             "default": ModelConfig(provider="openai", id="gpt-6-astra"),
-            "sol": ModelConfig(provider="codex", id="gpt-6.2-sol", reasoning={"levels": ["low", "high"], "default": "low"}),
+            "sol": ModelConfig(
+                provider="codex",
+                id="gpt-6.2-sol",
+                reasoning={"levels": ["low", "high"], "default": "low"},
+            ),
         },
         defaults=DefaultsConfig(tools=[]),
     )

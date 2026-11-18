@@ -1,4 +1,5 @@
 """Reasoning levels: the per-model ``reasoning`` block, ``name@level`` references, and how a level reaches a route."""
+# ruff: noqa: D103
 
 from __future__ import annotations
 
@@ -98,7 +99,9 @@ def test_the_model_table_lists_and_saves_only_authored_models() -> None:
 
     assert list(config.models) == ["sol", "plain"]
     assert len(config.models) == 2
-    assert sorted(config.models.items()) == sorted({"sol": config.models["sol"], "plain": config.models["plain"]}.items())
+    assert sorted(config.models.items()) == sorted(
+        {"sol": config.models["sol"], "plain": config.models["plain"]}.items(),
+    )
     assert set(config.authored_model_dump()["models"]) == {"sol", "plain"}
     assert config.authored_model_dump()["models"]["sol"]["reasoning"] == _LEVELS
 

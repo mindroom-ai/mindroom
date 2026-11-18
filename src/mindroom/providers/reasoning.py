@@ -22,14 +22,20 @@ def _level_settings(route: str, level: str, extra_kwargs: dict[str, Any]) -> dic
         return {**extra_kwargs, "reasoning_effort": "none" if off else level}
     if route == "deepseek":
         settings = {key: value for key, value in extra_kwargs.items() if key != "reasoning_effort"}
-        return {**settings, "use_thinking": False} if off else {**settings, "reasoning_effort": level, "use_thinking": True}
+        return (
+            {**settings, "use_thinking": False}
+            if off
+            else {**settings, "reasoning_effort": level, "use_thinking": True}
+        )
     if route in _CLAUDE_ROUTES:
         if off:
             return {**extra_kwargs, "thinking": {"type": "disabled"}}
         return {**extra_kwargs, "output_config": {**(extra_kwargs.get("output_config") or {}), "effort": level}}
     if route == "google":
         # Gemini rejects a request that sets both thinking keys.
-        settings = {key: value for key, value in extra_kwargs.items() if key not in {"thinking_level", "thinking_budget"}}
+        settings = {
+            key: value for key, value in extra_kwargs.items() if key not in {"thinking_level", "thinking_budget"}
+        }
         return {**settings, "thinking_budget": 0} if off else {**settings, "thinking_level": level}
     if route == "ollama":
         return {**extra_kwargs, "think": False if off else level}
