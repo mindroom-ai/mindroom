@@ -7,6 +7,7 @@ that cannot wait for the homeserver use it, and reads the state again when its c
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import defaultdict
 from typing import TYPE_CHECKING, cast, get_args
@@ -31,6 +32,7 @@ ROOM_REPLY_MODES: tuple[RoomReplyMode, ...] = get_args(RoomReplyMode)
 _SETTING_KEY = "reply_mode"
 # A change made while no bot's sync timeline showed it, such as during a sync gap, applies after this long.
 _REREAD_AFTER_SECONDS = 600.0
+_READ_TIMEOUT_SECONDS = 5.0
 # Runtimes before the room setting stored overrides in this file; each moves into its room's state when first read.
 _LEGACY_FILENAME = "room_reply_modes.json"
 
@@ -73,7 +75,9 @@ async def refresh_room_reply_mode(client: nio.AsyncClient, runtime_paths: Runtim
         return
     changes = _changes[key]
     try:
-        response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, _SETTING_KEY)
+        # A turn waits for this read, so a stalled homeserver costs it a few seconds at most.
+        async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
+            response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, _SETTING_KEY)
     except Exception:
         logger.warning("room_reply_mode_read_failed", room_id=room_id, exc_info=True)
         return

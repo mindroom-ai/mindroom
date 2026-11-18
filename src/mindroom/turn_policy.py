@@ -692,7 +692,8 @@ class TurnPolicy:
         wrote follow the room's ordinary rules.
         """
         context = dispatch.context
-        await refresh_room_reply_mode(self._client(), self.deps.runtime_paths, dispatch.target.room_id)
+        if (client := self.deps.runtime.client) is not None:
+            await refresh_room_reply_mode(client, self.deps.runtime_paths, dispatch.target.room_id)
         if not self._reply_mode_requires_mention(
             dispatch.target.room_id,
             dispatch.envelope,
