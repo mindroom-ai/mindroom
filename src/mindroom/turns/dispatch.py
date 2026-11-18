@@ -393,20 +393,18 @@ class TurnDispatcher:
             if thread_id not in prompt_event_ids:
                 return
             if fork_parent_thread_id(prepared.dispatch.context.thread_history, thread_id) is not None:
-                # A fork's first title is its parent's, which needs no prompt.
+                # A fork's first title is its parent's, which needs no prompt, only its root.
                 prompt = None
+                prompt_event_ids = (thread_id,)
             elif turn.payload.raw_audio_fallback:
                 return
             else:
                 # A batch (say attachments, then the text sent with them) is titled from
-                # each source's own prompt, without the coalescing wrapper.
+                # each source's own prompt, without the coalescing wrapper. The voice flag
+                # covers the whole batch, so a typed text may start with its prefix.
                 source_prompts = turn.handled_turn.source_event_prompts or {}
                 prompt = "\n".join(
-                    source_prompts[event_id].removeprefix(VOICE_PREFIX)
-                    if turn.payload.voice_transcript
-                    else source_prompts[event_id]
-                    for event_id in prompt_event_ids
-                    if event_id in source_prompts
+                    source_prompts[event_id] for event_id in prompt_event_ids if event_id in source_prompts
                 )
         elif thread_id != turn.event.event_id or turn.payload.raw_audio_fallback:
             return

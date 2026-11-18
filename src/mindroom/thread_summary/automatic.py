@@ -460,6 +460,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 conversation_reader,
                 room_id,
                 thread_id,
+                edits_of=prompt_event_ids,
                 unreadable_is_missing=True,
             )
             if not history.is_full_history:
@@ -516,6 +517,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 conversation_reader,
                 room_id,
                 thread_id,
+                edits_of=prompt_event_ids,
                 unreadable_is_missing=True,
             )
             if not history.is_full_history:

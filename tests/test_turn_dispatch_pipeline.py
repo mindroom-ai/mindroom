@@ -2889,12 +2889,18 @@ class TestAgentBot(AgentBotTestBase):
         summary.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("voice_in_batch", [False, True])
     async def test_prompt_title_covers_attachment_and_text_sent_together(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        voice_in_batch: bool,
     ) -> None:
-        """A new thread's video root and the text sent right after it flush as one turn, titled from both."""
+        """A new thread's video root and the text sent right after it flush as one turn, titled from both.
+
+        A voice source anywhere in the batch marks the whole turn a transcript, so a
+        typed text that starts with the voice prefix keeps it.
+        """
         config = self._config_for_storage(tmp_path)
         config.defaults.thread_summary_first_threshold = 1
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
@@ -2911,14 +2917,15 @@ class TestAgentBot(AgentBotTestBase):
                 "content": {"msgtype": "m.video", "body": "clip.mp4", "filename": "clip.mp4", "url": "mxc://x/clip"},
             },
         )
+        body = f"{VOICE_PREFIX}Summarize this video" if voice_in_batch else "Summarize this video"
         text_source = {
             "content": {
-                "body": "Summarize this video",
+                "body": body,
                 "msgtype": "m.text",
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$video"},
             },
         }
-        text = PreparedIngress(sender=sender, event_id="$text", body="Summarize this video", source=text_source)
+        text = PreparedIngress(sender=sender, event_id="$text", body=body, source=text_source)
         key = requester_coalescing_key(room.room_id, "$video", sender)
         facts = make_ingress_facts(sender, requester_user_id=sender)
         turn = build_prepared_turn(
@@ -2926,6 +2933,8 @@ class TestAgentBot(AgentBotTestBase):
             [PendingEvent(event=event, room=room, facts=facts) for event in (prepare_media_ingress(video), text)],
             queues_other_run=nothing_else_queued,
         )
+        if voice_in_batch:
+            turn = replace(turn, payload=replace(turn.payload, voice_transcript=True))
         target = MessageTarget.resolve(room_id=room.room_id, thread_id="$video", reply_to_event_id="$text")
         dispatch = PreparedDispatch(
             requester_user_id=sender,
@@ -2939,7 +2948,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             target=target,
             correlation_id="$text",
-            envelope=_hook_envelope(body="Summarize this video", source_event_id="$text", target=target),
+            envelope=_hook_envelope(body=body, source_event_id="$text", target=target),
         )
         plan = DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
         replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
@@ -2957,7 +2966,7 @@ class TestAgentBot(AgentBotTestBase):
 
         summary.assert_called_once()
         assert summary.call_args.kwargs["prompt_event_ids"] == ("$video", "$text")
-        assert summary.call_args.kwargs["prompt"] == "[Attached video]\nSummarize this video"
+        assert summary.call_args.kwargs["prompt"] == f"[Attached video]\n{body}"
 
     @pytest.mark.asyncio
     async def test_a_coalesced_first_turn_of_a_fork_queues_its_inherited_title(
@@ -3020,4 +3029,4 @@ class TestAgentBot(AgentBotTestBase):
 
         summary.assert_awaited_once()
         assert summary.await_args.kwargs["prompt"] is None
-        assert summary.await_args.kwargs["prompt_event_ids"] == ("$fork", "$next")
+        assert summary.await_args.kwargs["prompt_event_ids"] == ("$fork",)

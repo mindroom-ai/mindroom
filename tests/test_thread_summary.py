@@ -92,7 +92,7 @@ from tests.test_thread_export_projected_history import admit_live, prompt_reader
 from tests.test_thread_export_projected_history import raw as _projection_raw
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
     from types import ModuleType
 
     from mindroom.constants import RuntimePaths
@@ -921,6 +921,45 @@ class TestMaybeGenerateThreadSummary:
         assert [summary["summary"] for summary in sent] == ([] if parent_title is None else ["Trip plan (forked)"])
         assert model.requests == []
 
+    async def test_a_batch_starting_a_fork_needs_its_root_to_survive(self) -> None:
+        """A fork root deleted while its parent's title is read leaves no title, even with the batch's follow-up still there."""
+        parent = _make_thread_history(2)
+        parent.append(_make_summary_notice_message(_THREAD, message_count=2, summary="Trip plan"))
+        follow_up = ResolvedVisibleMessage.synthetic(
+            sender="@user0:localhost",
+            body="and more",
+            timestamp=1700000001,
+            event_id="$next",
+            thread_id="$fork",
+        )
+        self._fork_of_thread(parent, [self._fork_root(), follow_up])
+        walks = 0
+
+        async def walk(**_kwargs: object) -> bool:
+            nonlocal walks
+            walks += 1
+            if walks == 2:
+                self._fork_of_thread(parent, [follow_up])
+            return True
+
+        self.conversation_reader.hydrator.rewalk = AsyncMock(side_effect=walk)
+
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            "$fork",
+            _mock_config(),
+            self.rp,
+            prompt_event_ids=("$fork",),
+            prompt=None,
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+
+        assert walks == 2
+        assert not _sent_summaries(self.client)
+
     @pytest.mark.parametrize("generated", ["Fork answer", "Fork answer (forked)"])
     async def test_a_forks_later_summaries_stay_marked_forked(self, generated: str) -> None:
         """The marker survives every automatic summary of a fork, and is never doubled."""
@@ -1083,6 +1122,23 @@ class TestMaybeGenerateThreadSummary:
             assert _sent_summaries(self.client)[0]["summary"] == "Video summary"
         else:
             assert not _sent_summaries(self.client)
+
+    async def test_provisional_title_sees_an_edit_of_a_non_root_source_the_walk_missed(self) -> None:
+        """A recursive walk can page out the text reply's edit; only a direct lookup of each source finds it."""
+        model = self._summarizer(_title("Video summary"))
+        edited = _make_thread_history(2)
+        edited[1].apply_edit(body="Edited request", timestamp=1700001500, latest_event_id="$edit", content=None)
+
+        async def walk(*, edits_of: Collection[str] = (), **_kwargs: object) -> bool:
+            self._history(edited if "$event1" in edits_of else _make_thread_history(2))
+            return True
+
+        self.conversation_reader.hydrator.rewalk = AsyncMock(side_effect=walk)
+
+        await self._provisional("[Attached video]\nSummarize this video", prompt_event_ids=("$event0", "$event1"))
+
+        assert not model.requests
+        assert not _sent_summaries(self.client)
 
     async def test_provisional_title_once_across_runtimes_before_sync_echo(
         self,
