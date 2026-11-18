@@ -17,6 +17,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
+- [`matrix_user`] - Read Matrix as a personal agent's owner.
 - [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -25,12 +26,12 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 ## Tool Runtime Context
 
-These tools work only while an agent is responding in a Matrix conversation.
-Unless the call passes explicit IDs, they act on the current room and thread.
+Except [`matrix_user`], these tools work only while an agent is responding in a Matrix conversation.
+Unless the call passes explicit IDs, they act on the current room and thread, except [`matrix_user`], which needs `room_id` for every action on a room.
 `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
 `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
 `room_id` takes a room ID, alias, or configured room name; `matrix_api` takes only a room ID.
-Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
+Except [`matrix_user`], tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
 Attachment IDs (`att_*`) are limited to the current conversation and IDs registered earlier in the same tool run; see [Attachments](https://docs.mindroom.chat/attachments/#attachment-ids).
 
@@ -300,6 +301,50 @@ matrix_api(
     keys=["content.body"],
     event_context={"before_limit": 1, "after_limit": 1, "include_profile": True},
 )
+```
+
+## [`matrix_user`]
+
+`matrix_user` lets a [personal agent](https://docs.mindroom.chat/personal-agents/) read Matrix as its owner, with no sign-in: the owner's own rooms and DMs, including rooms the agent is not in.
+It acts only for the agent's owner, in any turn that runs for them, such as a chat with the agent or one of their scheduled tasks, or through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
+
+`matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
+
+| Action | Returns |
+|--------|---------|
+| `rooms` | The owner's rooms, one line each: unread rooms first, with their unread and mention counts and whether the owner marked them unread, then invitations with who sent them, then the rest by name; a DM without a name shows the other person; `query` keeps rooms whose name contains it, and `limit` (default 20, at most 200) caps the lines, with `left_out` counting the rest |
+| `messages` | The newest messages of the room `room_id` names, oldest first, one line each with its latest edit applied and its file, reactions, and thread replies noted, and texts over 2000 characters cut; `limit` defaults to 30 (at most 100) and counts reactions and edits too, so a page can show fewer lines, and `page_token`, the previous result's `next_page_token`, continues into older messages; with `thread_id`, that thread's root and newest replies; with `event_id`, that message and up to half of `limit` messages on each side |
+| `search` | Messages containing `query` in all the owner's rooms, or only in `room_id`, newest first, each line starting with its room; `limit` defaults to 10 (at most 50), and `page_token` continues |
+| `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
+| `people` | With a full Matrix ID as `query`, that person's profile; otherwise people the user directory finds, `limit` defaulting to 10 (at most 50) |
+| `download` | The file, at most 64 MiB, of the message `event_id` in `room_id`, as an `attachment_id` the agent's other tools accept in the current conversation, so not through the MCP gateway |
+| `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
+
+Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
+
+To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
+That token can act as every account the `users` pattern covers, administrators included.
+Without it, the toolkit answers `matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN.`
+
+```yaml
+# The homeserver's registration file; MindRoom needs only as_token.
+id: mindroom-user
+url: null
+as_token: <a long random secret>
+hs_token: <another long random secret>
+sender_localpart: mindroom-user
+namespaces:
+  users:
+    - exclusive: false
+      regex: "@.*:example.com"
+```
+
+```yaml
+personal_agents:
+  mind:
+    agent:
+      tools:
+        - matrix_user
 ```
 
 ## Related Matrix Runtime Features

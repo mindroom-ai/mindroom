@@ -13,6 +13,7 @@ import asyncio
 import json
 import math
 import re
+import weakref
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypeIs, override
 from urllib.parse import unquote
 
@@ -25,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from mindroom.api import config_lifecycle
 from mindroom.api.client_sessions import presented_session
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials.manager import (
     CredentialsUnreadableError,
     credential_layers,
@@ -104,6 +106,10 @@ _TOKEN_CHECK_TIMEOUT_SECONDS = 10.0
 _MAX_TOKEN_CHECK_BYTES = 64 * 1024
 _DEFAULT_ACCEPT: Final = "application/vnd.github+json"
 _API_VERSION = "2022-11-28"
+# One lock per user with a token save or removal under way, so a removal sent during a save's GitHub check runs after
+# that save instead of being undone by it. Per process only: processes sharing one credential store do not share it.
+# A lock no request holds or waits for drops out.
+_token_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
 class GitHubRequest(BaseModel):
@@ -230,7 +236,12 @@ def _read_token(context: OAuthCredentialContext) -> dict[str, str] | None:
     Raises ``CredentialsUnreadableError`` for a saved document that cannot be read or holds no token and login of
     the shapes a save checks.
     """
-    document = _token_store(context).read_saved_credentials(_TOKEN_SERVICE)
+    try:
+        document = _token_store(context).read_saved_credentials(_TOKEN_SERVICE)
+    except ValueError as exc:
+        # The store refusing to build or open its path; a link or other non-file there reads as no document instead.
+        msg = f"Stored credentials for {_TOKEN_SERVICE} could not be located"
+        raise CredentialsUnreadableError(msg) from exc
     if document is None:
         return None
     token, login = document.get("token"), document.get("login")
@@ -257,6 +268,14 @@ async def _stored_token(context: OAuthCredentialContext | None) -> dict[str, str
     except CredentialsUnreadableError:
         logger.warning("github_token_unreadable")
         raise
+
+
+def _token_lock(user_id: str) -> asyncio.Lock:
+    """Return the lock serializing ``user_id``'s token saves and removals in this process."""
+    lock = _token_locks.get(user_id)
+    if lock is None:
+        lock = _token_locks[user_id] = asyncio.Lock()
+    return lock
 
 
 def _save_token(context: OAuthCredentialContext, document: dict[str, str]) -> None:
@@ -306,6 +325,9 @@ async def _token_login(token: str) -> str | JSONResponse:
     except (httpx.HTTPError, TimeoutError) as exc:
         logger.warning("github_token_check_failed", error_type=type(exc).__name__)
         return _error(502, "github_unreachable")
+    if _rate_limited(response):
+        logger.warning("github_token_check_rate_limited", status=response.status_code)
+        return _error(502, "github_rate_limited")
     if response.status_code in {401, 403}:
         logger.info("github_token_rejected", status=response.status_code)
         return _error(400, "github_token_rejected")
@@ -314,6 +336,12 @@ async def _token_login(token: str) -> str | JSONResponse:
         logger.warning("github_token_check_failed", status=response.status_code)
         return _error(502, "github_unreachable")
     return login
+
+
+def _rate_limited(response: httpx.Response) -> bool:
+    """Tell whether GitHub answered with a rate limit: any 429, or a 403 with no requests left or a wait to keep."""
+    limited = response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers
+    return response.status_code == 429 or (response.status_code == 403 and limited)
 
 
 @router.get("/status", response_model=None)
@@ -328,14 +356,17 @@ async def save_github_token(payload: GitHubToken, request: Request) -> dict[str,
     context = _credential_context(request)
     if context is None:
         return _error(409, "github_not_connected")
-    login = await _token_login(payload.token)
-    if isinstance(login, JSONResponse):
-        return login
-    try:
-        await asyncio.to_thread(_save_token, context, {"token": payload.token, "login": login})
-    except OSError as exc:
-        logger.warning("github_token_save_failed", error_type=type(exc).__name__)
-        return _error(503, _UNAVAILABLE)
+    async with _token_lock(presented_session(request).user_id):
+        login = await _token_login(payload.token)
+        if isinstance(login, JSONResponse):
+            return login
+        try:
+            # Finished even when the request is cancelled, so the lock is never released while it still writes.
+            await run_blocking_until_complete(_save_token, context, {"token": payload.token, "login": login})
+        except (OSError, ValueError) as exc:
+            # The store refuses some writes with `ValueError`; neither answer names the path or the error.
+            logger.warning("github_token_save_failed", error_type=type(exc).__name__)
+            return _error(503, _UNAVAILABLE)
     logger.info("github_token_saved")
     return {"connected": True, "via": "token", "login": login}
 
@@ -345,7 +376,14 @@ async def delete_github_token(request: Request) -> dict[str, object] | JSONRespo
     """Remove the session user's saved token, if any, and answer the status left, maybe the GitHub App connection."""
     context = _credential_context(request)
     if context is not None:
-        await asyncio.to_thread(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
+        # Waits for a save under way, which would otherwise publish its token after this removal.
+        async with _token_lock(presented_session(request).user_id):
+            try:
+                await run_blocking_until_complete(lambda: _token_store(context).delete_credentials(_TOKEN_SERVICE))
+            except (OSError, ValueError) as exc:
+                # As on save, the store may refuse with `ValueError`; the answer names neither path nor error.
+                logger.warning("github_token_delete_failed", error_type=type(exc).__name__)
+                return _error(503, _UNAVAILABLE)
     return await _status(context)
 
 

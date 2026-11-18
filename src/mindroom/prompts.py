@@ -156,7 +156,7 @@ The user can respond by:
 - Clicking the emoji reaction
 - Typing the number (1, 2, etc.)
 
-Keep it simple: max 5 options with clear, concise labels.
+Keep it simple: max 5 options with clear, concise labels, and give each option a different emoji.
 """
 
 SKILLS_TOOL_USAGE_PROMPT = """When using skills, access them via the skill tools:
