@@ -364,24 +364,31 @@ async def test_a_send_body_that_is_not_a_json_object_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_state_and_account_data_writes_are_not_stamped(tmp_path: Path) -> None:
-    """Only events sent into a room carry the marker; state and account data pass unchanged, naming the person."""
+async def test_state_events_are_stamped_and_account_data_is_not(tmp_path: Path) -> None:
+    """A state event is an event in the room, whatever endpoint carried it, so it carries the marker.
+
+    Account data is the person's own, outside any room, and passes unchanged; a read of state is never changed.
+    """
     client, homeserver = _client(tmp_path, {"event_id": "$state"})
     account_data = {"@bob:example.com": [ROOM]}
 
     await client.room_put_state(ROOM, "m.room.topic", {"topic": "Plans"})
+    await client.room_put_state(ROOM, "com.example.note", {"text": "Hi"}, state_key="@bob:example.com")
     await client.send(
         "PUT",
         "/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/m.direct",
         json.dumps(account_data),
     )
+    await client.send("GET", "/_matrix/client/v3/rooms/%21room%3Aexample.com/state/m.room.topic")
 
-    state, direct = homeserver.requests
-    assert "/rooms/%21room%3Aexample.com/state/m.room.topic" in state.url
-    assert state.body == {"topic": "Plans"}
+    topic, keyed, direct, read = homeserver.requests
+    assert "/rooms/%21room%3Aexample.com/state/m.room.topic" in topic.url
+    assert topic.body == {"topic": "Plans", AGENT_AUTHORED_KEY: AGENT}
+    assert keyed.body == {"text": "Hi", AGENT_AUTHORED_KEY: AGENT}
     # Parsed, the body sent equals the one given: no key was added.
     assert direct.body == account_data
-    assert state.query["user_id"] == direct.query["user_id"] == [OWNER]
+    assert read.body is None
+    assert topic.query["user_id"] == direct.query["user_id"] == [OWNER]
 
 
 @pytest.mark.parametrize("source", ["variable", "file"])
