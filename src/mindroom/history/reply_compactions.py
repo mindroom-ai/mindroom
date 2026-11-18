@@ -24,18 +24,22 @@ if TYPE_CHECKING:
         CompactionOutcome,
     )
 
-# Every later write of the reply repeats the entry, so a provider's long error must not crowd out its answer.
-_FAILURE_REASON_MAX_CHARS = 300
+# Every later write of the reply repeats the entry, so a provider's long error or a long model alias must not crowd
+# out its answer: the strings an entry takes from outside are cut to these lengths.
+_MAX_CHARS = {"failure_reason": 300, "summary_model": 120}
 # Every write repeats the list too, so a long tool loop that compacts again and again shows only its newest ones.
 MAX_REPLY_COMPACTIONS = 8
 # ...and within this many bytes as Matrix sends them (ASCII escapes), since an edit carries the list twice.
-# The newest entry is always kept, whatever its size.
+# The newest entry is always kept; with its strings cut, it fits on its own.
 MAX_REPLY_COMPACTIONS_BYTES = 8 * 1024
 
 
-def _short_reason(reason: str) -> str:
-    """Return the reason cut to the cap, marked with an ellipsis when cut."""
-    return reason if len(reason) <= _FAILURE_REASON_MAX_CHARS else reason[:_FAILURE_REASON_MAX_CHARS] + "…"
+def _capped(key: str, value: object) -> object:
+    """Return a field's value cut to its cap, marked with an ellipsis when cut."""
+    limit = _MAX_CHARS.get(key)
+    if limit is None or not isinstance(value, str) or len(value) <= limit:
+        return value
+    return value[:limit] + "…"
 
 
 class ReplyCompactions:
@@ -64,7 +68,7 @@ class ReplyCompactions:
             "after_tool": self._tool_count() if self._tool_count is not None else 0,
             "status": "running",
             "started_at": time.time_ns() // 1_000_000,
-            "summary_model": event.summary_model,
+            "summary_model": _capped("summary_model", event.summary_model),
             "before_tokens": event.before_tokens,
             "runs_before": event.runs_before,
         }
@@ -81,7 +85,7 @@ class ReplyCompactions:
         entry = next((entry for entry in self._entries if entry["id"] == entry_id), None)
         if entry is None:
             return
-        entry.update({key: value for key, value in fields.items() if value is not None})
+        entry.update({key: _capped(key, value) for key, value in fields.items() if value is not None})
         if entry["status"] != "running":
             entry.pop("runs_remaining", None)
 
@@ -156,7 +160,7 @@ class ReplyCompactionLifecycle:
         self._recorder.update(
             event.notice_event_id,
             status=event.status,
-            failure_reason=_short_reason(event.failure_reason),
+            failure_reason=event.failure_reason,
             duration_ms=event.duration_ms,
             summary_model=event.summary_model,
         )

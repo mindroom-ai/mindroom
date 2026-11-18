@@ -228,16 +228,22 @@ async def test_a_reply_writes_only_its_newest_compactions_so_a_short_answer_edit
 
 @pytest.mark.asyncio
 async def test_one_worst_case_entry_fits_the_byte_budget() -> None:
-    """A failed entry with the longest reason, all escaped emoji, still fits, so the newest entry is never dropped."""
+    """A failed entry with the longest reason and model name, all escaped emoji, still fits the budget alone.
+
+    Every string an entry takes from outside is capped, so the newest entry, which is always kept, fits by construction.
+    """
     recorder = ReplyCompactions()
     lifecycle = _lifecycle(recorder)
-    entry_id = await lifecycle.start(_start())
-    await lifecycle.progress(_progress(entry_id))
-    await lifecycle.complete_failure(replace(_failure(entry_id, "failed"), failure_reason="\U0001f600" * 400))
+    long = "\U0001f600" * 400
+    entry_id = await lifecycle.start(replace(_start(), summary_model=long))
+    await lifecycle.progress(replace(_progress(entry_id), summary_model=long))
+    await lifecycle.complete_failure(replace(_failure(entry_id, "failed"), summary_model=long, failure_reason=long))
 
     content = recorder.content()
     assert content is not None
-    assert len(content) == 1
+    [entry] = content
+    assert entry["summary_model"] == "\U0001f600" * 120 + "…"
+    assert entry["failure_reason"] == "\U0001f600" * 300 + "…"
     assert len(json.dumps(content)) <= MAX_REPLY_COMPACTIONS_BYTES
 
 
