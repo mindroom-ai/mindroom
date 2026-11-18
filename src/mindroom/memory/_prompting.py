@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.knowledge.retrieval import o200k_tokens
 from mindroom.prompt_templates import render_prompt_template
 from mindroom.redaction import REDACTION_FAILED, redact_private_keys, redact_sensitive_text
 from mindroom.tool_system.events import body_without_tool_markers
@@ -43,26 +42,6 @@ def format_memories_as_context(
 
     memory_lines = "\n".join(f"- {memory.get('memory', '')}" for memory in memories)
     return render_prompt_template(prompt_template, context_type=context_type, memory_lines=memory_lines)
-
-
-def add_within_recall_budget(
-    selected: Sequence[MemoryResult],
-    extra: Sequence[MemoryResult],
-    *,
-    token_budget: int,
-) -> list[MemoryResult]:
-    """Return ``selected`` followed by the hits of ``extra``, in order, that fit the token budget ``selected`` left.
-
-    A hit of ``extra`` that does not fit is dropped, and a later, smaller one may still fit.
-    """
-    remaining = token_budget - sum(o200k_tokens(result.get("memory", "")) for result in selected)
-    added: list[MemoryResult] = []
-    for result in extra:
-        tokens = o200k_tokens(result.get("memory", ""))
-        if tokens <= remaining:
-            added.append(result)
-            remaining -= tokens
-    return [*selected, *added]
 
 
 def strip_user_turn_time_prefix(text: str) -> str:

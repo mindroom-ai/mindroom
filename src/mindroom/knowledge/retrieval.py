@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass, replace
-from itertools import accumulate
 from typing import TYPE_CHECKING
 
 from mindroom.judgment.answers import JudgmentError
-from mindroom.knowledge.read_protocol import DISTANCE_KEY
 from mindroom.logging_config import get_logger
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import o200k_counter
@@ -17,7 +15,6 @@ from mindroom.token_counting.families import o200k_counter
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.knowledge.rerank import Reranker
 
 logger = get_logger(__name__)
@@ -54,15 +51,6 @@ class Selection:
     hybrid_score_gap: float | None = None
     #: After reranking, keep candidates the reranker scored at or above this.
     min_rerank_score: float | None = None
-
-
-def hybrid_scores(hits: Sequence[SearchHit]) -> list[float]:
-    """Return a cosine-scale score per hit that never rises down the hybrid rank order.
-
-    Hits arrive in hybrid rank order, which word matches can lift above closer vectors. Each score is the best cosine
-    similarity at or below its rank, so scores stay on the cosine scale and sorting by them keeps the hybrid order.
-    """
-    return list(accumulate((1.0 - hit.meta_data[DISTANCE_KEY] for hit in reversed(hits)), max))[::-1]
 
 
 def o200k_tokens(text: str) -> int:
@@ -122,7 +110,7 @@ def _select[T](ranked: Sequence[Candidate[T]], selection: Selection, *, reranked
     for candidate in ranked[: max(selection.limit, 0)]:
         if reranked:
             threshold = selection.min_rerank_score
-            if threshold is not None and (candidate.score < threshold or candidate.score == -math.inf):
+            if threshold is not None and candidate.score < threshold:
                 break
         elif (
             selection.hybrid_score_gap is not None

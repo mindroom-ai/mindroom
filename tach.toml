@@ -3884,7 +3884,6 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.knowledge.file_memory_knowledge",
     "mindroom.knowledge.read_protocol",
-    "mindroom.knowledge.retrieval",
     "mindroom.memory._shared",
 ]
 visibility = ["mindroom.memory._file_backend"]
@@ -3908,7 +3907,7 @@ visibility = ["mindroom.memory._backend"]
 
 [[modules]]
 path = "mindroom.memory._prompting"
-depends_on = ["mindroom.knowledge.retrieval", "mindroom.prompt_templates", "mindroom.tool_system.events"]
+depends_on = ["mindroom.prompt_templates", "mindroom.tool_system.events"]
 visibility = [
     "mindroom.memory",
     "mindroom.memory._file_backend",
@@ -6671,13 +6670,8 @@ visibility = ["mindroom.knowledge.utils"]
 
 [[modules]]
 path = "mindroom.knowledge.retrieval"
-depends_on = ["mindroom.judgment.answers", "mindroom.knowledge.read_protocol"]
-visibility = [
-    "mindroom.knowledge.search",
-    "mindroom.memory._file_backend",
-    "mindroom.memory._prompting",
-    "mindroom.memory._semantic_file_search",
-]
+depends_on = ["mindroom.judgment.answers"]
+visibility = ["mindroom.knowledge.search", "mindroom.memory._file_backend"]
 
 [[modules]]
 path = "mindroom.knowledge.watch"

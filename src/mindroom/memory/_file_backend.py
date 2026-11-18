@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.config.resolution import entity_timezone, memory_search
 from mindroom.embeddings.errors import classified_embedder_error
-from mindroom.knowledge.retrieval import Candidate, Selection, retrieve
+from mindroom.knowledge.retrieval import Candidate, Selection, o200k_tokens, retrieve
 from mindroom.knowledge.utils import configured_reranker
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
@@ -26,7 +26,7 @@ from mindroom.timing import timed
 from mindroom.token_counting.counts import count
 
 from ._policy import MemoryScope, team_scope, team_scopes, team_user_id
-from ._prompting import add_within_recall_budget, redact_memory_text
+from ._prompting import redact_memory_text
 from ._semantic_file_search import (
     SemanticFileMemoryIndexUnavailableError,
     schedule_semantic_file_memory_refresh,
@@ -801,13 +801,30 @@ def _agent_keyword_results(scope: MemoryScope, query: str, limit: int) -> list[M
 # fuses `max(limit * 2, 50)` candidates per ranking, so up to 25 keeps the fusion width, and with it the ranking, of
 # a three-hit search.
 _RECALL_SEARCH_LIMIT = 20
+#: The o200k tokens one turn's recalled memories may take in total.
+_RECALL_TOKEN_BUDGET = 800
 #: The semantic hits one turn's recall injects: within 0.05 of the best hybrid score, at most 5, 800 o200k tokens.
-_RECALL_SELECTION = Selection(limit=5, token_budget=800, hybrid_score_gap=0.05)
+_RECALL_SELECTION = Selection(limit=5, token_budget=_RECALL_TOKEN_BUDGET, hybrid_score_gap=0.05)
 #: Seconds the per-turn recall waits for its reranker before keeping the hybrid selection.
 _RECALL_RERANK_DEADLINE_SECONDS = 2.0
 #: Reranker providers that passed the recall benchmark: with ``memory.search.rerank`` unset, memory search reranks
 #: with them and with no other.
 _RERANK_BY_DEFAULT_PROVIDERS = frozenset({"openai_decisions", "typesafe"})
+
+
+def _add_within_recall_budget(selected: Sequence[MemoryResult], extra: Sequence[MemoryResult]) -> list[MemoryResult]:
+    """Return ``selected`` followed by the hits of ``extra``, in order, that fit the recall budget ``selected`` left.
+
+    A hit of ``extra`` that does not fit is dropped, and a later, smaller one may still fit.
+    """
+    remaining = _RECALL_TOKEN_BUDGET - sum(o200k_tokens(result.get("memory", "")) for result in selected)
+    added: list[MemoryResult] = []
+    for result in extra:
+        tokens = o200k_tokens(result.get("memory", ""))
+        if tokens <= remaining:
+            added.append(result)
+            remaining -= tokens
+    return [*selected, *added]
 
 
 async def _retrieve_memories(
@@ -968,11 +985,7 @@ class FileMemoryBackend:
         if semantic and recall:
             team_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
             return MemorySearchOutcome(
-                results=add_within_recall_budget(
-                    results,
-                    team_results[:limit],
-                    token_budget=cast("int", _RECALL_SELECTION.token_budget),
-                ),
+                results=_add_within_recall_budget(results, team_results[:limit]),
                 degraded_reason=degraded_reason,
             )
         results.extend(team_results)
