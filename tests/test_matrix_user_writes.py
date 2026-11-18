@@ -83,11 +83,10 @@ DIRECTORY_PATH = f"{CLIENT}/directory/room/{ALIAS}"
 ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
 REACTION_KEY = "emoji must be one emoji, at most 8 characters and without spaces."
 MEGOLM = {"algorithm": "m.megolm.v1.aes-sha2"}
-# Why a DM made with Bob was not added to `m.direct`, and what the result of its send says of it.
-DM_NOT_LISTED_WHY = "Matrix answered 500 M_UNKNOWN: Database unavailable"
-DM_NOT_LISTED = (
-    f"Made the DM {NEW_DM} with {BOB}, but could not list it as a DM ({DM_NOT_LISTED_WHY}). "
-    f"To send there again, use room_id {NEW_DM}."
+# What a send to Bob, who has no DM with the owner, answers.
+NO_DM = (
+    f"There is no DM with {BOB} yet. Your owner can start one in their Matrix client, "
+    "or you can make a room with create_room, invite them, and send to that room."
 )
 ROOM_UNCONFIRMED = (
     "The homeserver did not confirm the room. It may have been made: list your owner's rooms before making it again."
@@ -131,11 +130,6 @@ def _sent(homeserver: FakeHomeserver, room_id: str = ROOM, event_type: str = "m.
 def _changes(homeserver: FakeHomeserver) -> list[HomeserverRequest]:
     """Return the requests that change anything: every one but a GET."""
     return [request for request in homeserver.requests if request.method != "GET"]
-
-
-def _direct_changes(homeserver: FakeHomeserver) -> list[HomeserverRequest]:
-    """Return the requests that change the owner's `m.direct`."""
-    return [request for request in _changes(homeserver) if request.path == DIRECT_PATH]
 
 
 def _notes(paths: RuntimePaths, tmp_path: Path, room_id: str = ROOM, **fields: str) -> AttachmentRecord:
@@ -649,266 +643,31 @@ async def test_send_to_a_person_uses_their_newest_dm(config: Config, paths: Runt
 
 
 @pytest.mark.asyncio
-async def test_send_to_a_person_without_a_dm_creates_one_and_records_it(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """Without a DM of only the two of them, a new one is made, added to the owner's DMs, and the message sent there."""
-    left = "!left:example.com"
-    homeserver.answers.update(
-        {
-            DIRECT_PATH: {BOB: [left], CAROL: ["!carol:example.com"]},
-            _members_path(left): _members(alice="join", bob="leave"),
-            CREATE_PATH: {"room_id": NEW_DM},
-        },
-    )
-
-    result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-
-    assert result == ok_result("send", room_id=NEW_DM, event_id="$dm")
-    [created, recorded, sent] = _changes(homeserver)
-    assert created.body == {"preset": "trusted_private_chat", "is_direct": True, "invite": [BOB]}
-    assert (recorded.method, recorded.path) == ("PUT", DIRECT_PATH)
-    assert recorded.body == {BOB: [left, NEW_DM], CAROL: ["!carol:example.com"]}
-    assert sent.path.startswith(_send_path(NEW_DM))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("answering", [{"thread_id": "$root"}, {"event_id": "$message"}], ids=["thread", "reply"])
-async def test_an_answer_to_a_person_without_a_dm_makes_none(
+@pytest.mark.parametrize(
+    "answering",
+    [{}, {"thread_id": "$root"}, {"event_id": "$message"}],
+    ids=["message", "thread", "reply"],
+)
+async def test_send_to_a_person_without_a_dm_is_refused(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
     answering: dict[str, str],
 ) -> None:
-    """A thread or message to answer cannot be in a DM not made yet, so none is made and nobody is invited."""
-    homeserver.answers.update({DIRECT_PATH: {}, CREATE_PATH: {"room_id": NEW_DM}})
+    """Without a listed DM of only the two of them, nothing is made or sent, and the refusal says how to reach them."""
+    left = "!left:example.com"
+    homeserver.answers.update(
+        {
+            DIRECT_PATH: {BOB: [left], CAROL: ["!carol:example.com"]},
+            _members_path(left): _members(alice="join", bob="leave"),
+        },
+    )
 
     result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?", **answering)
 
-    assert result == error_result("send", f"There is no DM with {BOB} yet, so nothing there to answer.")
+    assert result == error_result("send", NO_DM)
     assert _changes(homeserver) == []
-
-
-@pytest.mark.asyncio
-async def test_a_new_dm_that_could_not_be_listed_still_gets_the_message(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """A DM made but not added to the owner's DMs is used all the same, and the result and the audit line say so."""
-    homeserver.answers.update(
-        {
-            # The owner has no DMs yet; `m.direct` is read, read again before the write, and the write fails.
-            DIRECT_PATH: [
-                matrix_error(404, "M_NOT_FOUND", "No m.direct"),
-                matrix_error(404, "M_NOT_FOUND", "No m.direct"),
-                matrix_error(500, "M_UNKNOWN", "Database unavailable"),
-            ],
-            CREATE_PATH: {"room_id": NEW_DM},
-        },
-    )
-
-    with capture_logs() as logs:
-        result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-
-    assert result == ok_result("send", room_id=NEW_DM, event_id="$dm", note=DM_NOT_LISTED)
-    assert [content["body"] for content in _sent(homeserver, NEW_DM)] == ["Lunch?"]
-    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
-    assert (audit["status"], audit["room_id"], audit["invited"]) == ("ok", NEW_DM, BOB)
-    assert audit["dm_not_listed"] == DM_NOT_LISTED_WHY
-
-
-@pytest.mark.asyncio
-async def test_a_failed_send_into_a_new_dm_names_the_room_it_made(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """The DM made for a send stays when the send fails, so the error names it and whether it is listed."""
-    refused = matrix_error(403, "M_FORBIDDEN", "You cannot post here")
-    homeserver.answers.update(
-        {
-            DIRECT_PATH: [{}, matrix_error(500, "M_UNKNOWN", "Database unavailable")],
-            CREATE_PATH: {"room_id": NEW_DM},
-            f"{_send_path(NEW_DM)}*": refused,
-        },
-    )
-
-    with capture_logs() as logs:
-        unlisted = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-    homeserver.answers[DIRECT_PATH] = {}
-    listed = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-
-    nothing_sent = "Nothing was sent: RoomSendError: M_FORBIDDEN You cannot post here."
-    assert unlisted == error_result("send", f"{DM_NOT_LISTED} {nothing_sent}")
-    assert listed == error_result("send", f"Made the DM {NEW_DM} with {BOB}. {nothing_sent}")
-    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
-    assert (audit["status"], audit["room_id"], audit["dm_not_listed"]) == ("error", NEW_DM, DM_NOT_LISTED_WHY)
-
-
-@pytest.mark.asyncio
-async def test_recording_a_new_dm_keeps_what_the_owner_changed_meanwhile(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """`m.direct` is written whole, so the copy written is the one read just before, not the one read at the start."""
-    dave = {"@dave:example.com": ["!d:example.com"]}
-    homeserver.answers.update(
-        {
-            DIRECT_PATH: [
-                {CAROL: ["!c:example.com"]},
-                {CAROL: ["!c:example.com"], **dave},
-            ],
-            CREATE_PATH: {"room_id": NEW_DM},
-        },
-    )
-
-    result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-
-    assert result == ok_result("send", room_id=NEW_DM, event_id="$dm")
-    [recorded] = _direct_changes(homeserver)
-    assert recorded.body == {CAROL: ["!c:example.com"], **dave, BOB: [NEW_DM]}
-
-
-@pytest.mark.asyncio
-async def test_a_failed_second_read_records_nothing_and_names_the_room(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """When `m.direct` cannot be read again before the write, the early copy is not written in its place.
-
-    The message goes into the new room all the same.
-    """
-    homeserver.answers.update(
-        {
-            DIRECT_PATH: [
-                {CAROL: ["!c:example.com"]},
-                matrix_error(500, "M_UNKNOWN", "Database unavailable"),
-            ],
-            CREATE_PATH: {"room_id": NEW_DM},
-        },
-    )
-
-    result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-
-    assert result == ok_result("send", room_id=NEW_DM, event_id="$dm", note=DM_NOT_LISTED)
-    assert _direct_changes(homeserver) == []
-
-
-@dataclass
-class _SlowHomeserver(FakeHomeserver):
-    """A homeserver that lets another call's request in before it answers one, and keeps the `m.direct` it is given."""
-
-    direct: dict[str, object] = field(default_factory=dict)
-    # The ID each new room gets, in turn.
-    new_rooms: list[str] = field(default_factory=list)
-
-    async def request(self, method: str, url: str, **kwargs: Any) -> Any:  # noqa: ANN401
-        await asyncio.sleep(0)
-        return await super().request(method, url, **kwargs)
-
-    def _answer(self, path: str) -> Answer:
-        request = self.requests[-1]
-        if path == DIRECT_PATH:
-            if request.method == "PUT":
-                assert isinstance(request.body, dict)
-                self.direct = request.body
-            return Answer(self.direct)
-        if path == CREATE_PATH:
-            return Answer({"room_id": self.new_rooms.pop(0)})
-        return super()._answer(path)
-
-
-async def _write_both(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-    first: dict[str, object],
-    second: dict[str, object],
-) -> list[dict]:
-    """Make two `matrix_user_write` calls of Alice's agent at once and return the fields of each."""
-    with owner_turn(config, paths), homeserver.serving_the_toolkit():
-        toolkit = owner_toolkit(config, paths)
-        results = await asyncio.gather(toolkit.matrix_user_write(**first), toolkit.matrix_user_write(**second))
-    return [json.loads(result) for result in results]
-
-
-@pytest.mark.asyncio
-async def test_two_first_sends_to_one_person_at_once_make_one_dm(config: Config, paths: RuntimePaths) -> None:
-    """The second call waits for the first to make and record the DM, then sends there too."""
-    homeserver = _SlowHomeserver(
-        {
-            _members_path(NEW_DM): _members(alice="join", bob="invite"),
-            f"{_send_path(NEW_DM)}*": Answer({"event_id": "$dm"}),
-        },
-        new_rooms=[NEW_DM, "!second:example.com"],
-    )
-
-    results = await _write_both(
-        config,
-        paths,
-        homeserver,
-        {"action": "send", "user_id": BOB, "message": "Lunch?"},
-        {"action": "send", "user_id": BOB, "message": "At one?"},
-    )
-
-    assert results == [ok_result("send", room_id=NEW_DM, event_id="$dm")] * 2
-    assert len(homeserver.requests_to(CREATE_PATH)) == 1
-    assert homeserver.direct == {BOB: [NEW_DM]}
-    assert sorted(content["body"] for content in _sent(homeserver, NEW_DM)) == ["At one?", "Lunch?"]
-
-
-@pytest.mark.asyncio
-async def test_first_sends_to_two_people_at_once_record_both_dms(config: Config, paths: RuntimePaths) -> None:
-    """`m.direct` is written whole, so the second call reads it only after the first has written its DM there."""
-    carol_dm = "!carol-dm:example.com"
-    homeserver = _SlowHomeserver(
-        {
-            f"{_send_path(NEW_DM)}*": Answer({"event_id": "$dm"}),
-            f"{_send_path(carol_dm)}*": Answer({"event_id": "$carol"}),
-        },
-        new_rooms=[NEW_DM, carol_dm],
-    )
-
-    results = await _write_both(
-        config,
-        paths,
-        homeserver,
-        {"action": "send", "user_id": BOB, "message": "Lunch?"},
-        {"action": "send", "user_id": CAROL, "message": "Lunch?"},
-    )
-
-    assert results == [
-        ok_result("send", room_id=NEW_DM, event_id="$dm"),
-        ok_result("send", room_id=carol_dm, event_id="$carol"),
-    ]
-    assert homeserver.direct == {BOB: [NEW_DM], CAROL: [carol_dm]}
-
-
-@pytest.mark.asyncio
-async def test_a_new_dm_that_is_encrypted_names_the_room_it_made(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """A homeserver that encrypts private rooms makes the new DM encrypted: nothing is sent, and the refusal names it."""
-    homeserver.answers.update(
-        {
-            DIRECT_PATH: {},
-            CREATE_PATH: {"room_id": NEW_DM},
-            f"{CLIENT}/rooms/{NEW_DM}/state/m.room.encryption": MEGOLM,
-        },
-    )
-
-    result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-
-    assert result == error_result("send", f"Made the DM {NEW_DM} with {BOB}. {ENCRYPTED}")
-    assert [request.path for request in _changes(homeserver)] == [CREATE_PATH, DIRECT_PATH]
-    assert _sent(homeserver, NEW_DM) == []
+    assert homeserver.paths() == [DIRECT_PATH, _members_path(left)]
 
 
 @pytest.mark.asyncio
@@ -1540,24 +1299,6 @@ async def test_a_create_room_the_homeserver_did_not_confirm_says_it_may_exist(
 
 
 @pytest.mark.asyncio
-async def test_a_dm_the_homeserver_did_not_confirm_says_it_may_exist(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """A DM made for a send whose answer was lost may exist, with the person invited, so nothing more is sent."""
-    homeserver.answers.update({DIRECT_PATH: {}, CREATE_PATH: TimeoutError()})
-
-    with capture_logs() as logs:
-        result = await _write(config, paths, homeserver, action="send", user_id=BOB, message="Lunch?")
-
-    assert result == error_result("send", ROOM_UNCONFIRMED)
-    [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
-    assert (audit["status"], audit["error"], audit["invited"]) == ("error", ROOM_UNCONFIRMED, BOB)
-    assert homeserver.paths()[-1] == CREATE_PATH
-
-
-@pytest.mark.asyncio
 async def test_a_failed_create_room_does_not_log_a_stray_room_id(
     config: Config,
     paths: RuntimePaths,
@@ -1643,8 +1384,10 @@ class _HangingHomeserver(FakeHomeserver):
 
 @pytest.mark.asyncio
 async def test_a_write_cancelled_midway_leaves_its_audit_line(config: Config, paths: RuntimePaths) -> None:
-    """A write stopped after it made a DM, while its message was going out, is logged as interrupted, with the room."""
-    homeserver = _HangingHomeserver({DIRECT_PATH: {}, CREATE_PATH: {"room_id": NEW_DM}})
+    """A write stopped while its message was going out to a DM is logged as interrupted, with the room."""
+    homeserver = _HangingHomeserver(
+        {DIRECT_PATH: {BOB: [NEW_DM]}, _members_path(NEW_DM): _members(alice="join", bob="join")},
+    )
 
     with capture_logs() as logs:
         writing = asyncio.create_task(
@@ -1657,7 +1400,7 @@ async def test_a_write_cancelled_midway_leaves_its_audit_line(config: Config, pa
 
     [audit] = [entry for entry in logs if entry["event"] == "matrix_user_write_audit"]
     assert (audit["status"], audit["error"]) == ("interrupted", "CancelledError")
-    assert (audit["action"], audit["room_id"], audit["invited"], audit["event_id"]) == ("send", NEW_DM, BOB, None)
+    assert (audit["action"], audit["room_id"], audit["event_id"]) == ("send", NEW_DM, None)
     assert all("secret plan" not in str(entry) for entry in logs)
 
 
@@ -1683,9 +1426,8 @@ async def test_a_write_that_fails_unexpectedly_leaves_its_audit_line(
     [
         {"action": "invite", "room_id": ROOM, "user_id": BOB},
         {"action": "create_room", "name": "Trip", "user_id": BOB},
-        {"action": "send", "user_id": BOB, "message": "Lunch?"},
     ],
-    ids=["invite", "create_room", "new-dm"],
+    ids=["invite", "create_room"],
 )
 async def test_the_audit_line_names_whom_a_write_invited(
     config: Config,
@@ -1693,8 +1435,8 @@ async def test_the_audit_line_names_whom_a_write_invited(
     homeserver: FakeHomeserver,
     arguments: dict[str, str],
 ) -> None:
-    """Whom the owner's account invited is logged, into a room, a new room, or a DM made for a send."""
-    homeserver.answers.update({f"{ROOM_PATH}/invite": {}, CREATE_PATH: {"room_id": NEW_DM}, DIRECT_PATH: {}})
+    """Whom the owner's account invited is logged, into a room or a new room."""
+    homeserver.answers.update({f"{ROOM_PATH}/invite": {}, CREATE_PATH: {"room_id": NEW_DM}})
 
     with capture_logs() as logs:
         result = await _write(config, paths, homeserver, **arguments)

@@ -10,7 +10,6 @@ event would go out in plain text.
 
 from __future__ import annotations
 
-import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -18,7 +17,6 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 from uuid import uuid4
-from weakref import WeakValueDictionary
 
 from mindroom.attachments.storage import filter_attachments_for_context, load_attachment
 from mindroom.constants import AGENT_AUTHORED_KEY
@@ -66,9 +64,6 @@ _WRITES_WINDOW_SECONDS = 30.0
 _RATE_LIMIT_LOCK = Lock()
 # Recent writes by agent, requester, and room: the room written to, else the person messaged, else none for a new room.
 _RECENT_WRITES: defaultdict[tuple[str, str, str], deque[float]] = defaultdict(deque)
-# One call at a time finds or makes a DM for a person: two at once would each make one with the same someone, or
-# each write the person's `m.direct` whole and drop the DM the other added.
-_DIRECT_ROOM_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 _ONE_TARGET = "send needs exactly one of room_id and user_id."
 _NOTHING_TO_SEND = "send needs message or attachment."
 _ONE_EVENT = "send takes message or attachment, not both: send the text and the file as two calls."
@@ -155,10 +150,8 @@ class _Written:
 
     room_id: str | None
     event_id: str | None = None
-    # Whom it invited: into a room, into a new room, or into a DM made for a send.
+    # Whom it invited: into a room, or into a new room.
     invited: str | None = None
-    # Why the DM made for a send could not be added to the person's `m.direct`, when it could not.
-    dm_not_listed: str | None = None
 
 
 async def write_as_person(
@@ -204,7 +197,6 @@ def _audit(
         event_id=written.event_id,
         attachments=int(write.attachment is not None),
         **({} if written.invited is None else {"invited": written.invited}),
-        **({} if written.dm_not_listed is None else {"dm_not_listed": written.dm_not_listed}),
         **({} if error is None else {"error": error}),
     )
 
@@ -338,23 +330,12 @@ async def _send(
     file: AttachmentRecord | None,
     marker: dict[str, str],
 ) -> dict[str, object]:
-    """Send one event into the room, or into the person's DM with whom ``write`` names, made now when they have none."""
-    if write.room_id is not None:
-        return await _send_into(client, turn, write, written, file, marker, write.room_id)
-    them = str(write.user_id)
-    answers = write.thread_id is not None or write.event_id is not None
-    room_id, made = await _direct_room(client, actor.person_user_id, them, written, answers=answers)
-    try:
-        fields = await _send_into(client, turn, write, written, file, marker, room_id)
-    except MatrixRequestError as failed:
-        if not made:
-            raise
-        # The DM made for this send stays, with them invited, so the failure names it.
-        msg = f"{_made_dm(room_id, them, written.dm_not_listed)} {failed}"
-        raise MatrixRequestError(msg) from None
-    if written.dm_not_listed is not None:
-        fields["note"] = _made_dm(room_id, them, written.dm_not_listed)
-    return fields
+    """Send one event into the room, or into the person's existing DM with whom ``write`` names."""
+    room_id = write.room_id
+    if room_id is None:
+        room_id = await _direct_room(client, actor.person_user_id, str(write.user_id))
+        written.room_id = room_id
+    return await _send_into(client, turn, write, written, file, marker, room_id)
 
 
 async def _send_into(
@@ -532,66 +513,22 @@ async def _newest_in_thread(client: nio.AsyncClient, room_id: str, thread_id: st
     return thread_id
 
 
-def _made_dm(room_id: str, them: str, not_listed: str | None) -> str:
-    """Return what a result says of the DM made for its send, and of why it is not in the person's DMs, if it is not."""
-    made = f"Made the DM {room_id} with {them}"
-    if not_listed is None:
-        return f"{made}."
-    why = not_listed.rstrip(".")
-    return f"{made}, but could not list it as a DM ({why}). To send there again, use room_id {room_id}."
-
-
-async def _direct_room(
-    client: nio.AsyncClient,
-    person: str,
-    them: str,
-    written: _Written,
-    *,
-    answers: bool,
-) -> tuple[str, bool]:
-    """Return the person's DM with ``them``, and whether it was made now, as one is when they have none.
+async def _direct_room(client: nio.AsyncClient, person: str, them: str) -> str:
+    """Return the person's DM with ``them``, refusing when they have none: a send never makes one.
 
     Their DM is the newest room the person's `m.direct` lists for ``them`` whose members, joined or invited, are only the
-    two of them. A room made now is added there, and is their DM for this send even when that fails. A send that
-    ``answers`` a thread or a message makes none: a room made now holds neither.
-    Calls of this runtime for one person take turns, so a second one finds the DM the first made and recorded.
-    ``written`` names the room, whom a room made now invited, and why it could not be added, if it could not.
+    two of them.
     """
-    async with _DIRECT_ROOM_LOCKS.setdefault(person, asyncio.Lock()):
-        direct_path = f"/user/{quote(person, safe='')}/account_data/m.direct"
-        direct = await optional_json(client, direct_path) or {}
-        listed = direct.get(them)
-        for room_id in reversed(listed if isinstance(listed, list) else []):
-            if isinstance(room_id, str) and await _only_the_two(client, room_id, person, them):
-                written.room_id = room_id
-                return room_id, False
-        if answers:
-            msg = f"There is no DM with {them} yet, so nothing there to answer."
-            raise MatrixRequestError(msg)
-        # Set before the request, so that the audit line of a room the homeserver did not confirm names them too.
-        written.invited = them
-        room_id = await _create_room(client, {"preset": "trusted_private_chat", "is_direct": True, "invite": [them]})
-        written.room_id = room_id
-        written.dm_not_listed = await _record_direct_room(client, direct_path, them, room_id)
-        return room_id, True
-
-
-async def _record_direct_room(client: nio.AsyncClient, direct_path: str, them: str, room_id: str) -> str | None:
-    """Add ``room_id`` to the person's `m.direct` list for ``them``, as it is when this writes; return why it failed.
-
-    `m.direct` is written as a whole, and the person's own client may have changed it since it was first read, so it is
-    read again just before the write and that copy, not the early one, is written back. The caller holds the person's
-    lock, so no other call of this runtime writes it between that read and the write.
-    """
-    try:
-        fresh = await optional_json(client, direct_path) or {}
-        listed = fresh.get(them)
-        listed = listed if isinstance(listed, list) else []
-        if room_id not in listed:
-            await matrix_json(client, "PUT", direct_path, {**fresh, them: [*listed, room_id]})
-    except REQUEST_FAILURES as error:
-        return request_failure(error)
-    return None
+    direct = await optional_json(client, f"/user/{quote(person, safe='')}/account_data/m.direct") or {}
+    listed = direct.get(them)
+    for room_id in reversed(listed if isinstance(listed, list) else []):
+        if isinstance(room_id, str) and await _only_the_two(client, room_id, person, them):
+            return room_id
+    msg = (
+        f"There is no DM with {them} yet. Your owner can start one in their Matrix client, "
+        "or you can make a room with create_room, invite them, and send to that room."
+    )
+    raise MatrixRequestError(msg)
 
 
 async def _only_the_two(client: nio.AsyncClient, room_id: str, person: str, them: str) -> bool:

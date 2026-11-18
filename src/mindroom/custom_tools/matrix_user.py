@@ -270,7 +270,7 @@ class MatrixUserTools(Toolkit):
         Agents never act on what you send this way: to talk to one, write as yourself.
 
         Actions (room_id: ID, #alias, or configured room name):
-        - send: message or attachment (one ID), not both, to room_id, or to user_id in their DM (made if missing).
+        - send: message or attachment (one ID), not both, to room_id, or to user_id in their existing DM.
           thread_id sends into that thread; event_id replies to that message.
         - react: emoji on event_id in room_id.
         - edit: Replace your owner's message event_id in room_id with message.
