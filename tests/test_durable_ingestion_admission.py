@@ -188,10 +188,10 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
 
 
 @pytest.mark.asyncio
-async def test_pump_wakes_the_dispatcher_only_for_new_actionable_work_or_a_replay(
+async def test_pump_wakes_the_dispatcher_at_once_only_for_new_actionable_work_or_a_replay(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:
-    """An empty sync, the bot's own streaming edit or a redelivered event leaves nothing for the dispatcher to find."""
+    """Within the recheck interval, an empty sync, the bot's own streaming edit or a redelivered event wakes nothing."""
     stream = uuid4()
     principal = await principal_for(journal_database(), stream)
     redelivered = SyncBatch(stream, 4, (message("$new"),))
@@ -238,11 +238,14 @@ async def test_pump_wakes_the_dispatcher_only_for_new_actionable_work_or_a_repla
 
 
 @pytest.mark.asyncio
-async def test_pump_still_wakes_for_work_another_agent_made_runnable(
+async def test_pump_wakes_the_dispatcher_within_the_recheck_interval_after_batches_that_bring_nothing(
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A departing router fails an agent's paused approval without waking it; the agent's later syncs find the source."""
+    """A departing router fails an agent's paused approval without waking it; the agent's next syncs lead to a wake.
+
+    The syncs arrive before the recheck is due and then stop, so only the scheduled wake can find the source.
+    """
     paused = event_journal_store_tests.TestApprovalContinuations
     alice = journal_store.principal("agent@alice")
     await paused.admit_sources(alice)
@@ -251,8 +254,7 @@ async def test_pump_still_wakes_for_work_another_agent_made_runnable(
     stream = uuid4()
     consumer = await alice.load_or_create_ingestion_consumer(new_generation=uuid4())
     await alice.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
-    now = [1_000.0]
-    monkeypatch.setattr(durable_ingestion, "monotonic", lambda: now[0])
+    monkeypatch.setattr(durable_ingestion, "_RECHECK_SECONDS", 1.0)
     handed: list[str] = []
     handed_over = asyncio.Event()
     scanned = asyncio.Event()
@@ -270,20 +272,19 @@ async def test_pump_still_wakes_for_work_another_agent_made_runnable(
         scanned.set()
 
     monkeypatch.setattr(worker, "_dispatch_ready_rooms", dispatch_and_signal)
-    batches = [SyncBatch(stream, 1, ()), SyncBatch(stream, 2, ()), SyncBatch(stream, 3, ())]
+    batches = [SyncBatch(stream, 1, ()), SyncBatch(stream, 2, ())]
     acked: list[SyncBatch] = []
+    idle = asyncio.Event()
 
     class Batches(Session):
         async def next_batch(self) -> SyncBatch | None:
-            if len(acked) == 2:
-                # The agent's syncs keep arriving; the last one comes after the recheck interval.
-                now[0] += durable_ingestion._RECHECK_SECONDS
             return batches[len(acked)] if len(acked) < len(batches) else None
 
         async def ack(self, batch: SyncBatch) -> None:
             acked.append(batch)
 
     async def wait_for_work() -> None:
+        idle.set()
         await asyncio.Event().wait()
 
     worker.start()
@@ -301,9 +302,11 @@ async def test_pump_still_wakes_for_work_another_agent_made_runnable(
                 wake_semantic_dispatch=worker.wake,
             ),
         )
-        await asyncio.wait_for(handed_over.wait(), 1)
-        assert handed == ["$source-1"]
+        await asyncio.wait_for(idle.wait(), 1)
         assert acked == batches
+        assert handed == []
+        await asyncio.wait_for(handed_over.wait(), 5)
+        assert handed == ["$source-1"]
     finally:
         if pump is not None:
             pump.cancel()
