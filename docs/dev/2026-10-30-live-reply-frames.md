@@ -27,7 +27,7 @@ Reasoning and finer progress the runtime already had never reached the user.
   Publisher ids start with zero-padded start milliseconds, so `(sid, seq)` orders live state across a restart.
   Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
   Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
-- Frames cut each tool entry's `args_preview` and `result_preview` to 200 characters (ending in `…`), and a snapshot that still does not fit the 60,000-byte limit (encrypted size in an encrypted room) leaves out the previews of the fewest oldest entries that make it fit; the running and newest calls keep theirs, and `progress` is untouched.
+- Frames cut each tool entry's `args_preview` and `result_preview` to 200 characters (ending in `…`), and a snapshot that still does not fit the 60,000-byte limit (encrypted size in an encrypted room) leaves out the previews of the fewest oldest entries that make it fit (oldest first, up to all of them), and `progress` is untouched.
   An entry that lost any preview carries `clipped: true`, so a client can take the whole previews from the durable trace, which keeps them.
   Only a snapshot widens that cut, every 5 s or when a delta would not fit, so the deltas between snapshots stay appends.
   Before this, whole traces stopped frames 17 times in production on 2026-11-17 (one reply: 61 calls, a 48 KB trace).

@@ -72,8 +72,13 @@ class LivePublisher:
                 delta=live_delta(self.last_sent, shown),
             )
         if frame is None or not self._fits(frame):
-            snapshot_due = True
-            frame, shown = self._fitted_snapshot(reply_event_id, docs)
+            bare = self.bare
+            snapshot, fitted = self._fitted_snapshot(reply_event_id, docs)
+            if frame is None or self._fits(snapshot):
+                snapshot_due, frame, shown = True, snapshot, fitted
+            else:
+                # The size check is an estimate; a delta it rejects may still go out, where no snapshot fits it.
+                self.bare = bare
         outcome = await send_live_frame(
             self.client,
             self.room_id,

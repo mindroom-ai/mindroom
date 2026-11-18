@@ -611,6 +611,50 @@ async def test_frames_drop_the_oldest_previews_only_at_a_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_a_delta_too_big_for_the_estimate_becomes_a_fitted_snapshot_or_goes_out_as_is(
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized delta is replaced by a snapshot that fits; when none fits, the delta goes out and the fit stays."""
+    monkeypatch.setattr(publisher_module, "_SNAPSHOT_INTERVAL_SECONDS", float("inf"))
+    publisher = LivePublisher(client=_encrypted_client(), room_id=_ROOM_ID)
+
+    def docs(count: int) -> LiveDocs:
+        return LiveDocs(
+            md="text",
+            reasoning="",
+            tools=tuple(_entry(index) for index in range(count)),
+            status="streaming",
+            activity="",
+        )
+
+    await publisher._send_next("$reply", docs(10))
+    # Deltas look too big; snapshots fit once the oldest five lost their previews.
+    monkeypatch.setattr(
+        publisher,
+        "_fits",
+        lambda frame: "snapshot" in frame and "args_preview" not in frame["snapshot"]["tools"][4],
+    )
+    await publisher._send_next("$reply", docs(11))
+    assert "snapshot" in frames.sent[-1]
+    assert frames.sent[-1]["seq"] == 1
+    assert publisher.bare == 5
+
+    # Nothing fits: the delta goes out as it is, and the fit is not widened by the failed search.
+    monkeypatch.setattr(publisher, "_fits", lambda _frame: False)
+    await publisher._send_next("$reply", docs(12))
+    assert [index for index, _ in frames.sent[-1]["delta"]["tools"]["set"]] == [11]
+    assert publisher.bare == 5
+
+    # A failed send makes the next frame a snapshot.
+    monkeypatch.setattr(publisher, "_fits", lambda _frame: True)
+    frames.outcomes = [LiveSendOutcome.RETRY]
+    await publisher._send_next("$reply", docs(13))
+    await publisher._send_next("$reply", docs(13))
+    assert "snapshot" in frames.sent[-1]
+
+
+@pytest.mark.asyncio
 async def test_reasoning_before_the_answer_streams_over_the_placeholder(tmp_path: Path, frames: _Frames) -> None:
     """A model that thinks before it answers shows its reasoning live over the reply's Thinking placeholder."""
     records, edits = _records(), _Edits()
