@@ -267,6 +267,40 @@ def test_reasoning_alone_does_not_make_a_streaming_edit_oversized() -> None:
         )
 
 
+def test_reasoning_does_not_lengthen_the_oversized_edit_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An answer too big for an edit waits as long with reasoning as without, so reasoning never holds back text."""
+    clock = [1000.0]
+    monkeypatch.setattr("mindroom.matrix.large_messages.monotonic", lambda: clock[0])
+
+    def edit(event_id: str, reasoning: dict[str, object] | None) -> dict[str, object]:
+        extra = {REASONING_CONTENT_KEY: reasoning} if reasoning else {}
+        source = {"body": "a" * 40000, "msgtype": "m.notice", STREAM_STATUS_KEY: STREAM_STATUS_STREAMING, **extra}
+        return {
+            "body": "* " + "a" * 40000,
+            "msgtype": "m.notice",
+            **extra,
+            "m.new_content": source,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+        }
+
+    def allowed_after(seconds: float, event_id: str, reasoning: dict[str, object] | None) -> bool:
+        clock[0] = 1000.0
+        assert should_send_oversized_nonterminal_streaming_edit(
+            room_id="!room:server",
+            original_event_id=event_id,
+            edit_content=edit(event_id, reasoning),
+        )
+        clock[0] = 1000.0 + seconds
+        return should_send_oversized_nonterminal_streaming_edit(
+            room_id="!room:server",
+            original_event_id=event_id,
+            edit_content=edit(event_id, reasoning),
+        )
+
+    wait = next(seconds for seconds in range(1, 600) if allowed_after(seconds, f"$plain{seconds}", None))
+    assert allowed_after(wait, "$reasoning", {"text": "r" * 256_000, "duration_ms": 1})
+
+
 @pytest.mark.asyncio
 async def test_threaded_edit_strips_nested_relations_from_replacement_payload() -> None:
     """Threaded edits should keep the top-level replacement relation only."""
