@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
 from mindroom.tool_system.events import body_without_tool_markers
-from mindroom.turns.facts import command_for, is_router_voice_echo
+from mindroom.turns.facts import command_for, is_voice_echo
 
 if TYPE_CHECKING:
     import structlog
@@ -113,7 +113,7 @@ async def _is_unresponded_requester_event(
     """
     facts = classify(event.sender, source)
     content = source.get("content")
-    if is_router_voice_echo(facts, content) or facts.run_identity != run_identity:
+    if is_voice_echo(facts, content) or facts.run_identity != run_identity:
         return False
     if event.event_id in handled or await for_another_participant(event.event_id, source):
         return False

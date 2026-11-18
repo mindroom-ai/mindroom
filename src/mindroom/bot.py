@@ -124,7 +124,7 @@ from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from .voice.ingress import VoiceIngress, VoiceIngressDeps
 from .voice.readiness import VoiceReadiness
-from .voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
+from .voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -262,7 +262,6 @@ class AgentBot:
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
     _turn_store: TurnStore
-    _visible_voice_echo: VisibleVoiceEchoLifecycle
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
     _ingress_hook_runner: IngressHookRunner
@@ -276,6 +275,7 @@ class AgentBot:
     _interactive_selections: InteractiveSelections
     _voice_ingress: VoiceIngress
     _turn_dispatcher: TurnDispatcher
+    _visible_voice_echo: VisibleVoiceEchoLifecycle
     _turn_ingress: TurnIngress
     _room_lifecycle: BotRoomLifecycle
     _decryption_diagnostics: DecryptionDiagnostics
@@ -655,15 +655,11 @@ class AgentBot:
             ),
         )
         self._visible_voice_echo = VisibleVoiceEchoLifecycle(
-            VisibleVoiceEchoDeps(
-                runtime=self._runtime_view,
-                logger=self.logger,
-                agent_name=self.agent_name,
-                delivery_gateway=self._delivery_gateway,
-                turn_store=self._turn_store,
-                router_turn_records=self._journal_store.turn_records(ROUTER_AGENT_NAME),
-                ingress=self._ingress_validator,
-            ),
+            runtime=self._runtime_view,
+            agent_name=self.agent_name,
+            delivery_gateway=self._delivery_gateway,
+            turn_store=self._turn_store,
+            claim_room_event=self._journal_store.claim_room_event,
         )
         self._visible_responses = VisibleResponseReconciler(
             VisibleResponseReconcilerDeps(
@@ -726,7 +722,6 @@ class AgentBot:
                 readiness=VoiceReadiness(
                     normalizer=self._inbound_turn_normalizer,
                     turn_store=self._turn_store,
-                    visible_echo=self._visible_voice_echo,
                     logger=self.logger,
                 ),
                 turn_policy=self._turn_policy,
@@ -752,6 +747,7 @@ class AgentBot:
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
                 selections=self._interactive_selections,
+                visible_voice_echo=self._visible_voice_echo,
             ),
         )
         self._coalescing_gate = CoalescingGate(

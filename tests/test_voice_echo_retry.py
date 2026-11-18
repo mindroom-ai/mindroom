@@ -264,7 +264,6 @@ async def test_failed_transcript_send_retries_from_the_checkpoint_and_posts_once
         await harness.gate.drain_all()
         assert await dispatcher.store.is_pending(event.event_id)
         assert harness.runner.requests == []
-        assert harness.retried_dispatch_sources == [(event.event_id,)]
         assert not harness.turn_store.has_live_turn_claim(event.event_id)
         snapshot = await harness.turn_store.prepared_voice_for_source(event.event_id)
         assert snapshot is not None

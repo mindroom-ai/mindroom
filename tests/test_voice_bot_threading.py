@@ -20,10 +20,10 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedIngress
@@ -39,7 +39,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_edit_message_mock,
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
@@ -61,9 +60,8 @@ if TYPE_CHECKING:
 
 
 def _agent_bot(*, agent_user: AgentMatrixUser, config: Config, rooms: list[str]) -> AgentBot:
-    """Construct an agent bot in a runtime whose router has not finished its first sync, so no voice echo is expected."""
+    """Construct an agent bot in a ready runtime."""
     runtime = ready_runtime(config, runtime_paths_for(config))
-    runtime.not_ready.add(ROUTER_AGENT_NAME)
     return install_runtime_journal_support(
         make_test_agent_bot(agent_user=agent_user, rooms=rooms, orchestrator=runtime),
     )
@@ -90,7 +88,8 @@ def mock_home_bot(generate_response_mock: AsyncMock) -> AgentBot:
         Config(
             agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:server"]}},
             authorization={},
-            voice={"enabled": True},
+            # These tests are about threading; the one about the transcript turns it on.
+            voice={"enabled": True, "visible_router_echo": False},
         ),
     )
     config = bind_runtime_paths(config, test_runtime_paths(tmpdir))
@@ -280,6 +279,7 @@ def _normalized_voice_result(
         "body": text,
         "msgtype": "m.text",
         SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+        VOICE_TRANSCRIPT_KEY: True,
     }
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
@@ -617,97 +617,16 @@ async def test_voice_message_signals_active_turn_once_transcribed(mock_home_bot:
     assert not queued_signal.has_pending_human_messages()
 
 
-@pytest.mark.parametrize(
-    "echo_error",
-    [
-        RuntimeError("echo failed"),
-        asyncio.CancelledError(),
-    ],
-)
 @pytest.mark.asyncio
-async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
-    mock_home_bot: AgentBot,
-    echo_error: BaseException,
-) -> None:
-    """A post-STT echo failure before dispatch handoff leaves no queued notice behind; none is reserved before it."""
-    bot = mock_home_bot
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.canonical_alias = None
-    room.users = {
-        "@mindroom_home:localhost": MagicMock(),
-        "@user:example.com": MagicMock(),
-    }
-    room.members_synced = True
-
-    voice_event = _make_voice_event(
-        event_id="$voice-echo-fails",
-        source={
-            "content": {
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        },
-    )
-    target = bot._turn_ingress.deps.resolver.build_message_target(
-        room_id=room.room_id,
-        thread_id="$thread_root",
-        reply_to_event_id=voice_event.event_id,
-        event_source=voice_event.source,
-    )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
-        event=PreparedIngress(
-            sender=voice_event.sender,
-            event_id=voice_event.event_id,
-            body="🎤 continue",
-            source={"content": {"body": "🎤 continue", SOURCE_KIND_KEY: "voice"}},
-            server_timestamp=voice_event.server_timestamp,
-            payload_trusted=True,
-        ),
-    )
-
-    echo_failures: list[BaseException] = []
-
-    async def fail_visible_echo(*_args: object, **_kwargs: object) -> None:
-        assert queued_signal.pending_human_messages == 0
-        echo_failures.append(echo_error)
-        raise echo_error
-
-    replace_turn_deps(bot, agent_name=ROUTER_AGENT_NAME)
-    install_send_response_mock(bot, AsyncMock(return_value="$voice-placeholder"))
-    install_edit_message_mock(bot, AsyncMock(side_effect=fail_visible_echo))
-    turn_active = True
-    queued_signal.begin_response_turn()
-    try:
-        with (
-            patch.object(
-                bot._turn_ingress.deps.normalizer,
-                "prepare_voice_event",
-                new=AsyncMock(return_value=normalized_voice),
-            ),
-            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        ):
-            await bot._on_media_message(room, voice_event)
-            queued_signal.finish_response_turn()
-            turn_active = False
-            await drain_coalescing(bot)
-    finally:
-        if turn_active:
-            queued_signal.finish_response_turn()
-
-    assert echo_failures == [echo_error]
-    assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.has_pending_human_messages()
-
-
-@pytest.mark.asyncio
-async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
+async def test_answering_agent_posts_the_transcript_and_dispatches_canonical_voice(
     mock_home_bot: AgentBot,
     generate_response_mock: AsyncMock,
 ) -> None:
-    """A non-router should dispatch canonical voice without posting a visible echo."""
+    """The agent that answers posts the transcript in the voice message's thread, then dispatches canonical voice."""
     bot = mock_home_bot
+    bot.config.voice.visible_router_echo = True
+    install_send_response_mock(bot, AsyncMock(return_value="$transcript"))
+    install_generate_response_mock(bot, generate_response_mock)
     room = _threaded_room()
     _install_test_coalescing_gate(bot, debounce_seconds=0.0)
     voice_event = _make_threaded_voice_event(event_id="$voice-visible-echo")
@@ -741,7 +660,10 @@ async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
 
     generate_response_mock.assert_called_once()
     assert generate_response_mock.call_args.kwargs["prompt"].startswith("canonical voice transcript")
-    assert await bot._turn_store.visible_echo(voice_event.event_id) is None
+    assert (await bot._turn_store.visible_echo(voice_event.event_id)).event_id == "$transcript"
+    transcript = bot._delivery_gateway.send_text.await_args.args[0]
+    assert transcript.response_text == "canonical voice transcript"
+    assert transcript.target.resolved_thread_id == "$thread_root"
 
 
 @pytest.mark.asyncio

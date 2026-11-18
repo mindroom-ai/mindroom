@@ -22,6 +22,7 @@ from mindroom.constants import (
     VOICE_TRANSCRIPT_KEY,
     RuntimePaths,
 )
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_replay_guard import (
     has_newer_unresponded_in_thread,
     has_newer_unresponded_journal_thread_event,
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
     from mindroom.command_turn_executor import CommandTurnExecutor
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.dispatch_handoff import DispatchEvent, PreparedIngress
+    from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.event_journal import PendingTurnView
     from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
@@ -87,6 +88,7 @@ if TYPE_CHECKING:
     from mindroom.turns.facts import RunIdentity
     from mindroom.turns.interactive_selection import InteractiveSelections
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
+    from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 
 
 def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
@@ -240,6 +242,7 @@ class TurnDispatchDeps:
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
     selections: InteractiveSelections
+    visible_voice_echo: VisibleVoiceEchoLifecycle
 
 
 @dataclass
@@ -517,15 +520,7 @@ class TurnDispatcher:
     ) -> None:
         visible_responses = self.deps.visible_responses
         if plan.kind == "ignore":
-            router_outcome = (
-                await self._router_handled_turn_outcome(room.room_id, prepared.handled_turn)
-                if plan.ignore_reason == "router"
-                else None
-            )
-            if router_outcome is not None:
-                await self.deps.turn_store.record_responded_turn(router_outcome, room_id=room.room_id)
-            else:
-                await visible_responses.settle_source_events_ignored(prepared.handled_turn)
+            await visible_responses.settle_source_events_ignored(prepared.handled_turn)
             return
         if plan.kind == "route":
             if not await self._execute_route_plan(room, prepared, plan):
@@ -564,6 +559,8 @@ class TurnDispatcher:
         if pending_turn is None or await visible_responses.settle_deleted_sources(pending_turn, room_id=room.room_id):
             return
         handled_turn = pending_turn.record
+        if response_history_scope is not None and prepared.turn.payload.voice_transcript:
+            await self._publish_voice_transcripts(prepared, handled_turn)
 
         # The inbox handoff is complete once the runner takes the conversation's
         # response lock; the response itself keeps running on a runner-owned task.
@@ -602,6 +599,24 @@ class TurnDispatcher:
         # own cancellation state.
         if response_task.done() and not response_task.cancelled() and not response_started.is_set():
             response_task.result()
+
+    async def _publish_voice_transcripts(self, prepared: _PreparedTextDispatch, handled_turn: TurnRecord) -> None:
+        """Post the transcript of each voice message this turn answers, before its reply starts.
+
+        A routed turn answers the person's messages its route names; this bot transcribed them itself.
+        """
+        target = prepared.dispatch.target
+        for source_event_id in prepared.turn.facts.routed_event_ids or handled_turn.source_event_ids:
+            voice = await self.deps.turn_store.prepared_voice_for_source(source_event_id)
+            if voice is None:
+                continue
+            transcript = PreparedIngress(
+                sender=prepared.dispatch.requester_user_id,
+                event_id=source_event_id,
+                body=voice.body,
+                source={"content": voice.to_content()},
+            )
+            await self.deps.visible_voice_echo.publish(target.room_id, source_event_id, target, transcript)
 
     async def _execute_route_plan(
         self,
@@ -904,24 +919,6 @@ class TurnDispatcher:
             scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
             scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
         )
-
-    async def _router_handled_turn_outcome(
-        self,
-        room_id: str,
-        handled_turn: TurnRecord,
-    ) -> TurnRecord | None:
-        """Return the turn an ignored router turn records answered: by the visible echo it published, if any.
-
-        The router takes its echo as its answer here deliberately; publishing an
-        echo never records one by itself.
-        """
-        echoes = await self.deps.turn_store.finalized_visible_echoes(handled_turn.source_event_ids)
-        if not echoes:
-            return None
-        handled = await self.deps.turn_store.handled_among(room_id, handled_turn.source_event_ids)
-        if handled.issuperset(handled_turn.source_event_ids):
-            return None
-        return canonicalize_turn_record(handled_turn, response_event_id=echoes[0])
 
     async def _execute_response_action(
         self,

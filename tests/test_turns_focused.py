@@ -154,7 +154,7 @@ from mindroom.turns.interactive_selection import (
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from mindroom.voice.ingress import VoiceIngress, VoiceIngressDeps
 from mindroom.voice.readiness import VoiceReadiness
-from mindroom.voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
+from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 from tests.access_schema_support import refresh_memberships, with_responder_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
@@ -775,22 +775,7 @@ def _build_harness(
             resolver=resolver,
             response_runner=cast("ResponseRunner", runner),
             delivery_gateway=cast("DeliveryGateway", gateway),
-            readiness=VoiceReadiness(
-                normalizer=normalizer,
-                turn_store=turn_store,
-                visible_echo=VisibleVoiceEchoLifecycle(
-                    VisibleVoiceEchoDeps(
-                        runtime=runtime,
-                        logger=logger,
-                        agent_name=agent_name,
-                        delivery_gateway=cast("DeliveryGateway", gateway),
-                        turn_store=turn_store,
-                        router_turn_records=journal_store.turn_records(ROUTER_AGENT_NAME),
-                        ingress=ingress_validator,
-                    ),
-                ),
-                logger=logger,
-            ),
+            readiness=VoiceReadiness(normalizer=normalizer, turn_store=turn_store, logger=logger),
             turn_policy=cast("TurnPolicy", policy),
         ),
     )
@@ -814,6 +799,13 @@ def _build_harness(
             visible_responses=visible_responses,
             retry_dispatch_sources=_retry_dispatch_sources,
             selections=selections,
+            visible_voice_echo=VisibleVoiceEchoLifecycle(
+                runtime=runtime,
+                agent_name=agent_name,
+                delivery_gateway=cast("DeliveryGateway", gateway),
+                turn_store=turn_store,
+                claim_room_event=journal_store.claim_room_event,
+            ),
         ),
     )
 
@@ -3017,7 +3009,8 @@ async def test_voice_message_is_routed_on_its_transcript(
     select = AsyncMock(return_value=ResponderSelection("general"))
     monkeypatch.setattr("mindroom.router.relay.suggest_responder_for_message", select)
 
-    await harness.ingress.handle_media_event(_room_with_members(config, ROUTER_AGENT_NAME, "general", "research"), event)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    await harness.ingress.handle_media_event(room, event)
     await harness.gate.drain_all()
 
     assert select.await_args.args[0] == "who can review the new PR?"
@@ -7595,54 +7588,6 @@ async def test_a_batch_source_ended_before_its_reply_hands_the_rest_back_once_th
     claim.release()
     assert harness.retried_dispatch_sources == [(second.event_id,)]
     assert not await harness.turn_store.is_handled(_ROOM_ID, second.event_id)
-
-
-@pytest.mark.asyncio
-async def test_router_recovery_relays_once_past_every_echo_of_a_coalesced_voice_turn(
-    config: Config,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two finalized echoes of one routing turn, then a crash before the relay: the replay relays exactly once."""
-    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
-    event = _text_event("route this", event_id="$voice-2:localhost")
-    echoes = {"$voice-1:localhost": "$echo-1:localhost", "$voice-2:localhost": "$echo-2:localhost"}
-    for source, echo in echoes.items():
-        await harness.turn_store.record_visible_echo(_ROOM_ID, source, echo)
-        await harness.turn_store.record_finalized_visible_echo(source, echo, is_fallback=False)
-    handled_turn = TurnRecord.create(list(echoes), completed=False)
-    send_route = harness.gateway.send_route
-    monkeypatch.setattr(harness.gateway, "send_route", AsyncMock(side_effect=RuntimeError("crash before the relay")))
-    with pytest.raises(RuntimeError, match="crash before the relay"):
-        await execute_router_relay(
-            harness.dispatcher.deps,
-            room,
-            event,
-            (),
-            requester_user_id=_SENDER,
-            handled_turn=handled_turn,
-        )
-    monkeypatch.setattr(harness.gateway, "send_route", send_route)
-
-    with patch(
-        "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
-        return_value=frozenset(echoes.values()),
-    ):
-        await execute_router_relay(
-            harness.dispatcher.deps,
-            room,
-            event,
-            (),
-            requester_user_id=_SENDER,
-            handled_turn=handled_turn,
-        )
-
-    assert len(harness.gateway.routes) == 1
-    record = await harness.turn_store.get_turn_record(event.event_id)
-    assert record is not None
-    assert record.completed is True
-    assert record.response_event_id == "$route-1:localhost"
 
 
 async def _prepared_model_prompt(harness: _Harness, request: ResponseRequest) -> str:

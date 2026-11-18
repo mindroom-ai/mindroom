@@ -213,7 +213,6 @@ from mindroom.turns.interactive_selection import InteractiveSelections
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.ingress import VoiceIngress
-from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backends import static_runner as static_runner_module
 from mindroom.workers.compatibility import worker_health_payload
@@ -3313,7 +3312,6 @@ def _changes_for(deps: "DataclassInstance", changes: Mapping[str, object]) -> di
 _VOICE_READINESS_CHANGES = {
     "normalizer": "normalizer",
     "turn_store": "turn_store",
-    "visible_voice_echo": "visible_echo",
     "logger": "logger",
 }
 
@@ -3398,16 +3396,12 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
     visible_voice_echo = unwrap_extracted_collaborator(bot._visible_voice_echo)
-    bot._visible_voice_echo = VisibleVoiceEchoLifecycle(
-        replace(
-            visible_voice_echo.deps,
-            runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
-            logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
-            agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
-            delivery_gateway=rebuilt_changes["delivery_gateway"],
-            turn_store=rebuilt_changes["turn_store"],
-            ingress=rebuilt_changes["ingress"],
-        ),
+    bot._visible_voice_echo = replace(
+        visible_voice_echo,
+        runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
+        agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
+        delivery_gateway=rebuilt_changes["delivery_gateway"],
+        turn_store=rebuilt_changes["turn_store"],
     )
     wrap_extracted_collaborators(bot, "_visible_voice_echo")
     visible_responses = unwrap_extracted_collaborator(bot._visible_responses)
@@ -4264,14 +4258,6 @@ def _reset_approval_manager_runtime() -> Generator[None]:
     approval_manager_module._MANAGER = None
     yield
     approval_manager_module._MANAGER = None
-
-
-@pytest.fixture(autouse=True)
-def _reset_voice_echo_barriers() -> Generator[None]:
-    """Keep cross-bot voice echo ordering state, and its loop bindings, per test."""
-    _reset_visible_voice_echo_barriers()
-    yield
-    _reset_visible_voice_echo_barriers()
 
 
 @pytest.fixture(autouse=True)

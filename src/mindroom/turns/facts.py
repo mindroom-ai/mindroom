@@ -135,13 +135,9 @@ class IngressFacts:
         )
 
 
-def is_router_voice_echo(facts: IngressFacts, content: object) -> bool:
-    """Return whether content is the router's display-only transcript of a human's or bot account's audio."""
-    return (
-        facts.sender_entity_name == ROUTER_AGENT_NAME
-        and facts.original_sender is not None
-        and is_visible_router_voice_echo_content(content)
-    )
+def is_voice_echo(facts: IngressFacts, content: object) -> bool:
+    """Return whether content is a managed account's display-only transcript of a human's or bot account's audio."""
+    return facts.original_sender is not None and is_visible_router_voice_echo_content(content)
 
 
 def command_for(facts: IngressFacts, command_text: str, source_count: int = 1) -> Command | None:

@@ -101,7 +101,6 @@ class DispatchPlan:
     extra_content: dict[str, Any] | None = None
     media_events: list[MediaDispatchEvent] | None = None
     router_event: DispatchEvent | None = None
-    ignore_reason: Literal["router"] | None = None
 
 
 @dataclass(frozen=True)
@@ -585,10 +584,7 @@ class TurnPolicy:
 
         The steward is the owner account, which answers no message, or a candidate whose own rules skipped the turn.
         """
-        ignore = DispatchPlan(
-            kind="ignore",
-            ignore_reason="router" if self.deps.agent_name == ROUTER_AGENT_NAME else None,
-        )
+        ignore = DispatchPlan(kind="ignore")
         context = dispatch.context
         requester_user_id = dispatch.requester_user_id
         if not self.is_room_steward(room.room_id) or context.mentioned_agents or context.has_non_agent_mentions:
@@ -640,7 +636,7 @@ class TurnPolicy:
                 self.deps.logger.info("Skipping response: reply mode needs a mention; thread history unavailable")
             else:
                 self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
-            return DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
+            return DispatchPlan(kind="ignore")
         # A steward that may not answer this requester only routes their message.
         if not is_router and self.can_reply_to_sender_in_room(dispatch.requester_user_id, room.room_id):
             action = await self._resolve_response_action(

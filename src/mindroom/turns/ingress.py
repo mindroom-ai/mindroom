@@ -71,7 +71,7 @@ from mindroom.timing import (
     get_dispatch_pipeline_timing,
 )
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
-from mindroom.turns.facts import command_for, is_router_voice_echo
+from mindroom.turns.facts import command_for, is_voice_echo
 from mindroom.turns.queued_notice import mark_waiting_for_approval, queued_notice_reservation_if_busy
 
 if TYPE_CHECKING:
@@ -336,7 +336,7 @@ class TurnIngress:
             event_source=prepared_event.source,
         )
         content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
-        if facts.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND and is_router_voice_echo(facts, content):
+        if facts.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND and is_voice_echo(facts, content):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         envelope = self.deps.resolver.build_envelope(event=prepared_event, facts=facts, target=target)
         if not hook_ingress_policy(envelope).allow_full_dispatch:

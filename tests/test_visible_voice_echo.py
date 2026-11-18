@@ -18,6 +18,7 @@ from mindroom.constants import (
 )
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, _VoiceNormalizationResult
 from mindroom.routing_judgment import ResponderSelection
+from mindroom.turn_policy import DispatchPlan, ResponseAction
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.test_turns_focused import _SENDER, _THREAD_ROOT, _build_harness, _room_with_members, _route_as_delivered
 from tests.test_voice_echo_retry import _force_readiness_fallback, _voice_event
@@ -147,9 +148,9 @@ async def test_restart_after_transcript_does_not_post_again(tmp_path: Path, monk
     _transcribes(monkeypatch, normalized)
     crashed = _build_harness(config, tmp_path)
     crashed.runner.pre_lock_error = RuntimeError("crash before the reply")
-    await _deliver(crashed, room, event)
+    with pytest.raises(RuntimeError, match="crash before the reply"):
+        await _deliver(crashed, room, event)
     assert len(crashed.gateway.sent) == 1
-    assert crashed.runner.requests == []
 
     restarted = _build_harness(config, tmp_path)
     await _deliver(restarted, room, event)
@@ -183,10 +184,12 @@ async def test_two_answering_bots_post_one_transcript(tmp_path: Path, monkeypatc
     """Of two bots that answer one voice message, one posts the transcript and the other's reply waits for it."""
     config = _config(tmp_path)
     room = _room_with_members(config, "general", "research")
-    event, normalized = _voice_event(config, mentions=("general", "research"))
+    event, normalized = _voice_event(config)
     _transcribes(monkeypatch, normalized)
     first = _build_harness(config, tmp_path)
     second = _build_harness(config, tmp_path, agent_name="research")
+    answer = DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
+    monkeypatch.setattr(second.policy, "plan_turn", AsyncMock(return_value=answer))
     send_started, release_send = asyncio.Event(), asyncio.Event()
     send = first.gateway.send_text
 
@@ -205,6 +208,7 @@ async def test_two_answering_bots_post_one_transcript(tmp_path: Path, monkeypatc
     release_send.set()
     await asyncio.wait_for(asyncio.gather(first_delivery, second_delivery), timeout=5)
 
+    assert first.retried_dispatch_sources == second.retried_dispatch_sources == []
     assert [request.response_text for request in first.gateway.sent] == [_TRANSCRIPT]
     assert second.gateway.sent == []
     assert len(first.runner.requests) == len(second.runner.requests) == 1
