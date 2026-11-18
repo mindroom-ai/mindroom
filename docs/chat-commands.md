@@ -106,7 +106,8 @@ A valid change gets a preview of the current and new values, with ✅ and ❌ re
 Only the user who requested the change can confirm or cancel it, and that user must still be a platform administrator.
 Unconfirmed changes expire after 24 hours.
 
-Pending changes usually survive a MindRoom restart; if one cannot, such as a secret value, the confirmation asks you to run `/config set` again.
+The agent or team that answered `/config set` keeps the pending change on the MindRoom host, not in the room, and it alone acts on the reactions.
+Pending changes survive a MindRoom restart, except a secret value, which is never saved: its confirmation asks you to run `/config set` again.
 
 On confirmation, the change is saved to `config.yaml` and applies to new agent interactions, except [event journal](deployment/storage.md#event-journal) changes, which apply after MindRoom restarts.
 If `config.yaml` changes while a confirmed change is being saved, for example through a dashboard save, the change is refused with `Changes were NOT applied.`; run `/config set` again.

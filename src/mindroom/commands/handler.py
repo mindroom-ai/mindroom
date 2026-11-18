@@ -486,6 +486,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
                 await config_confirmation.ensure_pending_change(
                     context.client,
+                    context.runtime_paths,
                     event_id=response_event_id,
                     room_id=room.room_id,
                     thread_id=effective_thread_id,

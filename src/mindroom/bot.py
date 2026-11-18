@@ -810,12 +810,13 @@ class AgentBot:
         )
 
     async def _recover_config_confirmation_setup(self, room_id: str, preview_event_id: str) -> bool:
-        """Recover Matrix-backed config setup without coupling turn control to commands."""
+        """Recover config preview setup without coupling turn control to commands."""
         if self.client is None:
             msg = "Matrix client is not ready for config confirmation recovery"
             raise RuntimeError(msg)
         return await config_confirmation.recover_confirmation_setup(
             self.client,
+            self.runtime_paths,
             room_id,
             preview_event_id,
         )
@@ -1076,13 +1077,7 @@ class AgentBot:
         await self.steward_duties.room_joined(room_id)
 
     async def _restore_joined_room(self, room_id: str) -> None:
-        """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime.
-
-        The config previews this agent or team sent there wait for their reactions again.
-        """
-        answers = self.agent_name in {*self.config.agents, *self.config.teams}
-        if self.client is not None and answers and self.config.authorization.config_command_enabled:
-            await config_confirmation.restore_pending_changes(self.client, room_id)
+        """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime."""
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
