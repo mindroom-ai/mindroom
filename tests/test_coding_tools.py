@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.custom_tools import coding as coding_module
 from mindroom.custom_tools.coding import (
     CodingTools,
     _find_all_matches,
@@ -24,6 +27,7 @@ from mindroom.path_safety import (
     split_search_pattern,
 )
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_schema import tool_parameters, validated_entrypoint
 from mindroom.tools.file import file_tools
 
 if TYPE_CHECKING:
@@ -211,34 +215,173 @@ class TestReadFile:
         assert "[truncated]" in result
 
 
+def _one(old_text: str, new_text: str) -> list[dict[str, str]]:
+    """Return the edits of a call that makes one replacement."""
+    return [{"old_text": old_text, "new_text": new_text}]
+
+
 class TestEditFile:
     """Tests for CodingTools.edit_file."""
 
     def test_exact_edit(self, tools: CodingTools, tmp_base: Path) -> None:
-        """Performs exact text replacement with context diff."""
-        result = tools.edit_file("hello.py", "print('hello')", "print('hi')")
-        assert "Applied edit" in result
-        assert "print('hello')" in result  # old line shown in diff
-        assert "print('hi')" in result  # new line shown in diff
-        # Context line should be present
-        assert "print('world')" in result
-        content = (tmp_base / "hello.py").read_text()
-        assert "print('hi')" in content
-        assert "print('hello')" not in content
+        """Replaces exact text and reports where the new text landed, without a diff."""
+        result = tools.edit_file("hello.py", _one("print('hello')", "print('hi')"))
+        assert result == "Applied 1 edit to hello.py: line 1."
+        assert (tmp_base / "hello.py").read_text() == "print('hi')\nprint('world')\n"
+
+    def test_edits_match_the_original_file_not_each_other(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Every old_text is matched against the file as it was, so two edits can swap lines."""
+        (tmp_base / "swap.py").write_text("a = 1\nb = 2\nc = 3\n")
+        result = tools.edit_file(
+            "swap.py",
+            [{"old_text": "a = 1", "new_text": "b = 2"}, {"old_text": "b = 2", "new_text": "a = 1"}],
+        )
+        assert result == "Applied 2 edits to swap.py: lines 1, 2."
+        assert (tmp_base / "swap.py").read_text() == "b = 2\na = 1\nc = 3\n"
+
+    def test_reported_lines_are_in_the_new_file(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Line ranges count the replaced text where it sits after all edits."""
+        (tmp_base / "lines.py").write_text("one\ntwo\nthree\nfour\n")
+        result = tools.edit_file(
+            "lines.py",
+            [{"old_text": "four\n", "new_text": "4\n"}, {"old_text": "one\n", "new_text": "1\n1.1\n1.2\n"}],
+        )
+        assert result == "Applied 2 edits to lines.py: lines 1-3, 6."
+        assert (tmp_base / "lines.py").read_text() == "1\n1.1\n1.2\ntwo\nthree\n4\n"
+
+    def test_replace_all(self, tools: CodingTools, tmp_base: Path) -> None:
+        """replace_all replaces every match."""
+        (tmp_base / "dup.py").write_text("foo\nbar\nfoo\n")
+        result = tools.edit_file("dup.py", [{"old_text": "foo", "new_text": "baz", "replace_all": True}])
+        assert result == "Applied 1 edit to dup.py: lines 1, 3."
+        assert (tmp_base / "dup.py").read_text() == "baz\nbar\nbaz\n"
+
+    def test_overlapping_edits_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Edits whose matches overlap are refused and nothing is written."""
+        (tmp_base / "overlap.py").write_text("alpha beta gamma\n")
+        result = tools.edit_file(
+            "overlap.py",
+            [
+                {"old_text": "alpha", "new_text": "A"},
+                {"old_text": "gamma", "new_text": "G"},
+                {"old_text": "beta gamma", "new_text": "B"},
+            ],
+        )
+        assert result == "Error: edits[1] and edits[2] overlap. Merge them into one edit.\nNo changes written."
+        assert (tmp_base / "overlap.py").read_text() == "alpha beta gamma\n"
+
+    def test_one_failing_edit_writes_nothing(self, tools: CodingTools, tmp_base: Path) -> None:
+        """All edits apply or none does."""
+        result = tools.edit_file(
+            "hello.py",
+            [{"old_text": "print('hello')", "new_text": "print('hi')"}, {"old_text": "missing", "new_text": "x"}],
+        )
+        assert result.startswith("Error: edits[1] not found in the file.")
+        assert result.endswith("No changes written.")
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
+
+    def test_not_found_names_the_closest_line(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A missed old_text points at the line it most likely meant."""
+        (tmp_base / "calc.py").write_text("import math\n\n\ndef compute_total(items):\n    return sum(items)\n")
+        result = tools.edit_file("calc.py", _one("\ndef compute_totals(items):\n    pass\n", "x"))
+        assert result == (
+            "Error: old_text not found in the file.\nClosest line 4: def compute_total(items):\nNo changes written."
+        )
+
+    def test_not_found_without_a_close_line(self, tools: CodingTools) -> None:
+        """No hint when nothing in the file resembles old_text."""
+        result = tools.edit_file("hello.py", _one("nonexistent text", "replacement"))
+        assert result == "Error: old_text not found in the file.\nNo changes written."
+
+    def test_closest_line_is_cut(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A long closest line is cut to 200 characters."""
+        (tmp_base / "long.py").write_text("x" * 500 + "\n")
+        result = tools.edit_file("long.py", _one("x" * 499 + "y", "z"))
+        assert f"Closest line 1: {'x' * 200}\nNo changes written." in result
+
+    def test_several_matches_lists_their_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An ambiguous old_text names every line it matches and how to pick one."""
+        (tmp_base / "dup.py").write_text("foo\nx\nfoo\nfoo\n")
+        result = tools.edit_file("dup.py", _one("foo", "bar"))
+        assert result == (
+            "Error: old_text matches 3 places (lines 1, 3, 4). Add nearby lines to old_text to pick one, "
+            "or set replace_all.\nNo changes written."
+        )
+        assert (tmp_base / "dup.py").read_text() == "foo\nx\nfoo\nfoo\n"
+
+    def test_edits_as_a_json_string(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Edits a model sent as a JSON string still apply, through the validated tool call too."""
+        edits = json.dumps(_one("print('hello')", "print('hi')"))
+        assert (
+            validated_entrypoint(tools.edit_file)(path="hello.py", edits=edits) == "Applied 1 edit to hello.py: line 1."
+        )
+        assert tools.edit_file("hello.py", json.dumps(_one("print('hi')", "print('hey')"))).startswith("Applied 1 edit")
+        assert (tmp_base / "hello.py").read_text() == "print('hey')\nprint('world')\n"
+
+    def test_legacy_flat_call_still_applies(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A call with the old flat old_text and new_text arguments works, though the schema no longer shows them."""
+        result = validated_entrypoint(tools.edit_file)(
+            path="hello.py",
+            old_text="print('hello')",
+            new_text="print('hi')",
+        )
+        assert result == "Applied 1 edit to hello.py: line 1."
+        assert (tmp_base / "hello.py").read_text() == "print('hi')\nprint('world')\n"
+
+    def test_unknown_arguments_show_the_shape(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A call without edits gets an error that shows how to call it."""
+        result = validated_entrypoint(tools.edit_file)(path="hello.py", old_str="print('hello')", new_str="x")
+        assert result.startswith("Error:")
+        assert '"old_text"' in result
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
+
+    def test_schema_offers_only_path_and_edits(self, tools: CodingTools) -> None:
+        """The model sees edits items with old_text, new_text and replace_all, and no top-level old_text."""
+        parameters = tool_parameters(tools.edit_file)
+        assert list(parameters["properties"]) == ["path", "edits"]
+        items = parameters["properties"]["edits"]["items"]
+        assert list(items["properties"]) == ["old_text", "new_text", "replace_all"]
+        assert items["required"] == ["old_text", "new_text"]
+
+    def test_crlf_and_bom_survive(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Line endings and a byte order mark stay as they were."""
+        (tmp_base / "win.txt").write_bytes(b"\xef\xbb\xbfline one\r\nline two\r\nline three\r\n")
+        result = tools.edit_file(
+            "win.txt",
+            [{"old_text": "line one", "new_text": "first"}, {"old_text": "line three", "new_text": "third"}],
+        )
+        assert result == "Applied 2 edits to win.txt: lines 1, 3."
+        assert (tmp_base / "win.txt").read_bytes() == b"\xef\xbb\xbffirst\r\nline two\r\nthird\r\n"
+
+    def test_lf_edits_of_a_crlf_file_keep_crlf(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An old_text written with LF matches a CRLF file, and its new_text lands with CRLF."""
+        (tmp_base / "win.txt").write_bytes(b"line one\r\nline two\r\nline three\r\n")
+        result = tools.edit_file("win.txt", _one("line one\nline two\n", "first\nsecond\nthird\n"))
+        assert result == "Applied 1 edit to win.txt: lines 1-3."
+        assert (tmp_base / "win.txt").read_bytes() == b"first\r\nsecond\r\nthird\r\nline three\r\n"
 
     def test_fuzzy_edit_whitespace(self, tools: CodingTools, tmp_base: Path) -> None:
         """Handles trailing whitespace differences via fuzzy matching."""
         (tmp_base / "ws.py").write_text("def foo():   \n    pass\n")
-        result = tools.edit_file("ws.py", "def foo():\n    pass", "def bar():\n    pass")
-        assert "Applied edit" in result
-        assert "fuzzy" in result
+        result = tools.edit_file("ws.py", _one("def foo():\n    pass", "def bar():\n    pass"))
+        assert result == "Applied 1 edit to ws.py: lines 1-2 (matched after normalizing whitespace/quotes)."
+        assert (tmp_base / "ws.py").read_text() == "def bar():\n    pass\n"
+
+    def test_fuzzy_note_names_the_edit(self, tools: CodingTools, tmp_base: Path) -> None:
+        """With several edits, the fuzzy note says which one matched loosely."""
+        (tmp_base / "q.py").write_text("a = 1\nsay(\u201chi\u201d)\n")
+        result = tools.edit_file(
+            "q.py",
+            [{"old_text": "a = 1", "new_text": "a = 2"}, {"old_text": 'say("hi")', "new_text": 'say("bye")'}],
+        )
+        assert result == "Applied 2 edits to q.py: lines 1, 2 (edits[1] matched after normalizing whitespace/quotes)."
+        assert (tmp_base / "q.py").read_text() == 'a = 2\nsay("bye")\n'
 
     def test_fuzzy_edit_multiline_preserves_line_boundaries(self, tools: CodingTools, tmp_base: Path) -> None:
         """Fuzzy multiline edits should consume trailing spaces and line ending of matched lines."""
         (tmp_base / "fuzzy_multiline.py").write_text("foo   \nbar\n")
-        result = tools.edit_file("fuzzy_multiline.py", "foo\n", "X\n")
-        assert "Applied edit" in result
-        assert "fuzzy" in result
+        result = tools.edit_file("fuzzy_multiline.py", _one("foo\n", "X\n"))
+        assert "normalizing" in result
         assert (tmp_base / "fuzzy_multiline.py").read_text() == "X\nbar\n"
 
     def test_fuzzy_edit_single_line_consumes_trailing_whitespace_and_newline(
@@ -248,43 +391,112 @@ class TestEditFile:
     ) -> None:
         """Fuzzy single-line edits should not leave trailing whitespace artifacts."""
         (tmp_base / "fuzzy_single_line.py").write_text("foo   \n")
-        result = tools.edit_file("fuzzy_single_line.py", "foo\n", "X\n")
-        assert "Applied edit" in result
-        assert "fuzzy" in result
+        result = tools.edit_file("fuzzy_single_line.py", _one("foo\n", "X\n"))
+        assert "normalizing" in result
         assert (tmp_base / "fuzzy_single_line.py").read_text() == "X\n"
 
     def test_fuzzy_edit_handles_composed_vs_decomposed_unicode(self, tools: CodingTools, tmp_base: Path) -> None:
         """Fuzzy edits should replace full graphemes across NFC differences."""
         (tmp_base / "unicode.py").write_text("Cafe\u0301")
-        result = tools.edit_file("unicode.py", "Café", "Tea")
-        assert "Applied edit" in result
-        assert "fuzzy" in result
+        result = tools.edit_file("unicode.py", _one("Café", "Tea"))
+        assert "normalizing" in result
         assert (tmp_base / "unicode.py").read_text() == "Tea"
-
-    def test_edit_not_found(self, tools: CodingTools) -> None:
-        """Returns error when old_text is not found."""
-        result = tools.edit_file("hello.py", "nonexistent text", "replacement")
-        assert "Error" in result
-        assert "not found" in result
-
-    def test_edit_multiple_matches(self, tools: CodingTools, tmp_base: Path) -> None:
-        """Returns error when old_text matches multiple locations."""
-        (tmp_base / "dup.py").write_text("foo\nfoo\nfoo\n")
-        result = tools.edit_file("dup.py", "foo", "bar")
-        assert "Error" in result
-        assert "3 locations" in result
 
     def test_edit_missing_file(self, tools: CodingTools) -> None:
         """Returns error for missing files."""
-        result = tools.edit_file("missing.py", "old", "new")
+        result = tools.edit_file("missing.py", _one("old", "new"))
         assert "Error" in result
         assert "not found" in result
 
-    def test_edit_rejects_empty_old_text(self, tools: CodingTools) -> None:
+    def test_edit_rejects_empty_old_text(self, tools: CodingTools, tmp_base: Path) -> None:
         """Rejects empty old_text instead of attempting a replacement."""
-        result = tools.edit_file("hello.py", "", "replacement")
-        assert "Error" in result
-        assert "non-empty" in result
+        result = tools.edit_file("hello.py", [*_one("print('hello')", "x"), *_one("", "replacement")])
+        assert result == "Error: edits[1].old_text is empty.\nNo changes written."
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
+
+    def test_edit_rejects_empty_edits(self, tools: CodingTools) -> None:
+        """An empty edits list is refused with the shape to use."""
+        result = tools.edit_file("hello.py", [])
+        assert result.startswith("Error: edits is empty.")
+        assert '"old_text"' in result
+
+    def test_edit_rejects_a_no_op(self, tools: CodingTools) -> None:
+        """Edits that leave the file as it was are refused."""
+        result = tools.edit_file("hello.py", _one("print('hello')", "print('hello')"))
+        assert result.startswith("Error:")
+        assert "identical" in result
+        assert result.endswith("No changes written.")
+
+
+class TestEditFileConcurrency:
+    """Concurrent edit_file calls on one file serialize; calls on different files still run in parallel."""
+
+    @staticmethod
+    def _run_concurrently(
+        tools: CodingTools,
+        calls: list[tuple[str, list[dict[str, str]]]],
+        monkeypatch: pytest.MonkeyPatch,
+        barrier_timeout: float,
+    ) -> threading.Barrier:
+        """Run edit_file calls in threads that wait for each other right after reading the file."""
+        barrier = threading.Barrier(len(calls))
+        read = coding_module.read_resolved_file
+
+        def read_then_wait(base_dir: Path, resolved: Path) -> bytes:
+            content = read(base_dir, resolved)
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait(timeout=barrier_timeout)
+            return content
+
+        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
+        results: list[str] = []
+        threads = [threading.Thread(target=lambda c=call: results.append(tools.edit_file(*c))) for call in calls]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert all(result.startswith("Applied") for result in results), results
+        return barrier
+
+    @pytest.mark.parametrize("where", ["inside", "outside"])
+    def test_concurrent_edits_of_one_file_both_land(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        where: str,
+    ) -> None:
+        """Two racing edits of one file both land, and no tail of a longer write is left behind."""
+        base_dir = tmp_path / "base"
+        base_dir.mkdir()
+        target = base_dir / "race.txt" if where == "inside" else tmp_path / "race.txt"
+        target.write_text("AAAA\nBBBB\n")
+        tools = CodingTools(base_dir=str(base_dir), file_access="workspace" if where == "inside" else "unrestricted")
+
+        self._run_concurrently(
+            tools,
+            [(str(target), _one("AAAA", "A" * 50)), (str(target), _one("BBBB", "b"))],
+            monkeypatch,
+            barrier_timeout=0.5,
+        )
+
+        assert target.read_text() == "A" * 50 + "\nb\n"
+
+    def test_edits_of_different_files_run_in_parallel(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Calls on different files are not serialized: both reach the barrier together."""
+        (tmp_path / "one.txt").write_text("one\n")
+        (tmp_path / "two.txt").write_text("two\n")
+        tools = CodingTools(base_dir=str(tmp_path))
+
+        barrier = self._run_concurrently(
+            tools,
+            [("one.txt", _one("one", "1")), ("two.txt", _one("two", "2"))],
+            monkeypatch,
+            barrier_timeout=10,
+        )
+
+        assert not barrier.broken
+        assert (tmp_path / "one.txt").read_text() == "1\n"
+        assert (tmp_path / "two.txt").read_text() == "2\n"
 
 
 class TestWriteFile:
@@ -1060,7 +1272,7 @@ class TestPathTraversal:
 
     def test_edit_traversal(self, tools: CodingTools) -> None:
         """Blocks edit of files outside base directory."""
-        result = tools.edit_file("../../etc/passwd", "root", "hacked")
+        result = tools.edit_file("../../etc/passwd", _one("root", "hacked"))
         assert "Error" in result
 
     def test_absolute_outside_base(self, tools: CodingTools) -> None:
@@ -1195,7 +1407,7 @@ class TestCodingToolsFileAccess:
         outside_file.write_text("hello\n")
 
         tools = CodingTools(base_dir=str(base_dir))
-        result = tools.edit_file(str(outside_file), "hello", "goodbye")
+        result = tools.edit_file(str(outside_file), _one("hello", "goodbye"))
 
         assert "Error" in result
         assert "outside base_dir" in result
@@ -1211,9 +1423,9 @@ class TestCodingToolsFileAccess:
         outside_file.write_text("hello\n")
 
         tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted")
-        result = tools.edit_file(str(outside_file), "hello", "goodbye")
+        result = tools.edit_file(str(outside_file), _one("hello", "goodbye"))
 
-        assert "Applied edit" in result
+        assert result.startswith("Applied 1 edit")
         assert outside_file.read_text() == "goodbye\n"
 
     def test_unrestricted_finds_files_outside(
@@ -1603,7 +1815,7 @@ class TestGitMetadataWrites:
 
         assert "Git metadata" in tools.write_file(self._CONFIG, "[core]\n")
         assert "Git metadata" in tools.write_file("linked/config", "[core]\n")
-        assert "Git metadata" in tools.edit_file(self._CONFIG, "bare = false", "bare = true")
+        assert "Git metadata" in tools.edit_file(self._CONFIG, _one("bare = false", "bare = true"))
 
         assert git_config.read_text() == self._ORIGINAL
 
