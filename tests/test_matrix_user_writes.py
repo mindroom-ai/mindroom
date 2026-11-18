@@ -81,7 +81,6 @@ THREAD_PATH = f"/_matrix/client/v1/rooms/{ROOM}/relations/$root/m.thread"
 ALIAS = "#planning:example.com"
 DIRECTORY_PATH = f"{CLIENT}/directory/room/{ALIAS}"
 ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
-COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
 REACTION_KEY = "emoji must be one emoji, at most 8 characters and without spaces."
 MEGOLM = {"algorithm": "m.megolm.v1.aes-sha2"}
 # Why a DM made with Bob was not added to `m.direct`, and what the result of its send says of it.
@@ -90,8 +89,6 @@ DM_NOT_LISTED = (
     f"Made the DM {NEW_DM} with {BOB}, but could not list it as a DM ({DM_NOT_LISTED_WHY}). "
     f"To send there again, use room_id {NEW_DM}."
 )
-# A reply's quote, which a bridge drops before it looks for a command, then a command.
-QUOTED_COMMAND = "> <@alice:example.com> quoted text\n\n!tg logout"
 ROOM_UNCONFIRMED = (
     "The homeserver did not confirm the room. It may have been made: list your owner's rooms before making it again."
 )
@@ -489,38 +486,6 @@ async def test_an_ephemeral_attachment_is_named_as_such(
     assert json.loads(result) == error_result(
         "send",
         "Attachment att_media has no stored file and cannot be sent as your owner.",
-    )
-    assert homeserver.requests == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["!admin users list", "  \\!admin x", "\u200b!x", "> quoted\n\n!x"])
-async def test_a_command_like_file_name_is_refused(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-    tmp_path: Path,
-    name: str,
-) -> None:
-    """A file goes out with its name as its text, which a bridge or the homeserver would run as the owner's command.
-
-    Whoever sent a file named it, so a downloaded file can carry such a name.
-    """
-    record = _notes(paths, tmp_path, filename=name)
-
-    result = await _write(
-        config,
-        paths,
-        homeserver,
-        attachment_ids=(record.attachment_id,),
-        action="send",
-        room_id=ROOM,
-        attachment=record.attachment_id,
-    )
-
-    assert result == error_result(
-        "send",
-        f"Attachment {record.attachment_id}'s file name is sent as its text. {COMMAND_LIKE}",
     )
     assert homeserver.requests == []
 
@@ -996,78 +961,16 @@ async def test_a_joined_room_is_still_checked_for_encryption_before_a_send(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["send", "edit"])
-@pytest.mark.parametrize(
-    "text",
-    [
-        "!help",
-        "  !admin users list",
-        "\\!admin x",
-        "\\\\!x",
-        "\ufeff!x",
-        "\u200b!x",
-        "\u2060\\\\!x",
-        QUOTED_COMMAND,
-        "> first\n>second\n\n> third\n\n\n\\!x",
-    ],
-)
-async def test_a_command_like_message_is_refused(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-    action: str,
-    text: str,
-) -> None:
-    """A bridge or the homeserver would run such a message as the person's command, so it is never sent.
-
-    Invisible characters before the command do not hide it: a recipient may drop them first. Nor do quoted lines: a
-    bridge drops a reply's quote before it looks for a command.
-    """
-    result = await _write(config, paths, homeserver, action=action, room_id=ROOM, event_id="$own", message=text)
-
-    assert result == error_result(action, COMMAND_LIKE)
-    assert homeserver.requests == []
-
-
-@pytest.mark.asyncio
-async def test_a_quoted_command_is_refused_without_a_reply_too(
+async def test_a_command_the_owner_asks_to_send_to_a_bot_is_sent(
     config: Config,
     paths: RuntimePaths,
     homeserver: FakeHomeserver,
 ) -> None:
-    """A message that starts with quoted lines is checked after them, whether or not it is a reply."""
-    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, message=QUOTED_COMMAND)
-
-    assert result == error_result("send", COMMAND_LIKE)
-    assert homeserver.requests == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["> <@alice:example.com> quoted text", "> !quoted\n\nSounds good"])
-async def test_a_quote_without_a_command_after_it_is_sent(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-    text: str,
-) -> None:
-    """Only what follows the quoted lines can be a command, so a quote alone or before ordinary text goes out."""
-    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, event_id="$own", message=text)
+    """A message that reads as a command goes out like any other: an approval rule, whose card shows it, decides."""
+    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="!help")
 
     assert result == ok_result("send", room_id=ROOM, event_id="$sent")
-    assert [content["body"] for content in _sent(homeserver)] == [text]
-
-
-@pytest.mark.asyncio
-async def test_a_message_with_an_exclamation_mark_elsewhere_is_sent(
-    config: Config,
-    paths: RuntimePaths,
-    homeserver: FakeHomeserver,
-) -> None:
-    """Only the start of a message makes a command."""
-    result = await _write(config, paths, homeserver, action="send", room_id=ROOM, message="Ship it! !now")
-
-    assert result == ok_result("send", room_id=ROOM, event_id="$sent")
-    assert [content["body"] for content in _sent(homeserver)] == ["Ship it! !now"]
+    assert [content["body"] for content in _sent(homeserver)] == ["!help"]
 
 
 @pytest.mark.asyncio

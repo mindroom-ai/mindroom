@@ -11,7 +11,6 @@ event would go out in plain text.
 from __future__ import annotations
 
 import asyncio
-import unicodedata
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -76,8 +75,6 @@ _ONE_EVENT = "send takes message or attachment, not both: send the text and the 
 _REPLY_NEEDS_TEXT = "A reply (event_id) needs message."
 _NOT_A_USER_ID = "user_id is a full Matrix ID such as @bob:example.com."
 _NOT_THE_OWNER = "user_id is whom to message or invite, never your owner."
-# A bridge or the homeserver runs such a message as its sender's command, whatever marks it as the agent's.
-_COMMAND_LIKE = 'A message sent as your owner cannot start with "!" or "\\": it would read as a command.'
 _ENCRYPTED = "The room is encrypted, and nothing is sent as your owner into an encrypted room."
 _ENCRYPTION_UNKNOWN = "Nothing was sent: whether the room is encrypted could not be read"
 _ROOM_UNCONFIRMED = (
@@ -99,27 +96,6 @@ def _user_problem(user_id: str | None) -> str | None:
     return None if user_id is None or MATRIX_USER_ID.fullmatch(user_id) else _NOT_A_USER_ID
 
 
-def _first_visible(line: str) -> str:
-    """Return the first character of ``line`` that is neither whitespace nor invisible, or "" when it has none."""
-    # A recipient may drop leading whitespace and invisible format characters (Unicode category Cf, such as U+FEFF and
-    # U+200B) before it looks for a command.
-    return next(
-        (character for character in line if not character.isspace() and unicodedata.category(character) != "Cf"),
-        "",
-    )
-
-
-def _command_problem(text: str | None) -> str | None:
-    # A bridge drops a reply's quote, its leading `>` lines and the blank lines between and after them, before it
-    # looks for a command, so the first line that is neither decides. The repository's reply-fallback stripper takes
-    # only the exact fallback a client writes ("> " lines, then one blank line), which a model need not.
-    first = next(
-        (first for line in (text or "").splitlines() if (first := _first_visible(line)) not in {"", ">"}),
-        "",
-    )
-    return _COMMAND_LIKE if first in {"!", "\\"} else None
-
-
 @dataclass(frozen=True, slots=True)
 class MatrixUserWrite:
     """One write the model asked for, by its arguments; one it left blank is None."""
@@ -137,7 +113,7 @@ class MatrixUserWrite:
     attachment: str | None = None
     name: str | None = None
 
-    def problem(self) -> str | None:  # noqa: PLR0911 - one return per action's own check
+    def problem(self) -> str | None:
         """Return what the arguments lack, or why they are refused, without asking the homeserver anything."""
         if self.action == "send":
             return self._send_problem()
@@ -157,8 +133,6 @@ class MatrixUserWrite:
         if self.action == "react":
             # The `react` tool's rule: a reaction acknowledges a message, so it is never a sentence.
             return reaction_key_error(str(self.emoji).strip())
-        if self.action == "edit":
-            return _command_problem(self.message)
         return _user_problem(self.user_id) if self.action == "invite" else None
 
     def _send_problem(self) -> str | None:
@@ -170,9 +144,7 @@ class MatrixUserWrite:
             return _NOTHING_TO_SEND
         if self.message is not None and self.attachment is not None:
             return _ONE_EVENT
-        if self.event_id is not None and self.message is None:
-            return _REPLY_NEEDS_TEXT
-        return _command_problem(self.message)
+        return _REPLY_NEEDS_TEXT if self.event_id is not None and self.message is None else None
 
 
 @dataclass
@@ -299,11 +271,7 @@ def _conversation_file(turn: ToolRuntimeContext, attachment_id: str) -> Attachme
 
 
 def _turn_file(turn: ToolRuntimeContext, attachment_id: str) -> AttachmentRecord:
-    """Return the stored file that ``attachment_id`` names, refusing one the turn and its conversation do not hold.
-
-    A file goes out with its name as its text, which whoever sent the file chose, so a name that would read as a
-    command is refused too.
-    """
+    """Return the stored file that ``attachment_id`` names, refusing one the turn and its conversation do not hold."""
     record = resolve_context_attachment_record(turn, attachment_id)
     if isinstance(record, str):
         record = _conversation_file(turn, attachment_id) or record
@@ -312,9 +280,6 @@ def _turn_file(turn: ToolRuntimeContext, attachment_id: str) -> AttachmentRecord
         record = f"Attachment {attachment_id} has no stored file and cannot be sent as your owner."
     if isinstance(record, str):
         raise MatrixRequestError(record)
-    if (problem := _command_problem(record.filename)) is not None:
-        msg = f"Attachment {attachment_id}'s file name is sent as its text. {problem}"
-        raise MatrixRequestError(msg)
     return record
 
 
