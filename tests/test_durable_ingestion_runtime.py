@@ -383,14 +383,12 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(
 @pytest.mark.parametrize("status", [403, 429, 503])
 async def test_failed_durable_join_retains_pending_invitation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     status: int,
 ) -> None:
     """An ambiguous HTTP failure must retain both the invitation and decrypt fence."""
     config, bot, room, event = _live_router_invite_scenario(tmp_path)
     bot.change_local_membership = AgentBot.change_local_membership.__get__(bot)
     bot._room_lifecycle.deps = replace(bot._room_lifecycle.deps, change_membership=bot.change_local_membership)
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
     async with _owned_session(bot) as session:
         bot.client.invited_rooms[room.room_id] = room
         session._transport.request = AsyncMock(side_effect=HttpError(status))
@@ -422,7 +420,6 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
         return await AgentBot.change_local_membership(bot, room_id, target, is_authorized=is_authorized)
 
     bot._room_lifecycle.deps = replace(bot._room_lifecycle.deps, change_membership=change)
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
     async with _owned_session(bot) as session:
         bot.client.invited_rooms[room.room_id] = room
         request = AsyncMock(return_value=b"{}")
@@ -460,7 +457,7 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_at", ["persistence", "welcome"])
+@pytest.mark.parametrize("failure_at", ["persistence", "room_setup"])
 @pytest.mark.parametrize("policy_allows_recovery", [True, False])
 async def test_joined_invitation_recovers_without_an_invite_cache(
     tmp_path: Path,
@@ -478,7 +475,7 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
     if failure_at == "persistence":
         monkeypatch.setattr(bot._room_lifecycle, "_remember_invited_room", AsyncMock(side_effect=failure))
     else:
-        monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock(side_effect=failure))
+        monkeypatch.setattr(bot._room_lifecycle, "_room_joined", AsyncMock(side_effect=failure))
     monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock())
     async with _owned_session(bot) as session, _syncing(bot, session):
         bot.client.invited_rooms[room.room_id] = room
@@ -489,20 +486,20 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
 
     config.router.accept_invites = policy_allows_recovery
     bot._room_lifecycle = BotRoomLifecycle(bot._room_lifecycle.deps)
-    welcome = AsyncMock()
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", welcome)
+    room_setup = AsyncMock()
+    monkeypatch.setattr(bot._room_lifecycle, "_room_joined", room_setup)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[room.room_id]))
     async with _owned_session(bot) as session:
         request = AsyncMock()
         session._transport.request = request
         assert room.room_id in bot.client.rooms
         assert room.room_id not in bot.client.invited_rooms
-        # Startup computes cleanup before welcome admission opens.
+        # Startup computes cleanup before the invitation's room setup runs.
         assert await bot._room_lifecycle._rooms_to_leave() == ([] if policy_allows_recovery else [room.room_id])
-        welcome.assert_not_awaited()
+        room_setup.assert_not_awaited()
         await bot._room_lifecycle.reconcile_pending_invites()
         assert (room.room_id in bot._room_lifecycle.invited_room_ids()) is policy_allows_recovery
-        assert welcome.await_count == int(policy_allows_recovery)
+        assert room_setup.await_count == int(policy_allows_recovery)
         assert (room.room_id not in _pending_room_invites(config, ROUTER_AGENT_NAME)) is policy_allows_recovery
         request.assert_not_awaited()
 
@@ -512,7 +509,7 @@ async def test_invite_completion_keeps_a_replacement_pending_inviter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Finishing one welcome must not erase a later invitation's durable work."""
+    """Finishing one invitation's room setup must not erase a later invitation's durable work."""
     config, bot, room, event = _live_router_invite_scenario(tmp_path)
     bot._room_lifecycle.deps = replace(
         bot._room_lifecycle.deps,
@@ -520,10 +517,10 @@ async def test_invite_completion_keeps_a_replacement_pending_inviter(
     )
     replacement = "@replacement:localhost"
 
-    async def welcome(_room_id: str, _sender: str) -> None:
+    async def room_setup(_room_id: str) -> None:
         await bot._room_lifecycle._record_pending_room_invite(room.room_id, replacement)
 
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", welcome)
+    monkeypatch.setattr(bot._room_lifecycle, "_room_joined", room_setup)
     monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock())
     async with _owned_session(bot) as session, _syncing(bot, session):
         bot.client.invited_rooms[room.room_id] = room
