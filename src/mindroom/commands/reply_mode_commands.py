@@ -58,7 +58,8 @@ async def handle_reply_mode_command(  # noqa: PLR0911 - one answer per outcome
 ) -> str:
     """Show, set, or clear the room-level reply mode override, the room's `reply_mode` setting."""
     requested = args_text.strip().lower()
-    await refresh_room_reply_mode(client, runtime_paths, room_id)
+    # A command reads the room's state itself, so it never trusts a copy that missed a change.
+    current = await refresh_room_reply_mode(client, runtime_paths, room_id, force=True)
     if not requested or requested in _LIST_ARGUMENTS:
         return _show_room_reply_mode(config, runtime_paths, room_id)
 
@@ -69,7 +70,7 @@ async def handle_reply_mode_command(  # noqa: PLR0911 - one answer per outcome
         return "❌ Room admin only."
 
     if requested in _RESET_ARGUMENTS:
-        if resolve_room_reply_mode_override(runtime_paths, room_id) is None:
+        if current and resolve_room_reply_mode_override(runtime_paths, room_id) is None:
             return "This room has no reply mode override."
         if not await write_room_reply_mode(client, runtime_paths, room_id, None):
             return _WRITE_FAILED

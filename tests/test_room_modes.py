@@ -27,7 +27,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import RoomModes, RoomReader, require_room_reader
-from mindroom.room_reply_modes import observe_room_settings_event, resolve_room_reply_mode_override
+from mindroom.room_reply_modes import resolve_room_reply_mode_override, write_room_reply_mode
 from mindroom.room_thread_modes import resolve_room_thread_mode_override, set_room_thread_mode_override
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Coroutine
     from pathlib import Path
 
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
 
 ROOM_ID = "!room:localhost"
@@ -84,11 +85,9 @@ class _Room:
     def published(self) -> dict[str, Any] | None:
         return self.events.get((THREAD_MODE, ""))
 
-    def set_reply_setting(self, mode: str) -> None:
-        """A room admin's client sets the room's reply mode setting, which the runtime sees arrive in sync."""
-        self.events[REPLY_SETTING] = {"value": mode}
-        source = {"type": REPLY_SETTING[0], "state_key": REPLY_SETTING[1], "content": {"value": mode}}
-        observe_room_settings_event(self.paths, ROOM_ID, source)
+    async def set_reply_setting(self, mode: RoomReplyMode) -> None:
+        """A room admin sets the room's reply mode setting, which the runtime then knows."""
+        assert await write_room_reply_mode(self.client, self.paths, ROOM_ID, mode)
 
 
 @pytest.fixture
@@ -160,14 +159,14 @@ async def test_modes_give_each_override_and_the_reply_mode_in_effect(room: _Room
     room.config.rooms[ROOM_ID] = RoomConfig(reply_mode="mentions")
     assert reader.modes() == RoomModes(thread=None, reply=None, reply_in_effect="mentions")
     set_room_thread_mode_override(room.paths, room_id=ROOM_ID, mode="room")
-    room.set_reply_setting("auto")
+    await room.set_reply_setting("auto")
     assert reader.modes() == RoomModes(thread="room", reply="auto", reply_in_effect="auto")
 
 
 @pytest.mark.asyncio
 async def test_an_admin_sets_and_clears_the_thread_mode_and_the_router_publishes_each(room: _Room) -> None:
     """The router publishes the override, and once it is cleared, the agents' configured mode; the reply mode stays."""
-    room.set_reply_setting("mentions")
+    await room.set_reply_setting("mentions")
     reader = await room.reader()
     await reader.set_modes(thread="room")
     assert room.stored() == ("room", "mentions")
