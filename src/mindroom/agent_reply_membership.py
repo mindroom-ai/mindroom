@@ -33,8 +33,9 @@ _JOIN_LAG_MAX_TRACKED = 4096
 
 type _ResponderMembershipPolicySignature = tuple[str, bool, tuple[str, ...]]
 type _AgentReplyMembershipPolicySignature = tuple[_ResponderMembershipPolicySignature, ...]
-# How a refresh ended: it published every answer, published with a read still failing, or an invalidation voided it.
-type RefreshOutcome = Literal["published", "read_failed", "voided"]
+# How a refresh ended: it published every answer, published with a read still failing, published answers that
+# newer evidence already outdates, or an invalidation voided it.
+type RefreshOutcome = Literal["published", "read_failed", "superseded", "voided"]
 
 
 def _agent_reply_membership_policy_signature(
@@ -125,6 +126,8 @@ class AgentReplyMembershipIndex:
         self._refresh_lock = asyncio.Lock()
         # Live transitions seen while a refresh queries Matrix, which it replays onto its answers before publishing.
         self._refresh_transitions: list[_LiveTransition] | None = None
+        # Rooms an account reported joining while a refresh queries Matrix, whose room lists may predate the join.
+        self._refresh_joined_room_ids: set[str] = set()
         # (room ID, requester) to when a denial first waited for the observer's view of that join.
         self._join_lag_started: dict[tuple[str, str], float] = {}
         # Rooms whose ready rows may trail a join the observer has not applied yet, which the next refresh reads again.
@@ -386,6 +389,8 @@ class AgentReplyMembershipIndex:
         if self._desired_signature != signature or snapshot.policy_signature != signature:
             return False
         possible_room_ids = snapshot.possible_joined_room_ids
+        if joined and self._refresh_transitions is not None:
+            self._refresh_joined_room_ids.add(room_id)
         if joined and (possible_room_ids is None or room_id in possible_room_ids):
             return False
         if not joined and self._refresh_transitions is not None:
@@ -466,6 +471,7 @@ class AgentReplyMembershipIndex:
                 else ()
             )
             self._refresh_transitions = transitions = []
+            self._refresh_joined_room_ids.clear()
             try:
                 candidate = await _build_authoritative_snapshot(
                     config,
@@ -486,9 +492,16 @@ class AgentReplyMembershipIndex:
                 return "voided"
             candidate = _replay_refresh_transitions(candidate, self._snapshot, config, transitions)
             now_clients, _, complete = observers()
-            if not complete or [client.user_id for client in now_clients] != [client.user_id for client in clients]:
+            superseded = [client.user_id for client in now_clients] != [client.user_id for client in clients]
+            possible_room_ids = candidate.possible_joined_room_ids
+            if not complete or superseded:
                 # A running account does not observe yet, or one began to meanwhile: its rooms are in no room list.
                 candidate = replace(candidate, refresh_required=True, possible_joined_room_ids=None)
+            elif possible_room_ids is not None and not self._refresh_joined_room_ids <= possible_room_ids:
+                # An account joined a room after its room list was read: the room waits for the next read.
+                possible_room_ids |= self._refresh_joined_room_ids
+                candidate = replace(candidate, refresh_required=True, possible_joined_room_ids=possible_room_ids)
+                superseded = True
             self._publish(candidate)
             for room in candidate.rooms:
                 if room.ready and room.room_key is not None:
@@ -499,7 +512,7 @@ class AgentReplyMembershipIndex:
                         readiness="ready",
                         member_count=len(room.raw_joined_user_ids),
                     )
-            return "read_failed" if candidate.refresh_required else "published"
+            return "superseded" if superseded else "read_failed" if candidate.refresh_required else "published"
 
     def apply_member_event(
         self,

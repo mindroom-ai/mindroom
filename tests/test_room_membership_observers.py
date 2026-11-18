@@ -818,6 +818,8 @@ async def test_own_join_of_a_room_no_room_list_named_waits_for_that_accounts_rea
         # A recovered member event that carries the join too is a loss only for an account that was observing.
         ("discovery_unknown", "recovered_own_join", "armed", False),
         ("discovery_unknown", "recovered_own_join", "open", True),
+        # The read in flight took its room lists before the join, and is reading another room.
+        ("discovery_unknown", "own_join_of_unlisted_room", "closed", False),
     ],
 )
 async def test_own_join_during_the_prospective_observers_read_is_discovery_evidence_only(
@@ -832,9 +834,11 @@ async def test_own_join_during_the_prospective_observers_read_is_discovery_evide
 
     Either the room's row still names an account that stopped observing, or nothing is known yet, as at a first
     start, when every joined room reports a join: the join then publishes nothing and voids nothing.
+    A room the read in flight does not list stays pending when that read publishes, and is read right after.
     """
     config, runtime_paths = _config(tmp_path)
-    a = _Account(_A, {_ROOM: (_A, _B, _ALICE)})
+    unlisted = carrier == "own_join_of_unlisted_room"
+    a = _Account(_A, {_OTHER: (_A, _ALICE)} if unlisted else {_ROOM: (_A, _B, _ALICE)})
     b = _Account(_B, {_ROOM: (_A, _B, _ALICE)})
     index = AgentReplyMembershipIndex()
     membership_sync = _sync(index)
@@ -844,18 +848,22 @@ async def test_own_join_during_the_prospective_observers_read_is_discovery_evide
     else:
         index.invalidate(config, reason="initial_config")
     a.hold = asyncio.Event()
+    attempts: list[tuple[object, bool]] = []
 
     async def refresh() -> object:
-        return await index.refresh(config, runtime_paths, lambda: (_clients(a), _by_power({}), True))
+        outcome = await index.refresh(config, runtime_paths, lambda: (_clients(a), _by_power({}), True))
+        attempts.append((outcome, index.grants_pending(config, joined_rooms=[], current_room_id=_ROOM)))
+        return outcome
 
     _enter(membership_sync, config, joiner)
     membership_sync.request_refresh(config, refresh)
     await _reached(a.reading)
+    a.answers[_ROOM] = (_A, _B, _ALICE)
     epoch, snapshot = index._epoch, index.snapshot
     join = (
-        (_own_join("invite"), None)
-        if carrier == "own_join"
-        else _recovered_member_event(previous_membership="invite", membership="join")
+        _recovered_member_event(previous_membership="invite", membership="join")
+        if carrier == "recovered_own_join"
+        else (_own_join("invite"), None)
     )
 
     membership_sync.pre_admit_ingestion(config, runtime_paths, *join, observer_user_id=_A)
@@ -866,10 +874,13 @@ async def test_own_join_during_the_prospective_observers_read_is_discovery_evide
     a.hold.set()
     await asyncio.wait_for(membership_sync.refresh_for_access_check(config, refresh), 5)
 
-    assert _observers(index) == {_ROOM: _A}
+    assert _observers(index) == ({_OTHER: _A, _ROOM: _A} if unlisted else {_ROOM: _A})
     assert index.is_current_room_member(_ALICE, _ROOM, config, runtime_paths)
     # A fenced read is voided, and the coordinator's one retry reads the room again.
-    assert a.reads == [_ROOM] * (2 if fenced else 1)
+    # A publication that missed the joined room leaves it pending, never denied, for that same retry.
+    first = "voided" if fenced else "superseded" if unlisted else None
+    assert attempts == [*([(first, True)] if first else []), ("published", False)]
+    assert a.reads == ([_OTHER, _ROOM] if unlisted else [_ROOM] * (2 if fenced else 1))
     assert membership_sync._refresh_retry_at == 0.0
     assert not index.needs_refresh(config)
 

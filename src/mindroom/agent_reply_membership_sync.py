@@ -210,7 +210,7 @@ class AgentReplyMembershipSync:
 
     async def _refresh(self, config: Config, refresh: Callable[[], Awaitable[object]]) -> None:
         """Refresh, once more at once when an invalidation voided the attempt; what is still unanswered backs off."""
-        if await refresh() == "voided":
+        if await refresh() in ("voided", "superseded"):
             await refresh()
         if not self._memberships.needs_refresh(config):
             self._refresh_attempt = 0
