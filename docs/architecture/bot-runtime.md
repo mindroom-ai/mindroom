@@ -111,10 +111,16 @@ A cleanup that outlasts its budget keeps its owners, and the Matrix client and j
 Shutdown invalidates membership readiness only after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
 Replay does not wait for a later sync token or Sliding Sync position: recovered callbacks may rely on the room ID, but cached membership and state are best-effort.
 A message that mentions nobody and that no bot answers by its own rules is routed by one bot per room, the room's steward.
-The steward selects a responder and sends it a hidden `io.mindroom.route` event, which names the responder, the person's event and the thread, carries the relay context, and has no `m.relates_to`, `m.mentions` or text for people.
-Every bot journals that event from sync as `EventKind.ROUTE`, only when an account the identity registry manages sent it, and journal dispatch hands it to the message callback as a mention of the responder in reply to the person's event.
-The responder answers the person's event for that person under its own access rules, every other bot settles the route without work, and the person's event is an alias of the responder's turn.
-The steward records the route as its answer, so a replay sends none again; a responder that is still starting leaves the turn pending with nothing sent, and a steward the selection names answers the turn itself with no event.
+The steward routes under `router.access` alone: its own reply access decides only whether it may answer the turn itself.
+The steward selects a responder and sends it a hidden `io.mindroom.route` event, which names the responder, every message of the turn with the newest last, and the thread, carries the relay context, and has no `m.relates_to` or `m.mentions`.
+The route carries the person's text as its `body` only for a scheduled task and for a responder that answers in the room, which reads no conversation.
+Every bot journals that event from sync as `EventKind.ROUTE`, only when an account the identity registry manages sent it, and journal dispatch hands it to the message callback as a mention of the responder in reply to the person's newest message, keeping only the relay context keys a responder reads.
+Only an event journaled as a route is a route: a message whose content carries the route key is an ordinary message.
+The responder answers the person's newest message for that person under its own access rules, every other bot settles the route without work, and every message the route names is an alias of the responder's turn, so an edit or a deletion of any of them reaches its answer.
+A turn that pauses for an approval stores the event its reply answers, so its resumed reply, tools and model run answer the person's message and not the route.
+The steward records the route as its answer, so a replay sends none again, and a replay whose record a crash lost finds the route in the room's history before it selects anyone.
+A bot that is no longer the room's steward when its selection returns sends no route and answers nothing.
+A responder that is still starting leaves the turn pending with nothing sent, and a steward the selection names answers the turn itself with no event.
 
 ### Delivery and membership
 

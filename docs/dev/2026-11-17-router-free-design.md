@@ -89,15 +89,20 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     A turn those rules leave unanswered (several candidates, nobody mentioned, the thread names no responder and holds one person, `router.access` allows the requester when set) is routed by the room's steward alone, and every other bot ignores it, as it ignored it while a router existed.
     The steward (decision 3) may be the owner account or a candidate.
     It coalesces and normalizes the turn as any bot does, runs the selector once, and sends one event of type `io.mindroom.route`.
-    The event's content names, under the `io.mindroom.route` key, the chosen account (`entity`), the person's event (`event_id`) and the thread the answer belongs in (`thread_id`), and carries the relay context the responder reads: the trusted-relay source kind, the original sender, attachment IDs, and a scheduled task's per-run settings.
-    It has no `m.relates_to` and no `m.mentions`, so no homeserver counts it in a thread and no mention rule fires for it, and it has a `body` only when it relays a scheduled task whose prompt the responder could not read otherwise.
+    The event's content names, under the `io.mindroom.route` key, the chosen account (`entity`), every message of the turn with the newest last (`event_ids`) and the thread the answer belongs in (`thread_id`), and carries the relay context the responder reads: the trusted-relay source kind, the original sender, attachment IDs, voice markers, and a scheduled task's per-run settings.
+    The responder keeps only those keys, and only an event journaled as a route is read as one.
+    It has no `m.relates_to` and no `m.mentions`, so no homeserver counts it in a thread and no mention rule fires for it, and it has a `body` only when the responder could not read the text otherwise: for a scheduled task's prompt, and for a responder that answers in the room and reads no conversation.
+    The steward routes under `router.access` alone, so a candidate steward whose own access denies the person still routes the person's message, and answers it itself only when its own access allows.
     Every bot journals the event from sync, in encrypted rooms too, the way a silent schedule trigger is journaled, and only when its sender is an account the identity registry manages.
     The bot it names runs it as a mention through the existing trusted-relay path: the requester is the original sender, the bot's own access rules apply to that requester, and the answer replies to the person's event.
     Every other bot settles it without work.
     A candidate steward that the selection names answers the turn itself and sends no event.
     A turn nobody fits gets no event and no answer; when the selector fails, the candidate with the lowest Matrix ID is chosen.
     A selected responder that is still starting leaves the turn pending with nothing sent, and it is routed again once that responder is ready.
-    The steward records the route as its answer to the turn, so a replay sends no second route, and a responder that receives a second route for a message it answered answers once, because the route names the message as an alias of its turn.
+    The steward records the route as its answer to the turn, so a replay sends no second route, and a replay whose record a crash lost finds the route in the room's history before it selects anyone.
+    A responder that receives a second route for a message it answered answers once, because the route names every message of the turn as an alias of its turn.
+    A bot rechecks that it is still the room's steward when its selection returns, and sends and answers nothing when it is not; two bots that both pass that check within the same moment can still both route, which is accepted.
+    A turn that pauses for an approval stores the event its reply answers, so the resumed reply and its tools answer the person's message and not the route.
     The fast paths read nothing shared, so their rare races are the ones the router had: a candidate that answers by its own rules while the steward routes the same message can produce a second answer.
 15. **Startup (question D): no account is required.**
     Every configured account starts through the same retrying path, with the owner account first when the config needs one.
