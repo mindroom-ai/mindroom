@@ -253,7 +253,7 @@ A base whose folder sandboxed workers can write, or that contains such a folder,
 ### Reranking
 
 A reranker reads the query together with each candidate chunk and reorders them.
-A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3`, and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
+A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3` (measured before MindRoom capped its input at 1024 tokens), and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
 Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI ranked 20 candidates in about 0.3 seconds and 400 in 0.8, while `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
 
 ```yaml
@@ -284,7 +284,8 @@ If the reranker fails, the search returns its results in the merged order and lo
 
 Each provider scores a chunk from 0 to 1, and a chunk missing from the response ranks last.
 `sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
-It truncates each query and chunk pair to 1024 tokens, so a long chunk cannot need tens of GiB of memory.
+It truncates each query and chunk pair to 1024 tokens, or to the model's own limit if that is shorter, which cuts ordinary default chunks too, since most full 5,000-character chunks exceed 1024 `BAAI/bge-reranker-v2-m3` tokens.
+The cap limits how much memory one search can need, but it does not guarantee a peak.
 The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
 
 #### Judgment rerankers
