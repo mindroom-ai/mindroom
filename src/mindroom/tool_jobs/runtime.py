@@ -376,6 +376,7 @@ class ToolJobRuntime:
         authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
         cancel: _Cleanup,
         continues: _Continues = lambda _job: False,
+        reply_stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
     ) -> None:
         # Saves land only while this runtime's generation owns the jobs, which its creator takes before recovery.
         self._store = store
@@ -384,6 +385,8 @@ class ToolJobRuntime:
         self.authorize_execution = authorize_execution
         self._cancel = cancel
         self._continues = continues
+        # Reads whether a job's reply recorded a Stop since the job began; the reply's record is a Stop's authority.
+        self._reply_stopped = reply_stopped
         self._entries: dict[str, _Entry] = {}
         # Conversation lookups read this instead of scanning every entry; `_add_entry` and `_remove_entry` keep it.
         # Jobs are keyed by their recipient, room, thread, and requester.
@@ -559,8 +562,7 @@ class ToolJobRuntime:
 
         Only an interruption is undecided: an outcome the job's own work or its cleanup reached stands. Only a job
         that worked, of a kind the runtime's creator continues, stays: one with a cancel request or waiting for a
-        person's decision ends, as does one whose reply this process saw stopped. A Stop this process did not see is
-        in the reply's record, which whoever continues the job reads first.
+        person's decision ends, as does one whose reply was stopped.
         """
         job = entry.job
         return (
@@ -573,10 +575,14 @@ class ToolJobRuntime:
     async def _settle_stopped(self, entry: _Entry) -> None:
         """Clean up what a restart stopped and end the job, or keep it for `continue_stopped`; the caller holds the lock.
 
-        Only work the restart cut short is interrupted by it; a cancellation saved before it is not.
+        Only work the restart cut short is interrupted by it; a cancellation saved before it is not. A Stop the
+        process that recorded it did not live to apply to the job is read from the reply's record, so the job ends as
+        one whose reply was stopped (`_publish_outcome`).
         """
         cancelled = entry.job.status == "cancel_requested"
         entry.control.cancel(shutdown=not cancelled)
+        if self._reply_stopped is not None and self._continues(entry.job):
+            entry.control.reply_stopped = await self._reply_stopped(entry.job)
         outcome = await self._cleanup(entry)
         settled = self._settled(entry, outcome, _stopped_outcome(cancelled=cancelled, cause="restart"))
         if self._keeps(entry, settled):
@@ -607,37 +613,32 @@ class ToolJobRuntime:
             and self._grant(entry.job) == "allowed"
         )
 
-    async def continue_stopped(self, job_id: str, spec: JobSpec | None, *, reply_stopped: bool = False) -> None:
+    async def continue_stopped(self, job_id: str, spec: JobSpec | None) -> None:
         """Run a job a restart stopped on as ``spec``, under its own ID, or end it interrupted when ``spec`` is None.
 
-        ``reply_stopped`` says the job's reply holds a Stop this process never saw, which then counts as one it saw.
         A job that was continued, cancelled, or settled since it was listed is left alone. A Stop of its reply that
-        arrived meanwhile ends it, and it stays as it is while its requester's access is no longer allowed: revocation
-        cancels it, or a later pass continues it.
+        marked it while it waited ends it, and it stays as it is while its requester's access is no longer allowed:
+        revocation cancels it, or a later pass continues it.
         """
         async with self._lock:
             self._ensure_open(accepting=True)
             entry = self._entries.get(job_id)
             if entry is None or entry.interruption is None or not self._awaits_continuation(entry):
                 return
-            entry.control.reply_stopped |= reply_stopped
             if spec is None or entry.control.reply_stopped:
                 await self._publish_outcome(entry, entry.interruption)
             elif self._grant(entry.job) == "allowed":
-                await run_coroutine_until_complete(self._relaunch(entry, spec, entry.interruption))
+                await run_coroutine_until_complete(self._relaunch(entry, spec))
 
-    async def _relaunch(self, entry: _Entry, spec: JobSpec, stopped: BackgroundOutcome) -> None:
+    async def _relaunch(self, entry: _Entry, spec: JobSpec) -> None:
         """Save a stopped job with the adapter it continues on, then launch it; callers finish this first.
 
-        The save comes first, so a later restart finds what the job ran. A Stop of the job's reply marks the job
-        without the runtime lock, so one may land during the save: the job then ends as ``stopped``. No await
-        separates that last check, and the one of the requester's access, from the task's creation, so a Stop either
-        is seen here or finds a job that runs.
+        The save comes first, so a later restart finds what the job ran. The requester's access is checked again
+        after it, with no await before the task's creation. A Stop of the job's reply that lands from here on has the
+        effect a Stop has on a working job (`cancel_stopped_reply`): the job is refused its next approval.
         """
         await self._publish(entry, _updated(entry.job, adapter=spec.adapter))
-        if entry.control.reply_stopped:
-            await self._publish_outcome(entry, stopped)
-        elif self._grant(entry.job) == "allowed":
+        if self._grant(entry.job) == "allowed":
             entry.cancel = spec.cancel
             entry.task = asyncio.create_task(self._run(entry, spec.operation), name=f"tool-job:{entry.job.job_id}")
 
@@ -987,21 +988,17 @@ class ToolJobRuntime:
         """Refuse a stopped reply's jobs every later approval, and cancel those waiting on cards, which denies them.
 
         A job whose approved call already runs keeps running; any other is cancelled when it next asks or is answered.
-        A job a restart stopped that still waits to be continued ends, and no later restart continues a stopped
-        reply's job (`_keeps`).
+        A job a restart continued is such a job again. One that still waits to be continued ends when its turn to
+        continue comes (`continue_stopped`), and no later restart continues a stopped reply's job (`_keeps`).
         """
         stopped = [entry for entry in self._entries.values() if entry.job.reply_id == reply_id]
-        # Marked before the lock, so a decision or a continuation already waiting for the lock is refused too.
+        # Marked before the lock, so a decision already waiting for the lock is refused too.
         for entry in stopped:
             entry.control.reply_stopped = True
         async with self._lock:
-            if self._closed or self._shutdown_task is not None:
-                return
             for entry in stopped:
-                if entry.job.status == "awaiting_approval":
+                if entry.job.status == "awaiting_approval" and not self._closed and self._shutdown_task is None:
                     await self._request_cancel(entry)
-                elif entry.interruption is not None and self._awaits_continuation(entry):
-                    await self._publish_outcome(entry, entry.interruption)
 
     async def _request_cancel(self, entry: _Entry) -> asyncio.Task[BackgroundJob]:
         """Durably request cancellation and return its one drain; the caller holds the runtime lock."""

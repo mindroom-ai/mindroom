@@ -157,3 +157,26 @@ Two reviews of `87759d6d3` left five items; the identity and the round 2 rule st
   Such a job now ends with a result that says its user stopped it; the runtime chooses it where it publishes a job's end, so the shutdown, a Stop of a waiting job, and the pass share it, and the pass hands the runtime a Stop it read in the reply's record.
 
 Measured: +136 −36 in `src` against `87759d6d3`, net +100.
+
+## Round 4
+
+An audit after round 3 found the change at +589 −51 in `src` against an estimate of about 300, and the findings of rounds 1 to 3 in two places: Stop handling, where each round closed one order of events and the next review found another, and the continuation prompt.
+This round rules on both and supersedes the Stop and prompt text of rounds 2 and 3 where they differ.
+
+- **R1, a Stop has the effect it has on main.**
+  Rounds 2 and 3 held a continued job to a stricter rule than a live job: main cancels a job waiting on its cards at once, and any other working job, a subagent included, only when it next asks for an approval.
+  A continued job is a job of its reply again: it keeps the saved link to the reply, so a Stop marks it and it is refused its next approval.
+  One durable check stays, moved to where it serves every ending: recovery reads the reply's record for each subagent job the restart stopped, and a job whose reply recorded a Stop since the job began ends there, with the result that says its user stopped it.
+  A job a Stop marks in the process that received it ends as before: at that process's shutdown, or when the pass comes to it while it waits to continue.
+  The rule for everything else: a Stop that lands while a continuation launches has the effect a Stop has on a working job.
+  Deleted: the Stop check after the launch's save, the end of a waiting job from inside the Stop's own effect, the pass's read of the reply's record, and the flag by which the pass told the runtime of a Stop.
+- **R2, one place builds the continuation prompt.**
+  `_continuation_prompt` builds it once, when the continuation is prepared, and it is saved with the job (`continuation_prompt` in the adapter).
+  The ruling asked for the prompt to be the continued turn's saved task; it is saved beside the task instead, because the task is the turn's label in the room (round 3, "The account in the room") and the account must not show there.
+  A continuation a restart stops before its first call is sent the saved prompt again, so its account of the earlier run is not lost; one stopped after its own calls is sent the note, the prompt it was sent, and the account of its own run.
+  The nested-child defect had one cause: the prompt replaced the task inside the response envelope (`_sending`), and the delegation driver hands that envelope to every child started under the turn, where "the prompt equals the task" is true of each nested child's first response.
+  The envelope wrapper is gone: the job passes the prompt to its own child's first response (`delegation_call_job(prompt=...)`, down to `_execute_child`), which no other child reaches and which compares nothing.
+- **R3, a child that awaited approval.**
+  A crash between a Stop's record and its effects left a waiting child's job, which recovery ended with the restart's reason, "Send a follow-up".
+  It now ends through the same path as every other Stop ending, since recovery reads the reply's record before it settles the job (R1).
+- **R4, accepted limits**, documented in the architecture's Limits and not coded: a grant that turns unresolved during the launch's save uses up that continuation; a bot that left and rejoined the room while down counts as joined; the 10-minute access wait starts again in each process.

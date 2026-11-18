@@ -59,8 +59,6 @@ logger = get_logger(__name__)
 _RETRY_SECONDS = 5.0
 # How long a stopped subagent job waits for its requester's access to resolve once its bot has synced.
 _ACCESS_WAIT_SECONDS = 600.0
-# Why a stopped subagent job ends when its reply's record holds a Stop from after the job began.
-_REPLY_STOPPED = "the reply that started it was stopped"
 
 
 def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
@@ -161,6 +159,7 @@ class ToolJobRuntimeCoordinator:
                 authorize_execution=self._authorize_execution,
                 cancel=self._interrupt,
                 continues=_is_subagent_job,
+                reply_stopped=self._reply_stopped,
             )
         self._initialized = True
 
@@ -188,6 +187,17 @@ class ToolJobRuntimeCoordinator:
             ),
             runtime_paths=self.runtime_paths,
         )
+
+    async def _reply_stopped(self, job: BackgroundJob) -> bool:
+        """Return whether the reply that started a job recorded a Stop since the job began.
+
+        The reply's record is the authority for a Stop: it holds one the process that recorded it did not live to
+        apply to the job. A reply stopped and regenerated before the job began does not count.
+        """
+        if job.reply_id is None or (bot := self.bot_provider(job.owner.recipient)) is None:
+            return False
+        reply = await bot.journal_principal().replies.load(job.reply_id)
+        return reply is not None and reply.stop_receipt_order != job.reply_stop_order
 
     def _grant(self, job: BackgroundJob) -> JobGrant:
         """Recheck current delegation, team membership, and requester reply access."""
@@ -387,12 +397,16 @@ class ToolJobRuntimeCoordinator:
                 return
             # The job's task starts in this context, so its child runs in its conversation as a reply's job does.
             with tool_runtime_context(context):
-                spec = await self._continuation(bot, job, runtime)
+                try:
+                    spec = await continued_subagent_job(job, runtime)
+                except Exception:
+                    logger.exception("Subagent job could not continue after a restart", job_id=job.job_id)
+                    spec = "its continuation could not be prepared"
                 if not isinstance(spec, str):
                     await runtime.continue_stopped(job.job_id, spec)
                     return
         logger.info("Subagent job ends instead of continuing after a restart", job_id=job.job_id, reason=spec)
-        await runtime.continue_stopped(job.job_id, None, reply_stopped=spec == _REPLY_STOPPED)
+        await runtime.continue_stopped(job.job_id, None)
 
     def _ready_bot(self, job: BackgroundJob) -> AgentBot | str | None:
         """Return the bot a stopped job continues under, why the job ends instead, or None while the job waits.
@@ -418,22 +432,6 @@ class ToolJobRuntimeCoordinator:
         if grant == "pending" and now - self._unresolved_since.setdefault(job.job_id, now) >= _ACCESS_WAIT_SECONDS:
             return "its requester's access stayed unresolved after the bot's first sync"
         return None
-
-    async def _continuation(self, bot: AgentBot, job: BackgroundJob, runtime: ToolJobRuntime) -> JobSpec | str:
-        """Return what a stopped job runs on as, or why it ends: a stopped reply's job, or a turn that cannot continue.
-
-        The reply's record is the authority for a Stop: it holds one this process never saw, such as a Stop the
-        process that recorded it did not live to apply to the job.
-        """
-        if job.reply_id is not None:
-            reply = await bot.journal_principal().replies.load(job.reply_id)
-            if reply is not None and reply.stop_receipt_order != job.reply_stop_order:
-                return _REPLY_STOPPED
-        try:
-            return await continued_subagent_job(job, runtime)
-        except Exception:
-            logger.exception("Subagent job could not continue after a restart", job_id=job.job_id)
-            return "its continuation could not be prepared"
 
     def _conversation_context(self, bot: AgentBot, job: BackgroundJob) -> ToolRuntimeContext | None:
         """Rebuild the tool context of the conversation a job belongs to, or None while its bot has no Matrix client."""
