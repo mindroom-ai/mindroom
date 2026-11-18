@@ -420,7 +420,12 @@ class Config(BaseModel):
         default_factory=ExternalTriggerPolicyConfig,
         description="Global policy for tool-managed signed external triggers",
     )
-    models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
+    # Validating the default turns it into a ``ModelTable`` too, so an omitted ``models`` still reads references.
+    models: dict[str, ModelConfig] = Field(
+        default_factory=dict,
+        validate_default=True,
+        description="Model configurations",
+    )
     tool_approval: ToolApprovalConfig = Field(
         default_factory=ToolApprovalConfig,
         description="Tool-approval rules for agent-initiated tool calls",

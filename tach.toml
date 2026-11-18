@@ -6046,6 +6046,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.thread_summary"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.entity_resolution",

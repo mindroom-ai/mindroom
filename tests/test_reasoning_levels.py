@@ -10,9 +10,10 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config, ConfigRuntimeValidationError
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ModelTable
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.reasoning import apply_reasoning_level
+from mindroom.thread_summary.generation import _summary_provider
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -237,3 +238,30 @@ def test_a_model_without_the_block_is_unchanged() -> None:
     model = ModelConfig(provider="openai", id="m", extra_kwargs={"reasoning_effort": "high"})
 
     assert apply_reasoning_level(model) is model
+
+
+def test_a_config_without_models_still_reads_references() -> None:
+    config = Config()
+
+    assert isinstance(config.models, ModelTable)
+    config.models["sol"] = ModelConfig(**_sol())
+    assert config.models["sol@high"].display_name == "Sol (high)"
+
+
+def test_a_thread_summary_at_a_level_drops_its_model_s_temperature(
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[ModelConfig] = []
+    monkeypatch.setattr(
+        "mindroom.providers.registry.build_model_provider",
+        lambda config, _paths, model_name: built.append(config.models[model_name]),
+    )
+    config = _config(sol=_sol(extra_kwargs={"temperature": 0.9, "reasoning_summary": "auto"}))
+
+    _summary_provider(config, runtime_paths, "sol@high")
+
+    assert isinstance(built[0], ModelConfig)
+    assert built[0].extra_kwargs == {"reasoning_summary": "auto"}
+    assert built[0].reasoning is not None
+    assert built[0].reasoning.default == "high"
