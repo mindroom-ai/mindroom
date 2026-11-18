@@ -639,6 +639,22 @@ async def test_hook_runs_on_the_steward_elected_when_the_event_was_first_dispatc
 
 
 @pytest.mark.asyncio
+async def test_hook_is_lost_when_the_claims_owner_never_dispatches_the_event(tmp_path: Path) -> None:
+    """Accepted cost: a claim's owner that stopped, or joined after the event, dispatches no copy, and no other bot runs it."""
+    steward = _steward_bot(tmp_path)
+    other = _other_bot(steward)
+    seen = _recording(steward, EVENT_ROOM_MEMBER_JOINED)
+    room = cast("nio.MatrixRoom", _room())
+    join = _room_member_event(event_id="$join")
+
+    await _dispatch_member(other, room, join)
+    steward.orchestrator.steward = other.agent_name
+    await _dispatch_member(other, room, join)
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
 async def test_claimed_hook_cancelled_before_it_ran_is_retried_by_its_owner_after_a_handover(tmp_path: Path) -> None:
     """The bot that holds an event's claim runs the hook on its retry, though another bot is the steward by then."""
     attempts: list[str] = []
