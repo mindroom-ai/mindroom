@@ -23,7 +23,7 @@ from mindroom.llm.messages import PROMPT_UPDATE_KEY, system_text
 from mindroom.llm.provider import Capabilities, ModelRequest
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry as provider_registry
-from mindroom.providers.pipeline import prompt_hold
+from mindroom.providers.pipeline import compose, prompt_hold
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -757,3 +757,26 @@ async def test_an_approval_resumed_by_a_later_runner_sends_the_prompt_its_run_st
     assert "Answer in Dutch." in system_text(resumed.messages)
     assert "Answer in English." not in system_text(resumed.messages)
     assert _told(resumed) == []
+
+
+@pytest.mark.asyncio
+async def test_a_turn_sizes_its_request_with_the_update_before_it_sends_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History preparation sizes through the same projection, so its budget counts the update the request will hold."""
+    conversation = _Conversation.start(tmp_path, monkeypatch)
+    await conversation.turn("First question")
+    conversation.write_rules(_VIOLET)
+    sized_before_sending: list[bool] = []
+
+    def sized(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
+        projected = prompt_hold.held_request(inner, request)
+        if len(conversation.wire.requests) == conversation.sent:
+            sized_before_sending.append(bool(_told(projected)))
+        return projected
+
+    monkeypatch.setattr(compose, "held_request", sized)
+    [second] = await conversation.turn("Second question")
+    assert len(_updates(second)) == 1
+    assert any(sized_before_sending)

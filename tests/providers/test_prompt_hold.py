@@ -273,6 +273,12 @@ async def test_a_replay_of_the_same_messages_sends_the_same_prompt_and_updates(c
     assert _shape(again) == _shape(sent)
     assert ([message.content for message in again[:2]], _updates(again)) == ([_A, _TURN], _updates(sent))
 
+    # The skill review forks the turn's final request: it reuses the cached prefix and leaves the hold as it was.
+    state = conversation.state()
+    fork = await conversation.send([*_system(_B), *second[2:], _answer(), _user("Review this conversation.")])
+    assert _shape(fork) == [*_shape(sent), "assistant", "user"]
+    assert (fork[0].content, _updates(fork), conversation.state()) == (_A, _updates(sent), state)
+
     # A paused run resumes with the system messages it stored, the tool call it paused on, and its result.
     call = Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "add"}}])
     paused = [*_system(_B), *second[2:], call]
