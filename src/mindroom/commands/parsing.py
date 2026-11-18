@@ -189,7 +189,7 @@ class _CommandParser:
         raw_text = message.strip().removeprefix(VOICE_PREFIX)
         if mention_names:
             # Mentions before a command aim it at the agents they name: `@Research Expert !model`.
-            names = "|".join(re.escape(name) for name in sorted(mention_names, key=len, reverse=True))
+            names = "|".join(map(re.escape, mention_names))
             raw_text = re.sub(rf"^(?:@?(?:{names})\s+)+(?=[!/])", "", raw_text, flags=re.IGNORECASE)
         # `/cmd` parses like `!cmd`, but only a known command: other `/` text (paths, `/s`) is conversation.
         is_slash = raw_text.startswith("/")

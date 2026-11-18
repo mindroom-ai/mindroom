@@ -105,7 +105,7 @@ def model_selection_targets_other_runtime(content: Mapping[str, object], user_id
 def model_selection_names_runtime(content: Mapping[str, object], user_id: str) -> bool:
     """Return whether a structured selection names this account, whose device answered its discovery."""
     raw = content.get(MODEL_SELECTION_CONTENT_KEY)
-    return isinstance(raw, Mapping) and raw.get("runtime_user_id") == user_id
+    return isinstance(raw, Mapping) and cast("Mapping[str, object]", raw).get("runtime_user_id") == user_id
 
 
 def model_selection_result(

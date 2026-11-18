@@ -216,7 +216,7 @@ class IngressValidator:
     def _mention_names(self, mentions: object) -> tuple[str, ...]:
         """Return the display name, entity name and Matrix ID of each agent and team an event's pills mention."""
         config = self.deps.runtime.config
-        user_ids = mentions.get("user_ids") if isinstance(mentions, dict) else None
+        user_ids = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
         return tuple(
             name
             for user_id in (user_ids if isinstance(user_ids, list) else ())
