@@ -333,11 +333,6 @@ class ScheduledTaskRuntime:
                 return
         yield None
 
-    def router_client(self) -> nio.AsyncClient | None:
-        """Return the router's client, the account a room admin should empower for schedule state."""
-        router = self.bots().get(ROUTER_AGENT_NAME)
-        return None if router is None else router.client
-
     def _ready_bot(self, entity_name: str) -> AgentBot | None:
         bot = self.bots().get(entity_name)
         if bot is None or bot in self._fenced or not bot.running or not bot.first_sync_complete or bot.client is None:

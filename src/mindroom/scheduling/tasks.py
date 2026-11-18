@@ -49,6 +49,7 @@ from mindroom.scheduling.errors import (
     SchedulingError,
 )
 from mindroom.scheduling.ownership import decide_task_owner
+from mindroom.steward_duties import moderator_rights_message
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_system.plugins import config_plugins
@@ -705,30 +706,6 @@ async def require_scheduled_task(
     return task
 
 
-def _scheduled_task_permission_hint(
-    client: nio.AsyncClient,
-    room_id: str,
-    writers: ScheduledTaskRuntime | None,
-) -> str:
-    """Tell the room admin how to let MindRoom save schedule state in a room.
-
-    Name the running router whenever there is one: it runs schedules in every room where it may write their state,
-    and backs other accounts' rejected writes, so its grant is the one that unblocks scheduling for the whole room.
-    Rooms MindRoom did not create often leave it below the power level that room state needs.
-    """
-    account = (writers.router_client() if writers is not None else None) or client
-    room = account.rooms.get(room_id)
-    if room is not None:
-        required_level = room.power_levels.get_state_event_required_level(SCHEDULED_TASK_EVENT_TYPE)
-        current_level = room.power_levels.get_user_level(account.user_id)
-        if current_level < required_level:
-            return (
-                f"Ask a room admin to raise the power level of {account.user_id} in this room "
-                f"from {current_level} to {required_level}, then retry."
-            )
-    return f"Ensure {account.user_id} is joined with permission to write room state, then retry."
-
-
 async def _write_scheduled_task_state(
     client: nio.AsyncClient,
     room_id: str,
@@ -771,7 +748,7 @@ async def _put_scheduled_task_state_content(
 
     msg = (
         f"Failed to persist scheduled task state for task `{task_id}`: {failure}. "
-        f"{_scheduled_task_permission_hint(client, room_id, writers)}"
+        f"{moderator_rights_message('save schedules')}"
     )
     raise ScheduledTaskStorageError(msg)
 

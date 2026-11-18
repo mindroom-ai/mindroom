@@ -109,7 +109,6 @@ async def _reply(
     ids = entity_ids(config, runtime_paths)
     scheduled_tasks = MagicMock(spec=ScheduledTaskRuntime)
     scheduled_tasks.other_state_writer.return_value = nullcontext()
-    scheduled_tasks.router_client.return_value = None
     context = make_test_command_handler_context(
         client=client,
         config=config,
@@ -367,8 +366,8 @@ async def test_cancel_of_a_task_that_already_ended(tmp_path: Path, status: str) 
 
 
 @pytest.mark.asyncio
-async def test_cancel_whose_state_write_is_refused(tmp_path: Path) -> None:
-    """A cancellation Matrix refuses to store reports the refusal and how to fix it."""
+async def test_state_refusal_says_moderator_rights(tmp_path: Path) -> None:
+    """A cancellation Matrix refuses to store reports the refusal and that the agent needs moderator rights."""
     client = make_matrix_client_mock()
     _serve_task(client, _workflow())
     client.room_put_state = AsyncMock(return_value=_STATE_WRITE_REFUSED)
@@ -377,8 +376,7 @@ async def test_cancel_whose_state_write_is_refused(tmp_path: Path) -> None:
 
     assert reply == (
         f"❌ Failed to cancel task `{TASK_ID}`: Failed to persist scheduled task state for task `{TASK_ID}`: "
-        f"RoomPutStateError: M_FORBIDDEN denied. Ensure {client.user_id} is joined with permission to write room "
-        "state, then retry."
+        "RoomPutStateError: M_FORBIDDEN denied. I need moderator rights in this room to save schedules."
     )
 
 

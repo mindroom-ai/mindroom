@@ -2285,66 +2285,6 @@ async def test_persist_scheduled_task_state_raises_on_matrix_error() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("writer_level", "hint"),
-    [
-        (
-            0,
-            f"Ask a room admin to raise the power level of {SCHEDULE_WRITER_ID} in this room from 0 to 50, then retry.",
-        ),
-        (50, f"Ensure {SCHEDULE_WRITER_ID} is joined with permission to write room state, then retry."),
-    ],
-    ids=["under-powered", "powered"],
-)
-async def test_state_write_error_names_the_power_grant_the_writer_lacks(writer_level: int, hint: str) -> None:
-    """A refused state write names the exact grant only when the writing account lacks the power."""
-    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    room = _matrix_room("!test:server")
-    room.power_levels.defaults.state_default = 50
-    room.power_levels.users[SCHEDULE_WRITER_ID] = writer_level
-    client.rooms["!test:server"] = room
-    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-
-    with pytest.raises(SchedulingError, match="Failed to persist scheduled task state") as exc_info:
-        await scheduling._put_scheduled_task_state_content(
-            client=client,
-            room_id="!test:server",
-            task_id="taskfail",
-            content={},
-        )
-
-    assert str(exc_info.value).endswith(hint)
-
-
-@pytest.mark.asyncio
-async def test_agent_state_write_error_names_the_router_grant() -> None:
-    """A refused agent write asks for the router's grant, which unblocks every schedule in the room."""
-    router_client = make_matrix_client_mock(user_id="@mindroom_router:server")
-    router_room = _matrix_room("!test:server")
-    router_room.power_levels.defaults.state_default = 50
-    router_room.power_levels.users[router_client.user_id] = 0
-    router_client.rooms = {"!test:server": router_room}
-    writers = scheduled_task_runtime(_runtime_paths(), scheduling_bot(router_client), config=Config())
-    agent_client = make_matrix_client_mock(user_id="@mindroom_general:server")
-    agent_client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-
-    with pytest.raises(SchedulingError, match="Failed to persist scheduled task state") as exc_info:
-        await scheduling._put_scheduled_task_state_content(
-            client=agent_client,
-            room_id="!test:server",
-            task_id="taskfail",
-            content={},
-            writers=writers,
-        )
-
-    router_client.room_put_state.assert_not_awaited()
-
-    assert str(exc_info.value).endswith(
-        "Ask a room admin to raise the power level of @mindroom_router:server in this room from 0 to 50, then retry.",
-    )
-
-
-@pytest.mark.asyncio
 async def test_a_status_write_describes_a_task_without_a_timezone_in_the_current_global_one() -> None:
     """A runner's status write keeps a legacy task's recurring description in the timezone the config has now."""
     client = make_matrix_client_mock(user_id="@mindroom_router:server")
@@ -2728,7 +2668,7 @@ async def test_schedule_task_with_a_failed_state_write_and_no_fallback_writer_fa
     message = str(exc_info.value)
     assert message.startswith("Failed to schedule: ")
     assert "Failed to persist scheduled task state" in message
-    assert message.endswith(f"Ensure {SCHEDULE_WRITER_ID} is joined with permission to write room state, then retry.")
+    assert message.endswith("I need moderator rights in this room to save schedules.")
     start_task.assert_not_called()
 
 
@@ -2755,7 +2695,7 @@ async def test_state_write_error_includes_hint_when_the_fallback_writer_raises()
 
     message = str(exc_info.value)
     assert "@mindroom_general:server write failed (RuntimeError: writer unavailable)" in message
-    assert message.endswith(f"Ensure {SCHEDULE_WRITER_ID} is joined with permission to write room state, then retry.")
+    assert message.endswith("I need moderator rights in this room to save schedules.")
 
 
 @pytest.mark.asyncio
