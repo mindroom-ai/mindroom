@@ -9496,6 +9496,7 @@ visibility = [
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.execution",
     "mindroom.delegation.execution",
+    "mindroom.skill_learning.reviewer",
 ]
 
 [[modules]]
@@ -9874,6 +9875,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.skill_learning.tools",
     "mindroom.skill_learning.transcript",
+    "mindroom.tool_jobs.background_after",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_schema",
