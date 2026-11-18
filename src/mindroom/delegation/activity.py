@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
     from mindroom.delegation.state import DelegationChild
     from mindroom.llm.events import ToolCompleted, ToolStarted
-    from mindroom.llm.usage import RunMetrics
 
 logger = get_logger(__name__)
 
@@ -85,8 +84,8 @@ class SubagentSnapshot:
     result_preview: str | None
     # The ``model`` object of ``model_name`` that clients show, with its display name; the sink resolves it.
     model: Mapping[str, str] | None = None
-    # What the run has used so far: the ``input_tokens`` and ``output_tokens`` of its requests that ended, zero until
-    # the first did, the ``tool_calls`` it started, rows the caps removed included, and those tokens' ``cost_usd``,
+    # What the run has used so far: the ``input_tokens``, cached ones included, and ``output_tokens`` of its requests
+    # that ended, zero until the first did, the ``tool_calls`` it started, rows the caps removed included, and those tokens' ``cost_usd``,
     # left out when no model they used is priced. A feed's snapshot always has it.
     usage: Mapping[str, int | float] | None = None
 
@@ -370,11 +369,14 @@ class ActivityFeed:
         self._activity.model_name = model_name
         self._mark()
 
-    def usage(self, usage: RunMetrics | None, cost_usd: float | None) -> None:
-        """Set what the run's requests have used so far and what that cost; it goes out with the next window's snapshot."""
+    def usage(self, tokens: tuple[int, int] | None, cost_usd: float | None) -> None:
+        """Set the input and output ``tokens`` the run's requests have used so far, unless None, and what they cost.
+
+        It goes out with the next window's snapshot.
+        """
         activity = self._activity
-        if usage is not None:
-            activity.input_tokens, activity.output_tokens = usage.tokens.input_tokens, usage.tokens.output_tokens
+        if tokens is not None:
+            activity.input_tokens, activity.output_tokens = tokens
         activity.cost_usd = cost_usd
         self._mark()
 

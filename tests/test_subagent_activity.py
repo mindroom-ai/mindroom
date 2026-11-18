@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.activity import _SubagentStatus
+    from mindroom.llm.usage import MessageMetrics
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -600,12 +601,12 @@ def _delegating_turn(
     child_turns: list[Sequence[ScriptStep]],
     *,
     grandchild_turns: list[Sequence[ScriptStep]] | None = None,
-    child_pricing: ModelPricing | None = None,
+    child_model: ModelConfig | None = None,
 ) -> tuple[ResponseTurnContext, ToolRuntimeContext, RuntimePaths, Config]:
     """Return a `leader` turn that delegates one task to `child`, whose model plays ``child_turns``.
 
-    With ``grandchild_turns``, `child` may delegate to `grandchild`, whose model plays them. With ``child_pricing``,
-    `child` answers as the configured default model, priced so.
+    With ``grandchild_turns``, `child` may delegate to `grandchild`, whose model plays them. With ``child_model``,
+    `child` answers as that model, configured as the default one.
     """
     agents = {
         "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
@@ -617,9 +618,9 @@ def _delegating_turn(
         agents["grandchild"] = AgentConfig(display_name="Grandchild", tools=["calculator"])
         models["grandchild"] = ScriptedModel(grandchild_turns)
     config = native_delegation_config(agents=agents)
-    if child_pricing is not None:
-        config.models["default"] = ModelConfig(provider="openai", id="gpt-6-astra", pricing=child_pricing)
-        models["child"].identity = model_identity(config.models["default"])
+    if child_model is not None:
+        config.models["default"] = child_model
+        models["child"].identity = model_identity(child_model)
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     identity = _identity()
@@ -913,8 +914,8 @@ async def test_subagent_usage_prices_the_run_model(
     """A run on a priced model reports what its requests cost at the deployment's prices, as its settlement does."""
     requests = [usage(100, 10), usage(50, 5)]
     child_turns = [calls(tool_call("add", "add", a=1, b=2), metrics=requests[0]), answer("Three", requests[1])]
-    pricing = ModelPricing(input=1, output=2)
-    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns, child_pricing=pricing)
+    priced = ModelConfig(provider="openai", id="gpt-6-astra", pricing=ModelPricing(input=1, output=2))
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns, child_model=priced)
     answered_by = model_identity(config.models["default"])
     spent = RunMetrics()
     for request in requests:
@@ -932,6 +933,42 @@ async def test_subagent_usage_prices_the_run_model(
     last = await seen.wait_for_status("completed")
     assert cost == pytest.approx(150 * 1e-6 + 15 * 2e-6)
     assert last.usage == {"input_tokens": 150, "output_tokens": 15, "tool_calls": 1, "cost_usd": cost}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "request_usage"),
+    [
+        # Anthropic's own API counts cache reads and writes outside the input.
+        (
+            ModelConfig(provider="anthropic", id="claude-opus-5-5"),
+            usage(100, 10, cache_read_tokens=900, cache_write_tokens=50),
+        ),
+        # OpenRouter counts them in it.
+        (ModelConfig(provider="openrouter", id="anthropic/claude-opus-5.5"), usage(1_050, 10, cache_read_tokens=900)),
+    ],
+    ids=["anthropic", "openrouter"],
+)
+async def test_subagent_usage_counts_cached_input_on_every_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+    model: ModelConfig,
+    request_usage: MessageMetrics,
+) -> None:
+    """The input tokens are the whole prompt, cached tokens included, however the provider reports its cache."""
+    turn, runtime, paths, config = _delegating_turn(
+        tmp_path,
+        monkeypatch,
+        [answer("Three", request_usage)],
+        child_model=model,
+    )
+
+    with tool_runtime_context(runtime):
+        await ai_response(turn, paths, config)
+
+    last = await seen.wait_for_status("completed")
+    assert last.usage == {"input_tokens": 1_050, "output_tokens": 10, "tool_calls": 0}
 
 
 @pytest.mark.asyncio

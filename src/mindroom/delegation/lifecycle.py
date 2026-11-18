@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.ai_run_metadata import model_payload, prior_usage_of, turn_usage
+from mindroom.ai_run_metadata import model_payload, prior_usage_of, prompt_input_tokens, turn_usage
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
@@ -66,7 +66,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.llm.usage import RunMetrics
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.models import ScriptResourceProfileName
@@ -242,8 +241,8 @@ async def settle_child_response(
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
-    usage, own_usd = _own_usage(response, config)
-    _publish(child.delegation_id, lambda feed: feed.usage(usage, own_usd))
+    tokens, own_usd = _own_usage(response, config)
+    _publish(child.delegation_id, lambda feed: feed.usage(tokens, own_usd))
     known = [usd for usd in (own_usd, child.subagents_cost_usd) if usd is not None]
     child.cost_usd = sum(known) if known else None
     content = response.handover_content
@@ -308,15 +307,19 @@ async def finish_child_turn(
     return await finish_child_record(child, config=config, runtime_paths=runtime_paths)
 
 
-def _own_usage(record: RunRecord, config: Config) -> tuple[RunMetrics | None, float | None]:
-    """Return what the turn of ``record``'s run has used, its earlier runs included, and what that costs.
+def _own_usage(record: RunRecord, config: Config) -> tuple[tuple[int, int] | None, float | None]:
+    """Return the input and output tokens the turn of ``record``'s run has used, its earlier runs included, and their cost.
 
-    The cost is at ``config``'s prices, None when none of the usage is of a priced model, and leaves out what the
-    turn's subagents cost.
+    The input tokens are whole prompts, cached tokens included, so runs on providers that count their cache
+    differently compare; the tokens are None for a record without usage. The cost is at ``config``'s prices, None
+    when none of the usage is of a priced model, and leaves out what the turn's subagents cost.
     """
     usage = turn_usage(prior_usage_of(record), record.metrics)
-    cost = run_cost_usd(usage, model_provider=record.model_provider, model_id=record.model, prices=model_prices(config))
-    return usage, cost
+    provider, model_id = record.model_provider, record.model
+    cost = run_cost_usd(usage, model_provider=provider, model_id=model_id, prices=model_prices(config))
+    if usage is None:
+        return None, cost
+    return (prompt_input_tokens(usage, provider=provider, model_id=model_id), usage.tokens.output_tokens), cost
 
 
 def child_usage_hook(config: Config) -> BeforeRequestHook:
