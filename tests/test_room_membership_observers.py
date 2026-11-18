@@ -570,15 +570,15 @@ async def test_power_change_keeps_ready_observer(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["first_sync_complete", "accepting_work", "running"])
+@pytest.mark.parametrize("missing", ["observes_room_members", "accepting_work", "running"])
 async def test_bot_before_first_sync_is_not_picked(tmp_path: Path, missing: str) -> None:
-    """A bot whose own sync is not live, before its first sync or while it stops, observes no room despite its power."""
+    """A bot whose own sync is not live, before its loop caught up or while it stops, observes no room despite its power."""
     config, runtime_paths = _config(tmp_path)
     room = nio.MatrixRoom(_ROOM, _B)
     room.power_levels.users[_B] = 100
     a = _Account(_A, {_ROOM: (_A, _B, _ALICE)})
     b = _Account(_B, {_ROOM: (_A, _B, _ALICE)}, rooms={_ROOM: room})
-    live = {"running": True, "first_sync_complete": True, "accepting_work": True}
+    live = {"running": True, "observes_room_members": True, "accepting_work": True}
     bots = {
         "a": SimpleNamespace(client=a, **live),
         "b": SimpleNamespace(client=b, **(live | {missing: False})),

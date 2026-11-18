@@ -2460,7 +2460,7 @@ async def test_router_invite_welcome_reads_the_joined_rooms_members(
     bot.client.joined_rooms = AsyncMock(side_effect=list_joined_rooms)
     # Only a running bot whose own sync is live observes room members.
     bot.running = True
-    bot._first_sync_done = True
+    bot.observes_room_members = True
     bot.client.joined_members = AsyncMock(return_value=joined_members_response(room_id, *members))
     bot.client.room_messages = AsyncMock(side_effect=check_history)
     send_response = AsyncMock(return_value="$welcome")

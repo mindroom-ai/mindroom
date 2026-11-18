@@ -42,7 +42,9 @@ from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_inv
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.matrix_rtc.call_manager import CallManager
+from mindroom.orchestration.runtime import sync_forever_with_restart
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.room_steward import membership_observers
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.tool_system.plugins import config_plugins
 from tests.access_schema_support import refresh_memberships
@@ -350,6 +352,93 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
     assert [request.args for request in call_manager.reconcile_joined_rooms.await_args_list] == [(), ()]
 
 
+@pytest.mark.asyncio
+async def test_bot_observes_room_members_only_while_its_receive_loop_has_caught_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh picks a bot only between a receive loop's first settled frame and that loop's end.
+
+    A failed loop's bot is still running and synced once, yet during the retry sleep and until the next loop
+    catches up nothing applies its room's membership changes.
+    """
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.running = True
+    bot.prepare_for_sync_shutdown = AsyncMock()  # type: ignore[method-assign]
+    observers: dict[str, list[str]] = {}
+    original_sleep = asyncio.sleep
+
+    def observe(moment: str) -> None:
+        observers[moment] = [client.user_id for client in membership_observers({bot.agent_name: bot})[0]]
+
+    async def receive() -> None:
+        loop = 1 if "loop 1 start" not in observers else 2
+        observe(f"loop {loop} start")
+        with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+            await _complete_frame(bot)
+        observe(f"loop {loop} settled")
+        if loop == 1:
+            message = "transport disconnected"
+            raise OSError(message)
+        bot.running = False
+
+    async def retry_sleep(delay: float) -> None:
+        if delay == 17:
+            observe("retry sleep")
+        else:
+            await original_sleep(delay)
+
+    monkeypatch.setattr(bot, "sync_forever", receive)
+    monkeypatch.setattr("mindroom.orchestration.runtime.retry_delay_seconds", lambda *_args, **_kwargs: 17)
+    monkeypatch.setattr("mindroom.orchestration.runtime.asyncio.sleep", retry_sleep)
+
+    await asyncio.wait_for(sync_forever_with_restart(bot, max_retries=2), 5)
+
+    own_id = [bot.matrix_id.full_id]
+    assert observers == {
+        "loop 1 start": [],
+        "loop 1 settled": own_id,
+        "retry sleep": [],
+        "loop 2 start": [],
+        "loop 2 settled": own_id,
+    }
+    assert [invalidation.kwargs["reason"] for invalidation in _invalidations(orchestrator).call_args_list] == [
+        "sync_loop_started",
+        "sync_caught_up",
+        "sync_failure",
+        "sync_loop_started",
+        "sync_caught_up",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_quiesced_ingestion_ends_the_bots_observation_before_its_drain(tmp_path: Path) -> None:
+    """A bot being stopped or replaced stops observing, and its rooms fail closed, before its ingestion drains."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.running = True
+    bot.mark_sync_loop_started()
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await _complete_frame(bot)
+    assert membership_observers({bot.agent_name: bot})[0] == [bot.client]
+    _invalidations(orchestrator).reset_mock()
+    draining = asyncio.Event()
+    drained: list[tuple[bool, int]] = []
+
+    async def drain() -> None:
+        drained.append((bot.observes_room_members, _invalidations(orchestrator).call_count))
+        draining.set()
+
+    bot._ingestion_session = MagicMock(quiesce=drain)
+
+    await bot.quiesce_matrix_ingestion()
+
+    assert drained == [(False, 1)]
+    _invalidations(orchestrator).assert_called_once_with(bot.config, bot.matrix_id.full_id, reason="observer_stopping")
+    assert membership_observers({bot.agent_name: bot})[0] == []
+
+
 def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> None:
     """A reconnect generation must fail closed before its first response arrives."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
@@ -401,7 +490,7 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
     # The generation's first frame also makes this account an observer, which asks for a refresh of its own.
     assert _invalidations(orchestrator).call_args_list == [
         call(bot.config, bot.matrix_id.full_id, reason=reason)
-        for reason in ("uncertain_sync_response", "first_sync_complete")
+        for reason in ("uncertain_sync_response", "sync_caught_up")
     ]
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 

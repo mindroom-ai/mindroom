@@ -438,11 +438,13 @@ async def test_ingestion_quiesce_marks_supervisor_stop_intent() -> None:
     bot = object.__new__(AgentBot)
     bot._runtime_view = BotRuntimeState(orchestrator=MagicMock())
     bot._ingestion_session = AsyncMock()
+    bot.invalidate_agent_reply_memberships = MagicMock()  # type: ignore[method-assign]
 
     await AgentBot.quiesce_matrix_ingestion(bot)
 
     assert bot.ingestion_quiesced is True
     bot._ingestion_session.quiesce.assert_awaited_once()
+    bot.invalidate_agent_reply_memberships.assert_called_once_with(reason="observer_stopping")
 
 
 @pytest.mark.asyncio

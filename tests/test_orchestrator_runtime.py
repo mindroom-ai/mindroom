@@ -5823,15 +5823,19 @@ async def test_grant_refresh_reads_through_the_synced_bots_only(tmp_path: Path) 
     """A refresh is given the clients of the bots whose own sync is live; without one it still runs and grants nothing."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
     live = {"running": True, "accepting_work": True, "revoke_reply_authorized_calls": AsyncMock()}
-    synced = MagicMock(first_sync_complete=True, **live)
-    starting = MagicMock(first_sync_complete=False, **live)
+    synced = MagicMock(observes_room_members=True, **live)
+    starting = MagicMock(observes_room_members=False, **live)
+    clients: list[list[MagicMock]] = []
 
-    with patch.object(orchestrator.agent_reply_memberships, "refresh") as refresh:
+    async def refresh(_config: Config, _runtime_paths: RuntimePaths, observers: Callable[[], tuple]) -> None:
+        clients.append(observers()[0])
+
+    with patch.object(orchestrator.agent_reply_memberships, "refresh", side_effect=refresh):
         await orchestrator.refresh_agent_reply_memberships()
         install_bots(orchestrator, {"synced": synced, "starting": starting})
         await orchestrator.refresh_agent_reply_memberships()
 
-    assert [request.args[2] for request in refresh.await_args_list] == [[], [synced.client]]
+    assert clients == [[], [synced.client]]
 
 
 @pytest.mark.asyncio

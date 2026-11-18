@@ -49,13 +49,14 @@ def membership_observers(
 ) -> tuple[list[nio.AsyncClient], Callable[[str, Sequence[str]], str | None]]:
     """Return the clients that may observe room members for reply access, and the steward rule among their accounts.
 
-    A bot observes only while its own sync is live: after its first sync completed and until it stops accepting work.
+    A bot observes only while its own sync is live: from the first settled frame of a receive loop until that loop
+    fails or the bot stops accepting work.
     The rule ranks the accounts it is given for one room by the power each one's own cache of that room gives it.
     """
     clients = {
         bot.client.user_id: bot.client
         for bot in bots.values()
-        if bot.client is not None and bot.running and bot.first_sync_complete and bot.accepting_work
+        if bot.client is not None and bot.running and bot.observes_room_members and bot.accepting_work
     }
 
     def pick_observer(room_id: str, user_ids: Sequence[str]) -> str | None:

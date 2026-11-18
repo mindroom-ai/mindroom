@@ -338,6 +338,8 @@ class _SyncIteration:
                     stale_for_seconds=sync_age_seconds,
                 )
 
+            # The stalled loop's account stops observing room members before its cancellation is awaited.
+            bot.invalidate_agent_reply_memberships(reason="watchdog_stall")
             watchdog_cancelled_sync.set()
             request_task_cancel(sync_task, cancel_source="sync_restart")
             with suppress(asyncio.CancelledError):
@@ -453,6 +455,9 @@ async def _run_sync_iteration(bot: AgentBot, *, attempt: int) -> _SyncIterationO
         logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=attempt)
         outcome = _SyncIterationOutcome(restart_reason_category="sync_failure")
     finally:
+        if outcome.restart_reason_category is not None and not outcome.stalled_restart:
+            # The receive loop failed, so its account stops observing room members before anything is awaited.
+            bot.invalidate_agent_reply_memberships(reason=outcome.restart_reason_category)
         if iteration is not None:
             await iteration.cancel(shutdown_intent=outcome.shutdown_intent)
             if not bot.running:
@@ -649,7 +654,6 @@ async def sync_forever_with_restart(bot: AgentBot, max_retries: int = -1) -> Non
         outcome = await _run_sync_iteration(bot, attempt=retry_count + 1)
         if outcome.restart_reason_category is None or not _matrix_sync_receive_loop_active(bot):
             break
-        bot.invalidate_agent_reply_memberships(reason=outcome.restart_reason_category)
         retry_count += 1
         will_retry = max_retries < 0 or retry_count < max_retries
         resulting_action: RuntimeLifecycleAction = "restart_receive_loop" if will_retry else "preserve_response_runtime"
