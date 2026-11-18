@@ -108,6 +108,18 @@ async def _responder_ready(deps: _RouterRelaySupport, entity_name: str, turn: Tu
     return readiness is True
 
 
+async def _still_steward(deps: _RouterRelaySupport, room_id: str, turn: TurnRecord) -> bool:
+    """Return whether this bot is still the room's steward, which it was when it planned to route.
+
+    One that lost the room while it selected drops the turn: the new steward routes its own copy.
+    """
+    if deps.turn_policy.is_room_steward(room_id):
+        return True
+    deps.logger.info("No longer the room's steward; dropping the turn it was routing")
+    await deps.visible_responses.settle_source_events_ignored(turn)
+    return False
+
+
 def _router_handoff_extra_content(
     deps: _RouterRelaySupport,
     *,
@@ -223,7 +235,7 @@ async def execute_router_relay(  # noqa: PLR0911
         await deps.visible_responses.settle_source_events_ignored(source_turn)
         return False
     if suggested_entity == deps.agent_name:
-        return True
+        return await _still_steward(deps, room.room_id, source_turn)
     if not await _responder_ready(deps, suggested_entity, source_turn):
         return False
 
@@ -272,8 +284,12 @@ async def execute_router_relay(  # noqa: PLR0911
             canonicalize_turn_record(tracked_handled_turn, response_event_id=recovered_response_event_id),
         )
         return False
-    # The responder may have stopped or restarted while the relay was prepared.
-    if not await _responder_ready(deps, suggested_entity, tracked_handled_turn):
+    # The responder may have stopped or restarted, and this bot may have lost the room, while the route was prepared.
+    if not await _responder_ready(deps, suggested_entity, tracked_handled_turn) or not await _still_steward(
+        deps,
+        room.room_id,
+        tracked_handled_turn,
+    ):
         return False
     route = {
         "entity": entity_identity_registry(deps.runtime.config, deps.runtime_paths)

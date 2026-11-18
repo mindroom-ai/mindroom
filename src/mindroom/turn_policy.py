@@ -543,7 +543,7 @@ class TurnPolicy:
             available_responders=await self.responder_candidates_for_room(room, requester_user_id),
         )
 
-    def _is_room_steward(self, room_id: str) -> bool:
+    def is_room_steward(self, room_id: str) -> bool:
         """Return whether this bot is the room's steward, the one bot that routes there."""
         steward = self.deps.runtime.orchestrator.room_steward(room_id)
         return steward is not None and steward.agent_name == self.deps.agent_name
@@ -584,7 +584,7 @@ class TurnPolicy:
         )
         context = dispatch.context
         requester_user_id = dispatch.requester_user_id
-        if not self._is_room_steward(room.room_id) or context.mentioned_agents or context.has_non_agent_mentions:
+        if not self.is_room_steward(room.room_id) or context.mentioned_agents or context.has_non_agent_mentions:
             return ignore
         if context.planning_thread_history_unavailable:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")

@@ -264,6 +264,14 @@ def _selective_router_recovery_runtime(
     return router_bot, healthy_bot, stuck_bot, room
 
 
+def _make_steward(bot: AgentBot, room_id: str, *, power: int) -> None:
+    """Give one bot the power, in its own cache of the room, that makes it the room's steward."""
+    assert bot.client is not None
+    own_room = nio.MatrixRoom(room_id, bot.client.user_id)
+    own_room.power_levels.users[bot.client.user_id] = power
+    bot.client.rooms[room_id] = own_room
+
+
 def _router_readiness_event(event_id: str) -> nio.RoomMessageText:
     return nio.RoomMessageText.from_dict(
         {
@@ -704,6 +712,7 @@ class TestRoutingRegression:
     ) -> None:
         """A candidate that routes as the room's steward and is selected answers itself: no relay, nothing settled."""
         _router_bot, healthy_bot, _stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+        _make_steward(healthy_bot, room.room_id, power=101)
         mock_suggest_responder.return_value = ResponderSelection("healthy")
 
         answers_itself = await _router_relay(healthy_bot, room, "$routes-to-itself")
@@ -711,6 +720,53 @@ class TestRoutingRegression:
         assert answers_itself is True
         healthy_bot.client.room_send.assert_not_awaited()
         assert not await healthy_bot._turn_store.is_handled(room.room_id, "$routes-to-itself")
+
+    @pytest.mark.asyncio
+    @patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock)
+    async def test_a_bot_that_lost_the_room_while_it_selected_sends_no_route(
+        self,
+        mock_suggest_responder: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A bot that is no longer the room's steward once it has selected drops the turn and sends nothing."""
+        router_bot, healthy_bot, _stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+
+        async def select_while_power_changes(*_args: object, **_kwargs: object) -> ResponderSelection:
+            _make_steward(healthy_bot, room.room_id, power=101)
+            return ResponderSelection("healthy")
+
+        mock_suggest_responder.side_effect = select_while_power_changes
+
+        visible_responses = router_bot._turn_dispatcher.deps.visible_responses
+        with patch.object(visible_responses, "settle_source_events_ignored", AsyncMock()) as settle:
+            assert await _router_relay(router_bot, room, "$lost-the-room") is False
+
+        router_bot.client.room_send.assert_not_awaited()
+        assert settle.await_args.args[0].source_event_ids == ("$lost-the-room",)
+
+    @pytest.mark.asyncio
+    @patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock)
+    async def test_a_bot_that_lost_the_room_while_it_selected_itself_does_not_answer(
+        self,
+        mock_suggest_responder: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A steward that selects itself answers only while it still is the steward: the new one routes its own copy."""
+        _router_bot, healthy_bot, stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+        _make_steward(healthy_bot, room.room_id, power=101)
+
+        async def select_while_power_changes(*_args: object, **_kwargs: object) -> ResponderSelection:
+            _make_steward(stuck_bot, room.room_id, power=102)
+            return ResponderSelection("healthy")
+
+        mock_suggest_responder.side_effect = select_while_power_changes
+
+        visible_responses = healthy_bot._turn_dispatcher.deps.visible_responses
+        with patch.object(visible_responses, "settle_source_events_ignored", AsyncMock()) as settle:
+            assert await _router_relay(healthy_bot, room, "$lost-before-answering") is False
+
+        healthy_bot.client.room_send.assert_not_awaited()
+        assert settle.await_args.args[0].source_event_ids == ("$lost-before-answering",)
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(

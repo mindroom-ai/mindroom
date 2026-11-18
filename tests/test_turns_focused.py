@@ -422,6 +422,9 @@ class _SpyTurnPolicy:
     async def router_thread_skips(self, room: nio.MatrixRoom, requester_user_id: str, thread_history: Any) -> bool:  # noqa: ANN401
         return await self.inner.router_thread_skips(room, requester_user_id, thread_history)
 
+    def is_room_steward(self, room_id: str) -> bool:
+        return self.inner.is_room_steward(room_id)
+
     def not_for_this_agent(self, *args: Any) -> bool:  # noqa: ANN401
         return self.inner.not_for_this_agent(*args)
 
