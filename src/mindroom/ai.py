@@ -65,6 +65,7 @@ from mindroom.memory import (
     MemoryPromptParts,
     build_memory_prompt_parts,
     conversation_entrypoint_preamble,
+    entrypoint_snapshot_path,
     strip_user_turn_time_prefix,
 )
 from mindroom.metadata_merge import deep_merge_metadata
@@ -119,6 +120,7 @@ from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+    from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
@@ -206,6 +208,7 @@ class _PreparedAgentRun:
     are the stored history the request replays under the resolved plan, and ``turn`` is the new input around the
     prompt.
     ``cli_context`` holds the context documents a minimal turn's Bash reads through `mindroom-agent`.
+    ``memory_copy`` is the file of the MEMORY.md copy the system messages hold, None when they hold none.
     """
 
     build: AgentBuild
@@ -220,6 +223,7 @@ class _PreparedAgentRun:
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
     cli_context: Mapping[str, str]
+    memory_copy: Path | None
 
     @property
     def prompt_text(self) -> str:
@@ -508,6 +512,7 @@ def _agent_loop_hooks(
             turn_recorder=run_context.turn_recorder,
             # A voice call's turn, and a contact's, finishes its calls inside the turn and is never replayed.
             checkpoints=not ctx.inline_tools,
+            memory_copy=prepared.memory_copy,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
@@ -674,6 +679,7 @@ def _memory_conversation(
     system prompt every turn and can drop the agent's own memory writes, so none of them has a cache to keep.
     Without automatic compaction, fitting a long conversation into the context window is such a limit. Nor has a turn
     that stores no run (``usage_kind``), as its later turns replay none of its memory writes.
+    The copy lies beside the conversation's database, so in a private agent's own state root.
     """
     if (
         ctx.persona is not None
@@ -689,7 +695,10 @@ def _memory_conversation(
         return None
     session = scope_context.session
     compaction = compaction_marker(session) if session is not None else (None, None)
-    return ConversationRef(scope_context.session_id, compaction)
+    return ConversationRef(
+        compaction,
+        entrypoint_snapshot_path(scope_context.storage.path, scope_context.session_id),
+    )
 
 
 async def _prepare_turn_memory(
@@ -966,6 +975,7 @@ async def _prepare_agent_and_prompt(
         prepared_history=prepared_execution.prepared_history,
         runtime_model_name=runtime_model.model_name,
         cli_context=cli_context,
+        memory_copy=memory_conversation.snapshot if memory_conversation is not None else None,
     )
 
 
