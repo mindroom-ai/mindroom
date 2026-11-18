@@ -13,7 +13,8 @@ def carries_agent_authored_marker(content: Mapping[str, object]) -> bool:
     Only the key's presence counts: the marker can only take authority away, so no value of it needs trusting.
 
     ``m.new_content`` is the layer conversation history keeps of an edit, so a sender must put the key on both layers
-    of an edit: a marker only on the wrapper is seen at admission and nowhere after.
+    of an edit: a marker only on the wrapper is seen at admission and nowhere after, and an edit too long for one event
+    gets a new wrapper that mirrors ``m.new_content`` alone.
     """
     if AGENT_AUTHORED_KEY in content:
         return True

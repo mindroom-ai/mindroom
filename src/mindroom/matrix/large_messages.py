@@ -14,7 +14,6 @@ import nio
 
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
-    AGENT_AUTHORED_KEY,
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     CALL_TRANSCRIPT_CONTENT_KEY,
@@ -53,7 +52,6 @@ _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
         "m.mentions",
-        AGENT_AUTHORED_KEY,
         ACTING_REQUESTER_KEY,
         HOOK_SOURCE_KEY,
         SKIP_MENTIONS_KEY,
@@ -109,9 +107,7 @@ def _is_passthrough_preview_key(key: object) -> bool:
 
 def _is_passthrough_edit_wrapper_key(key: object) -> bool:
     """Return whether one source key should be mirrored onto the edit wrapper."""
-    return isinstance(key, str) and (
-        key == AGENT_AUTHORED_KEY or (key.startswith("io.mindroom.") and key not in _SIDECAR_ONLY_MINDROOM_KEYS)
-    )
+    return isinstance(key, str) and key.startswith("io.mindroom.") and key not in _SIDECAR_ONLY_MINDROOM_KEYS
 
 
 def _copy_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
