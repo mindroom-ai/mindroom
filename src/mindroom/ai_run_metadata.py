@@ -16,6 +16,7 @@ from mindroom.model_usage import (
     message_context_tokens,
     uncached_input_tokens_from_counts,
 )
+from mindroom.providers.identity import model_identity
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -231,12 +232,18 @@ def _uncached_input_tokens(
     )
 
 
-def prompt_input_tokens(metrics: RunMetrics, *, provider: str | None, model_id: str | None) -> int:
+def prompt_input_tokens(metrics: RunMetrics, *, provider: str | None, model_id: str | None, config: Config) -> int:
     """Return the input tokens of a run's usage as whole prompts, cache reads and writes included.
 
     Providers count cached tokens inside or outside their input, so each model of the breakdown is counted by its
-    own provider's rule; usage without a breakdown is counted as ``provider``'s and ``model_id``'s.
+    own provider's rule; usage without a breakdown is counted as ``provider``'s and ``model_id``'s. Usage names a
+    model by the identity its config gives it, which Claude and Gemini on Vertex AI share a provider in, so the
+    provider ``config`` configures for that identity decides, and the identity alone for a model ``config`` lacks.
     """
+    configured = {}
+    for model_config in config.models.values():
+        identity = model_identity(model_config)
+        configured[identity.provider, identity.id] = model_config.provider
     entries = [entry for entries in (metrics.details or {}).values() for entry in entries]
     counted = [(entry.tokens, entry.provider, entry.id) for entry in entries] or [(metrics.tokens, provider, model_id)]
     return sum(
@@ -245,7 +252,7 @@ def prompt_input_tokens(metrics: RunMetrics, *, provider: str | None, model_id: 
             cache_read_tokens=tokens.cache_read_tokens,
             cache_write_tokens=tokens.cache_write_tokens,
             provider=entry_provider,
-            configured_provider=None,
+            configured_provider=configured.get((entry_provider, entry_model_id)),
             model_id=entry_model_id,
         )
         or 0

@@ -861,6 +861,7 @@ depends_on = [
     "mindroom.model_usage",
     "mindroom.llm",
     "mindroom.delegation.cost",
+    "mindroom.providers.identity",
 ]
 
 [[modules]]

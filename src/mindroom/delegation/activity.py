@@ -168,6 +168,8 @@ class _SubagentActivity:
     output_tokens: int = 0
     cost_usd: float | None = None
     _items: list[_SubagentItem] = field(default_factory=list)
+    # The IDs of the calls that started and have not completed, whether or not the cap kept their rows.
+    _running_calls: set[str] = field(default_factory=set)
     # How many characters of the redacted text the cap hides, kept from one cut to the next; None after the raw text
     # was cut, so the next snapshot cuts afresh.
     _hidden: int | None = 0
@@ -216,17 +218,19 @@ class _SubagentActivity:
     def tool_started(self, event: ToolStarted, *, now: float) -> None:
         """Add a running tool row started at ``now``; a call announced again as it resumes keeps its row and start.
 
-        Every other start counts as a call the run made, one under an ID a finished call had too.
+        Every other start counts as a call the run made, one under an ID a completed call had too.
         """
         _, entry = format_tool_started_event(event.call)
         call_id = event.call.tool_call_id
-        if not any(item.tool_call_id == call_id and item.state == "running" for item in self._items):
+        if call_id not in self._running_calls:
+            self._running_calls.add(call_id)
             self.tool_calls += 1
         self._set_tool(call_id, _public_entry(entry), "running", started_at=now)
 
     def tool_completed(self, event: ToolCompleted) -> None:
         """Finish the row with the same call id, or append a finished row when none matches."""
         entry = _public_entry(format_tool_completed_event(event.call))
+        self._running_calls.discard(event.call.tool_call_id)
         self._set_tool(event.call.tool_call_id, entry, "error" if event.call.is_error else "done", started_at=None)
 
     def _set_tool(

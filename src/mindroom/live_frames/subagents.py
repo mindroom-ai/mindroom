@@ -213,22 +213,34 @@ class _Stream:
         return frame
 
     def _fitted_snapshot(self, snapshot: SubagentSnapshot, fits: Callable[[_Frame], bool]) -> tuple[_Frame, LiveDocs]:
-        """Return a snapshot frame within the size limit: without previews if need be, then without the oldest text."""
+        """Return a snapshot frame within the size limit: without previews if need be, then without the oldest text.
+
+        The run's usage never costs the previews: a frame that would fit with them if it left the usage out keeps
+        both, without that much of the oldest text when the text is long enough.
+        """
+        text_length = sum(len(item.text) for item in snapshot.items if item.kind == "text")
 
         def built(previews: bool, text_cut: int) -> tuple[_Frame, LiveDocs]:
             self.fit = (previews, text_cut)
             docs = _run_docs(snapshot, previews=previews, text_cut=text_cut)
             return self._frame(snapshot, docs=docs), docs
 
+        def cut(previews: bool) -> tuple[_Frame, LiveDocs]:
+            """Return the frame with the least cut of the oldest text that fits, else with a cut that does not."""
+
+            def fits_cut(text_cut: int) -> bool:
+                return fits(built(previews, text_cut)[0])
+
+            return built(previews, bisect_left(range(text_length + 1), True, lo=1, key=fits_cut))
+
         frame, docs = built(self.previews, 0)
         if self.previews and not fits(frame):
-            frame, docs = built(False, 0)
-        if fits(frame):
-            return frame, docs
-        # The least cut of the oldest text that fits; the frame without any text always fits, as the caps bound the rest.
-        text_length = sum(len(item.text) for item in snapshot.items if item.kind == "text")
-        text_cut = bisect_left(range(text_length + 1), True, lo=1, key=lambda cut: fits(built(False, cut)[0]))
-        return built(False, text_cut)
+            if fits({**frame, "meta": _run_meta(snapshot, full=True)}):
+                frame, docs = cut(True)
+            if not fits(frame):
+                frame, docs = built(False, 0)
+        # The frame without any text always fits, as the caps bound the rest.
+        return (frame, docs) if fits(frame) else cut(False)
 
 
 class _Publisher:

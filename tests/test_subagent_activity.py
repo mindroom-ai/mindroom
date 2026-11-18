@@ -21,6 +21,7 @@ from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.models import ModelConfig, ModelPricing
+from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import activity as activity_module
 from mindroom.delegation import lifecycle
@@ -351,6 +352,20 @@ def test_a_call_announced_again_is_counted_once_and_a_reused_call_id_again() -> 
     a.tool_completed(ToolCompleted(call=_call("c1", result="ok")))
     a.tool_started(ToolStarted(call=_call("c1")), now=3.0)
     assert a.snapshot().usage == {"input_tokens": 0, "output_tokens": 0, "tool_calls": 2}
+
+
+def test_a_call_resumed_after_the_cap_removed_its_row_is_counted_once() -> None:
+    """A call waiting for approval whose row later calls pushed out is still the same call when it resumes."""
+    a = _activity()
+    a.tool_started(ToolStarted(call=_call("gated")), now=1.0)
+    for n in range(20):
+        a.tool_started(ToolStarted(call=_call(f"c{n}")), now=1.0)
+        a.tool_completed(ToolCompleted(call=_call(f"c{n}", result="ok")))
+    assert all(item.tool_call_id != "gated" for item in a.snapshot().items)
+    a.tool_started(ToolStarted(call=_call("gated")), now=2.0)
+    usage = a.snapshot().usage
+    assert usage is not None
+    assert usage["tool_calls"] == 21
 
 
 def test_task_and_result_are_cut_to_1000_characters() -> None:
@@ -944,10 +959,15 @@ async def test_subagent_usage_prices_the_run_model(
             ModelConfig(provider="anthropic", id="claude-opus-5-5"),
             usage(100, 10, cache_read_tokens=900, cache_write_tokens=50),
         ),
+        # So does Claude on Vertex AI, whose usage names the provider Gemini shares and here an ID without "claude".
+        (
+            ModelConfig(provider="vertexai_claude", id="custom-sonnet"),
+            usage(100, 10, cache_read_tokens=900, cache_write_tokens=50),
+        ),
         # OpenRouter counts them in it.
         (ModelConfig(provider="openrouter", id="anthropic/claude-opus-5.5"), usage(1_050, 10, cache_read_tokens=900)),
     ],
-    ids=["anthropic", "openrouter"],
+    ids=["anthropic", "vertex_claude_custom_id", "openrouter"],
 )
 async def test_subagent_usage_counts_cached_input_on_every_provider(
     tmp_path: Path,
@@ -969,6 +989,41 @@ async def test_subagent_usage_counts_cached_input_on_every_provider(
 
     last = await seen.wait_for_status("completed")
     assert last.usage == {"input_tokens": 1_050, "output_tokens": 10, "tool_calls": 0}
+
+
+@pytest.mark.asyncio
+async def test_a_child_stopped_during_a_tool_call_ends_with_the_usage_of_its_ended_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """A run cancelled while a tool runs reaches no further request, and its end still names what it used and cost."""
+    running = asyncio.Event()
+
+    async def add(_self: object, a: float, b: float) -> str:  # noqa: ARG001
+        """Never return."""
+        running.set()
+        await asyncio.Event().wait()
+        return ""
+
+    monkeypatch.setattr(CalculatorTools, "add", add)
+    request = usage(100, 10)
+    priced = ModelConfig(provider="openai", id="gpt-6-astra", pricing=ModelPricing(input=1, output=2))
+    child_turns = [calls(tool_call("add", "add", a=1, b=2), metrics=request)]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns, child_model=priced)
+
+    with tool_runtime_context(runtime):
+        reply = asyncio.create_task(ai_response(turn, paths, config))
+        async with asyncio.timeout(5):
+            await running.wait()
+        reply.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reply
+
+    last = await seen.wait_for_status("cancelled")
+    assert last is seen.snapshots[-1]
+    cost = pytest.approx(100 * 1e-6 + 10 * 2e-6)
+    assert last.usage == {"input_tokens": 100, "output_tokens": 10, "tool_calls": 1, "cost_usd": cost}
 
 
 @pytest.mark.asyncio

@@ -349,6 +349,36 @@ async def test_usage_rides_on_the_transcript_s_frames_and_alone_sends_none() -> 
 
 
 @pytest.mark.asyncio
+async def test_usage_costs_a_snapshot_at_the_cap_a_little_text_not_its_previews() -> None:
+    """A snapshot that just fits with its previews keeps them when it also names the run's usage.
+
+    The usage takes the place of that much of the oldest text.
+    """
+    room = FrameRoom()
+    entry = ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command", args_preview="command=git tag")
+    used = {"input_tokens": 1_900_000, "output_tokens": 80_000, "tool_calls": 31, "cost_usd": 12.345678}
+
+    def run(run_id: str, text_length: int, **fields: Any) -> SubagentSnapshot:  # noqa: ANN401
+        items = (_text("a" * text_length), _tool(entry, "running"))
+        return make_snapshot(delegation_id=run_id, subagent_id=run_id, items=items, **fields)
+
+    room.publish(run("d1", 1_000))
+    await _until(lambda: len(room.sent) == 1)
+    at_the_cap = 1_000 + _MAX_FRAME_BYTES - room.sent_bytes[0]
+    room.publish(run("d2", at_the_cap))
+    room.publish(run("d3", at_the_cap, usage=used))
+    await _until(lambda: len(room.sent) == 3)
+
+    plain, with_usage = sorted(room.sent[1:], key=lambda frame: frame["run"])
+    assert room.sent_bytes[1:] == [_MAX_FRAME_BYTES, _MAX_FRAME_BYTES]
+    assert _frame_tools(plain)[0]["args_preview"] == "command=git tag"
+    assert _frame_tools(with_usage)[0]["args_preview"] == "command=git tag"
+    assert with_usage["meta"]["usage"] == used
+    cut = len(plain["snapshot"]["md"]) - len(with_usage["snapshot"]["md"])
+    assert cut == len(json.dumps({"usage": used}, separators=(",", ":"))) - 1
+
+
+@pytest.mark.asyncio
 async def test_a_snapshot_without_usage_sends_frames_without_it() -> None:
     """A run whose usage is unknown says nothing about it, which a client shows as no stats."""
     room = FrameRoom()

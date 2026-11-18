@@ -91,6 +91,9 @@ class ChildRunObservation:
     audit: ChildAudit
     parent: ChildRunObservation | None = None
     response: RunRecord | None = None
+    # The live record of the child's run that last reached a request, in which the loop counts each request that ends,
+    # a cut-off one too; what an attempt that hands over no terminal record, such as a cancelled one, used is read here.
+    running: AnyRunRecord | None = None
     # The tail of what the child said and which tools it called, reported as its caller's progress.
     activity: str = ""
     # The ID the child's turn carries in its hooks and tool calls, also across a continuation that starts a new run.
@@ -101,8 +104,8 @@ class ChildRunObservation:
     # What the subagent turns whose results the child's run received cost, which its settlement adds to its own.
     subagent_cost: SubagentCost = field(default_factory=SubagentCost)
 
-    def owns(self, record: AnyRunRecord) -> TypeGuard[RunRecord]:
-        """Return whether a terminal record is of the child's current run and session, the run this context streams."""
+    def owns(self, record: AnyRunRecord | None) -> TypeGuard[RunRecord]:
+        """Return whether a record is of the child's current run and session, the run this context streams."""
         child = self.child
         return isinstance(record, RunRecord) and record.run_id == child.run_id and record.session_id == child.session_id
 
@@ -319,25 +322,34 @@ def _own_usage(record: RunRecord, config: Config) -> tuple[tuple[int, int] | Non
     cost = run_cost_usd(usage, model_provider=provider, model_id=model_id, prices=model_prices(config))
     if usage is None:
         return None, cost
-    return (prompt_input_tokens(usage, provider=provider, model_id=model_id), usage.tokens.output_tokens), cost
+    input_tokens = prompt_input_tokens(usage, provider=provider, model_id=model_id, config=config)
+    return (input_tokens, usage.tokens.output_tokens), cost
 
 
 def child_usage_hook(config: Config) -> BeforeRequestHook:
     """Return the loop hook that publishes what a child's turn has used so far before each request of its run.
 
     The loop has counted every request that ended by then in the run's record, so a request's usage shows once the
-    tool calls it made have ended; the last request's shows when the run settles (``settle_child_response``). The
-    hook does nothing outside a child's run, or for a run the child does not own, and a failure to publish is logged
-    and never reaches the run.
+    tool calls it made have ended; the last request's shows when the attempt ends, however it ends
+    (``child_run_context``). The hook does nothing outside a child's run, and a failure to publish is logged and never
+    reaches the run.
     """
 
     async def publish_usage(state: LoopState) -> SendRequest:
-        observation, record = _CHILD_RUN.get(), state.record
-        if observation is not None and observation.owns(record):
-            _publish(observation.child.delegation_id, lambda feed: feed.usage(*_own_usage(record, config)))
+        observation = _CHILD_RUN.get()
+        if observation is not None:
+            observation.running = state.record
+            _publish_usage(observation, config)
         return SendRequest()
 
     return publish_usage
+
+
+def _publish_usage(observation: ChildRunObservation, config: Config) -> None:
+    """Publish what the child's turn has used as its live record counts it, unless that record is another run's."""
+    record = observation.running
+    if observation.owns(record):
+        _publish(observation.child.delegation_id, lambda feed: feed.usage(*_own_usage(record, config)))
 
 
 def _publish(delegation_id: str, update: Callable[[ActivityFeed], object]) -> None:
@@ -466,6 +478,8 @@ async def child_run_context(
                     await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
             finally:
                 _CHILD_RUN.reset(token)
+                # An attempt cancelled during a tool call reaches no further request and hands over no record.
+                _publish_usage(observation, config)
                 _publish_exit(child, cancelled=cancelled, reason=reason)
 
 
