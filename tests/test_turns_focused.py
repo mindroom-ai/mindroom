@@ -3014,7 +3014,8 @@ async def test_voice_message_is_routed_on_its_transcript(
     await harness.gate.drain_all()
 
     assert select.await_args.args[0] == "who can review the new PR?"
-    assert len(harness.gateway.routes) == 1
+    [route] = harness.gateway.routes
+    assert route[constants.ROUTE_VOICE_TRANSCRIPTS_KEY] == {event.event_id: "who can review the new PR?"}
     assert harness.gateway.sent == []
 
 

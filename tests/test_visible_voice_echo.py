@@ -126,6 +126,39 @@ async def test_routed_responder_posts_transcript_before_reply(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
+async def test_routed_responder_posts_the_routes_transcript_when_its_checkpoint_is_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retention clears the checkpoint of a voice message its bot ignored; the route still carries the transcript."""
+    config = _config(tmp_path)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    event, normalized = _voice_event(config, mentions=())
+    _transcribes(monkeypatch, normalized)
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+    steward = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    responder = _build_harness(config, tmp_path)
+    replies_at_send = _record_replies_at_send(responder, monkeypatch)
+    await _deliver(steward, room, event)
+    await _deliver(responder, room, event)
+    await responder.turn_store.cleanup(unsettled_source_event_ids=frozenset())
+    assert await responder.turn_store.prepared_voice_for_source(event.event_id) is None
+
+    [route] = steward.gateway.routes
+    await _deliver(responder, room, _route_as_delivered(config, route, steward=ROUTER_AGENT_NAME))
+
+    [transcript] = responder.gateway.sent
+    assert transcript.response_text == _TRANSCRIPT
+    assert transcript.target.reply_to_event_id == event.event_id
+    assert transcript.extra_content[ORIGINAL_SENDER_KEY] == _SENDER
+    assert replies_at_send == [0]
+    assert len(responder.runner.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_no_transcript_when_nobody_answers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A voice message for another agent gets no transcript from a bot that does not answer it."""
     config = _config(tmp_path)

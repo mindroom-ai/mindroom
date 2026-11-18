@@ -15,6 +15,7 @@ from mindroom.bot_runtime_view import RunPhase
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_VOICE_TRANSCRIPTS_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
     VOICE_PREFIX,
@@ -606,15 +607,19 @@ class TurnDispatcher:
         A routed turn answers the person's messages its route names; this bot transcribed them itself.
         """
         target = prepared.dispatch.target
-        for source_event_id in prepared.turn.facts.routed_event_ids or handled_turn.source_event_ids:
+        routed_event_ids = prepared.turn.facts.routed_event_ids
+        # A route's content is its steward's; no other message's content is read for transcripts.
+        routed = prepared.turn.event.source["content"].get(ROUTE_VOICE_TRANSCRIPTS_KEY, {}) if routed_event_ids else {}
+        for source_event_id in routed_event_ids or handled_turn.source_event_ids:
             voice = await self.deps.turn_store.prepared_voice_for_source(source_event_id)
-            if voice is None:
+            body = voice.body if voice is not None else routed.get(source_event_id)
+            if body is None:
                 continue
             transcript = PreparedIngress(
                 sender=prepared.dispatch.requester_user_id,
                 event_id=source_event_id,
-                body=voice.body,
-                source={"content": voice.to_content()},
+                body=body,
+                source={"content": voice.to_content() if voice is not None else {VOICE_TRANSCRIPT_KEY: True}},
             )
             await self.deps.visible_voice_echo.publish(target.room_id, source_event_id, target, transcript)
 

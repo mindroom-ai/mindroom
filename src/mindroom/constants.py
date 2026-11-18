@@ -1038,6 +1038,8 @@ SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
 # Its content holds, under this same key, the responder's Matrix ID as `entity`, the person's event as `event_id`,
 # and the thread the answer belongs in as `thread_id`.
 ROUTE_EVENT_TYPE = "io.mindroom.route"
+# In a route's content: the steward's transcript of each voice message it routes, by event ID.
+ROUTE_VOICE_TRANSCRIPTS_KEY = "io.mindroom.voice_transcripts"
 # Room state holding one scheduled task, keyed by its task ID.
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report marker, not a credential.

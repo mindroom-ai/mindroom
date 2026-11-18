@@ -13,7 +13,9 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     ROUTE_EVENT_TYPE,
+    ROUTE_VOICE_TRANSCRIPTS_KEY,
     SOURCE_KIND_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, content_owns_per_fire_thread_root
@@ -220,6 +222,16 @@ async def _router_handoff_with_attachments(
     return extra_content
 
 
+async def _voice_transcripts(deps: _RouterRelaySupport, event_ids: list[str]) -> dict[str, str]:
+    """Return the transcript of each routed voice message: its responder posts it, though retention cleared its own."""
+    return {
+        event_id: voice.body
+        for event_id in event_ids
+        if (voice := await deps.turn_store.prepared_voice_for_source(event_id)) is not None
+        and VOICE_RAW_AUDIO_FALLBACK_KEY not in voice.to_content()
+    }
+
+
 async def execute_router_relay(  # noqa: PLR0911
     deps: _RouterRelaySupport,
     room: nio.MatrixRoom,
@@ -315,6 +327,8 @@ async def execute_router_relay(  # noqa: PLR0911
     if thread_event_id is not None:
         route["thread_id"] = thread_event_id
     content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route}
+    if transcripts := await _voice_transcripts(deps, route["event_ids"]):
+        content[ROUTE_VOICE_TRANSCRIPTS_KEY] = transcripts
     if scheduled_prompt is not None or thread_event_id is None:
         # A responder in a thread reads the person's messages there. One that answers in the room reads no
         # conversation, and a scheduled task's prompt may be in no visible message, so their route carries the prompt.
