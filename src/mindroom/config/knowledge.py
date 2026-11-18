@@ -21,7 +21,8 @@ def _validate_relative_patterns(value: list[str], *, field_name: str) -> list[st
 class KnowledgeRerankerConfig(BaseModel):
     """Reranker that reorders search results by how well each one answers the query."""
 
-    model_config = ConfigDict(extra="forbid")
+    # The dashboard names this variant by its title, since its provider is one of several.
+    model_config = ConfigDict(extra="forbid", title="Cohere, Sentence Transformers or Vertex AI")
 
     provider: Literal["cohere", "sentence_transformers", "vertex_ai"] = Field(
         description=(
