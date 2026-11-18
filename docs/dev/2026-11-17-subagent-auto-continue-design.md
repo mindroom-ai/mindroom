@@ -127,4 +127,4 @@ The fix is one rule: every fact that decides whether a stopped job goes on is re
 ### Size
 
 Estimated source change: about +110 −50 (runtime −5, coordinator +35, continuation +25, loop −6, recovery +5, notices +8, others +5), well under the 250-line stop line, so the round is implemented.
-Measured after implementation: +189 −104 in `src`, net +85.
+Measured after implementation: +189 −105 in `src`, net +84.
