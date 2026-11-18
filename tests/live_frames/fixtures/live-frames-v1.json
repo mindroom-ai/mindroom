@@ -21,7 +21,8 @@
           "reasoning": "",
           "tools": [],
           "status": "streaming",
-          "activity": ""
+          "activity": "",
+          "segments": []
         }
       }
     },
@@ -343,7 +344,8 @@
             }
           ],
           "status": "streaming",
-          "activity": "w"
+          "activity": "w",
+          "segments": []
         }
       }
     },

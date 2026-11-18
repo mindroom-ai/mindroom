@@ -173,11 +173,20 @@ def _read_scope_history_event_ids(storage: ConversationStore, session: Conversat
     return event_ids
 
 
-def remove_runs_answering(storage: ConversationStore, session_id: str, scope: HistoryScope, event_id: str) -> bool:
+def remove_runs_answering(
+    storage: ConversationStore,
+    session_id: str,
+    scope: HistoryScope,
+    event_id: str,
+    *,
+    keeping: Collection[str] = (),
+) -> bool:
     """Remove the first element of the scope's history that answered ``event_id`` and everything after it.
 
     Later model output may build on that reply, so the whole suffix goes; when a
     compacted run answered the event, so does the summary that folded it.
+    A run that read every revision of ``keeping`` answered the edit those revisions
+    are, not what the edit replaces, so the removal never starts at it.
     Returns True if anything was removed.
     """
     return summary_rows.cut_at_event(
@@ -186,6 +195,7 @@ def remove_runs_answering(storage: ConversationStore, session_id: str, scope: Hi
         scope_key=scope.key,
         event_id=event_id,
         match="answered",
+        keeping=keeping,
     )
 
 

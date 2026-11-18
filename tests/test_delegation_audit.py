@@ -29,9 +29,11 @@ from mindroom.delegation.recovery import interrupt_child, read_child_run
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run, save_run_checkpoint
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -42,6 +44,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import record_store_threads, test_runtime_paths
+from tests.fakes.scripted_model import tool_call
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -233,6 +236,46 @@ async def test_interruption_recovery_keeps_a_settlement_saved_before_a_crash(tmp
     assert (snapshot.status, snapshot.result) == ("cancelled", "Delegation cancelled.")
     run = json.loads((await _record_dir(child, config, paths) / "run.json").read_text())
     assert (run["status"], run["error"]) == ("cancelled", "Delegation cancelled.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+async def test_a_child_cut_short_mid_call_keeps_its_turn_as_history_its_follow_up_replays(
+    tmp_path: Path,
+    status: Literal["cancelled", "failed"],
+) -> None:
+    """A crash's checkpoint, or the row a stop stored, settles as a turn of the child's own calls, each answered."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await _start(child, config, paths)
+    storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
+    session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
+    call = tool_call("read_file", "read", path="a")
+    checkpoint = RunRecord(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        user_id="@alice:localhost",
+        agent_id="child",
+        messages=[Message(role="user", content="Report"), Message(role="assistant", tool_calls=[call])],
+        tools=[ToolExecution(tool_call_id="read", tool_name="read_file", tool_args={"path": "a"})],
+    )
+    await save_run_checkpoint(storage, session, checkpoint)
+
+    await interrupt_child(child, config=config, runtime_paths=paths, reason="Restarted", status=status)
+
+    stored = await read_child_run(child, config, paths)
+    assert stored is not None
+    assert (stored.status, stored.error, is_recovered_run(stored)) == (RunStatus.completed, None, True)
+    assert [(message.role, message.content) for message in stored.messages] == [
+        ("user", "Report"),
+        ("assistant", None),
+        ("tool", INTERRUPTED_CALL_RESULT),
+    ]
+    # The handle still says the turn did not finish, and settling it again changes nothing.
+    assert (child.status, child.result) == (status, "Restarted")
+    await interrupt_child(replace(child, status="running"), config=config, runtime_paths=paths, reason="Again")
+    assert await read_child_run(child, config, paths) == stored
 
 
 @pytest.mark.asyncio

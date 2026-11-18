@@ -28,7 +28,7 @@ Reasoning and finer progress the runtime already had never reached the user.
   Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
   Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
 - A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
-- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms}` (sidecar-only for large messages).
+- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms, segments}` (sidecar-only for large messages).
   Its duration runs from the start of each reasoning segment to the model's next output.
   OpenAI's Responses API streams a reasoning summary in parts, the first well after the model began reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
   Measured on Codex on 2026-11-01, the first part came about 5 s after reasoning began for GPT-6.1 Sol and GPT-6 Luna, but only at the end of 16 s of reasoning for GPT-6 Astra.
@@ -58,6 +58,7 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Send: `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/io.mindroom.live/{sid}.{seq}`; the homeserver keeps at most 256 events, 1 MiB, and 30 s per room, allows 30 events per second per sender and room, and refuses `m.*` types, non-members, and bodies over 64 KiB.
 - Sync: `{type, content, sender, origin_server_ts}` in `rooms.join.*.ephemeral.events`, never on initial sync, only after `since`; clients take the room from the enclosing sync room.
 - Frame: `{"v": 1, "reply", "sid", "seq", "snapshot": {md, reasoning, tools, status, activity}}` or the same with `"delta"`, whose `md` and `reasoning` are splices `{at, del, ins, len}` in UTF-16 code units, `tools` is `{len, set: [[index, entry]]}`, and `status`/`activity` are new values.
+  A snapshot also carries `segments: [{start, after_tool}]`, where each reasoning segment begins (`start` in UTF-16 code units into `reasoning`), and a delta carries the whole list only when it changed; old clients ignore the key.
   `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
 - Cadence: a frame per 100 ms tick when something changed, one send in flight, a snapshot first, after a failed send, and every 5 s.
 
@@ -79,7 +80,7 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   - `snapshot` and `delta` are exactly a reply's `LiveDocs` and live delta (`md` and `reasoning` as UTF-16 splices, `tools` as `{len, set}`, `status` and `activity` as new values).
     `reasoning` and `activity` are always empty.
 - `meta` rides on every frame, so a client that missed the snapshot still knows the run's status.
-  - `agent`: the sub-agent's name; `subagent`: the sub-agent this run is a turn of, the delegation ID of its first turn (equal to `run` for a first turn); `caller`: the agent or sub-agent that delegated to it; `root`: the agent in the room whose turn started the chain (equal to `caller` for a direct child); `parent`: the delegation ID of the run (the turn) that delegated to it, or `null`.
+  - `agent`: the sub-agent's name; `model`: the model it runs on, which follows a switch during the run, as the `model` object of `io.mindroom.ai_run` (`config`, the configured model key such as `default`, plus `display_name`, `id`, and `provider` when known); `subagent`: the sub-agent this run is a turn of, the delegation ID of its first turn (equal to `run` for a first turn); `caller`: the agent or sub-agent that delegated to it; `root`: the agent in the room whose turn started the chain (equal to `caller` for a direct child); `parent`: the delegation ID of the run (the turn) that delegated to it, or `null`.
   - `thread_id`: the Matrix thread the chain belongs to, or `null`; `source`: `"delegate"` or `"workflow"`.
   - `status`: one of the statuses below; `started_at`: Unix seconds; `ended_at`: Unix seconds once the run ended, else `null`.
   - A snapshot's `meta` also carries `task` (at most 1,000 characters) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
@@ -89,6 +90,7 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   So the n-th marker of `md` belongs to `tools[n-1]`, and a client renders the documents with the reply renderer.
   Text on both sides of a tool call is separated by the marker's blank lines; text items that meet because a cap removed what was between them are joined by a blank line.
   A completed call's entry has `type: "tool_call_completed"`, a running call's `tool_call_started`; a paused call that resumes keeps its row.
+  Every entry also carries `started_at`: the Unix seconds when the call was first announced, which the row keeps when the call resumes after a pause and when it completes, so a client can show how long a running call has run; it is `null` for a row that only a completion made, as when the cap had removed its start; it is kept when previews are hidden; old clients ignore the key.
 - `docs.status` is `"streaming"` while `meta.status` is `running` or `awaiting_approval`, and `"pending"` otherwise, so a client takes the run's state from `meta.status`.
 - Statuses: `running` from the first frame, and again after an approval or a pause; `awaiting_approval` while the child waits for the person to decide its gated calls, as a background job child does through its job's cards; `paused` when the child stopped on an approval its parent's reply owns, until it resumes as `running`; `completed`, `failed`, `cancelled`, and `denied` end the run.
   An attempt that settled no outcome ends as `cancelled` when it was cancelled and as `failed` otherwise, with the reason as `result`.

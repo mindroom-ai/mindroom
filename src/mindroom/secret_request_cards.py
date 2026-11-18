@@ -10,14 +10,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix_openid import homeserver_openid_binding, openid_audience
 from mindroom.origins import allowed_client_origins
+from mindroom.reply_scope import current_reply_event_id
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
@@ -30,6 +32,7 @@ from mindroom.secret_requests import (
 )
 from mindroom.tool_jobs.control import current_job_id, job_checkpoint
 from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_system.invocation import current_tool_call
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -41,6 +44,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_REASON_LENGTH = 500
+_MAX_LINE_LENGTH = 80
+_MAX_LINK_LENGTH = 2000
+LINK_REFUSAL = (
+    "Give `url` as an `http` or `https` link with a host, no sign-in part and no spaces, at most "
+    f"{_MAX_LINK_LENGTH} characters, or leave it out. No card was posted."
+)
 # How long a request whose answer the route claimed before the wait ended may still take to save (a local file write).
 _SAVE_GRACE_SECONDS = 30
 
@@ -59,6 +68,14 @@ class SecretRequestCard:
     # A key card's service as people read its name, and whether the service already has a key the answer replaces.
     display_name: str = ""
     replaces: bool = False
+    # What the agent chose to show, each empty when it gave none: what it calls a temporary secret, the page that
+    # gives the secret (a button), and the hint in the empty field.
+    label: str = ""
+    url: str = ""
+    placeholder: str = ""
+    # The event of the reply whose tool call asks and that call's id, both set when that reply shows an event.
+    response_event_id: str | None = None
+    tool_call_id: str | None = None
 
     def message(
         self,
@@ -71,12 +88,19 @@ class SecretRequestCard:
     ) -> dict[str, Any]:
         """Return the card's message content in `status`, in the thread when `thread_id` is given."""
         if isinstance(self.target, TemporaryTarget):
-            body = temporary_secret_body(status, agent_display_name=self.agent_display_name, name=self.target.name)
+            body = temporary_secret_body(
+                status,
+                agent_display_name=self.agent_display_name,
+                name=self.target.name,
+                label=self.label,
+                url=self.url,
+            )
         else:
             body = secret_request_body(
                 status,
                 agent_display_name=self.agent_display_name,
                 display_name=self.display_name,
+                url=self.url,
             )
         metadata = secret_request_content(
             request,
@@ -84,6 +108,11 @@ class SecretRequestCard:
             reason=self.reason,
             status=status,
             replaces=self.replaces,
+            label=self.label,
+            url=self.url,
+            placeholder=self.placeholder,
+            response_event_id=self.response_event_id,
+            tool_call_id=self.tool_call_id,
         )
         return build_message_content(
             body,
@@ -97,6 +126,32 @@ class SecretRequestCard:
 def card_reason(reason: str) -> str | None:
     """Return the reason a card shows, cut to its limit, or None when the agent gave none."""
     return reason.strip()[:_MAX_REASON_LENGTH] or None
+
+
+def card_line(text: str | None) -> str:
+    """Return a label or a field hint as a card shows it: one line, cut to its limit, empty when the agent gave none."""
+    return " ".join((text or "").split())[:_MAX_LINE_LENGTH]
+
+
+def card_link(url: str | None) -> str | None:
+    """Return the page a card's button opens, empty when the agent named none, or None for one no card shows.
+
+    A card shows an `http` or `https` URL with a host and no sign-in part (`user:password@`), written without spaces
+    or control characters. The person sees its host on the button; MindRoom never fetches it.
+    """
+    link = (url or "").strip()
+    if not link:
+        return ""
+    if len(link) > _MAX_LINK_LENGTH or any(char.isspace() or not char.isprintable() for char in link):
+        return None
+    try:
+        parts = urlsplit(link)
+        # Reading the port refuses one that is no port.
+        host, _port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    with_account = parts.username is not None or parts.password is not None
+    return link if parts.scheme in {"http", "https"} and host and not with_account else None
 
 
 async def chat_refusal(runtime_paths: RuntimePaths, *, noun: str) -> str | None:
@@ -131,7 +186,16 @@ async def ask_with_card(
     """Post `card` in the call's conversation and wait for the requester's answer, or say why no card was posted.
 
     The request returned is settled: its `outcome` is done and the posted card shows it.
+
+    The card, and each edit of it, names the reply whose tool call asks and that call, when the reply shows an event.
+    A call made through the CLI from a Bash call has a line of its own in the reply, so the card names that call.
     """
+    call = current_tool_call()
+    card = replace(
+        card,
+        response_event_id=current_reply_event_id(),
+        tool_call_id=None if call is None else call.context.call_id,
+    )
     thread_id = context.resolved_thread_id
     latest_thread_event_id = context.reply_to_event_id
     if thread_id is not None and latest_thread_event_id is None:

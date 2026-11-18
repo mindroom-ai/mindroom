@@ -7,7 +7,7 @@ import json
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -19,6 +19,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.temporary_secrets import TemporarySecretsTools
 from mindroom.message_target import MessageTarget
+from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
     TemporaryTarget,
@@ -26,7 +27,8 @@ from mindroom.secret_requests import (
     secret_holder,
     secret_request_registry,
 )
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_callable, adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -96,9 +98,10 @@ def _start(
     context: ToolRuntimeContext | None,
     name: str = "SUDO_PASSWORD",
     reason: str = _REASON,
+    **shown: str,
 ) -> asyncio.Task[str]:
     with tool_runtime_context(context):
-        return asyncio.create_task(tool.request_temporary_secret(name, reason))
+        return asyncio.create_task(tool.request_temporary_secret(name, reason, **shown))
 
 
 def _sent(context: ToolRuntimeContext) -> list[dict[str, object]]:
@@ -239,6 +242,102 @@ async def test_refuses_without_posting(tmp_path: Path, case: str, name: str, rea
 
 
 @pytest.mark.asyncio
+async def test_the_card_shows_a_label_a_link_and_a_field_hint(tmp_path: Path) -> None:
+    """What the agent calls the secret, where the person gets it and what the empty field hints are on the card."""
+    tool, context = _asking(tmp_path)
+
+    task = _start(
+        tool,
+        context,
+        "GITHUB_TOKEN",
+        label="  GitHub\n token ",
+        url=" https://github.com/settings/tokens?type=beta ",
+        placeholder="ghp_…",
+    )
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    content = card[SECRET_REQUEST_CONTENT_KEY]
+    assert (content["label"], content["url"], content["placeholder"]) == (
+        "GitHub token",
+        "https://github.com/settings/tokens?type=beta",
+        "ghp_…",
+    )
+    # A client without the card reads what is asked and where to get it in the plain body.
+    assert card["body"] == (
+        "🔑 Code asks for a secret (GitHub token, GITHUB_TOKEN). Open MindRoom Chat to enter it. "
+        "Where to get it: https://github.com/settings/tokens?type=beta"
+    )
+    _card, edit = _sent(context)
+    assert edit["m.new_content"][SECRET_REQUEST_CONTENT_KEY] == {**content, "status": "declined"}
+    assert edit["m.new_content"]["body"] == "🔑 Secret request declined."
+
+
+@pytest.mark.asyncio
+async def test_a_long_label_or_field_hint_is_cut(tmp_path: Path) -> None:
+    """A label and a hint are one short line each, so a card stays a card."""
+    tool, context = _asking(tmp_path)
+
+    task = _start(tool, context, label="L" * 200, placeholder="P" * 200)
+    content = (await _posted_card(context, task))[SECRET_REQUEST_CONTENT_KEY]
+    secret_request_registry().resolve(content["request_id"], "declined")
+    await task
+
+    assert (content["label"], content["placeholder"]) == ("L" * 80, "P" * 80)
+    assert "url" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8080/keys",
+        "https://[::1]:8443/token",
+        "https://例え.example/トークン?kind=new#form",
+    ],
+)
+async def test_a_card_takes_any_http_or_https_page(tmp_path: Path, url: str) -> None:
+    """`http`, a port, an IPv6 host and a name outside ASCII are all pages a card's button can open."""
+    tool, context = _asking(tmp_path)
+
+    task = _start(tool, context, url=url)
+    content = (await _posted_card(context, task))[SECRET_REQUEST_CONTENT_KEY]
+    secret_request_registry().resolve(content["request_id"], "declined")
+    await task
+
+    assert content["url"] == url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "github.com/settings/tokens",
+        "ftp://github.com/settings/tokens",
+        "javascript:alert(1)",
+        "https://",
+        "https:///settings/tokens",
+        "https://ada:secret@github.com/",
+        "https://github.com/settings tokens",
+        "https://github.com/\x00",
+        "https://github.com:99999/",
+        pytest.param("https://github.com/" + "a" * 2000, id="too-long"),
+    ],
+)
+async def test_refuses_a_link_no_card_can_show(tmp_path: Path, url: str) -> None:
+    """A link is an `http` or `https` page with a host and no sign-in part: anything else posts no card."""
+    tool, context = _asking(tmp_path)
+
+    result = json.loads(await _start(tool, context, url=url))
+
+    assert set(result) == {"status", "message"}
+    assert result["status"] == "error"
+    assert "`url`" in result["message"]
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "message"),
     [
@@ -285,3 +384,56 @@ def test_the_tool_is_one_an_agent_can_list(tmp_path: Path) -> None:
     assert isinstance(toolkit, TemporarySecretsTools)
     functions = adapt_toolkit(toolkit, key="temporary_secrets").functions
     assert [function.name for function in functions] == ["request_temporary_secret"]
+
+
+def _call_context(call_id: str) -> ToolCallContext:
+    return ToolCallContext(run_id="run", session_id="session", user_id=_ALICE, call_id=call_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True], ids=["direct", "cli-wrapped"])
+@pytest.mark.parametrize(("in_reply", "reply_event_id"), [(True, "$reply"), (True, None), (False, None)])
+async def test_a_card_names_the_reply_and_the_call_that_asked(
+    tmp_path: Path,
+    *,
+    wrapped: bool,
+    in_reply: bool,
+    reply_event_id: str | None,
+) -> None:
+    """A call made by a reply that shows an event names that event and its own call on the card and every edit.
+
+    A call made through the CLI from a Bash call has its own line in the reply, so the card names the inner call.
+    Without a shown reply the card names neither, and a client shows it as its own row.
+    """
+    tool, context = _asking(tmp_path)
+    (function,) = adapt_toolkit(tool, key="temporary_secrets").functions
+    arguments = {"name": "SUDO_PASSWORD", "reason": _REASON}
+
+    async def ask() -> object:
+        return await execute_tool_call(function, arguments, _call_context("call-ask"), middleware=())
+
+    async def bash() -> str:
+        """Run a shell command that calls an agent tool through the CLI."""
+        return (await ask()).content
+
+    handle = MagicMock(spec=SpanHandle)
+    handle.reply = MagicMock(event_id=reply_event_id)
+    token = _current_slot.set(SpanSlot(handle=handle) if in_reply else None)
+    try:
+        with tool_runtime_context(context):
+            run = (
+                execute_tool_call(adapt_callable(bash), {}, _call_context("call-bash"), middleware=())
+                if wrapped
+                else ask()
+            )
+            task = asyncio.ensure_future(run)
+    finally:
+        _current_slot.reset(token)
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    named = {"response_event_id": "$reply", "tool_call_id": "call-ask"} if reply_event_id is not None else {}
+    _card, edit = _sent(context)
+    for content in (card[SECRET_REQUEST_CONTENT_KEY], edit["m.new_content"][SECRET_REQUEST_CONTENT_KEY]):
+        assert {key: content[key] for key in ("response_event_id", "tool_call_id") if key in content} == named

@@ -36,6 +36,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import is_matrix_media_dispatch_event, is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix.thread_forks import fork_parent_thread_id
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -46,6 +47,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
+from mindroom.thread_models import copy_thread_model_override
 from mindroom.thread_summary.automatic import maybe_generate_prompt_summary
 from mindroom.thread_summary.schedule import first_reply_reaches_first_threshold
 from mindroom.thread_utils import mentions_another_participant
@@ -104,6 +106,24 @@ def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
 _SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF, TurnIntent.ROUTER_NOTICE})
 # Hook dispatches come only from managed senders, such as automations choosing a model for their prompt.
 _PER_RUN_MODEL_INTENTS = _SCHEDULED_RUN_INTENTS | {TurnIntent.HOOK_DISPATCH}
+
+
+def _inherit_fork_thread_models(
+    deps: TurnDispatchDeps,
+    turn: PreparedTurn,
+    thread_id: str | None,
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> None:
+    """Give a fork's first turn a snapshot of its parent thread's models, before any model of the turn resolves."""
+    if thread_id is None or thread_id not in turn.handled_turn.source_event_ids:
+        return
+    parent_thread_id = fork_parent_thread_id(thread_history, thread_id)
+    if parent_thread_id is None:
+        return
+    try:
+        copy_thread_model_override(deps.runtime_paths, parent_thread_id, thread_id)
+    except Exception:
+        deps.logger.exception("Fork thread model inheritance failed", parent_thread_id=parent_thread_id)
 
 
 def _scheduled_model_for_dispatch(event: DispatchEvent, origin_intent: TurnIntent) -> str | None:
@@ -365,19 +385,25 @@ class TurnDispatcher:
         """Start a new thread's title once selected to route or respond, before execution can block."""
         turn = prepared.turn
         thread_id = prepared.dispatch.target.resolved_thread_id
-        if (
-            thread_id is None
-            or thread_id != turn.event.event_id
-            or turn.handled_turn.is_coalesced
-            or turn.payload.raw_audio_fallback
-            or not first_reply_reaches_first_threshold(self.deps.runtime.config)
-        ):
+        if thread_id is None or not first_reply_reaches_first_threshold(self.deps.runtime.config):
             return
-        # A single-event turn has no coalescing wrapper or reply enrichment;
-        # voice normalization has already replaced the audio filename with text.
-        prompt = turn.event.body
-        if turn.payload.voice_transcript:
-            prompt = prompt.removeprefix(VOICE_PREFIX)
+        prompt: str | None
+        if turn.handled_turn.is_coalesced:
+            # A fork's first title is its parent's, which needs no prompt, so a batch holding the fork root gets it too.
+            if (
+                thread_id not in turn.handled_turn.source_event_ids
+                or fork_parent_thread_id(prepared.dispatch.context.thread_history, thread_id) is None
+            ):
+                return
+            prompt = None
+        elif thread_id != turn.event.event_id or turn.payload.raw_audio_fallback:
+            return
+        else:
+            # A single-event turn has no coalescing wrapper or reply enrichment;
+            # voice normalization has already replaced the audio filename with text.
+            prompt = turn.event.body
+            if turn.payload.voice_transcript:
+                prompt = prompt.removeprefix(VOICE_PREFIX)
         create_background_task(
             maybe_generate_prompt_summary(
                 self._client(),
@@ -385,7 +411,7 @@ class TurnDispatcher:
                 thread_id,
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
-                prompt_event_id=turn.event.event_id,
+                prompt_event_id=thread_id,
                 prompt=prompt,
                 conversation_reader=self.deps.resolver.deps.conversation_reader,
                 entity_name=self.deps.agent_name,
@@ -833,6 +859,7 @@ class TurnDispatcher:
             extract_context_start,
             path=context_path,
         )
+        _inherit_fork_thread_models(self.deps, turn, target.resolved_thread_id, context.thread_history)
         envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_envelope(
             event=event,
@@ -881,6 +908,7 @@ class TurnDispatcher:
             correlation_id=event.event_id,
             envelope=envelope,
             current_prompt_is_structured=turn.current_prompt_is_structured,
+            stopped_reply=turn.stopped_reply,
             scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
             scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
         )

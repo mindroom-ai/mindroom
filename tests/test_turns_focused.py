@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 from mindroom import constants, interactive
+from mindroom.ai_runtime import queued_message_signal_context, queued_notice_after_tool_batch
 from mindroom.attachments.storage import register_local_attachment
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
@@ -102,6 +103,7 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
+from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
@@ -111,10 +113,17 @@ from mindroom.matrix.segmented_messages import segment_matrix_content
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
+from mindroom.mid_turn import MidTurnGate, MidTurnMode
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _QueuedMessageState
+from mindroom.response_payload_preparation import (
+    _STEER_CONTINUATION_LINE,
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+    ResponsePayloadPreparer,
+)
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.router.relay import execute_router_relay
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -156,6 +165,7 @@ from tests.conftest import (
     make_pending_event,
     make_relation_lookup,
     make_visible_message,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -171,10 +181,10 @@ if TYPE_CHECKING:
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.hooks import MessageEnvelope
+    from mindroom.judgment.state import JudgmentRequest
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
-    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.turns.facts import IngressFacts
 
@@ -357,6 +367,10 @@ class _RecordingDeliveryGateway:
     async def edit_text(self, request: EditTextRequest) -> bool:
         self.edited.append(request)
         return True
+
+    async def settle_unclaimed_reply(self, _source_event_ids: tuple[str, ...], *, source_deleted: bool) -> bool:  # noqa: ARG002
+        """Report that no reply holds the sources, as no reply records exist here."""
+        return False
 
     async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
         """Record the failure a reply shows, when the fixture says a reply owns the event."""
@@ -6913,6 +6927,202 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
         await gate.drain_all()
 
 
+async def _wraps_up_after_tool_batch(queue: _QueuedMessageState) -> bool:
+    """Run the judgment a reply makes over ``queue`` after a tool batch, and return whether the reply wraps up."""
+    notice = "WRAP UP"
+    messages = [
+        Message(role="user", content="Write the long report"),
+        Message(
+            role="assistant",
+            tool_calls=[{"id": "call", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
+        ),
+        Message(role="tool", content="result", tool_call_id="call", tool_name="read_file"),
+    ]
+    with queued_message_signal_context(queue, mid_turn_gate=queue.mid_turn_gate):
+        await queued_notice_after_tool_batch(notice)(messages, ())
+    return any(message.content == notice for message in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judgment", ["cannot_wait", "can_wait", "skipped", "no_mid_turn"])
+@pytest.mark.parametrize("sender", [_SENDER, "@other:localhost"], ids=["requester", "another-person"])
+async def test_a_message_the_running_reply_stopped_for_is_answered_without_participation(
+    config: Config,
+    tmp_path: Path,
+    judgment: str,
+    sender: str,
+) -> None:
+    """A queued message the mid-turn judge said the running reply cannot wait for is answered when the reply ends.
+
+    Whoever sent it, the follow-up skips participation. A message the judge let wait, a wrap-up without a verdict,
+    and an agent without mid_turn leave the follow-up to participation.
+    """
+    config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
+    history = thread_history_result(
+        [
+            make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT),
+            make_visible_message(sender=_SENDER, body="Write the long report", event_id="$task:localhost"),
+            make_visible_message(sender=_entity_user_id(config, "general"), body="working", event_id="$working"),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=history)
+    room = _room_with_members(config, "general", "research")
+    room.add_member("@other:localhost", "Other", None)
+    event_id = "$correction:localhost"
+    queue = _QueuedMessageState()
+    if judgment != "no_mid_turn":
+
+        async def evaluate(_request: JudgmentRequest) -> bool | None:
+            return judgment == "can_wait"
+
+        queue.mid_turn_gate = MidTurnGate(
+            active_text="Write the long report",
+            evaluate=evaluate,
+            requester_id=_SENDER,
+            on_stop=queue.mark_stopped_reply,
+        )
+    # Without text the message cannot be judged, so the reply wraps up without a verdict.
+    text = None if judgment == "skipped" else "Stop, write the short summary instead"
+    queue.add_waiting_human_message(event_id, text=text, requester_id=sender, mentions_nobody=True)
+    # Unjudged, another person's untagged message lets the reply continue instead.
+    wraps_up = judgment in {"cannot_wait", "no_mid_turn"} or (judgment == "skipped" and sender == _SENDER)
+    assert await _wraps_up_after_tool_batch(queue) is wraps_up
+    queue.mid_turn_gate = None
+    idle = asyncio.Event()
+    dispatched = asyncio.Event()
+
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        await harness.dispatcher.handle_prepared_turn(batch)
+        await harness.runner.settle_inbox_responses()
+        dispatched.set()
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_for_thread_response_idle=wait_until_idle,
+    )
+    try:
+        pending = make_pending_event(
+            _text_event(
+                "Stop, write the short summary instead",
+                event_id=event_id,
+                thread_id=_THREAD_ROOT,
+                sender=sender,
+            ),
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id=sender,
+            active_follow_up=True,
+            notice=QueuedHumanNoticeReservation(queue, event_id),
+        )
+        await gate.admit(
+            active_follow_up_coalescing_key(_ROOM_ID, _THREAD_ROOT),
+            ready_result=ReadyPendingEvent(pending_event=pending),
+        )
+        idle.set()
+        async with asyncio.timeout(1):
+            await dispatched.wait()
+        (request,) = harness.runner.requests
+        assert (request.participation is None) is (judgment == "cannot_wait")
+        assert not queue.has_pending_human_messages()
+    finally:
+        idle.set()
+        await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_a_correction_queued_behind_a_remark_that_waited_is_still_answered(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """Another person's remark the judge let wait, then the requester's correction that stopped the reply.
+
+    The follow-ups split by requester: the remark goes through participation, and the correction, whose notice the
+    remark's turn released, is answered without it.
+    """
+    config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
+    history = thread_history_result(
+        [
+            make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT),
+            make_visible_message(sender=_SENDER, body="Write the long report", event_id="$task:localhost"),
+            make_visible_message(sender=_entity_user_id(config, "general"), body="working", event_id="$working"),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=history)
+    room = _room_with_members(config, "general", "research")
+    room.add_member("@other:localhost", "Other", None)
+    verdicts = [True, False]
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return verdicts.pop(0)
+
+    queue = _QueuedMessageState()
+    queue.mid_turn_gate = MidTurnGate(
+        active_text="Write the long report",
+        evaluate=evaluate,
+        requester_id=_SENDER,
+        on_stop=queue.mark_stopped_reply,
+    )
+    messages = (
+        ("$remark:localhost", "@other:localhost", "Nice weather today"),
+        ("$correction:localhost", _SENDER, "Stop, write the short summary instead"),
+    )
+    for index, (event_id, sender, body) in enumerate(messages):
+        queue.add_waiting_human_message(event_id, text=body, requester_id=sender, mentions_nobody=True)
+        assert await _wraps_up_after_tool_batch(queue) is (index == 1)
+    queue.mid_turn_gate = None
+    idle = asyncio.Event()
+    batches: list[PreparedTurn] = []
+    dispatched = asyncio.Event()
+
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+        await harness.dispatcher.handle_prepared_turn(batch)
+        await harness.runner.settle_inbox_responses()
+        if len(batches) == len(messages):
+            dispatched.set()
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_for_thread_response_idle=wait_until_idle,
+    )
+    try:
+        for event_id, sender, body in messages:
+            pending = make_pending_event(
+                _text_event(body, event_id=event_id, thread_id=_THREAD_ROOT, sender=sender),
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id=sender,
+                active_follow_up=True,
+                notice=QueuedHumanNoticeReservation(queue, event_id),
+            )
+            await gate.admit(
+                active_follow_up_coalescing_key(_ROOM_ID, _THREAD_ROOT),
+                ready_result=ReadyPendingEvent(pending_event=pending),
+            )
+        idle.set()
+        async with asyncio.timeout(1):
+            await dispatched.wait()
+        assert [
+            (batch.handled_turn.source_event_ids, request.participation is None)
+            for batch, request in zip(batches, harness.runner.requests, strict=True)
+        ] == [(("$remark:localhost",), False), (("$correction:localhost",), True)]
+    finally:
+        idle.set()
+        await gate.drain_all()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("by_agent", [False, True], ids=["person", "agent"])
 async def test_an_edit_before_the_turn_starts_changes_what_it_answers_unless_an_agent_made_it(
@@ -7317,3 +7527,183 @@ async def test_router_recovery_relays_once_past_every_echo_of_a_coalesced_voice_
     assert record is not None
     assert record.completed is True
     assert record.response_event_id == "$sent-1:localhost"
+
+
+async def _prepared_model_prompt(harness: _Harness, request: ResponseRequest) -> str:
+    """Build the request's payload as the runner does under the lock; return what the model reads of the prompt."""
+    deps = harness.dispatcher.deps
+    preparer = ResponsePayloadPreparer(
+        normalizer=deps.normalizer,
+        ingress_hook_runner=deps.ingress_hook_runner,
+        agent_name="general",
+        logger=deps.logger,
+    )
+    prepared = await preparer.prepare(request)
+    return prepared.model_prompt if prepared.model_prompt is not None else prepared.prompt
+
+
+def _follow_up_gate(
+    harness: _Harness,
+    idle: asyncio.Event,
+    batches: list[PreparedTurn],
+    count: int,
+) -> tuple[CoalescingGate, asyncio.Event]:
+    """Return a gate that dispatches follow-ups through the harness once ``idle`` is set.
+
+    The returned event is set once ``count`` follow-ups have dispatched.
+    """
+    dispatched = asyncio.Event()
+
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+        await harness.dispatcher.handle_prepared_turn(batch)
+        await harness.runner.settle_inbox_responses()
+        if len(batches) == count:
+            dispatched.set()
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_for_thread_response_idle=wait_until_idle,
+    )
+    return gate, dispatched
+
+
+def _follow_up_history(config: Config) -> ThreadHistoryResult:
+    return thread_history_result(
+        [
+            make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT),
+            make_visible_message(sender=_SENDER, body="Write the long report", event_id="$task:localhost"),
+            make_visible_message(sender=_entity_user_id(config, "general"), body="working", event_id="$working"),
+        ],
+        is_full_history=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("admission", "steered"), [("steer", True), ("queue", False), ("idle_steer", False)])
+async def test_requester_steer_after_final_text_dispatches_once_with_bypass(
+    config: Config,
+    tmp_path: Path,
+    admission: str,
+    *,
+    steered: bool,
+) -> None:
+    """The requester's Steer that arrived while the reply wrote its final text is answered once when it ends.
+
+    No batch completed after it, so it ended no run, yet its follow-up skips participation and tells the model to
+    carry on. A Queue message, and a Steer admitted while nothing ran, are ordinary follow-ups.
+    """
+    config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
+    harness = _build_harness(config, tmp_path, thread_history=_follow_up_history(config))
+    room = _room_with_members(config, "general", "research")
+    queue = _QueuedMessageState()
+    event_id, body = "$steer:localhost", "Also print the date"
+    if admission != "idle_steer":
+        queue.bind_active_requester(_SENDER)
+    mode = MidTurnMode.QUEUE if admission == "queue" else MidTurnMode.STEER
+    queue.add_waiting_human_message(event_id, text=body, requester_id=_SENDER, mode=mode)
+    # The reply finishes its text and lets go of the conversation.
+    queue.bind_active_requester(None)
+    idle = asyncio.Event()
+    batches: list[PreparedTurn] = []
+    gate, dispatched = _follow_up_gate(harness, idle, batches, 1)
+    try:
+        pending = make_pending_event(
+            _text_event(body, event_id=event_id, thread_id=_THREAD_ROOT, sender=_SENDER),
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id=_SENDER,
+            active_follow_up=True,
+            notice=QueuedHumanNoticeReservation(queue, event_id),
+        )
+        await gate.admit(
+            active_follow_up_coalescing_key(_ROOM_ID, _THREAD_ROOT),
+            ready_result=ReadyPendingEvent(pending_event=pending),
+        )
+        idle.set()
+        async with asyncio.timeout(1):
+            await dispatched.wait()
+        (batch,) = batches
+        assert batch.handled_turn.source_event_ids == (event_id,)
+        (request,) = harness.runner.requests
+        assert (request.participation is None) is steered
+        assert request.prompt == body
+        model_prompt = await _prepared_model_prompt(harness, request)
+        assert model_prompt.count(_STEER_CONTINUATION_LINE) == (1 if steered else 0)
+        assert not queue.has_pending_human_messages()
+    finally:
+        idle.set()
+        await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_edited_steer_behind_another_requester_keeps_its_followup_mark(config: Config, tmp_path: Path) -> None:
+    """The requester's Steer, edited while it waits behind another person's message, keeps its bypass and its line.
+
+    The requester split answers the other person's message first, as an ordinary follow-up, and then the Steer with
+    its edited text.
+    """
+    config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
+    harness = _build_harness(config, tmp_path, thread_history=_follow_up_history(config))
+    room = _room_with_members(config, "general", "research")
+    room.add_member("@other:localhost", "Other", None)
+    queue = _QueuedMessageState()
+    queue.bind_active_requester(_SENDER)
+    messages = (
+        ("$remark:localhost", "@other:localhost", "Nice weather today", MidTurnMode.AUTO),
+        ("$steer:localhost", _SENDER, "Use the short format", MidTurnMode.STEER),
+    )
+    idle = asyncio.Event()
+    batches: list[PreparedTurn] = []
+    gate, dispatched = _follow_up_gate(harness, idle, batches, len(messages))
+    notices: dict[str, QueuedHumanNoticeReservation] = {}
+    try:
+        for event_id, sender, body, mode in messages:
+            queue.add_waiting_human_message(event_id, text=body, requester_id=sender, mentions_nobody=True, mode=mode)
+            notices[event_id] = QueuedHumanNoticeReservation(queue, event_id)
+            pending = make_pending_event(
+                _text_event(body, event_id=event_id, thread_id=_THREAD_ROOT, sender=sender),
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id=sender,
+                active_follow_up=True,
+                notice=notices[event_id],
+            )
+            await gate.admit(
+                active_follow_up_coalescing_key(_ROOM_ID, _THREAD_ROOT),
+                ready_result=ReadyPendingEvent(pending_event=pending),
+                source_event_id=event_id,
+            )
+        edited = "Use the long format"
+        assert gate.apply_pending_edit(
+            room_id=_ROOM_ID,
+            source_event_id="$steer:localhost",
+            sender=_SENDER,
+            body=edited,
+            new_content={"body": edited, "msgtype": "m.text"},
+            for_another_participant=False,
+        )
+        notices["$steer:localhost"].update(
+            request_envelope(room_id=_ROOM_ID, reply_to_event_id="$steer:localhost", prompt=edited, user_id=_SENDER),
+            mentions_nobody=False,
+        )
+        queue.bind_active_requester(None)
+        idle.set()
+        async with asyncio.timeout(1):
+            await dispatched.wait()
+        assert [
+            (batch.handled_turn.source_event_ids, request.participation is None)
+            for batch, request in zip(batches, harness.runner.requests, strict=True)
+        ] == [(("$remark:localhost",), False), (("$steer:localhost",), True)]
+        remark, steer = harness.runner.requests
+        assert steer.prompt == edited
+        assert (await _prepared_model_prompt(harness, steer)).count(_STEER_CONTINUATION_LINE) == 1
+        assert _STEER_CONTINUATION_LINE not in await _prepared_model_prompt(harness, remark)
+    finally:
+        idle.set()
+        await gate.drain_all()

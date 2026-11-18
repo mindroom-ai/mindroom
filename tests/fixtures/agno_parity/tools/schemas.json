@@ -5,7 +5,7 @@
     "functions": [
       {
         "name": "create_agent",
-        "description": "Create an agent for the person asking, with a role of its own and some of your tools.\nThe new agent's ID is your name plus `name`. `instructions` replace yours; omit them to keep yours.\n`tools` are toolkit names you have, such as `calculator`, never function names; omit it to give all of yours.\nThe owner approves on a card unless their own !auto_approve window is open;\non \"Tool approval needs the router in this room\", call `invite_router` and retry.",
+        "description": "Create an agent for the person asking, with a role of its own and some of your tools.\nThe new agent's ID is your name plus `name`. `instructions` replace yours; omit them to keep yours.\n`tools` are toolkit names you have, such as `calculator`, never function names; omit it to give all of yours.\nThe owner approves on a card unless their own /auto_approve window is open;\non \"Tool approval needs the router in this room\", call `invite_router` and retry.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1029,6 +1029,46 @@
           },
           "required": [
             "file_path"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "inline_image",
+        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string"
+            },
+            "alt": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "reference"
           ]
         },
         "strict": false,
@@ -9192,7 +9232,7 @@
       },
       {
         "name": "request_secret",
-        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.",
+        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nGive `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to\nhint at the key's form.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -9203,6 +9243,28 @@
             "reason": {
               "type": "string",
               "description": "What you need the key for, in a sentence or two the user reads on the card."
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "An `http` or `https` page where the user gets or creates the key, such as the service's keys page."
+            },
+            "placeholder": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A hint the empty field shows, such as the key's form (`sk-…`). Never a real value."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -23719,7 +23781,7 @@
     "functions": [
       {
         "name": "schedule",
-        "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
+        "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `/schedule` command.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -27296,7 +27358,7 @@
     "functions": [
       {
         "name": "request_temporary_secret",
-        "description": "Ask the user for a secret your shell commands need, with a card in this conversation, and wait.\nCall this for a password, token, passphrase or code that a command needs and that you must not see: the\nuser types it into a masked field in MindRoom Chat, and it becomes the environment variable `name` of your\nshell commands in this conversation. The value never reaches you or the chat.\nThe user chooses how long it is kept: 15 minutes, or 24 hours. Say in `reason` when the work takes longer than\n15 minutes.\nWhen you also have `request_secret` and need the API key of a service it can ask for, call that instead:\nsuch a key never reaches your commands.\nWaits up to 15 minutes and returns `status`:\n`provided` with `minutes`, how long the variable stays set: use `$name` inside the command that needs it,\nand never print, store or send the value;\n`declined` when the user refused: do not ask again for this secret in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why.",
+        "description": "Ask the user for a secret your shell commands need, with a card in this conversation, and wait.\nCall this for a password, token, passphrase or code that a command needs and that you must not see: the\nuser types it into a masked field in MindRoom Chat, and it becomes the environment variable `name` of your\nshell commands in this conversation. The value never reaches you or the chat.\nThe user chooses how long it is kept: 15 minutes, or 24 hours. Say in `reason` when the work takes longer than\n15 minutes.\nMake the card easy to answer: give `label` to say what the secret is, `url` when a page gives or creates it\n(the card shows a button that opens it), and `placeholder` to hint at its form.\nWhen you also have `request_secret` and need the API key of a service it can ask for, call that instead:\nsuch a key never reaches your commands.\nWaits up to 15 minutes and returns `status`:\n`provided` with `minutes`, how long the variable stays set: use `$name` inside the command that needs it,\nand never print, store or send the value;\n`declined` when the user refused: do not ask again for this secret in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -27307,6 +27369,39 @@
             "reason": {
               "type": "string",
               "description": "What you need the secret for, in a sentence or two the user reads on the card."
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the secret is, in a few words the card shows as its title, such as `GitHub token`."
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "An `http` or `https` page where the user gets or creates the secret, such as a token page."
+            },
+            "placeholder": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A hint the empty field shows, such as the secret's form (`ghp_…`). Never a real value."
             },
             "mindroom_output_path": {
               "anyOf": [

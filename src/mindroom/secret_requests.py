@@ -149,15 +149,22 @@ def secret_request_hosts(service: EgressService) -> tuple[str, ...]:
     return tuple(sorted({rule.host for rule in service.rules}))
 
 
+def _where_to_get_it(url: str) -> str:
+    """Return what a pending card's body says of the page the agent named, for a client that shows no button."""
+    return f" Where to get it: {url}" if url else ""
+
+
 def secret_request_body(
     status: SecretRequestStatus,
     *,
     agent_display_name: str,
     display_name: str,
+    url: str = "",
 ) -> str:
-    """Return the plain-text fallback body for a card in `status`."""
+    """Return the plain-text fallback body for a card in `status`; a pending one names the page that gives the key."""
     if status == "pending":
-        return f"🔑 {agent_display_name} asks for your {display_name} key. Open MindRoom Chat to enter it."
+        asks = f"🔑 {agent_display_name} asks for your {display_name} key. Open MindRoom Chat to enter it."
+        return asks + _where_to_get_it(url)
     if status == "saved":
         return f"🔑 {display_name} key saved."
     if status == "declined":
@@ -165,10 +172,22 @@ def secret_request_body(
     return f"🔑 {display_name} key request expired."
 
 
-def temporary_secret_body(status: SecretRequestStatus, *, agent_display_name: str, name: str) -> str:
-    """Return the plain-text fallback body for a temporary secret's card in `status`."""
+def temporary_secret_body(
+    status: SecretRequestStatus,
+    *,
+    agent_display_name: str,
+    name: str,
+    label: str = "",
+    url: str = "",
+) -> str:
+    """Return the plain-text fallback body for a temporary secret's card in `status`.
+
+    A pending one says what the agent calls the secret and names the page that gives it.
+    """
     if status == "pending":
-        return f"🔑 {agent_display_name} asks for a secret ({name}). Open MindRoom Chat to enter it."
+        asked = f"{label}, {name}" if label else name
+        asks = f"🔑 {agent_display_name} asks for a secret ({asked}). Open MindRoom Chat to enter it."
+        return asks + _where_to_get_it(url)
     if status == "saved":
         return "🔑 Secret received."
     if status == "declined":
@@ -183,6 +202,11 @@ def secret_request_content(
     reason: str,
     status: SecretRequestStatus,
     replaces: bool = False,
+    label: str = "",
+    url: str = "",
+    placeholder: str = "",
+    response_event_id: str | None = None,
+    tool_call_id: str | None = None,
 ) -> dict[str, object]:
     """Return the `io.mindroom.secret_request` object: metadata only, never a value.
 
@@ -191,6 +215,13 @@ def secret_request_content(
     A temporary secret's card has no service fields, so a client that knows only key cards reads none in it; it
     names the variable, the keeps the requester chooses from with their lifetimes in seconds, and, once answered, the
     keep chosen.
+
+    What the agent chose to show is there only when given: the `url` of the page that gives the secret, the
+    `placeholder` of the empty field, and a temporary secret's `label` (a key card is named after its service).
+
+    A card asked by a reply's tool call names the reply's event (`response_event_id`) and the call (`tool_call_id`), so
+    a client can draw the card at the call's line; it names neither when the call was not made by a reply that shows
+    an event.
     """
     content: dict[str, object] = {"request_id": request.request_id, "requester_id": request.requester_id}
     target = request.target
@@ -201,6 +232,10 @@ def secret_request_content(
     content |= {"reason": reason, "status": status, "expires_at": int(request.expires_at * 1000)}
     if replaces:
         content["replaces"] = True
+    shown = {"label": label if isinstance(target, TemporaryTarget) else "", "url": url, "placeholder": placeholder}
+    content |= {key: text for key, text in shown.items() if text}
+    if response_event_id is not None and tool_call_id is not None:
+        content |= {"response_event_id": response_event_id, "tool_call_id": tool_call_id}
     if isinstance(target, TemporaryTarget):
         content["keep"] = dict(TEMPORARY_SECRET_KEEP_SECONDS)
         if request.kept is not None:

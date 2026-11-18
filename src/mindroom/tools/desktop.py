@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     ],
     docs_url="https://docs.mindroom.chat/tools/desktop/",
     helper_text=(
-        "Ask the requester to send `!desktop setup` in a private Matrix room containing only them and one "
+        "Ask the requester to send `/desktop setup` in a private Matrix room containing only them and one "
         "Desktop-enabled agent, plus the router when it serves the command."
     ),
     function_names=("desktop",),

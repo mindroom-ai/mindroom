@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import quote
@@ -17,7 +19,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
-from mindroom.thread_export import ThreadExportTarget
+from mindroom.thread_export import ThreadExportSource, ThreadExportTarget, export_threads_to_sources
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (
     export_threads_for_targets_for_client as _export_threads_for_targets_for_client,
@@ -55,6 +57,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.thread_export import ThreadExportStats
+    from mindroom.thread_export.execution import ExportedThreads
 
 
 async def _export_threads_for_client(
@@ -430,6 +433,81 @@ async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
 
     assert index_path.stat().st_mtime_ns == first_mtime
     build_index.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pass_indexes_the_threads_it_wrote_without_parsing_their_files(tmp_path: Path) -> None:
+    """A pass parses only thread files it did not write, and its index matches a rebuild that parses every file."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    output_dir = tmp_path / "exports"
+    rooms = _export_rooms(runtime_paths, "lobby")
+    thread_ids = ["$older:localhost", "$quiet:localhost", "$active:localhost"]
+    histories = {
+        thread_id: [
+            ResolvedVisibleMessage.synthetic(
+                sender=f"@{name}:localhost",
+                body=f"{name} opens",
+                timestamp=1_700_000_000_000 + index,
+                event_id=thread_id,
+            ),
+        ]
+        for index, (thread_id, name) in enumerate(zip(thread_ids, ["alice", "bob", "carol"], strict=True))
+    }
+
+    async def fetch_history(*_args: object, thread_id: str, **_kwargs: object) -> object:
+        return histories[thread_id]
+
+    async def export(enumerated: list[str], *, truncated: bool) -> ThreadExportStats:
+        with (
+            patch(
+                "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+                new=AsyncMock(return_value=(enumerated, truncated)),
+            ),
+            patch(
+                "mindroom.thread_export.execution.fetch_projected_thread_history",
+                new=AsyncMock(side_effect=fetch_history),
+            ),
+        ):
+            return await _export_threads_for_client(
+                client=Mock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                output_dir=output_dir,
+                rooms=rooms,
+            )
+
+    await export(thread_ids, truncated=False)
+    histories["$active:localhost"].append(
+        ResolvedVisibleMessage.synthetic(
+            sender="@dave:localhost",
+            body="dave replies",
+            timestamp=1_700_000_000_100,
+            event_id="$reply:localhost",
+            thread_id="$active:localhost",
+        ),
+    )
+    with patch.object(
+        thread_export_storage,
+        "_thread_index_entry",
+        wraps=thread_export_storage._thread_index_entry,
+    ) as parse:
+        stats = await export(thread_ids[1:], truncated=True)
+
+    assert stats.threads_unchanged == 1
+    assert [call.args[0] for call in parse.call_args_list] == [f"{quote('$older:localhost', safe='')}.yaml"]
+    index_path = output_dir / "lobby" / "index.json"
+    from_pass = index_path.read_bytes()
+    index_path.unlink()
+    write_room_index(output_dir, rooms[0])
+    assert index_path.read_bytes() == from_pass
+    index = json.loads(from_pass)
+    assert [(entry["thread_id"], entry["participants"]) for entry in index["threads"]] == [
+        ("$active:localhost", ["@carol:localhost", "@dave:localhost"]),
+        ("$quiet:localhost", ["@bob:localhost"]),
+        ("$older:localhost", ["@alice:localhost"]),
+    ]
 
 
 @pytest.mark.asyncio
@@ -892,14 +970,14 @@ async def test_empty_complete_enumeration_repairs_index_after_committed_yaml_add
             ],
         }
 
-    assert write_thread_payload(output_dir, room, indexed_thread_id, payload(indexed_thread_id)) is True
+    assert write_thread_payload(output_dir, room, indexed_thread_id, payload(indexed_thread_id)).replaced is True
     index_path = output_dir / "lobby" / "index.json"
     if existing_index:
         write_room_index(output_dir, room)
         assert json.loads(index_path.read_text(encoding="utf-8"))["thread_count"] == 1
     else:
         assert not index_path.exists()
-    assert write_thread_payload(output_dir, room, committed_thread_id, payload(committed_thread_id)) is True
+    assert write_thread_payload(output_dir, room, committed_thread_id, payload(committed_thread_id)).replaced is True
 
     with patch(
         "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
@@ -1440,3 +1518,203 @@ async def test_export_threads_counts_only_enumerated_rooms(tmp_path: Path) -> No
     assert stats.rooms_exported == 1
     assert stats.failures == 1
     assert stats.failed_items[0].room_key == "lobby"
+
+
+_REMEMBERED_ROOM = _ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Lobby")
+_REMEMBERED_THREAD = "$stable:localhost"
+_REMEMBERED_HISTORY = (
+    ResolvedVisibleMessage.synthetic(
+        sender="@alice:localhost",
+        body="Stable content",
+        timestamp=1_700_000_000_000,
+        event_id=_REMEMBERED_THREAD,
+    ),
+)
+
+
+_MARKER = (1, 1, 1, None)
+
+
+def _journal_answer(*event_ids: str) -> AsyncMock:
+    """Return the journal's fingerprint of the remembered thread: a standing marker and these unedited rows."""
+    rows = frozenset((event_id, event_id, None) for event_id in (_REMEMBERED_THREAD, *event_ids))
+    return AsyncMock(return_value=(_MARKER, rows))
+
+
+def _remembering_source(
+    exported: ExportedThreads,
+    fingerprint: AsyncMock,
+    room: _ThreadExportRoom = _REMEMBERED_ROOM,
+) -> ThreadExportSource:
+    """Return a workspace source whose journal answers ``fingerprint`` for every thread."""
+    reader = Mock()
+    reader.completeness.thread_fingerprint = fingerprint
+    return ThreadExportSource(
+        client=Mock(),
+        reader=reader,
+        rooms=(room,),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
+        exported=exported,
+    )
+
+
+async def _remembering_pass(
+    config: Config,
+    output_dir: Path,
+    source: ThreadExportSource,
+    history: Sequence[ResolvedVisibleMessage] = _REMEMBERED_HISTORY,
+) -> tuple[ThreadExportStats, AsyncMock]:
+    """Run one workspace pass over the remembered thread, and return its stats and the thread read it made."""
+    fetch = AsyncMock(return_value=copy.deepcopy(list(history)))
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=([_REMEMBERED_THREAD], False)),
+        ),
+        patch("mindroom.thread_export.execution.fetch_projected_thread_history", new=fetch),
+    ):
+        (stats,) = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            sources=(source,),
+            targets=(ThreadExportTarget(output_dir=output_dir),),
+            full_pass=False,
+        )
+    return stats, fetch
+
+
+def _remembered_file(output_dir: Path) -> Path:
+    return output_dir / "lobby" / f"{quote(_REMEMBERED_THREAD, safe='')}.yaml"
+
+
+@pytest.mark.asyncio
+async def test_a_pass_skips_a_thread_nothing_changed_in_since_it_wrote_it(tmp_path: Path) -> None:
+    """A thread whose journal fingerprint has not moved is neither read nor written, and stays in the room index."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    fingerprint = _journal_answer()
+    source = _remembering_source({}, fingerprint)
+
+    await _remembering_pass(config, output_dir, source)
+    written = _remembered_file(output_dir).read_bytes()
+    unchanged, fetch = await _remembering_pass(config, output_dir, source)
+
+    fetch.assert_not_awaited()
+    assert (unchanged.threads_exported, unchanged.threads_unchanged, unchanged.failures) == (1, 1, 0)
+    assert _remembered_file(output_dir).read_bytes() == written
+    index = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))
+    assert [entry["thread_id"] for entry in index["threads"]] == [_REMEMBERED_THREAD]
+
+    fingerprint.return_value = (_MARKER, frozenset({(_REMEMBERED_THREAD, "$edit:localhost", None)}))
+    _, fetch = await _remembering_pass(config, output_dir, source)
+
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["edit", "delete"])
+async def test_a_pass_restores_an_export_file_changed_since_it_wrote_it(tmp_path: Path, change: str) -> None:
+    """A thread file someone edited or deleted is read and written again, even though the thread did not change."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    source = _remembering_source({}, _journal_answer())
+    await _remembering_pass(config, output_dir, source)
+    path = _remembered_file(output_dir)
+    exported = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if change == "edit":
+        # The same size in the same file, so only the modification time tells the edit apart.
+        status = path.stat()
+        path.write_bytes(path.read_bytes().replace(b"Stable content", b"Edited content"))
+        os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns + 1_000_000_000))
+        assert (path.stat().st_ino, path.stat().st_size) == (status.st_ino, status.st_size)
+    else:
+        path.unlink()
+
+    _, fetch = await _remembering_pass(config, output_dir, source)
+
+    fetch.assert_awaited_once()
+    restored = yaml.safe_load(_remembered_file(output_dir).read_text(encoding="utf-8"))
+    assert restored["messages"] == exported["messages"]
+
+
+@pytest.mark.asyncio
+async def test_a_thread_titled_by_a_person_is_read_on_every_pass(tmp_path: Path) -> None:
+    """A title a person set holds only while room membership authorizes them, so its thread is never skipped."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    pin = ResolvedVisibleMessage.synthetic(
+        sender="@alice:localhost",
+        body="Person title",
+        event_id="$pin:localhost",
+        timestamp=1_700_000_001_000,
+        content={
+            "msgtype": "m.notice",
+            "body": "Person title",
+            "io.mindroom.thread_summary": {
+                "version": 1,
+                "summary": "Person title",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "model": "manual",
+                "pinned": True,
+            },
+        },
+        thread_id=_REMEMBERED_THREAD,
+    )
+    # The journal holds exactly the rows the export reads, so only the person's title keeps the thread from a skip.
+    source = _remembering_source({}, _journal_answer("$pin:localhost"))
+
+    with patch("mindroom.thread_export.execution.human_summary_authorizer", return_value=lambda _sender: True):
+        await _remembering_pass(config, output_dir, source, (*_REMEMBERED_HISTORY, pin))
+        _, fetch = await _remembering_pass(config, output_dir, source, (*_REMEMBERED_HISTORY, pin))
+
+    fetch.assert_awaited_once()
+    assert (
+        yaml.safe_load(_remembered_file(output_dir).read_text(encoding="utf-8"))["thread"]["summary"] == "Person title"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["room", "trusted_senders"])
+async def test_a_pass_reads_a_thread_again_when_what_its_export_shows_besides_messages_changes(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    """A renamed room or a changed set of trusted title senders has a pass read a thread whose messages did not change."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    exported: ExportedThreads = {}
+    fingerprint = _journal_answer()
+    await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint))
+
+    if change == "room":
+        renamed = replace(_REMEMBERED_ROOM, name="Renamed")
+        _, fetch = await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint, renamed))
+        assert yaml.safe_load(_remembered_file(output_dir).read_text(encoding="utf-8"))["room"]["name"] == "Renamed"
+    else:
+        with patch(
+            "mindroom.thread_export.execution.trusted_sender_ids_for_export",
+            return_value=frozenset({"@mindroom_new:localhost"}),
+        ):
+            _, fetch = await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint))
+
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError("unsafe room"), OSError("unreadable room")])
+async def test_a_room_whose_thread_files_cannot_be_listed_is_exported_as_on_a_first_pass(
+    tmp_path: Path,
+    error: Exception,
+) -> None:
+    """When the room's export files cannot be listed, every thread is read and written as if nothing was remembered."""
+    config = _config(tmp_path)
+    output_dir = tmp_path / "exports"
+    source = _remembering_source({}, _journal_answer())
+    await _remembering_pass(config, output_dir, source)
+
+    with patch("mindroom.thread_export.execution.thread_file_identities", side_effect=error):
+        stats, fetch = await _remembering_pass(config, output_dir, source)
+
+    fetch.assert_awaited_once()
+    assert (stats.threads_exported, stats.failures) == (1, 0)

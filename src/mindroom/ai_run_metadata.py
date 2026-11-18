@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
+from mindroom.delegation.cost import received_subagent_cost_usd
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.usage import RunMetrics
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
@@ -269,6 +270,31 @@ def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
     return (RunMetrics.from_dict(stored),) if isinstance(stored, dict) else ()
 
 
+def model_payload(
+    config: Config,
+    model_name: str,
+    *,
+    model_id: str | None = None,
+    provider: str | None = None,
+) -> dict[str, str]:
+    """Return the ``model`` object clients show: the configured name, its display name, model ID, and provider.
+
+    ``model_id`` and ``provider`` are what the run recorded; each falls back to the configured model's.
+    """
+    model_config = config.models.get(model_name)
+    payload = {"config": model_name}
+    if model_config is not None:
+        if model_config.display_name:
+            payload["display_name"] = model_config.display_name
+        model_id = model_id or model_config.id
+        provider = provider or model_config.provider
+    if model_id is not None:
+        payload["id"] = model_id
+    if provider is not None:
+        payload["provider"] = provider
+    return payload
+
+
 def build_ai_run_metadata_content(
     *,
     config: Config,
@@ -296,7 +322,9 @@ def build_ai_run_metadata_content(
     describes the final run: its model, run id, status, tool count, and context.
     `context_run` is the run whose last own model request's context the reply reports: the reply's run, or a team's
     leader run, whose members' requests each held a context of their own.
-    `prices` maps recorded (provider, model ID) identities to prices for the reply's cost.
+    `prices` maps recorded (provider, model ID) identities to prices for the reply's cost, which covers the reply's own
+    model requests. What the subagent turns whose results the turn received cost is published beside it, read from the
+    turn running in this context when this builds: an approval resume makes its builder before its calls run.
     """
     metrics = turn_usage(prior_usage, metrics)
     model_config = config.models.get(model_name)
@@ -310,14 +338,7 @@ def build_ai_run_metadata_content(
         "session_id": session_id,
         "status": status.value.lower(),
     }
-    model_payload: dict[str, Any] = {"config": model_name}
-    if model_config is not None and model_config.display_name:
-        model_payload["display_name"] = model_config.display_name
-    if model_id is not None:
-        model_payload["id"] = model_id
-    if provider is not None:
-        model_payload["provider"] = provider
-    payload["model"] = model_payload
+    payload["model"] = model_payload(config, model_name, model_id=model_id, provider=provider)
     if metrics is not None:
         usage = ReplyUsage.of(
             metrics,
@@ -333,8 +354,13 @@ def build_ai_run_metadata_content(
         model_id=model_id,
         prices=prices,
     )
+    cost_payload: dict[str, str] = {}
     if cost is not None:
-        payload["cost"] = {"usd": format_cost_usd(cost)}
+        cost_payload["usd"] = format_cost_usd(cost)
+    if (subagents_usd := received_subagent_cost_usd()) is not None:
+        cost_payload["subagents_usd"] = format_cost_usd(subagents_usd)
+    if cost_payload:
+        payload["cost"] = cost_payload
     context = _reply_context_tokens(
         context_run,
         prepared_history,

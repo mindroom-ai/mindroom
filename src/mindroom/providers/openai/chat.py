@@ -143,10 +143,11 @@ class ChatAdapter:
         timer = TurnTimer()
         # Reading and encoding attachments can be slow, so the body is built off the event loop.
         kwargs = with_request_headers(await asyncio.to_thread(self._request_kwargs, request))
-        accumulator = ChatStream(self.wire)
         try:
             client = await self.clients.client()
             await request.on_send(sdk_request_body(kwargs, SDK_OPTION_KEYS))
+            # Made as the request goes out: its reasoning's start is the send.
+            accumulator = ChatStream(self.wire)
             sdk_stream = await client.chat.completions.create(**kwargs)
             # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK
             # stops decoding at the sentinel, so a body decoded to its end never sent one.

@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -18,6 +19,7 @@ from mindroom.ai import TurnResult, ai_response
 from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import activity as activity_module
 from mindroom.delegation import lifecycle
@@ -201,7 +203,7 @@ def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> No
     a = _activity()
     origin = ToolCallOrigin(parent_bash_call_id="bash-1", toolkit_name="files")
     keyed = "api_key=example-secret"
-    a.tool_started(ToolStarted(call=_call("c1", args={"query": keyed}), origin=origin))
+    a.tool_started(ToolStarted(call=_call("c1", args={"query": keyed}), origin=origin), now=1.0)
     (running,) = a.snapshot().items
     assert running.state == "running"
     assert "example-secret" not in (_checked_entry(running).args_preview or "")
@@ -218,13 +220,32 @@ def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> No
 def test_a_call_announced_again_keeps_its_one_row() -> None:
     """A paused call that is announced again as it resumes runs on in its own row, which its completion finishes."""
     a = _activity()
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.add_text("Waiting")
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.tool_completed(ToolCompleted(call=_call("c1", result="x")))
     assert [(i.kind, i.tool_call_id, i.state) for i in a.snapshot().items] == [
         ("tool", "c1", "done"),
         ("text", None, None),
+    ]
+
+
+def test_a_tool_row_keeps_when_its_call_first_started() -> None:
+    """A row carries when its call started, which announcing it again on resume and completing it keep.
+
+    A completion with no row of its own appends a row that names no start.
+    """
+    a = _activity()
+    a.tool_started(ToolStarted(call=_call("c1")), now=100.0)
+    assert a.snapshot().items[0].started_at == 100.0
+    a.add_text("Waiting")
+    a.tool_started(ToolStarted(call=_call("c1")), now=200.0)
+    assert a.snapshot().items[0].started_at == 100.0
+    a.tool_completed(ToolCompleted(call=_call("c1", result="x")))
+    a.tool_completed(ToolCompleted(call=_call("c9", result="x")))
+    assert [(i.tool_call_id, i.state, i.started_at) for i in a.snapshot().items if i.kind == "tool"] == [
+        ("c1", "done", 100.0),
+        ("c9", "done", None),
     ]
 
 
@@ -238,7 +259,7 @@ def test_a_completion_without_a_start_appends_a_done_row() -> None:
 def test_failed_tool_call_is_an_error_row() -> None:
     """A failed call ends in state error."""
     a = _activity()
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.tool_completed(ToolCompleted(call=_call("c1", result="boom", is_error=True)))
     assert a.snapshot().items[0].state == "error"
 
@@ -247,7 +268,7 @@ def test_text_past_6000_characters_is_cut_to_the_newest_5000() -> None:
     """The oldest text loses its head first; the order of items stays."""
     a = _activity()
     a.add_text("a" * 4_000)
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.add_text("b" * 4_000)
     items = a.snapshot().items
     texts = [i.text for i in items if i.kind == "text"]
@@ -282,7 +303,7 @@ def test_an_emptied_text_item_is_removed_and_counted() -> None:
     """Text trimmed to nothing disappears and counts as dropped."""
     a = _activity()
     a.add_text("a" * 100)
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.add_text("b" * 6_000)
     snapshot = a.snapshot()
     assert [i.kind for i in snapshot.items] == ["tool", "text"]
@@ -293,7 +314,7 @@ def test_tool_items_keep_the_newest_20_and_count_the_rest() -> None:
     """The 21st tool row removes the oldest one."""
     a = _activity()
     for n in range(23):
-        a.tool_started(ToolStarted(call=_call(f"c{n}")))
+        a.tool_started(ToolStarted(call=_call(f"c{n}")), now=1.0)
     snapshot = a.snapshot()
     assert len(snapshot.items) == 20
     assert snapshot.items[0].tool_call_id == "c3"
@@ -501,6 +522,24 @@ async def test_a_resumed_attempt_publishes_to_its_own_sink() -> None:
 
 
 @pytest.mark.asyncio
+async def test_frames_carry_the_model_the_child_runs_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mid-run model switch and a resume's model reach the next snapshot, and the switched one its run's meta."""
+    monkeypatch.setattr(lifecycle, "update_subagent_turn_sync", lambda *_args: None)
+    seen = _Sink()
+    child = _child()
+    feed = ActivityFeed.open(child, parent_delegation_id="p0", root_caller_agent_name="lead", sink=seen)
+    assert (await seen.wait_for(1)).model_name == "fast"
+    lifecycle.note_child_run_id(child, "run-2", _runtime_paths(tmp_path), model_name="smart")
+    switched = await seen.wait_for(2)
+    assert subagents_module._run_meta(switched, full=False)["model"] == {"config": "smart"}
+    feed.status("paused")
+    await seen.wait_for(3)
+    child.model_name = "retained"
+    ActivityFeed.open(child, parent_delegation_id="p0", root_caller_agent_name="lead", sink=seen)
+    assert (await seen.wait_for(4)).model_name == "retained"
+
+
+@pytest.mark.asyncio
 async def test_a_terminal_status_forgets_the_entry() -> None:
     """A finished run is published once with its result, and the same id later starts empty."""
     seen = _Sink()
@@ -595,6 +634,52 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
     assert (last.caller_agent_name, last.agent_name) == ("leader", "child")
     assert last.parent_delegation_id is None
     assert not _OPEN
+
+
+@pytest.mark.asyncio
+async def test_a_childs_progress_names_when_its_tool_call_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """The caller's progress names the UTC time the child's call started, the start its feed row carries."""
+    reports: list[str] = []
+    monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
+    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+
+    with tool_runtime_context(runtime):
+        await ai_response(turn, paths, config)
+
+    last = await seen.wait_for_status("completed")
+    started_at = last.items[0].started_at
+    assert started_at is not None
+    assert abs(time.time() - started_at) < 60
+    started = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
+    assert f"\nCalling add (started {started} UTC)\n" in reports
+
+
+@pytest.mark.asyncio
+async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_anew(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """A provider may reuse a call id within a run; the later call names its own start, not the finished one's."""
+    clock = iter([100.0, 200.0])
+    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: next(clock)))
+    reports: list[str] = []
+    monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
+    child_turns = [calls(tool_call("add", "add", a=1, b=2)), calls(tool_call("add", "add", a=3, b=4)), answer("Done")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+
+    with tool_runtime_context(runtime):
+        await ai_response(turn, paths, config)
+
+    last = await seen.wait_for_status("completed")
+    assert [item.started_at for item in last.items if item.kind == "tool"] == [100.0]
+    calling = [line for line in reports[-1].splitlines() if line.startswith("Calling")]
+    assert calling == ["Calling add (started 00:01:40 UTC)", "Calling add (started 00:03:20 UTC)"]
 
 
 @pytest.mark.asyncio
@@ -722,6 +807,7 @@ async def test_a_delegated_child_streams_frames_to_its_room(
     room = FrameRoom(encrypted=encrypted)
     child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+    config.models["default"] = ModelConfig(provider="anthropic", id="claude-opus-5-5", display_name="Opus 5.5")
     context, _bot = _in_room(runtime, room)
 
     with tool_runtime_context(context):
@@ -730,6 +816,8 @@ async def test_a_delegated_child_streams_frames_to_its_room(
     assert result.text.endswith("Done")
     frames = await _run_frames(room)
     first, last = frames[0], frames[-1]
+    model = {"config": "default", "display_name": "Opus 5.5", "id": "claude-opus-5-5", "provider": "anthropic"}
+    assert all(frame["meta"]["model"] == model for frame in frames)
     assert {frame["run"] for frame in frames} == {first["run"]}
     assert "snapshot" in first
     assert (first["meta"]["status"], first["meta"]["caller"], first["meta"]["root"]) == ("running", "leader", "leader")

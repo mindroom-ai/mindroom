@@ -87,8 +87,12 @@ async def search_agent_memories(
     limit: int = 3,
     execution_identity: ToolExecutionIdentity | None = None,
     editable: bool = False,
+    recall: bool = False,
 ) -> MemorySearchOutcome:
-    """Search agent memories including team memories; ``editable`` returns only IDs update and delete accept."""
+    """Search agent memories including team memories; ``editable`` returns only IDs update and delete accept.
+
+    ``recall`` marks the per-turn recall, which semantic file memory narrows by score gap and token budget.
+    """
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemorySearchOutcome(results=[])
     return await backend.search(
@@ -98,6 +102,7 @@ async def search_agent_memories(
         limit=limit,
         execution_identity=execution_identity,
         editable=editable,
+        recall=recall,
     )
 
 
@@ -206,6 +211,7 @@ async def _entrypoint_preamble(
     backend: ResolvedMemoryBackend,
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     conversation: ConversationRef | None,
     counter: TokenCounter,
@@ -228,13 +234,15 @@ async def _entrypoint_preamble(
     preamble = "\n".join(part for part in (body, _render_truncation_notice(entrypoint, config)) if part)
     if conversation is None or entrypoint.source_path is None:
         return preamble
-    return stable_entrypoint_preamble(
+    return await asyncio.to_thread(
+        stable_entrypoint_preamble,
         agent_name,
         conversation,
         entrypoint.source_path,
         body,
         preamble,
-        now=time.monotonic(),
+        store=runtime_paths.storage_root / "memory_entrypoint_snapshots.json",
+        now=time.time(),
     )
 
 
@@ -253,7 +261,15 @@ async def conversation_entrypoint_preamble(
     """
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return ""
-    return await _entrypoint_preamble(backend, agent_name, config, execution_identity, conversation, counter)
+    return await _entrypoint_preamble(
+        backend,
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity,
+        conversation,
+        counter,
+    )
 
 
 @timed("system_prompt_assembly.memory_enhancement")
@@ -282,6 +298,7 @@ async def build_memory_prompt_parts(
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        recall=True,
     )
     agent_memories = search_outcome.results
     if agent_memories:
@@ -291,6 +308,7 @@ async def build_memory_prompt_parts(
         backend,
         agent_name,
         config,
+        runtime_paths,
         execution_identity,
         conversation,
         counter,

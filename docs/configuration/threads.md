@@ -164,7 +164,8 @@ An agent judges a message only when all of these hold:
 Configured human aliases count as one participant, while agents, the internal service account, and `bot_accounts` do not count as humans.
 Agents merely present in the room never join: with 50 agents in a room and two already in the thread, only those two can judge, and only if each opted in.
 Each eligible agent decides separately.
-Commands and scheduled work never use adaptive participation.
+Commands, scheduled work, and a queued message the [mid-turn judge](#mid-turn-coalescing) said a running reply cannot wait for never use adaptive participation, so the agent answers that message once the reply ends.
+The judge decides once for all queued messages, so when new messages from two people were judged together, or a message was edited after the judgment, participation still decides.
 
 An agent that declines sends no reply; with `decline_reaction` set, it reacts once to the latest message of the turn.
 Choose the emoji with care, because 👍 can read as agreement with the message.
@@ -265,7 +266,7 @@ agents:
 
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
 It also lets the task continue for a message from another person than the one the agent is answering that is not about the task, such as a remark to someone else in the thread.
-It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
+It decides a message cannot wait when it stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
 When the judge is unsure, times out, or fails, the agent gets the wrap-up notice, except for the queued messages described below.
 With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
@@ -300,6 +301,33 @@ It does not cancel running tools or show the agent the queued text.
 Tool calls the agent makes in answer to it end the response without running.
 Stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
+
+### Steer, Queue and Auto
+
+A client chooses what a message does when it arrives during a reply by adding `io.mindroom.mid_turn` to its content, with the value `steer`, `queue`, or `auto`.
+A message without the key or with an unknown value is `auto`, so Element and other clients behave as described above.
+There is no config setting for this; the mode travels on each message.
+
+```json
+{"msgtype": "m.text", "body": "Also print the date.", "io.mindroom.mid_turn": "steer"}
+```
+
+**Steer** redirects the running reply, but only from the person that reply answers; a Steer from anyone else is handled as Auto.
+The reply ends after its current tool batch, with no wrap-up notice and no summary, and its message stays in the thread as completed with its text and tool calls so far.
+The steering message then gets its own new reply below it, which is answered without a participation check and told to carry on with the task, taking the message into account.
+The earlier tool calls and results reach it through normal [history](history.md), so your configured history limits apply to what it sees.
+That follow-up extends the cut-off reply's last model request, so provider prompt caching still applies.
+A Steer that arrives while the agent is writing its final text simply becomes the next turn, still carrying on the task, and a Steer while the agent is idle is an ordinary message.
+A Steer also releases a tool call waiting to move to the background at once; see [When a call becomes a job](../tools/agent-orchestration.md#when-a-call-becomes-a-job).
+A steered reply that showed nothing, because it wrote no text and its tool calls are hidden, has its placeholder removed with no failure note.
+The exception is a steered reply resuming after a [tool approval](../tool-approval.md), which ends with the usual "Tool approval continuation completed" text.
+
+**Queue** never interrupts: the message is not judged, sends no wrap-up notice, and does not move a waiting tool call to the background.
+It gets the agent's `defer_reaction`, if set, and is answered as its own turn after the reply finishes.
+
+**Auto** lets the mid-turn judge decide, as described above.
+When the judge explicitly says a message cannot wait, which includes a TypeSafe or OpenAI Decisions probability below `threshold`, the reply ends at the batch and the message continues the task in a new reply, exactly as for Steer, instead of getting the wrap-up notice.
+A skipped, failed, or timed-out judgment, or an agent with no `mid_turn` judge, still sends the wrap-up notice.
 
 ## Activity in Other Threads
 

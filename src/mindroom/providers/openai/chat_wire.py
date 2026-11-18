@@ -9,6 +9,7 @@ one finished turn.
 from __future__ import annotations
 
 import inspect
+import time
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -113,6 +114,10 @@ def chat_stop_reason(finish_reason: str | None) -> StopReason | None:
 
 # --- Requests -------------------------------------------------------------------------------------------------
 
+# The field each type of OpenRouter ``reasoning_details`` item holds its text in; ``data`` and ``signature`` are
+# ciphertext.
+_REASONING_DETAIL_TEXT = {"reasoning.text": "text", "reasoning.summary": "summary"}
+
 
 def _message_content(message: Message) -> str | list[Any] | None:
     """Return the content a Chat message carries; a tool result always has one, as the API requires."""
@@ -150,8 +155,42 @@ def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, 
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None
     if wire.route == "openrouter" and reasoning_details:
-        formatted["reasoning_details"] = reasoning_details
+        # LEGACY_COMPAT: OpenRouter reasoning details stored as the pieces their stream sent.
+        # Legacy format: an OpenRouter reply whose ``provider_data["reasoning_details"]`` holds one item per streamed
+        # piece, so a reasoning text or summary spans many consecutive items of one type and index.
+        # Last legacy release: v2026.11.389, which stored the pieces as every streaming release before it did, the
+        # Agno-based ones included (Agno 3.0.9 extends the list per delta); replacement: the first release after it
+        # stores each detail whole (``ChatStream.finish``).
+        # Handling: each request joins the pieces into whole details, as later releases store them; signatures and
+        # encrypted details pass unchanged.
+        # Coverage: tests/providers/test_openai_family_wire.py::test_a_reply_v2026_11_389_stored_sends_its_reasoning_details_whole
+        formatted["reasoning_details"] = _joined_reasoning_details(reasoning_details)
     return formatted
+
+
+def _joined_reasoning_details(details: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Join OpenRouter's streamed reasoning detail pieces into whole details, as its unstreamed replies hold them.
+
+    A stream sends a text or summary as consecutive pieces of one type, index, and id, a text's signature in its last
+    piece, and an encrypted detail whole.
+    """
+    joined: list[dict[str, Any]] = []
+    for detail in details:
+        last = joined[-1] if joined else None
+        name = _REASONING_DETAIL_TEXT.get(detail.get("type", ""))
+        if (
+            name is None
+            or last is None
+            or any(last.get(key) != detail.get(key) for key in ("type", "index", "id"))
+            or last.get("signature") is not None
+        ):
+            joined.append(dict(detail))
+            continue
+        last[name] = (last.get(name) or "") + (detail.get(name) or "")
+        for key, value in detail.items():
+            if last.get(key) is None:
+                last[key] = value
+    return joined
 
 
 def _chat_messages(messages: Sequence[Message], wire: ChatWire, provider: str) -> list[dict[str, Any]]:
@@ -382,10 +421,6 @@ def chat_request_kwargs(
     return sdk_call_kwargs(params, "chat")
 
 
-# The text fields of an OpenRouter ``reasoning_details`` item; its ``data`` and ``signature`` are ciphertext.
-_REASONING_DETAIL_TEXT_FIELDS = ("text", "summary")
-
-
 def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts: RequestParts, *, static: bool) -> None:
     """Add what a Chat request body gives its model to ``parts``.
 
@@ -408,7 +443,7 @@ def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts:
         parts.text(formatted.get("reasoning_content"))
         details = formatted.get("reasoning_details") or ()
         for detail in details:
-            for name in _REASONING_DETAIL_TEXT_FIELDS:
+            for name in _REASONING_DETAIL_TEXT.values():
                 if isinstance(text := detail.get(name), str):
                     parts.text(text)
         if any(detail.get("data") for detail in details):
@@ -454,16 +489,6 @@ def _chunk_usage(chunk: ChatCompletionChunk, wire: ChatWire) -> Mapping[str, Any
     return None if chunk.usage is None else chunk.usage.model_dump()
 
 
-def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> None:
-    """Merge one delta's provider data: lists extend, everything else is replaced."""
-    for key, value in update.items():
-        existing = target.get(key)
-        if isinstance(existing, list) and isinstance(value, list):
-            existing.extend(value)
-        else:
-            target[key] = value
-
-
 def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Store each call under the id its later requests send, so its result and approval receipt name that id.
 
@@ -505,6 +530,9 @@ class ChatStream:
     _reasoning: list[str] = field(default_factory=list)
     _calls: dict[int, dict[str, Any]] = field(default_factory=dict)
     _think: ThinkTagSplitter = field(default_factory=ThinkTagSplitter)
+    # When the call was sent or last sent text. OpenRouter sends a call's reasoning in one burst once the model has
+    # finished it, so its reasoning carries this as the thought's start; other routes stream reasoning as it is written.
+    _output_at: float = field(default_factory=time.monotonic)
 
     def add(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
         """Fold one chunk and return the events it carried: a partial report of usage it carried, then its deltas.
@@ -526,7 +554,10 @@ class ChatStream:
     def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
         if content is None:
             return []
-        _merge_provider_data(self.parts.provider_data, _reply_metadata(chunk))
+        self.parts.provider_data.update(_reply_metadata(chunk))
+        if content:
+            # OpenRouter's reasoning chunks carry an empty content, which is no output.
+            self._output_at = time.monotonic()
         return self._add_text(self._think.add(content))
 
     def _add_text(self, deltas: list[TextDelta | ReasoningDelta]) -> list[StreamEvent]:
@@ -537,12 +568,13 @@ class ChatStream:
 
     def _add_reasoning(self, fields: Mapping[str, Any]) -> list[StreamEvent]:
         if self.wire.route == "openrouter" and (details := fields.get("reasoning_details")):
-            _merge_provider_data(self.parts.provider_data, {"reasoning_details": list(details)})
+            self.parts.provider_data.setdefault("reasoning_details", []).extend(details)
         reasoning = _reasoning_field(fields)
         if not isinstance(reasoning, str):
             return []
         self._reasoning.append(reasoning)
-        return [ReasoningDelta(reasoning)] if reasoning else []
+        started_at = self._output_at if self.wire.route == "openrouter" else None
+        return [ReasoningDelta(reasoning, started_at=started_at)] if reasoning else []
 
     def _add_call_delta(self, call: Any, position: int) -> None:  # noqa: ANN401 - SDK tool-call delta model
         """Fold one call delta into the call at its index; a server that sends no index places it by its position."""
@@ -573,6 +605,8 @@ class ChatStream:
         self.parts.content = "".join(self._content) or None
         # An empty reasoning field means the model reasoned to nothing, which a route replaying reasoning sends back.
         self.parts.reasoning = "".join(self._reasoning) if self._reasoning else None
+        if details := self.parts.provider_data.get("reasoning_details"):
+            self.parts.provider_data["reasoning_details"] = _joined_reasoning_details(details)
         calls = [self._calls[index] for index in sorted(self._calls)]
         self.parts.tool_calls = _completed_tool_calls(calls)
         return events

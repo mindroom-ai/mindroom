@@ -19,7 +19,14 @@ import tiktoken.model
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.logging_config import get_logger
 
-__all__ = ["counter_for_model", "finish_loading", "load_o200k", "openai_model_counter", "start_loading_o200k"]
+__all__ = [
+    "counter_for_model",
+    "finish_loading",
+    "load_o200k",
+    "o200k_counter",
+    "openai_model_counter",
+    "start_loading_o200k",
+]
 
 logger = get_logger(__name__)
 
@@ -207,6 +214,11 @@ def counter_for_model(
         estimate=partial(_scaled_o200k_tokens, _margin(served)),
         pdf_page_tokens=_GEMINI_PDF_PAGE_TOKENS if "gemini" in served else None,
     )
+
+
+def o200k_counter() -> TokenCounter:
+    """Return a counter of plain o200k_base tokens, for a budget set in them rather than in a model's own tokens."""
+    return TokenCounter(estimate=partial(_encoding_tokens, _O200K))
 
 
 def openai_model_counter(model_id: str) -> TokenCounter:

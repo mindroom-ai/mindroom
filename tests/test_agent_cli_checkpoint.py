@@ -15,6 +15,9 @@ import pytest
 from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
 from mindroom.agent_loop.tools import PlannedCall
+from mindroom.constants import SUBAGENT_COST_RUN_METADATA_KEY
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, recover_interrupted_run
 from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
@@ -151,6 +154,26 @@ async def test_the_turns_session_holds_the_checkpoint_as_stored(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_an_approval_checkpoint_keeps_what_the_turn_s_subagents_cost(tmp_path: Path) -> None:
+    """A recovered approval resumes the checkpoint, so it holds what the turn's subagents cost, and a later save keeps it."""
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    await _capture(checkpoint, _record(), [_assistant("bash-1")])
+    with receiving_subagent_cost(SubagentCost(0.0022)):
+        await checkpoint.persist_approval("bash-1")
+    assert catalog.store is not None
+    saved = catalog.store.get_run("run")
+    assert saved is not None
+    assert (saved.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == 0.0022
+
+    # A save in a context that received nothing, as recovery's, leaves the stored cost.
+    await checkpoint.persist("bash-1", refresh=True)
+    saved = catalog.store.get_run("run")
+    assert saved is not None
+    assert (saved.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == 0.0022
+
+
+@pytest.mark.asyncio
 async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Path) -> None:
     catalog = await _stored_catalog(tmp_path)
     checkpoint = BatchCheckpoint(catalog)
@@ -265,6 +288,31 @@ async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path
         assert saved.messages[-1].audio[0].url == "https://example.test/sibling.wav"
     else:
         assert (saved.messages[-1].images, saved.messages[-1].audio) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_minimal_checkpoint_recovers_as_a_turn_with_every_bash_call_answered(tmp_path: Path) -> None:
+    """A crash after the batch was saved recovers its messages as stored: a finished sibling's result stays its own."""
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    await _capture(checkpoint, _record(), [Message(role="user", content="do work"), _assistant("done", "running")])
+    await checkpoint.persist("done")
+    checkpoint.complete("done", ToolOutcome(content="real sibling result"))
+    await checkpoint.persist_approval("running")
+    assert catalog.store is not None
+    saved = catalog.store.get_run("run")
+    assert saved is not None
+
+    assert recover_interrupted_run(catalog.store, catalog.session, saved)
+
+    recovered = catalog.store.get_run("run")
+    assert recovered is not None
+    assert is_model_history_visible_run(recovered)
+    assert recovered.messages[:3] == saved.messages
+    assert [(message.role, message.tool_call_id, message.content) for message in recovered.messages[2:]] == [
+        ("tool", "done", "real sibling result"),
+        ("tool", "running", INTERRUPTED_CALL_RESULT),
+    ]
 
 
 @pytest.mark.asyncio

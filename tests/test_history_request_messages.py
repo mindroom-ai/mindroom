@@ -618,6 +618,58 @@ def _paused_row(messages: list[Message]) -> RunRecord:
     return RunRecord.from_dict(json.loads(json.dumps(paused.to_dict())))
 
 
+def _steered_run() -> RunRecord:
+    """Return a run a Steer ended after its tool batch: its calls and results, with no final answer."""
+    calls = [{"id": call_id, "type": "function", "function": {"name": "echo", "arguments": "{}"}} for call_id in "ab"]
+    return RunRecord(
+        run_id="steered",
+        agent_id="code",
+        status=RunStatus.completed,
+        messages=[
+            Message(role="user", content="Do the task"),
+            Message(role="assistant", content="Looking.", tool_calls=calls),
+            Message(role="tool", tool_call_id="a", content="result a"),
+            Message(role="tool", tool_call_id="b", content="result b"),
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("limits", "replayed"),
+    [
+        pytest.param({}, ["Do the task", ("Looking.", "a", "b"), "result a", "result b"], id="unlimited"),
+        pytest.param({"max_tool_calls_from_history": 1}, ["Do the task", ("Looking.", "b"), "result b"], id="one-call"),
+        pytest.param({"max_tool_calls_from_history": 0}, ["Do the task", ("Looking.",)], id="no-calls"),
+        pytest.param(
+            {"num_history_messages": 3},
+            [("Looking.", "a", "b"), "result a", "result b"],
+            id="three-messages",
+        ),
+        # A window too small for the whole batch replays none of it, never a result without its call.
+        pytest.param({"num_history_messages": 2}, [], id="two-messages"),
+    ],
+)
+def test_steered_history_obeys_tool_call_and_message_limits(limits: dict[str, int], replayed: list[object]) -> None:
+    """The next turn replays a steered run's calls and results under the configured limits, keeping pairs whole."""
+    run = _steered_run()
+    stored = run.to_dict()
+    turn = TurnMessages(prompt=Message(role="user", content="Also print the date"))
+
+    request = _request(summary=None, history=_replay([run], **limits), turn=turn)
+
+    system, *history, prompt = request
+    assert (system.content, prompt.content) == ("Be precise.", "Also print the date")
+    assert [
+        (message.content, *(call["id"] for call in message.tool_calls or ()))
+        if message.role == "assistant"
+        else message.content
+        for message in history
+    ] == replayed
+    calls = [call["id"] for message in history for call in message.tool_calls or ()]
+    assert [message.tool_call_id for message in history if message.role == "tool"] == calls
+    assert run.to_dict() == stored
+
+
 def test_resumed_request_repeats_the_request_that_paused() -> None:
     """A resume sends the paused request again, so its prefix and the paused call's reasoning stay valid."""
     runs: list[AnyRunRecord] = [_agent_run("earlier")]

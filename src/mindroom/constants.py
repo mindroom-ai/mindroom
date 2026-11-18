@@ -1047,6 +1047,9 @@ SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
 # On a thread-move copy, which is skip-marked: the user IDs its original counted as mentioning earlier in its thread,
 # which the copy keeps counting while waking nobody.
 COPIED_MENTIONS_KEY = "io.mindroom.copied_mentions"
+# On each event of one composer submission with attachments: {"id": <per submission>, "more": <bool>}, where
+# ``more`` says the client sends another event of that submission without the person doing anything.
+SUBMISSION_CONTENT_KEY = "io.mindroom.submission"
 # On a forked thread's root: the parent thread and the last parent message the fork includes.
 FORK_CONTENT_KEY = "io.mindroom.fork"
 # Marks a message's ``m.mentions`` as every mention it makes, so receivers do not look for more in its text.
@@ -1065,8 +1068,12 @@ HOOK_SOURCE_RUN_METADATA_KEY = "hook_source"
 TURN_INTENT_RUN_METADATA_KEY = "turn_intent"
 # Run metadata key holding the usage of the attempts the run's turn spent before it, summed, as run metrics are stored.
 PRIOR_USAGE_RUN_METADATA_KEY = "mindroom_prior_usage"
+# Run metadata key holding what the subagent turns whose results the run's turn received cost so far, in USD.
+SUBAGENT_COST_RUN_METADATA_KEY = "mindroom_subagent_cost_usd"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
+# The recovered runs a turn's replay continued, which its answer's message is linked to as well.
+CONTINUED_RUNS_METADATA_KEY = "mindroom_continued_runs"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"

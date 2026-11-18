@@ -37,11 +37,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import STREAM_STATUS_KEY, TOOL_TRACE_CONTENT_KEY
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, STREAM_STATUS_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import Owed, Suppressed, Suppression
 from mindroom.history.interrupted_replay import is_interrupted_replay_run, persist_interrupted_replay_snapshot
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, STOPPED_BY_USER_NOTE, is_recovered_run
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -165,6 +166,8 @@ class _Homeserver:
     fail_text: str | None = None
     # How many writes that end a reply (``completed`` status) the server fails next, as an unreachable homeserver does.
     fail_completed: int = 0
+    # Text the server refuses in every write that is still streaming, as a homeserver that keeps refusing an edit does.
+    refuse_streaming_text: str | None = None
 
     async def room_send(
         self,
@@ -178,6 +181,13 @@ class _Homeserver:
         """Accept one send, collapsing a repeated transaction ID onto one event."""
         if message_type == "m.room.message" and self.fail_text is not None and self.fail_text in _body(content):
             self.fail_text = None
+            return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
+        if (
+            message_type == "m.room.message"
+            and self.refuse_streaming_text is not None
+            and self.refuse_streaming_text in _body(content)
+            and content.get(STREAM_STATUS_KEY) == "streaming"
+        ):
             return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
         if message_type == "m.room.message" and self.fail_completed and content.get(STREAM_STATUS_KEY) == "completed":
             self.fail_completed -= 1
@@ -707,11 +717,9 @@ async def test_a_user_stop_mid_stream_cancels_the_streamed_reply(
         ("cancelled", {"event_id": "$sent0", "failure_reason": "cancelled_by_user", "kind": "ai"}),
     ]
     [run] = turn.agent_runs()
-    assert is_interrupted_replay_run(run)
-    assert _original_status(run) == "cancelled"
-    assert run.content == "Partial answer\n\n(turn stopped before completion)"
-    # CHARACTERIZATION: current behavior; an interrupted row stores the bare message tag, not the model prompt.
-    assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
+    # The stopped run keeps its own messages: the prompt as the model read it, then what it showed and the stop note.
+    assert is_recovered_run(run)
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", f"Partial answer\n\n{STOPPED_BY_USER_NOTE}")]
     assert not await turn.pending()
 
 
@@ -807,11 +815,10 @@ async def test_a_user_stop_while_a_whole_delivery_runs_the_model(
     assert turn.hooks.fired == [
         ("cancelled", {"event_id": "$sent0", "failure_reason": "cancelled_by_user", "kind": "ai"}),
     ]
-    run = _interrupted(turn.agent_runs())
-    assert _original_status(run) == "cancelled"
+    [run] = turn.agent_runs()
+    assert is_recovered_run(run)
     # CHARACTERIZATION: current behavior; history keeps model text the room never showed.
-    assert run.content == "Partial answer\n\n(turn stopped before completion)"
-    assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", f"Partial answer\n\n{STOPPED_BY_USER_NOTE}")]
     assert not await turn.pending()
 
 
@@ -869,12 +876,16 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
         f"Partial\n\n{_CANCEL_NOTE}",
         "cancelled",
     )
-    run = _interrupted(turn.agent_runs())
-    # The Stop lands while the consumer writes, outside the model's await, and the turn is still recorded stopped.
-    assert _original_status(run) == "cancelled"
-    assert run.content.startswith(
-        "Partial answer\n\n(turn stopped before completion; 1 tool call(s) were still running)",
-    )
+    # The Stop lands while the consumer writes, outside the model's await, and the turn is still recorded stopped:
+    # the run called a tool, so it stays as its own messages, the call answered, and ends with the note of the Stop.
+    [run] = turn.agent_runs()
+    assert (run.status, is_interrupted_replay_run(run)) == (RunStatus.completed, False)
+    assert _messages(run)[1:] == [
+        ("assistant", "answer"),
+        ("tool", INTERRUPTED_CALL_RESULT),
+        ("assistant", STOPPED_BY_USER_NOTE),
+    ]
+    assert (run.metadata or {})[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$sent0"
 
 
 @pytest.mark.parametrize(
@@ -1534,11 +1545,12 @@ async def test_a_process_shutdown_mid_stream_leaves_the_reply_for_replay(
     assert turn.hooks.fired == []
     runs = turn.agent_runs()
     assert not any(is_interrupted_replay_run(run) for run in runs)
-    # CHARACTERIZATION: current behavior; the agent loop still stores its own cancelled run, holding only the prompt.
+    # CHARACTERIZATION: current behavior; the agent loop still stores its own cancelled run, holding the prompt and
+    # the message without content that stands for the response the shutdown cut off.
     [run] = runs
     assert run.status is RunStatus.cancelled
     assert run.content is None
-    assert _messages(run) == [("user", _MODEL_PROMPT)]
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", None)]
     assert await turn.pending()
 
 
@@ -1750,8 +1762,9 @@ async def test_a_pause_whose_progress_edit_fails_ends_the_reply_without_an_inter
         tools=[_ECHO_TOOL],
         scripts={"default": [calls(tool_call("echo", "call-1", text="hi"), content="Before approval")]},
     )
-    # The edit that would show the paused tool call is the one the homeserver refuses.
-    turn.homeserver.fail_text = "🔧 `echo` [1]"
+    # The homeserver refuses every progress edit that would show the paused tool call, the pause's own flush included:
+    # one refused progress edit alone is resent by the next, so only a flush that cannot land fails the pause.
+    turn.homeserver.refuse_streaming_text = "🔧 `echo` [1]"
     _require_echo_approval(turn)
     try:
         await turn.runner.generate_response(_plain_request(_target()))

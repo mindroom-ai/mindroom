@@ -17,6 +17,7 @@ from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_dec
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.delegation.background import child_snapshot, delegation_job, delegation_outcome
+from mindroom.delegation.cost import receive_subagent_cost, subagent_cost_metadata
 from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import (
@@ -224,7 +225,9 @@ async def persist_delegation_state(
     that ends. Any other run, such as a minimal-mode turn's checkpoint or a continued run, or a paused run the store
     holds as final, gets only its delegation key. ``session`` then holds the run as stored.
     """
-    changes = {DELEGATION_STATE_KEY: state.to_dict()}
+    # A run that gets only its delegation key, such as a minimal-mode checkpoint an approval recovery resumes, bypasses
+    # the save that stores what its turn's subagents cost, so the key carries it too.
+    changes = {DELEGATION_STATE_KEY: state.to_dict(), **subagent_cost_metadata()}
     response.metadata = {**(response.metadata or {}), **changes}
     if store is None:
         msg = "Durable delegation requires persisted session storage"
@@ -300,7 +303,7 @@ async def _execute_child(
     if context is None or context.requester_id != identity.requester_id or context.room_id != identity.room_id:
         msg = "Delegation requester context does not match its retained wait"
         raise RuntimeError(msg)
-    child_context = child_tool_runtime_context(context, child)
+    child_context = child_tool_runtime_context(context, child, config=config)
     if fresh:
         return await _start_child_envelope(
             child,
@@ -1084,6 +1087,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         # Completed and failed children both close the parent call and its after hook.
         receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
+    # The turn the parent call's answer reaches receives what the child cost.
+    receive_subagent_cost(child.cost_usd)
     result = resolve_result(
         _finalize_delegation_output(_child_result_text(child, receipt), output_request),
         failed=child.status != "completed",

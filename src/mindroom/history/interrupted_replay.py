@@ -34,7 +34,6 @@ _INTERRUPTED_REPLAY_STATE = "interrupted"
 _MAX_RETAINED_TOOL_CONTEXT_CHARS = 32_000
 _INTERRUPTION_SUMMARIES = {
     RunStatus.error: "(turn failed before completion",
-    RunStatus.paused: "(turn paused before completion",
     RunStatus.cancelled: "(turn stopped before completion",
 }
 
@@ -402,33 +401,3 @@ def persist_interrupted_replay_snapshot(
     )
     persisted_run = _build_interrupted_replay_run(snapshot=snapshot, run_id=run_id, session=session)
     storage.save_interrupted_record(session, persisted_run, state=state)
-
-
-def persist_interrupted_replay(
-    *,
-    storage: ConversationStore,
-    session: ConversationSession,
-    run_id: str,
-    user_message: str | None,
-    user_message_is_structured: bool,
-    partial_text: str | None,
-    completed_tools: Sequence[ToolTraceEntry],
-    interrupted_tools: Sequence[ToolTraceEntry],
-    run_metadata: Mapping[str, object] | None,
-    original_status: RunStatus = RunStatus.cancelled,
-) -> None:
-    """Persist one interrupted top-level turn from trusted runtime state into ``session``'s history."""
-    persist_interrupted_replay_snapshot(
-        storage=storage,
-        session=session,
-        run_id=run_id,
-        snapshot=build_interrupted_replay_snapshot(
-            user_message=user_message,
-            user_message_is_structured=user_message_is_structured,
-            partial_text=partial_text,
-            completed_tools=completed_tools,
-            interrupted_tools=interrupted_tools,
-            run_metadata=run_metadata,
-            original_status=original_status,
-        ),
-    )

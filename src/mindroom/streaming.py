@@ -24,7 +24,7 @@ from mindroom.constants import (
 )
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_terminal_suffixes
-from mindroom.live_frames.frames import LIVE_CHECKPOINT_KEY, LiveDocs
+from mindroom.live_frames.frames import LIVE_CHECKPOINT_KEY, LiveDocs, utf16_length
 from mindroom.live_frames.publisher import LivePublisher
 from mindroom.live_frames.transport import homeserver_relays_live_frames
 from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
@@ -73,6 +73,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "CANCELLED_RESPONSE_NOTE",
+    "CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE",
     "INTERRUPTED_RESPONSE_NOTE",
     "PROGRESS_PLACEHOLDER",
     "RESTART_INTERRUPTED_RESPONSE_NOTE",
@@ -139,6 +140,7 @@ CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
+CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted: agent restarted to apply a config change]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 
 StreamInputChunk = (
@@ -205,7 +207,12 @@ def format_stream_error_note(error: Exception | str) -> str:
 
 
 # The notes that end a reply a Stop, a restart, or an interruption cut short, in the order their stripping checks them.
-_PARTIAL_REPLY_NOTES = (CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)
+_PARTIAL_REPLY_NOTES = (
+    CANCELLED_RESPONSE_NOTE,
+    _INTERRUPTED_RESPONSE_NOTE,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE,
+)
 
 
 def is_interrupted_partial_reply(text: object) -> bool:
@@ -236,12 +243,12 @@ def clean_partial_reply_text(text: str) -> str:
     return cleaned
 
 
-def build_restart_interrupted_body(text: str) -> str:
+def build_restart_interrupted_body(text: str, note: str = RESTART_INTERRUPTED_RESPONSE_NOTE) -> str:
     """Return restart-note text for a stale in-progress message body."""
     stripped_text = text.rstrip()
     if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
-        return RESTART_INTERRUPTED_RESPONSE_NOTE
-    return f"{stripped_text}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
+        return note
+    return f"{stripped_text}\n\n{note}"
 
 
 @dataclass(frozen=True)
@@ -251,6 +258,8 @@ class UnfinishedStreamedReply:
     # The visible text as the user saw it, tool markers included.
     visible_text: str
     tool_trace: tuple[ToolTraceEntry, ...]
+    # The note below it, which names why the attempt stopped.
+    restart_note: str = RESTART_INTERRUPTED_RESPONSE_NOTE
 
     @property
     def partial_text(self) -> str:
@@ -260,7 +269,7 @@ class UnfinishedStreamedReply:
     @property
     def resumed_text(self) -> str:
         """Return the text a continuation streams below: what was shown, then the restart note."""
-        return f"{build_restart_interrupted_body(self.visible_text)}\n\n"
+        return f"{build_restart_interrupted_body(self.visible_text, self.restart_note)}\n\n"
 
 
 @dataclass(frozen=True)
@@ -628,6 +637,8 @@ class StreamingResponse:
     reasoning_text: str = field(default="", init=False)
     _reasoning_segment_started_at: float | None = field(default=None, init=False, repr=False)
     _reasoning_seconds: float = field(default=0.0, init=False, repr=False)
+    # Each segment's UTF-16 start in the reasoning, the visible tool calls before it, and, once closed, its duration.
+    _reasoning_segments: list[dict[str, int]] = field(default_factory=list, init=False, repr=False)
     # The latest output each running tool call reported, by call ID; only live frames show it.
     tool_progress: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     # This reply's live frames, once the homeserver relays them; durable edits are then checkpoints.
@@ -657,16 +668,26 @@ class StreamingResponse:
 
     def add_reasoning(self, text: str, *, started_at: float | None = None) -> None:
         """Append model reasoning, starting a new segment after other output at ``started_at``, or now when unknown."""
+        if not text:
+            return
         if self._reasoning_segment_started_at is None:
             self._reasoning_segment_started_at = time.monotonic() if started_at is None else started_at
             if self.reasoning_text and not self.reasoning_text.endswith("\n"):
                 self.reasoning_text += "\n\n"
+            self._reasoning_segments.append(
+                {
+                    "start": utf16_length(self.reasoning_text),
+                    "after_tool": len(self.tool_trace) if self.show_tool_calls else 0,
+                },
+            )
         self.reasoning_text += text
 
     def end_reasoning_segment(self) -> None:
         """Close the current reasoning segment, if any, adding its observed time."""
         if self._reasoning_segment_started_at is not None:
-            self._reasoning_seconds += time.monotonic() - self._reasoning_segment_started_at
+            elapsed = time.monotonic() - self._reasoning_segment_started_at
+            self._reasoning_seconds += elapsed
+            self._reasoning_segments[-1]["duration_ms"] = round(elapsed * 1000)
             self._reasoning_segment_started_at = None
 
     @property
@@ -706,6 +727,9 @@ class StreamingResponse:
             tools=tools,
             status=self._resolve_stream_status(is_final=False),
             activity="\n".join(line.text for line in warmup_lines),
+            segments=tuple(
+                {"start": segment["start"], "after_tool": segment["after_tool"]} for segment in self._reasoning_segments
+            ),
         )
 
     def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
@@ -986,7 +1010,11 @@ class StreamingResponse:
         capture_completions: tuple[asyncio.Future[None], ...] = (),
         retry_on_failure: bool = False,
     ) -> bool:
-        """Send one already-prepared non-terminal or terminal payload."""
+        """Send one already-prepared non-terminal or terminal payload, and return whether it landed.
+
+        A failed initial send raises, failing the stream. A failed progress edit of an existing event returns ``False``
+        and commits nothing, so the next edit resends the whole reply. A failed terminal update returns ``False``.
+        """
         is_initial_send = self.event_id is None
         if (
             not is_final
@@ -1037,9 +1065,7 @@ class StreamingResponse:
                 self._inflight_nonterminal_capture_state = None
         if not send_succeeded:
             if not is_final:
-                action = "send initial" if is_initial_send else "edit"
-                msg = f"Failed to {action} streaming message"
-                raise RuntimeError(msg)
+                self._nonterminal_send_failed(is_initial_send=is_initial_send)
             return False
 
         self._mark_first_visible_reply_if_needed(prepared_delivery.committed_state)
@@ -1056,6 +1082,25 @@ class StreamingResponse:
         else:
             self.placeholder_progress_sent = False
         return True
+
+    def _nonterminal_send_failed(self, *, is_initial_send: bool) -> None:
+        """Handle a progress send Matrix did not accept: a failed create fails the stream, a failed edit does not.
+
+        A progress edit is superseded by the next one, which carries the whole reply again, and the turn's answer lands
+        through the terminal update. So an edit Matrix refused, as during a homeserver restart, costs nothing but
+        itself: nothing is committed, so the next edit is still owed, and the throttle clock advances so an outage is
+        retried at the update cadence rather than on every streamed token.
+        """
+        if is_initial_send:
+            msg = "Failed to send initial streaming message"
+            raise RuntimeError(msg)
+        logger.warning(
+            "streaming_progress_edit_failed",
+            event_id=self.event_id,
+            room_id=self.room_id,
+            detail="The stream continues; the next progress edit retries with the full reply.",
+        )
+        self.last_update = time.time()
 
     async def _progress_permitted(
         self,
@@ -1131,6 +1176,7 @@ class StreamingResponse:
             extra_content[REASONING_CONTENT_KEY] = {
                 "text": self.reasoning_text,
                 "duration_ms": round(self._reasoning_seconds * 1000),
+                "segments": [dict(segment) for segment in self._reasoning_segments],
             }
         return extra_content
 
@@ -2292,8 +2338,9 @@ async def stream_progress_edits(
     counts as one in-place mutation. The first publication is delivered at
     once, so the reply leaves whatever state it showed before. Worker warm-up
     progress is shown as in ordinary streaming. Progress is transport only: a
-    rejected edit stops later progress without failing the caller, whose
-    terminal delivery still owns the reply. Leaving the scope waits until no
+    progress edit Matrix fails is resent in full by the next one, and an edit
+    the reply's records refuse, or one that raises, stops later progress; none
+    fails the caller, whose terminal delivery still owns the reply. Leaving the scope waits until no
     progress edit is in flight, even across cancellation, so the caller's
     terminal update can never race one.
     """

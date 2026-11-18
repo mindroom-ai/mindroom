@@ -54,10 +54,12 @@ class ResolvedMemoryBackend(Protocol):
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
         editable: bool = False,
+        recall: bool = False,
     ) -> MemorySearchOutcome:
         """Search memories visible to an agent, including its team scopes.
 
         ``editable`` asks only for results whose IDs update and delete accept.
+        ``recall`` marks the per-turn recall, which a backend may select differently from a search.
         """
 
     async def list_all(

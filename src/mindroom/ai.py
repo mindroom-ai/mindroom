@@ -26,6 +26,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
 from mindroom.config.resolution import memory_backend as agent_memory_backend
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.execution import drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -33,6 +34,7 @@ from mindroom.delegation.lifecycle import (
     delegation_grant,
     note_child_run_id,
     observe_child_event,
+    running_child_run,
 )
 from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
@@ -504,9 +506,13 @@ def _agent_loop_hooks(
             prompt_id=prepared.turn.prompt.id,
             lifecycle=ctx.compaction_lifecycle,
             turn_recorder=run_context.turn_recorder,
+            # A voice call's turn, and a contact's, finishes its calls inside the turn and is never replayed.
+            checkpoints=not ctx.inline_tools,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
+        # A delegated child leaves its owner's reply to the owner to end.
+        steering=ctx.delegation_depth == 0,
     )
 
 
@@ -1068,7 +1074,11 @@ async def run_delegated_child_response(
         only=child.persona.kept_knowledge if child.persona is not None else None,
     )
     context = get_tool_runtime_context()
-    child_context = child_tool_runtime_context(context, child) if context is not None else None
+    # The child's tools check reloads against the config its agent was built from, without the caller's approval
+    # overlay: the overlay's base, or the live config it was authorized under, never the caller turn's older snapshot.
+    built_from = config if approval_config is not None else authorized_config
+    child_context = child_tool_runtime_context(context, child, config=built_from) if context is not None else None
+    observation = running_child_run()
     turn = ResponseTurnContext(
         agent_mode=child.agent_mode,
         persona=child.persona,
@@ -1102,6 +1112,8 @@ async def run_delegated_child_response(
             runtime_paths,
             model_name=model_name,
         ),
+        # The child's settlement adds what its subagents cost to its own.
+        subagent_cost=None if observation is None else observation.subagent_cost,
     )
     # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
     with tool_runtime_context(child_context) if child_context is not None else detached_tool_scope(identity):
@@ -1138,6 +1150,8 @@ class TurnResult:
     text: str
     completed: CompletedAttempt | None = None
     failed: HandledAttempt | None = None
+    # What the subagent turns whose results the turn received cost.
+    subagent_cost: SubagentCost = field(default_factory=SubagentCost)
 
     @cached_property
     def run_metadata(self) -> dict[str, Any]:
@@ -1148,7 +1162,8 @@ class TurnResult:
         """
         ending = self.completed or self.failed
         build = ending.build_run_metadata if ending is not None else None
-        return build() if build is not None else {}
+        with receiving_subagent_cost(self.subagent_cost):
+            return build() if build is not None else {}
 
 
 async def ai_response(
@@ -1167,11 +1182,14 @@ async def ai_response(
     """
     completed: list[CompletedAttempt] = []
     failed: list[HandledAttempt] = []
+    sinks = sinks or TurnSinks()
+    subagent_cost = SubagentCost() if sinks.subagent_cost is None else sinks.subagent_cost
     reporting = replace(
-        sinks or TurnSinks(),
+        sinks,
         run_metadata_collector=None,
         on_completed=completed.append,
         on_failed=failed.append,
+        subagent_cost=subagent_cost,
     )
     body, _tool_trace = await collect_streamed_response_content(
         stream_agent_response(ctx, runtime_paths, config, sinks=reporting, resume=resume),
@@ -1182,6 +1200,7 @@ async def ai_response(
         text=body,
         completed=completed[-1] if completed else None,
         failed=failed[-1] if failed else None,
+        subagent_cost=subagent_cost,
     )
 
 

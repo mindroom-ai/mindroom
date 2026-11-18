@@ -1782,7 +1782,7 @@ agents:
 | `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) |
 | `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](https://docs.mindroom.chat/scheduling/#timezone) |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](https://docs.mindroom.chat/memory/) |
-| `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
+| `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `exclude`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
 | `knowledge_bases` | list | `[]` | Keys under top-level `knowledge_bases`, each at most once; see [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
 | `context_files` | list | `[]` | Workspace files preloaded into the prompt; see [File-Based Context Loading](#file-based-context-loading) |
@@ -2042,7 +2042,7 @@ These settings are global-only:
 | `enable_streaming` | `true` | Show replies as progressive message edits; see [Streaming](https://docs.mindroom.chat/streaming/#configuration) |
 | `streaming` | see [Streaming](https://docs.mindroom.chat/streaming/#configuration) | Timing settings for progressive edits |
 | `large_message_strategy` | `sidecar` | Oversized replies as a preview with the full text attached (`sidecar`) or as several complete messages (`split`); see [Large Messages](https://docs.mindroom.chat/streaming/#large-messages) |
-| `coalescing.debounce_ms` | `1000` | Milliseconds (>= 0) to wait after media for more attachments or a trailing caption before replying; text replies immediately |
+| `coalescing.debounce_ms` | `1000` | Milliseconds (>= 0) to wait after unmarked media for more attachments or a trailing caption before replying; text replies immediately, and [marked submissions](https://docs.mindroom.chat/attachments/#files-sent-with-text) use their own bound |
 | `show_stop_button` | `true` | Add a 🛑 reaction while an agent responds; see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button) |
 | `max_consecutive_agent_replies` | `50` | Consecutive agent or team messages (>= 1) before agents stop waking each other; see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents) |
 | `max_preload_chars` | `50000` | Cap (>= 1) on preloaded context files; see [File-Based Context Loading](#file-based-context-loading) |
@@ -3127,7 +3127,8 @@ An agent judges a message only when all of these hold:
 Configured human aliases count as one participant, while agents, the internal service account, and `bot_accounts` do not count as humans.
 Agents merely present in the room never join: with 50 agents in a room and two already in the thread, only those two can judge, and only if each opted in.
 Each eligible agent decides separately.
-Commands and scheduled work never use adaptive participation.
+Commands, scheduled work, and a queued message the [mid-turn judge](#mid-turn-coalescing) said a running reply cannot wait for never use adaptive participation, so the agent answers that message once the reply ends.
+The judge decides once for all queued messages, so when new messages from two people were judged together, or a message was edited after the judgment, participation still decides.
 
 An agent that declines sends no reply; with `decline_reaction` set, it reacts once to the latest message of the turn.
 Choose the emoji with care, because 👍 can read as agreement with the message.
@@ -3228,7 +3229,7 @@ agents:
 
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
 It also lets the task continue for a message from another person than the one the agent is answering that is not about the task, such as a remark to someone else in the thread.
-It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
+It decides a message cannot wait when it stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
 When the judge is unsure, times out, or fails, the agent gets the wrap-up notice, except for the queued messages described below.
 With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
@@ -3263,6 +3264,33 @@ It does not cancel running tools or show the agent the queued text.
 Tool calls the agent makes in answer to it end the response without running.
 Stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
+
+### Steer, Queue and Auto
+
+A client chooses what a message does when it arrives during a reply by adding `io.mindroom.mid_turn` to its content, with the value `steer`, `queue`, or `auto`.
+A message without the key or with an unknown value is `auto`, so Element and other clients behave as described above.
+There is no config setting for this; the mode travels on each message.
+
+```json
+{"msgtype": "m.text", "body": "Also print the date.", "io.mindroom.mid_turn": "steer"}
+```
+
+**Steer** redirects the running reply, but only from the person that reply answers; a Steer from anyone else is handled as Auto.
+The reply ends after its current tool batch, with no wrap-up notice and no summary, and its message stays in the thread as completed with its text and tool calls so far.
+The steering message then gets its own new reply below it, which is answered without a participation check and told to carry on with the task, taking the message into account.
+The earlier tool calls and results reach it through normal [history](https://docs.mindroom.chat/configuration/history/), so your configured history limits apply to what it sees.
+That follow-up extends the cut-off reply's last model request, so provider prompt caching still applies.
+A Steer that arrives while the agent is writing its final text simply becomes the next turn, still carrying on the task, and a Steer while the agent is idle is an ordinary message.
+A Steer also releases a tool call waiting to move to the background at once; see [When a call becomes a job](https://docs.mindroom.chat/tools/agent-orchestration/#when-a-call-becomes-a-job).
+A steered reply that showed nothing, because it wrote no text and its tool calls are hidden, has its placeholder removed with no failure note.
+The exception is a steered reply resuming after a [tool approval](https://docs.mindroom.chat/tool-approval/), which ends with the usual "Tool approval continuation completed" text.
+
+**Queue** never interrupts: the message is not judged, sends no wrap-up notice, and does not move a waiting tool call to the background.
+It gets the agent's `defer_reaction`, if set, and is answered as its own turn after the reply finishes.
+
+**Auto** lets the mid-turn judge decide, as described above.
+When the judge explicitly says a message cannot wait, which includes a TypeSafe or OpenAI Decisions probability below `threshold`, the reply ends at the batch and the message continues the task in a new reply, exactly as for Steer, instead of getting the wrap-up notice.
+A skipped, failed, or timed-out judgment, or an agent with no `mid_turn` judge, still sends the wrap-up notice.
 
 ## Activity in Other Threads
 
@@ -3475,6 +3503,10 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `mem0` (default) | Vector memory: relevant memories are retrieved before each reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories |
+
+Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
+File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
+`search_memories` returns up to its own `limit` in every mode.
 
 <video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
   <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -3708,12 +3740,14 @@ Each file is read up to 1 MiB, cut at its last complete line, and updating a tru
 |---|---|---|
 | `mode` | `keyword` | `keyword` or `semantic` |
 | `include` | `[memory/**/*.md]` | Glob patterns relative to the file-memory root that semantic search indexes; must be non-empty |
+| `exclude` | `[]` | Glob patterns relative to the file-memory root that semantic search leaves out of `include`, such as `exclude: [memory/archive/**]` for archived notes |
 | `include_entrypoint` | `false` | Also index `MEMORY.md` for semantic search |
 
 In `keyword` mode, `search_memories` matches structured entries with IDs in `MEMORY.md`, plus entries and plain-text lines in `memory/**/*.md`.
 Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload cap, read the file directly or use semantic search with `include_entrypoint: true`.
 
-In `semantic` mode, MindRoom builds a vector index of the `include` files with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](https://docs.mindroom.chat/knowledge/#storage)).
+In `semantic` mode, MindRoom builds a vector index of the `include` files not matched by `exclude` with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](https://docs.mindroom.chat/knowledge/#storage)).
+Each memory entry (a `- [id=...]` line, or a Markdown section up to `###`) is indexed and returned on its own, split at 1,200 characters; a `#` line inside a fenced code block is code, not a new section.
 Until the index is ready, or when embeddings fail, search falls back to keyword results.
 Writes through the `memory` tool, auto-flush, and an applied [dreaming](https://docs.mindroom.chat/scheduling/#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
@@ -3930,6 +3964,7 @@ knowledge_bases:
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
 | `chunk_context_model` | string | `null` | Model (a key under `models`) that writes a short context for each chunk of a multi-chunk file before it is indexed; see [Contextual Chunk Headers](#contextual-chunk-headers); semantic mode only |
+| `chunk_strategy` | `fixed` or `memory_entries` | `fixed` | `fixed` splits plain-text and Markdown files every `chunk_size` characters; `memory_entries` makes each memory entry (a `- [id=...]` line) or Markdown section up to `###` its own chunk of at most `chunk_size` characters, as semantic file memory does at 1,200; semantic mode only |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns a file must match to be included |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns removed after include filtering |
 | `include_extensions` | list | `null` | Exact set of extensions to index instead of the default text-like set (semantic mode only) |
@@ -3954,7 +3989,7 @@ A folder holding a file or folder name that is not valid UTF-8 may not be watche
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
 A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
 Rewriting leaves free space inside an index file, which later writes reuse; once a quarter of a kept index is free space, for example after many files were deleted, the next refresh copies the live index instead, so neither file stays much larger than its contents.
-Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
+Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, `chunk_strategy`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 A reindex requested while a refresh of the base runs starts once that refresh finishes.
 Closing the dashboard or dropping the API request does not stop a reindex once it is requested.
@@ -3963,7 +3998,7 @@ Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 42
 A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
 Knowledge base configuration hot-reloads.
-After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.
+After a `chunk_size`, `chunk_overlap`, `chunk_context_model`, or `chunk_strategy` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
 
 ### Folders Written by Another Host
@@ -5203,104 +5238,106 @@ Its model usage counts as ordinary replies, and extracting what it read counts a
 
 # Chat Commands
 
-Chat commands are messages starting with `!` that you type in any Matrix room where MindRoom agents or teams are present.
+Chat commands are messages starting with `/` that you type in any Matrix room where MindRoom agents or teams are present.
+Every command also works with `!` instead of `/` (`!help`, `!schedule ...`), everywhere, including clients such as Element that intercept unknown `/` commands before they are sent.
 Use them to get help, manage schedules, switch models or modes, manage room encryption, and, when enabled, change configuration from chat.
-This page lists every command and fully covers `!help`, `!hi`, and `!config`; the other commands are documented on the linked pages.
+This page lists every command and fully covers `/help`, `/hi`, and `/config`; the other commands are documented on the linked pages.
 
 ## Command List
 
 | Command | Description | Details |
 |---------|-------------|---------|
-| `!help [topic]` | Get help on commands or a specific topic | [`!help`](#help) |
-| `!hi` | Show the welcome message again | [`!hi`](#hi) |
-| `!schedule <task>` | Schedule a task or reminder | [Scheduling](https://docs.mindroom.chat/scheduling/#schedule) |
-| `!list_schedules` | List pending scheduled tasks | [Scheduling](https://docs.mindroom.chat/scheduling/#list_schedules) |
-| `!cancel_schedule <id>` | Cancel a scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#cancel_schedule) |
-| `!edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#edit_schedule) |
-| `!jobs` | List the background jobs running in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
-| `!cancel_job <id\|all>` | Cancel a background job by the short ID `!jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
-| `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
-| `!mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
-| `!model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
-| `!room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
-| `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |
-| `!reply_mode [auto\|mentions\|reset\|show]` | Show or switch whether agents need a mention to start a conversation in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#reply_mode) |
-| `!auto_approve [<minutes>\|<hours>h\|off]` | Run your tool calls in this thread without approval for a while, or show or end that window | [Tool Approval](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) |
-| `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) | [Matrix](https://docs.mindroom.chat/matrix/#encrypt) |
-| `!e2ee` | Show encryption diagnostics for this room | [Matrix](https://docs.mindroom.chat/matrix/#e2ee) |
-| `!config <operation>` | View and modify configuration (disabled by default, platform administrators only) | [`!config`](#config) |
-| `!reload-plugins` | Force-reload all configured plugins (platform administrators only) | [Plugins](https://docs.mindroom.chat/plugins/#reload-plugins) |
+| `/help [topic]` | Get help on commands or a specific topic | [`/help`](#help) |
+| `/hi` | Show the welcome message again | [`/hi`](#hi) |
+| `/schedule <task>` | Schedule a task or reminder | [Scheduling](https://docs.mindroom.chat/scheduling/#schedule) |
+| `/list_schedules` | List pending scheduled tasks | [Scheduling](https://docs.mindroom.chat/scheduling/#list_schedules) |
+| `/cancel_schedule <id>` | Cancel a scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#cancel_schedule) |
+| `/edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#edit_schedule) |
+| `/jobs` | List the background jobs running in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
+| `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
+| `/desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
+| `/mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
+| `/model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
+| `/room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
+| `/thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |
+| `/reply_mode [auto\|mentions\|reset\|show]` | Show or switch whether agents need a mention to start a conversation in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#reply_mode) |
+| `/auto_approve [<minutes>\|<hours>h\|off]` | Run your tool calls in this thread without approval for a while, or show or end that window | [Tool Approval](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) |
+| `/encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) | [Matrix](https://docs.mindroom.chat/matrix/#encrypt) |
+| `/e2ee` | Show encryption diagnostics for this room | [Matrix](https://docs.mindroom.chat/matrix/#e2ee) |
+| `/config <operation>` | View and modify configuration (disabled by default, platform administrators only) | [`/config`](#config) |
+| `/reload-plugins` | Force-reload all configured plugins (platform administrators only) | [Plugins](https://docs.mindroom.chat/plugins/#reload-plugins) |
 
 Command names are case-insensitive.
-Any other message starting with `!` gets `❌ Unknown command. Try !help for available commands.`
+Any other message starting with `!` gets ``❌ Unknown command. Try `/help` (or `!help`) for available commands.``
+A message starting with `/` that is not a command, such as a file path like `/home/me/notes.txt`, is an ordinary message.
 
 ## Command Handling
 
 The router answers commands, in the main room and in threads, even in rooms with a single agent.
-The exception is `!desktop`, which a private agent may answer itself when the room contains only you and that agent; see [`!desktop`](https://docs.mindroom.chat/tools/desktop/#desktop) for its room requirements.
+The exception is `/desktop`, which a private agent may answer itself when the room contains only you and that agent; see [`/desktop`](https://docs.mindroom.chat/tools/desktop/#desktop) for its room requirements.
 
 Commands follow the same [authorization](https://docs.mindroom.chat/authorization/) rules as ordinary messages.
 "Room admin" means a Matrix room administrator, while "platform administrator" means a user listed in `administrators`.
 
 Commands must be typed as text; voice messages are never turned into commands.
 
-An agent can send `!help`, `!mode`, `!model`, and the schedule commands on your behalf, and they run with your permissions.
+An agent can send `/help`, `/mode`, `/model`, and the schedule commands on your behalf, and they run with your permissions.
 Any other command sent by an agent for you is refused with `❌ Agents cannot run this command for you. Send it yourself.`
 
-## `!help`
+## `/help`
 
-`!help` lists all commands, and `!help <topic>` shows detailed usage and examples for one topic.
+`/help` lists all commands, and `/help <topic>` shows detailed usage and examples for one topic.
 
 ```
-!help
-!help schedule
-!help config
+/help
+/help schedule
+/help config
 ```
 
 **Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `reply_mode`, `reply-mode`, `replymode`, `auto_approve`, `auto-approve`, `autoapprove`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 Any other topic shows the general command list.
 
-## `!hi`
+## `/hi`
 
-`!hi` shows the room's welcome message again: the agents and teams you can address, their roles and tools, and quick-start instructions.
+`/hi` shows the room's welcome message again: the agents and teams you can address, their roles and tools, and quick-start instructions.
 
-## `!config`
+## `/config`
 
-`!config` views and changes `config.yaml` from chat.
+`/config` views and changes `config.yaml` from chat.
 It is disabled by default; set `authorization.config_command_enabled: true` (boolean, default `false`) to enable it.
 Even when enabled, only platform administrators can use it.
 Otherwise it replies `❌ Config command disabled.` or `❌ Admin only.`
 
 ```
-!config show
-!config get agents
-!config get agents.analyst.display_name
-!config set agents.analyst.display_name "Research Expert"
-!config set models.default.id gpt-6-astra
-!config set defaults.markdown false
-!config set agents.analyst.tools [shell, file]
+/config show
+/config get agents
+/config get agents.analyst.display_name
+/config set agents.analyst.display_name "Research Expert"
+/config set models.default.id gpt-6-astra
+/config set defaults.markdown false
+/config set agents.analyst.tools [shell, file]
 ```
 
-`!config` alone is the same as `!config show`.
+`/config` alone is the same as `/config show`.
 Paths use dot notation, such as `agents.analyst.role`, and list items use indexes, such as `agents.analyst.tools.0` for the first tool.
 Values are parsed as YAML, so `false`, `42`, and `[shell, file]` become a boolean, a number, and a list.
 Quote a value to keep its exact spacing.
 
 Shown values are redacted like `config_manager` output; see [Access, Redaction, and Saving](https://docs.mindroom.chat/tools/agent-orchestration/#access-redaction-and-saving).
-`!config set` refuses a value containing the `***redacted***` marker or masked URL credentials such as `***@host`, so copying shown values back cannot overwrite a hidden secret; set the field to its real value instead.
+`/config set` refuses a value containing the `***redacted***` marker or masked URL credentials such as `***@host`, so copying shown values back cannot overwrite a hidden secret; set the field to its real value instead.
 
 ### Configuration Confirmations
 
-`!config set` validates the change against the full configuration and replies with an error ending in `Changes were NOT applied.` when it is invalid.
+`/config set` validates the change against the full configuration and replies with an error ending in `Changes were NOT applied.` when it is invalid.
 A valid change gets a preview of the current and new values from the router, with ✅ and ❌ reactions.
 Only the user who requested the change can confirm or cancel it, and that user must still be a platform administrator.
 Unconfirmed changes expire after 24 hours.
 
-Pending changes usually survive a MindRoom restart; if one cannot, such as a secret value, the confirmation asks you to run `!config set` again.
+Pending changes usually survive a MindRoom restart; if one cannot, such as a secret value, the confirmation asks you to run `/config set` again.
 
 On confirmation, the change is saved to `config.yaml` and applies to new agent interactions, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes, which apply after MindRoom restarts.
-If `config.yaml` changes while a confirmed change is being saved, for example through a dashboard save, the change is refused with `Changes were NOT applied.`; run `!config set` again.
+If `config.yaml` changes while a confirmed change is being saved, for example through a dashboard save, the change is refused with `Changes were NOT applied.`; run `/config set` again.
 
 ## Stop Button
 
@@ -5416,7 +5453,8 @@ When an agent calls tools, MindRoom shows inline markers in the message text:
 🔧 `web_search` [1]          ← tool call completed
 ```
 
-The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, and result preview for call `[N]`.
+The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, result preview, and `tool_call_id` for call `[N]`.
+A secret request card (`io.mindroom.secret_request`) that a reply's tool call posted names that reply's event (`response_event_id`) and the call (`tool_call_id`), so a client can draw the card at the call's line; a call made through the CLI from a Bash call has its own line, which the card names.
 Tools that start in quick succession appear together in one edit.
 Markers and tool-trace metadata are shown by default; to hide them, set `show_tool_calls: false` on one agent or under `defaults` for every agent that leaves it unset (see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/#defaults)).
 With tool calls hidden, the agent still shows typing activity, and a tool that needs an isolated worker may show generic progress such as `Preparing isolated worker... 17s elapsed.` without naming the tool.
@@ -5426,6 +5464,8 @@ With tool calls hidden, the agent still shows typing activity, and a tool that n
 When a model reasons before or between parts of its answer, as with Anthropic extended thinking, OpenAI reasoning summaries, Gemini thinking, or `<think>` blocks, a streamed reply shows that reasoning to everyone in the room.
 MindRoom Chat shows it live above the answer and, once the reply finishes, as a collapsed "Thought for N s" block, where N is how long the model reasoned.
 The final message keeps it in `io.mindroom.reasoning`; it is never part of the answer text or the agent's history.
+The final message also keeps where each reasoning segment began (`segments`: UTF-16 `start` in `text`, `after_tool`, `duration_ms`), so clients can show it between the tool calls; segment durations add up to the total unless long reasoning was cut, which drops the later segments.
+Live frames carry the same list without durations.
 Set `show_reasoning: false` on an agent, or under `defaults`, to keep reasoning out of the room.
 Reasoning can describe tool calls that `show_tool_calls: false` hides, so set `show_reasoning: false` as well to keep them out of the room.
 Long reasoning is shortened on the final message so the reply stays one ordinary message; replies that are not streamed, team replies, and replies split into several messages (`large_message_strategy: split`) keep no reasoning, and a reply that paused for a tool approval shows its reasoning only until the pause and keeps none on its final message.
@@ -5440,6 +5480,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 |------|-------|
 | `**[Response cancelled by user]**` | The user stopped the response. |
 | `**[Response interrupted by service restart]**` | MindRoom restarted while the response was being generated; the reply continues below the note once MindRoom is back, or ends there if nothing is left to continue. |
+| `**[Response interrupted: agent restarted to apply a config change]**` | A `config.yaml` edit restarted this agent (for example, its tools changed) while the response was being generated; MindRoom itself kept running, and the reply continues below the note once the agent is back, or ends there if nothing is left to continue. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
 | `**[Response interrupted by an error: <error description>]**` | MindRoom could not finish the reply; the description says why. |
 | `Done.` | The agent finished without writing an answer of its own, for example after tool calls hidden by `show_tool_calls: false` or after a tool posted its answer; those tool calls still ran. |
@@ -6089,6 +6130,25 @@ Some provider integrations never send certain media kinds, so MindRoom leaves th
 Only models using the `google` provider receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
 Claude models (the `anthropic`, `vertexai_claude`, and `bedrock_claude` providers) and models using the `google` provider read documents only as PDF or text; other file types, such as Office files and archives, reach them as a note naming the file type.
 
+## Files Sent with Text
+
+A message with several files, or with files and text, reaches the room as one event per file with the text last, and the agent answers them as one turn.
+After an unmarked file, MindRoom waits `coalescing.debounce_ms` (1 second by default) for another file or the text before replying, and text replies at once.
+
+MindRoom Chat marks each event of such a submission so MindRoom does not have to guess when it is complete:
+
+```json
+"io.mindroom.submission": {"id": "<one ID per submission>", "more": true}
+```
+
+- `more: true` says the client sends another event of this submission without the person doing anything, so MindRoom waits up to 10 seconds after that event for the next one instead of `debounce_ms`, which covers sync delays between the events.
+- The submission's last event carries `more: false`, read as `false` when missing, and MindRoom replies at once, even when that event is a file.
+- When the last event never arrives, MindRoom answers what did after those 10 seconds; shutdown never waits for an open submission.
+- A text-only message carries no marker.
+  A marker that is not an object with a non-empty string `id` and a boolean `more` is ignored, so other clients, bridges, and older app builds keep the `debounce_ms` behavior.
+
+The wait only holds the sender's own submission, and only while no response to its conversation is already running.
+
 ## Attachment IDs
 
 Each received or registered file gets an attachment ID such as `att_abc123`.
@@ -6129,6 +6189,7 @@ agents:
 | `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
 | `view_file(path)` | Show an image from the workspace to the model |
 | `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
+| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply (unencrypted rooms only) |
 
 ```python
 list_attachments()
@@ -6169,6 +6230,19 @@ Save attachments this way before processing them with `file`, `coding`, `python`
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
+
+### Inline Images
+
+`inline_image(reference, alt=None)` accepts a context attachment ID (`att_*`) or a workspace file path,
+using the same path rules as sending attachments. It uploads the image to Matrix and returns
+`attachment_id`, `mxc_uri`, and `markdown`, for example `![cat.png](mxc://homeserver/media-id)`.
+Paste the returned `markdown` into the reply or `matrix_message` text where the image should appear.
+The alt text defaults to the filename.
+
+Only images with an `image/*` MIME type and a recognized image byte signature are accepted,
+up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
+Inline images require plaintext media and an unencrypted room because Markdown cannot carry decryption keys.
+In encrypted rooms, send the image through `matrix_message(attachments=[reference])` instead.
 
 ### Registering Local Files
 
@@ -6397,12 +6471,59 @@ agents:
 Pages may then load scripts, styles, and fonts from `/npm/` paths only; fetching data, external images, workers, and every other site stay blocked, and libraries that evaluate strings, such as Alpine or Vue in-page templates, do not run.
 Opening a page that uses a library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
 
+### Let pages load remote assets
+
+To preview a website as a browser shows it, with its real images, fonts, and stylesheets, pages can load assets from any `https:` address.
+This also takes two switches, both off by default:
+
+```yaml
+agents:
+  designer:
+    display_name: Designer
+    role: Preview website elements as a browser shows them.
+    model: default
+    tools:
+      - chat_ui:
+          enable_show_canvas: true
+          enable_canvas_remote_assets: true
+```
+
+```json
+{
+  "mindroom": {
+    "canvas": {
+      "enabled": true,
+      "remoteAssets": true
+    }
+  }
+}
+```
+
+`enable_canvas_remote_assets` (boolean, default `false`) tells the agent it may load assets from any `https:` address, and Chat's `remoteAssets` lets pages load scripts, styles, images, fonts, and media from them.
+Fetching data, frames, workers, and form submissions stay blocked.
+Every host a page names then sees the viewer's IP address and when they look, and a page can put data in the addresses it loads, which is why Chat keeps remote assets off unless its deployment allows them.
+
 ## What the user sees
 
 Each canvas appears in the conversation as its title with an **Open canvas** button.
 Chat opens the panel by itself under the same conditions as other [Chat UI actions](https://docs.mindroom.chat/tools/chat-ui/#what-the-user-sees); otherwise the user chooses **Open canvas**.
 The panel names the agent that made the page, and the user can resize it or expand it to the full width of the conversation.
 The room header's **Canvas** button lists the conversation's canvases, newest update first, and reopens one after the user closed it.
+
+### Pages in the thread
+
+With `inline=True`, `show_canvas` shows the page in the conversation itself, at the width of a reply, instead of in the panel; its height follows the content.
+Agents use it for mockups, diagrams, charts, and previews the user should see in the flow.
+An inline page is display-only: it cannot send answers or save state, and Chat never opens the panel for it, though **Open canvas** still shows it there.
+Updates keep a canvas inline.
+
+For an accurate preview of a website or app, the agent adds `raw=True`: Chat adds no styles or theme variables of its own, so browser defaults apply as in a normal tab.
+`width` (320 to 2560 pixels) renders the page at the viewport the design targets, such as 1440 for desktop or 390 for a phone, and scales it down to fit the conversation; it never scales up.
+A preview with `raw` or `width` is laid out in a browser window 16:10 of its width (568 to 1080 pixels tall), so `vh` units work as in a browser.
+The thread shows as much of that window as the page fills, and a taller page, such as one with a `100vh` hero section, scrolls inside it.
+Other inline pages grow with their content, so they must not use `vh` units.
+The panel shows raw pages too, at the panel's own width.
+`raw` and `width` belong to each update, so an update without them shows a themed page at reply width.
 
 When the panel cannot open, the **Open canvas** button is disabled and a message below it says why:
 
@@ -6501,7 +6622,7 @@ chat_ui.show_canvas(
 )
 ```
 
-- **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data or load external images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
+- **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data, and it loads libraries or external assets only where [libraries](#let-pages-load-libraries) or [remote assets](#let-pages-load-remote-assets) are allowed; otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
 - **Kept inputs:** inputs, selects, and textareas with an `id` or `name` keep their values on their own, across a reload, an update, and a switch to another version, matched by that `id` or `name` (a radio group by its name).
@@ -6539,7 +6660,7 @@ For choices the variables cannot make, such as a chart palette, `window.mindroom
 - In an encrypted room, the page, the answer, and a shared copy of the page's state are end-to-end encrypted like other messages.
 - A canvas shared with `share_state=True` lets its agent, and anyone else in the room, read what the page saved without asking each time; Chat says so in the panel.
   Passwords and fields with `autocomplete="off"` are never kept automatically, but whatever the page passes to `saveState` is shared, so pages must keep secrets out of it.
-- A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, and a page that loads libraries can put data in the addresses it requests, so a malicious page could leak what the user types into it.
+- A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, and a page that loads libraries or remote assets can put data in the addresses it requests, so a malicious page could leak what the user types into it.
   Chat therefore names the agent that made each canvas and reminds the user that what they enter may leave the panel.
 - Agents should show only pages they wrote, never downloaded or untrusted pages, because every canvas appears as the agent's own.
 
@@ -7072,7 +7193,8 @@ Totals support cost estimates, but provider-specific charging rules and calls ou
 With [prices](https://docs.mindroom.chat/configuration/models/#model-config-fields) set on a model, each agent or team reply that uses it records its cost in USD, priced the same way as [budget spend](https://docs.mindroom.chat/budgets/#how-spend-is-counted).
 In MindRoom Chat, open **Reply details** from a reply's ⓘ button or message menu to see its cost and the conversation's cost up to that reply.
 A reply's cost covers every model call made within the reply, including team members on other models and [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction).
-Subagents it delegates to and separate helper work, such as text compaction summaries, memory-backend extraction, and thread titles, are left out of it but still count toward budgets.
+Separate helper work, such as text compaction summaries, memory-backend extraction, and thread titles, is left out of it but still counts toward budgets.
+The subagents whose results the reply received, including the subagents those ran, have their cost recorded beside the reply's own; a background subagent counts on the reply that waited for or collected its result, and one whose result is never read counts on no reply.
 The conversation cost adds up the replies MindRoom Chat has loaded and reads "at least" while older messages are not loaded.
 A regenerated reply shows the cost of its latest run only.
 Replies on models without prices, and replies that report no token usage, show no cost.
@@ -7766,6 +7888,7 @@ The welcome is sent once, and changing `welcome` or `welcome_dispatch` later doe
 `auto_join_requester: true` requires the router's Matrix account to be allowed to use the homeserver's Synapse-compatible admin join API.
 It applies only when MindRoom creates the room, and never joins someone who already joined, left, or was banned.
 When the join fails, the onboarding failure's `error` names the HTTP status and Matrix error code, such as `answered HTTP 403 M_FORBIDDEN` when the router's account is not a homeserver admin.
+If the homeserver joins the owner itself within two seconds, as Tuwunel does with `rooms.invites.auto_accept`, a refused admin join is no failure and onboarding finishes on the first attempt.
 
 ## Onboarding Behavior
 
@@ -9173,6 +9296,7 @@ If shell permissions or deployment settings change after minimal mode was select
 ### Prompt and `minimal_instructions`
 
 The minimal prompt identifies the agent, lists its loaded workspace context files, and names the toolkits available through `mindroom-agent`.
+When the agent has skills, it names them; the agent reads one with `mindroom-agent context read skill:<name>`, which also gives the skill's directory.
 With file memory, it also names the workspace-relative `MEMORY.md` and `memory/` locations.
 File contents, the role, ordinary instructions, and tool guidance are not in the prompt; the agent reads them through `mindroom-agent context` when it needs them.
 
@@ -10599,9 +10723,13 @@ agents:
 
 `temporary_secrets` lets an agent ask for a secret that a shell command needs and that the agent must not see, such as a `sudo` password, a token for a host without an [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) service, a passphrase, or a pairing code.
 It provides `request_temporary_secret(name, reason)`, where `name` is the environment variable the commands should receive and `reason` is what the user reads on the card.
+The agent can also give a `label` that says what the secret is, the `url` of a page where the user gets or creates it, and a `placeholder` for the empty field.
 
 - MindRoom Chat shows the requester a card with the reason, the variable, and a masked field.
   Other people in the thread see who the card waits for.
+- A `label` becomes the card's title and a `placeholder` the hint in the empty field, each cut to one line of 80 characters.
+  A `url` becomes a button that names the page's host and opens it in the browser, and it must be an `http` or `https` link with a host, no `user:password@` part, and no spaces.
+  The agent chooses the link, so the user should check the host on the button before signing in there.
 - The requester chooses how long MindRoom keeps the value: 15 minutes in the memory of the MindRoom process, which is the default, or 24 hours, for which MindRoom also writes it to a file that only its own account can read, under `temporary_secrets/` in the storage directory.
   A restart forgets a value kept in memory and reads back one kept in a file.
   The file is deleted at the first tool call or answer after the value expired.
@@ -13021,8 +13149,19 @@ room_thread_summary_models:
 `defaults.thread_summary_temperature` (default `0.2`, `null` for provider defaults) applies when the provider supports a temperature override.
 These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
 
+A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
+MindRoom Chat sets them from the room settings dialog; any client can send the `io.mindroom.room_settings` state event with state key `thread_summary_instructions` and content `{"value": "<rules>"}`.
+The event falls under the room's `state_default` power level (normally 50), so only moderators and admins can change it, and agent tools cannot write it.
+Every automatic title, including the provisional title and retitles, reads the setting right before generating and appends it to the title instructions under a room rules section.
+Those rules win over conflicting built-in rules such as length, style, or emoji, but not over the rule to treat thread messages as untrusted text.
+Precedence, lowest to highest: the built-in `THREAD_SUMMARY_INSTRUCTIONS`, its `prompts:` override, the room setting; override `THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE` (placeholders `{instructions}` and `{room_instructions}`) to change how the two are joined.
+Values are trimmed and cut to 2,000 characters.
+To clear the setting, send `{}`; a missing event, `{}`, a non-string or blank `value`, or a failed read all mean the normal instructions, and a failed read never skips the title.
+Titles already set keep their wording until the next refresh.
+
 The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags.
 Later summaries never change tags, so tags someone removed are not re-added.
+These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; a later summary adds them once the power level allows it.
 
 ## Related Docs
 
@@ -13234,7 +13373,7 @@ None of the actions touches the user's own computer or browser:
 | Call | What the user sees | What it works on | What comes back to the agent |
 | --- | --- | --- | --- |
 | `open_panel(panel="computer")` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
-| `show_canvas(title=None, html=None, path=None, canvas_event_id=None, share_state=False)` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
+| `show_canvas(title=None, html=None, path=None, canvas_event_id=None, share_state=False, inline=False, raw=False, width=None)` | Canvas panel, or the conversation with `inline=True` | A web page the agent wrote; it cannot open websites | The user's confirmed answer, as their next message |
 | `read_canvas_state(canvas_event_id)` | Nothing | A canvas shown with `share_state=True` | What the page last saved, as the user's Chat last shared it |
 | `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
 | `open_settings(section="general")` | Settings dialog | The user's Chat settings, opened at one section; nothing is changed | Nothing |
@@ -13635,6 +13774,17 @@ Until a requester connects, `github` calls return an `OAuthConnectionRequired` r
 
 To use one token for everyone instead, choose **Use access token** and save it, or set `GITHUB_ACCESS_TOKEN` in the runtime environment.
 A saved `access_token` wins over `GITHUB_ACCESS_TOKEN`, which wins over a requester's OAuth connection, and blank or whitespace-only values count as unset.
+
+### GitHub In Client Plugins
+
+MindRoom Chat plugins, such as the pull request side panel, can read and write GitHub with the user's own OAuth connection instead of a token typed into the browser, and the token never leaves MindRoom.
+A plugin calls `GET /api/github/status` with its client session for `{"connected": true, "login": "<login>"}` or `{"connected": false}`.
+It then calls `POST /api/github/request` with `{"method": ..., "path": ..., "body": ..., "accept": ...}`, where `method` is `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`, `path` is `/graphql` or under `/repos/<owner>/<repo>` with an optional query, `body` is optional JSON, and `accept` is `application/vnd.github+json` (the default), `application/vnd.github.full+json`, or `application/vnd.github.diff`.
+The answer is HTTP 200 with `{"status", "body", "headers"}` holding GitHub's own status, its JSON or diff text, and its `x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`, and `x-github-request-id` headers.
+The route follows up to 3 redirects that stay on `https://api.github.com`, so a renamed or transferred repository's old name still works; any other redirect, and a 301 or 302 answer to a write, comes back as GitHub's redirect status.
+The route answers 409 `{"error": "github_not_connected"}` while the user has no usable GitHub connection or the GitHub App client is not saved, 400 for any other path or one longer than 4096 characters, 503 `{"error": "github_connection_unavailable"}` from either route when the connection could not be read or refreshed and a retry may help, and 502 when GitHub is unreachable or its answer exceeds 10 MiB.
+It uses only the user's own connection, never a saved `access_token` or `GITHUB_ACCESS_TOKEN`.
+The token reaches only repositories where the GitHub App is installed, with the App's permissions: merging, updating, and deleting pull request branches need Pull requests read and write, Contents read and write, Checks read, and Metadata read.
 
 ## [`todo`]
 
@@ -15596,10 +15746,11 @@ Scheduled turns and other agents' messages queued behind the reply wait for it i
 ### Seeing and cancelling jobs
 
 MindRoom Chat shows a jobs bar in the room or thread with each running job, a ✕ to cancel it, and **Stop all**.
+A call the reply still waits for joins the bar once it has run for 5 seconds, so the many calls that end sooner never appear; a job waiting for approval or being cancelled, or one its call left running in the background, appears at once.
 The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
 The bar lists only the newest of an agent's running jobs in a room that fit in 27,000 bytes of room state.
-That is about 80 jobs with typical names.
-Long requester IDs, tool names, or subagent names leave room for fewer, such as 46 with a 255-byte requester ID and a 64-character tool name.
+That is about 110 jobs with typical names.
+Long tool or subagent names leave room for fewer, such as 89 with a 64-character tool name.
 `!jobs` lists them all, and **Stop all** still stops every job of the room or thread.
 In any client, `!jobs` lists the conversation's running jobs by short ID and `!cancel_job <id|all>` cancels them, taking any part of an ID from its start that names one job; sent outside any thread, both cover the whole room.
 Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
@@ -15642,7 +15793,7 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
-A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls.
+A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls, each as a line such as `Calling run_shell_command (started 14:03:27 UTC)`, so you can tell how long a call has been running.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, conversation, and current local tool or delegation permission, and either the original caller or the agent or team that answers in that conversation.
@@ -17750,6 +17901,11 @@ It refuses a user's 17th open stream before accepting, across every route that u
 A plugin websocket route without `client_stream` is public and accepts any origin.
 `worker_relay` from `mindroom.plugin_http` reaches only the running dedicated worker of the `worker_target` a route or tool passes, never starting one, and checks no caller, so a route passes only the `worker_target` of an `AgentWorkspace` that `agent()` or `agents()` admitted for its caller, or one a tool of the plugin recorded, once the route checked that the record belongs to the route's room and agent and that its caller may use that agent there, and a tool only its own agent's; `load_worker_target` refuses a stored target whose worker key or private-agent visibility is not what its own scope, agent, and identity resolve, while its subagent placement only picks one of that worker's own subagent workers, which serve its workspaces and credentials, and a plugin loads only targets it stored in its state directory, which no worker mounts, never one a client sends; by name it reaches only services of the plugin whose route calls it, which it takes from the route's own scope, never from an argument, or of the plugin the context a tool passes names, and by port only what the worker's runner relays; it adds the runner token and drops any copy the route sends, and the runner adds the service's secret and drops any copy that arrives.
 `client_user_oauth_access_token` from `mindroom.plugin_http` gives a route the access token of one person's own OAuth connection, the one an agent whose worker scope is `user` or `user_agent` keeps for them, refreshed as the agent's tools refresh it, only while that person may converse with the agent under its access rules, as the Connections portal requires, and may connect its accounts, as a connect link's completion requires, and never for one of MindRoom's own accounts, nor for a provider none of the agent's tools uses or whose tools act as a service account; like the portal it decides on the room grants as the runtime holds them and reads no room itself, so a caller admitted only by room membership is refused until MindRoom has read that room; it refuses any other caller or agent before opening a credential store or minting a link, because a `shared` or unscoped agent's connection, like a service account, serves everyone who uses that agent, and a caller removed from an agent keeps their stored connection but no longer reaches it through the agent; it trusts the `ClientUser` its route passes, so a route passes only the one a session dependency resolved, never one a request names, and the plugin, which already runs with the primary's full trust, decides where the token goes.
+`POST /api/github/request` takes the same sessions and sends one GitHub API call with the session user's own GitHub connection, the one the `github` tool uses for them with any agent, refreshed as the tool refreshes it, and never another user's, a shared `access_token`, or an environment token; it answers 409 while that user has no usable connection.
+The token never leaves the primary: the route sends only to `https://api.github.com`, only `/graphql` and paths under `/repos/<owner>/<repo>` built from RFC 3986 path characters, with no empty, `.`, or `..` segment and none that decodes to a `/`, `\`, or control character, follows at most 3 redirects and only those to `https://api.github.com` on its default port without userinfo, never resending a write on a 301 or 302, and answers with GitHub's status, body, and four rate-limit and request-ID headers, never GitHub's other headers.
+So any page holding a user's session can act on GitHub as that user, within the GitHub App's permissions and installations, which for `/graphql` are not limited to one repository; disconnecting GitHub revokes that.
+`GET /api/github/status` reports the same connection from stored state, without refreshing it or calling GitHub.
+The route's own log lines name the method, the path's kind (such as `/repos/{owner}/{repo}/pulls`), and GitHub's status, never the token or a body; httpx and httpcore may log the full URL, including the repository and query, as they do for every outbound call.
 
 A plugin's `origin_module` router answers every request on its hosts, `<label>.<plugin>.<MINDROOM_PLUGIN_ORIGIN_DOMAIN>`, on the listener `MINDROOM_PLUGIN_ORIGIN_PORT` turns on, beside the API; MindRoom adds no authentication there, only the API's request body limit, so the plugin's router decides who sees each page, and a plugin reaches only hosts with its own name, which comes from the host, never from the request's path or query.
 Each host is an origin of its own, so its pages share no origin with the dashboard, the API's client routes, or another plugin's hosts; they do share a site with every other host of the domain, which is why the docs put the domain on a registrable domain of its own, and MindRoom's cookie-authenticated API changes require the API's own `Origin`.
@@ -17757,7 +17913,7 @@ Every answer on the listener carries `Content-Security-Policy: frame-ancestors '
 On any other host, `GET /ask?domain=<host>` tells an on-demand TLS proxy whether the host's plugin says it serves it now, so certificates are issued only for hosts a plugin vouches for; the listener writes no access log line for its HTTP requests, since a path or query may carry a one-use link, while Uvicorn still logs each websocket handshake with its path.
 The call transcript routes under `/api/call-transcripts/v1/` take the same sessions and check rooms themselves through the router: room membership to read a room's live call, permission to post messages to start or join a call, and for a call's own routes the room the call is in, never one the request names, answering 404 to anyone outside it.
 In a room an agent answers calls in, while no live call between people takes precedence, reading the room's live call checks room membership through that agent instead, also while call transcripts are off, and a call with the agent is read from the agent's transcript in memory, by its caller only, since other members could not tell they were heard.
-CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-transcripts/`, and `/api/rooms/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin, call transcript, and room routes too, and there is no separate list.
+CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-transcripts/`, `/api/rooms/`, and `/api/github/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin, call transcript, room, and GitHub routes too, and there is no separate list.
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
 
@@ -17790,7 +17946,7 @@ Do not report or "fix" these; they are deliberate.
 - `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack uploads may still use every file in the agent workspace.
-- A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries on, through the addresses it requests, so agents should only show pages they wrote; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
+- A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries or remote assets on, through the addresses it requests, so agents should only show pages they wrote; remote assets also show every host a page names the viewer's IP address; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation, and `agent_manager`'s `set_avatar` accepts only those IDs; Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, Slack downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
@@ -17811,6 +17967,7 @@ Do not report or "fix" these; they are deliberate.
 - An administrator whom a personal agent's template `access` admits, whom an owner adds as a co-owner of an agent created with `create_agent`, or whom a team that includes such an agent admits, may use that agent, whose instructions its owner may have written, and its tools act for the administrator, so such an agent with an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - A secret request card shows a `reason` the model wrote, so a manipulated agent can ask for the key of any service it may request with misleading text; the key still reaches only that service's hosts, which the card shows.
+- A secret request card also shows a title, a field hint, and a link button the model chose, so a manipulated agent can point the button at a look-alike sign-in page, as it can with a link in any message; the button names the page's host, only `http` and `https` links with no `user:password@` part get one, and MindRoom never fetches the link.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - `!auto_approve` lets a person approve every gated tool call they request in one thread, or in the whole room when it has no threads, for up to 24 hours, including tools that ask for their own confirmation but not tool calls scheduled to run later; only that person can send it, never an agent acting for them.
@@ -23853,10 +24010,12 @@ agents:
 ### Asking in chat
 
 For a missing key, the agent calls `request_secret` with a `service` (a name from `list_egress_credentials`) and a `reason`, and waits for the answer.
+It can also give the `url` of the page where the user gets or creates the key and a `placeholder` for the empty field.
 
 - MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
   Other people in the thread see who the card waits for.
   When the service already has a key in that scope, the card says that saving replaces it.
+- A `url` becomes a button that names the page's host and opens it in the browser, and a `placeholder` becomes the hint in the empty field, as on a [temporary secret's card](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets).
 - Chat sends the key to this MindRoom's API with the user's client session.
   MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
   The key never goes through Matrix, the model, the worker, or the logs.
@@ -26242,7 +26401,7 @@ Use `--allow-app` to save app choices at the same time.
 │ --help          -h            Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Pairing ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --code                        TEXT  Short-lived code returned by !desktop setup.    │
+│ *  --code                        TEXT  Short-lived code returned by /desktop setup.    │
 │                                        [required]                                      │
 │ *  --controller-user-id          TEXT  Pinned cloud controller Matrix user. [required] │
 │ *  --controller-device-id        TEXT  Pinned cloud controller device. [required]      │
