@@ -24,7 +24,7 @@ from mindroom.matrix.olm_to_device import (
 from mindroom.model_catalog import ModelCatalog
 from mindroom.model_selection_scope import validate_model_picker_scope
 from mindroom.thread_models import resolve_thread_model_override
-from mindroom.turn_model import ModelScope, resolve_turn_model
+from mindroom.turn_model import ModelScope, inherited_model_source, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -217,7 +217,14 @@ class _Receiver:
         }
         return {
             **_model_choice("override", override),
-            "inherited": [{"entity": name, **_model_choice("model", model)} for name, model in inherited.items()],
+            "inherited": [
+                {
+                    "entity": name,
+                    **_model_choice("model", model),
+                    "source": inherited_model_source(config, self.paths, name, request.room_id),
+                }
+                for name, model in inherited.items()
+            ],
         }
 
     async def _respond(

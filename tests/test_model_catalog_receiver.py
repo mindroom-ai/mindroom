@@ -113,7 +113,10 @@ async def test_authenticated_catalog_reply_and_live_config(tmp_path: Path, monke
     content = reply["content"]
     assert content["agent_user_ids"] == [agent]
     assert content["capabilities"] == ["model_selection"]
-    assert content["selection"] == {"override": None, "inherited": [{"entity": "helper", "model": "default"}]}
+    assert content["selection"] == {
+        "override": None,
+        "inherited": [{"entity": "helper", "model": "default", "source": "agent"}],
+    }
     assert content["request_id"] == "request-1"
     old_revision = content["catalog_revision"]
     current[0] = current[0].model_copy(deep=True)
@@ -428,7 +431,7 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
     await callback(request())
     assert sent.call_args.kwargs["content"]["selection"] == {
         "override": "thread",
-        "inherited": [{"entity": "helper", "model": "room"}],
+        "inherited": [{"entity": "helper", "model": "room", "source": "room"}],
     }
     del config.models["thread"]
     await callback(request(request_id="next"))
@@ -438,6 +441,24 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
     await callback(event)
     assert "thread_id" not in sent.call_args.kwargs["content"]
     assert sent.call_args.kwargs["content"]["selection"]["override"] is None
+
+
+@pytest.mark.asyncio
+async def test_inherited_model_from_room_models_config_names_its_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An authored `room_models` entry is reported apart from a saved room override and the entity's own model."""
+    callback, _, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    config = current[0]
+    config.models["lobby"] = ModelConfig(provider="openai", id="lobby-model")
+    config.room_models[ROOM] = "lobby"
+
+    await callback(request())
+
+    assert sent.call_args.kwargs["content"]["selection"]["inherited"] == [
+        {"entity": "helper", "model": "lobby", "source": "room_config"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -466,7 +487,7 @@ async def test_selection_reports_model_keys_and_their_reasoning_levels(
     assert sent.call_args.kwargs["content"]["selection"] == {
         "override": "thread",
         "reasoning": "high",
-        "inherited": [{"entity": "helper", "model": "room", "reasoning": "high"}],
+        "inherited": [{"entity": "helper", "model": "room", "reasoning": "high", "source": "room"}],
     }
 
 
