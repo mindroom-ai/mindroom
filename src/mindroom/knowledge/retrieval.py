@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from itertools import accumulate
 from typing import TYPE_CHECKING
 
+from mindroom.judgment.answers import JudgmentError
 from mindroom.knowledge.read_protocol import DISTANCE_KEY
 from mindroom.logging_config import get_logger
 from mindroom.token_counting.counts import count
@@ -20,6 +21,10 @@ if TYPE_CHECKING:
     from mindroom.knowledge.rerank import Reranker
 
 logger = get_logger(__name__)
+
+
+class _InvalidScoresError(ValueError):
+    """The reranker returned a wrong number of scores, or one the selection cannot read."""
 
 # Absorbs float rounding, so a hit exactly ``hybrid_score_gap`` below the top hit is kept.
 _SCORE_GAP_TOLERANCE = 1e-9
@@ -90,7 +95,11 @@ async def retrieve[T](
         unit_interval = selection.min_rerank_score is not None
         if len(scores) != len(candidates) or not all(_valid(score, unit_interval=unit_interval) for score in scores):
             msg = f"reranker returned {len(scores)} scores for {len(candidates)} candidates, or an invalid one"
-            raise ValueError(msg)  # noqa: TRY301 - one fallback for every way reranking fails
+            raise _InvalidScoresError(msg)  # noqa: TRY301 - one fallback for every way reranking fails
+    except (JudgmentError, TimeoutError, _InvalidScoresError) as exc:
+        # Known failures can repeat every turn, such as a lasting outage; their cause needs no traceback.
+        logger.warning("Reranking failed; keeping search order", error=f"{type(exc).__name__}: {exc}")
+        return _select(candidates, selection, reranked=False)
     except Exception:
         logger.warning("Reranking failed; keeping search order", exc_info=True)
         return _select(candidates, selection, reranked=False)

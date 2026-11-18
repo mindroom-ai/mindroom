@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
 from mindroom.config.main import Config
@@ -427,6 +428,30 @@ async def test_batch_refusal_is_none() -> None:
     result = await _client(body).judge_many(_batch_request(), owner="rerank", allow_network=True)
     assert result.failure is None
     assert result.decision == (0.25, None, 0.75)
+
+
+async def test_batch_evaluator_logs_a_count_not_every_probability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch's log line counts its probabilities and refusals instead of listing every one."""
+    paths = test_runtime_paths(tmp_path)
+    get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "stored-openai-key"})
+    response = json.dumps(_batch(_named("c0", 0.25), {"type": "refusal", "name": "c1"}, _named("c2", 0.75))).encode()
+
+    async def post(_self: JudgmentClient, _request_body: bytes) -> bytes:
+        return response
+
+    monkeypatch.setattr(JudgmentClient, "_post", post)
+    settings = OpenAIDecisionsJudgmentConfig(provider="openai_decisions")
+    batch = create_batch_evaluator(settings, paths, owner="root:rerank", capacity=JudgmentCapacity(max_concurrent=1, max_per_owner=1))
+    assert batch is not None
+    with capture_logs() as logs:
+        result = await batch.evaluate(_batch_request())
+
+    assert result.decision == (0.25, None, 0.75)
+    [logged] = [entry for entry in logs if entry["event"] == "Judgment evaluated"]
+    assert logged["decision"] == {"probabilities": 3, "refused": 1}
 
 
 async def test_batch_evaluator_uses_its_own_capacity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

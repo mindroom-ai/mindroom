@@ -6654,7 +6654,7 @@ visibility = ["mindroom.knowledge.utils"]
 
 [[modules]]
 path = "mindroom.knowledge.retrieval"
-depends_on = ["mindroom.knowledge.read_protocol"]
+depends_on = ["mindroom.judgment.answers", "mindroom.knowledge.read_protocol"]
 visibility = [
     "mindroom.knowledge.search",
     "mindroom.memory._file_backend",

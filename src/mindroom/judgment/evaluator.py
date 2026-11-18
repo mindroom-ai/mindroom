@@ -136,6 +136,13 @@ def _probability_client(
     )
 
 
+def _logged_decision(decision: object) -> object:
+    """A batch's decision as counts, so one rerank logs two numbers instead of one probability per candidate."""
+    if isinstance(decision, tuple):
+        return {"probabilities": len(decision), "refused": sum(probability is None for probability in decision)}
+    return decision
+
+
 def _logged_evaluator[T](
     evaluate: _JudgmentEvaluator[T],
     settings: JudgmentConfig,
@@ -150,7 +157,7 @@ def _logged_evaluator[T](
             backend=settings.provider,
             model=result.model_id,
             model_alias=settings.model if isinstance(settings, LLMJudgmentConfig) else None,
-            decision=result.decision,
+            decision=_logged_decision(result.decision),
             probability=result.probability,
             threshold=settings.threshold if not isinstance(settings, LLMJudgmentConfig) else None,
             failure=result.failure,

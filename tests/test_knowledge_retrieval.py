@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 import tiktoken
+from structlog.testing import capture_logs
 
+from mindroom.judgment.answers import JudgmentError
 from mindroom.knowledge.retrieval import Candidate, Selection, retrieve
 from mindroom.memory._file_backend import _RECALL_SELECTION, _retrieve_memories
 from mindroom.token_counting import families
@@ -21,6 +23,7 @@ from mindroom.token_counting.families import load_o200k
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from mindroom.knowledge.rerank import Reranker
     from mindroom.memory._shared import MemoryResult
 
 
@@ -187,6 +190,37 @@ async def test_failing_reranker_keeps_hybrid_selection() -> None:
     kept = await retrieve("query", _GAP_CANDIDATES, _GAP_SELECTION, reranker=_Reranker(failing=True))
 
     assert kept == list(_GAP_CANDIDATES[:2])
+
+
+class _RaisingReranker:
+    """Raises ``error`` when it scores."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        del query, documents
+        raise self.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reranker", "traceback"),
+    [
+        (_RaisingReranker(JudgmentError("timeout")), False),
+        (_RaisingReranker(TimeoutError()), False),
+        (_Reranker([0.9]), False),
+        (_RaisingReranker(RuntimeError("unexpected")), True),
+    ],
+)
+async def test_only_an_unexpected_reranker_failure_logs_a_traceback(reranker: Reranker, traceback: bool) -> None:
+    """A judgment failure, a timeout or invalid scores log one warning without a traceback; anything else keeps it."""
+    with capture_logs() as logs:
+        kept = await retrieve("query", _GAP_CANDIDATES, _GAP_SELECTION, reranker=reranker)
+
+    assert kept == list(_GAP_CANDIDATES[:2])
+    [warning] = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert bool(warning.get("exc_info")) == traceback
 
 
 @pytest.mark.asyncio
