@@ -35,7 +35,7 @@ New key on the agent's reply event, on the original send and on every `m.replace
     "status": "running",          // "running" | "success" | "failed" | "timeout"
     "started_at": 1794940102256,  // ms since epoch, backend clock
     "duration_ms": 8400,          // optional; elapsed so far while running, final otherwise
-    "summary_model": "haiku",
+    "summary_model": "haiku",     // at most 120 characters plus "…"
     "before_tokens": 366804,
     "after_tokens": 6336,         // optional; present on success (and progress)
     "history_budget_tokens": 351792, // optional
@@ -65,7 +65,7 @@ Client tolerance: parse defensively. Drop an entry that lacks a string `id`, a k
 - `StreamingResponse` adds the key to every durable write (progress and final) and puts the list into `LiveDocs`, which the frame publisher sends on its next tick. A compaction change never triggers, gates or requires a durable write: entries ride on the writes the stream makes anyway (text and tool progress, checkpoints due for other reasons, the placeholder send, the terminal write).
 - Prompt cache: no impact. Content keys never enter the prompt; `COMPACTION_NOTICE_CONTENT_KEY` stays in `_NON_TURN_NOTICE_CONTENT_KEYS`, and the plural key must not make a reply look like a notice.
 - Unchanged: quiet/contact/participation turns and callers without a lifecycle stay silent; run-local summaries never use the lifecycle.
-- Known limits: a reply keeps only its newest 8 compactions (`MAX_REPLY_COMPACTIONS`), fewer when their JSON as Matrix sends it (ASCII escapes) exceeds 8 KiB (`MAX_REPLY_COMPACTIONS_BYTES`), in its writes and frames alike. Without live frames, a running compaction shows only once the next durable write lands. Same as reasoning today: entries are not carried across approval resumes or restart replays; ledger-rendered terminal writes (cancel/error) drop the key.
+- Known limits: a reply keeps only its newest 8 compactions (`MAX_REPLY_COMPACTIONS`), fewer when their JSON as Matrix sends it (ASCII escapes) exceeds 8 KiB (`MAX_REPLY_COMPACTIONS_BYTES`), in its writes and frames alike. The entries are bounded metadata that count toward their carrier's size as reasoning does, so a reply already near a carrier limit falls back a little sooner: its edits to the sidecar throttle, or its frames stop and durable progress edits take over, as for any large reply. A reply suppressed after it generated (such as a silent scheduled reply) no longer leaves a visible compaction notice. Without live frames, a running compaction shows only once the next durable write lands. Same as reasoning today: entries are not carried across approval resumes or restart replays; ledger-rendered terminal writes (cancel/error) drop the key.
 
 ## Client (mindroom-chat)
 
