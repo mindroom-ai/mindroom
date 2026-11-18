@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import nio
@@ -47,7 +47,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.room_steward import membership_observers
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.tool_system.plugins import config_plugins
-from tests.access_schema_support import refresh_memberships
+from tests.access_schema_support import joined_members_response, refresh_memberships
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -403,13 +403,58 @@ async def test_bot_observes_room_members_only_while_its_receive_loop_has_caught_
         "loop 2 start": [],
         "loop 2 settled": own_id,
     }
+    # Only the loop that was open loses its rooms: no start, catch-up or second close invalidates anything.
     assert [invalidation.kwargs["reason"] for invalidation in _invalidations(orchestrator).call_args_list] == [
-        "sync_loop_started",
-        "sync_caught_up",
         "sync_failure",
-        "sync_loop_started",
-        "sync_caught_up",
     ]
+
+
+@pytest.mark.asyncio
+async def test_receive_loop_child_exit_fences_grants_before_the_sibling_is_drained(tmp_path: Path) -> None:
+    """When the source or the pump ends, the account's grants are revoked before the other one's cleanup is awaited."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    room_id, member = "!dm:localhost", "@alice:localhost"
+    client = bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.device_id = "DEVICE"
+    client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[room_id]))
+    client.joined_members = AsyncMock(return_value=joined_members_response(room_id, client.user_id, member))
+    index = orchestrator.agent_reply_memberships
+    in_cleanup, release = asyncio.Event(), asyncio.Event()
+
+    async def failing_source() -> None:
+        message = "transport disconnected"
+        raise OSError(message)
+
+    async def held_pump(*_args: object, **_kwargs: object) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            in_cleanup.set()
+            await release.wait()
+
+    bot._ingestion_session = MagicMock(run=failing_source)
+    bot.mark_sync_loop_started()
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await _complete_frame(bot)
+    await refresh_memberships(index, bot.config, bot.runtime_paths, client)
+    assert index.is_current_room_member(member, room_id, bot.config, bot.runtime_paths)
+
+    with patch("mindroom.bot.run_ingestion_pump", held_pump):
+        receive_loop = asyncio.create_task(bot.sync_forever())
+        try:
+            await asyncio.wait_for(in_cleanup.wait(), 5)
+
+            assert not receive_loop.done()
+            assert not index.is_current_room_member(member, room_id, bot.config, bot.runtime_paths)
+            assert membership_observers({bot.agent_name: bot})[0] == []
+            # A frame the draining pump still completes must not reopen the closed loop.
+            with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+                await _complete_frame(bot)
+            assert membership_observers({bot.agent_name: bot})[0] == []
+        finally:
+            release.set()
+        with pytest.raises(OSError, match="transport disconnected"):
+            await asyncio.wait_for(receive_loop, 5)
 
 
 @pytest.mark.asyncio
@@ -437,15 +482,6 @@ async def test_quiesced_ingestion_ends_the_bots_observation_before_its_drain(tmp
     assert drained == [(False, 1)]
     _invalidations(orchestrator).assert_called_once_with(bot.config, bot.matrix_id.full_id, reason="observer_stopping")
     assert membership_observers({bot.agent_name: bot})[0] == []
-
-
-def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> None:
-    """A reconnect generation must fail closed before its first response arrives."""
-    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-
-    bot.mark_sync_loop_started()
-
-    _invalidations(orchestrator).assert_called_once_with(bot.config, bot.matrix_id.full_id, reason="sync_loop_started")
 
 
 @pytest.mark.asyncio
@@ -488,11 +524,11 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
     ):
         await _complete_frame(bot)
 
-    # The generation's first frame also makes this account an observer, which asks for a refresh of its own.
-    assert _invalidations(orchestrator).call_args_list == [
-        call(bot.config, bot.matrix_id.full_id, reason=reason)
-        for reason in ("uncertain_sync_response", "sync_caught_up")
-    ]
+    _invalidations(orchestrator).assert_called_once_with(
+        bot.config,
+        bot.matrix_id.full_id,
+        reason="uncertain_sync_response",
+    )
     await asyncio.sleep(0)  # the frame asked for the refresh, which runs in a task of its own
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 

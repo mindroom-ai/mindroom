@@ -333,6 +333,10 @@ class AgentReplyMembershipIndex:
             grant_room_count=len(room_keys),
         )
 
+    def forget_joined_rooms(self) -> None:
+        """Hold no room proven absent until a refresh: a running account that does not observe yet may be in it."""
+        self._publish(replace(self._snapshot, refresh_required=True, possible_joined_room_ids=None))
+
     def invalidate_observer(self, config: Config, observer_user_id: str, *, reason: str) -> None:
         """Revoke the grants of the rooms one account observes, and its say in which rooms exist, until a refresh.
 

@@ -61,6 +61,8 @@ class AgentReplyMembershipSync:
         self._refresh_task: asyncio.Task[None] | None = None
         # Counts the grant losses, each of which voids the refresh in flight.
         self._grant_losses = 0
+        # Each account's receive loop: absent while closed, False once armed by its start, True once open.
+        self._observer_open: dict[str, bool] = {}
         self._live_transition_lock = asyncio.Lock()
         self._live_effects_pending = False
 
@@ -73,6 +75,30 @@ class AgentReplyMembershipSync:
         """Fail closed the rooms one account observes, request a refresh, and end the calls that lost reply access."""
         self._memberships.invalidate_observer(config, observer_user_id, reason=reason)
         self._grants_lost()
+
+    def observer_loop_started(self, config: Config, observer_user_id: str) -> None:
+        """Arm one account's receive loop; until it opens, no census holds a room proven absent."""
+        self.observer_closed(config, observer_user_id, reason="sync_loop_started")
+        self._observer_open[observer_user_id] = False
+        self._memberships.forget_joined_rooms()
+
+    def observer_frame_settled(self, observer_user_id: str) -> None:
+        """Open an armed account as an observer of room members and ask for the read of its rooms.
+
+        A frame of a loop that is closed, as one still draining after a failure or a stall, opens nothing.
+        """
+        if self._observer_open.get(observer_user_id) is False:
+            self._observer_open[observer_user_id] = True
+            self._grants_lost(revoke=False)
+
+    def observer_closed(self, config: Config, observer_user_id: str, *, reason: str) -> None:
+        """End one account's observation; only an account that was open loses its rooms' grants."""
+        if self._observer_open.pop(observer_user_id, False):
+            self.invalidate_observer(config, observer_user_id, reason=reason)
+
+    def observer_is_open(self, observer_user_id: str) -> bool:
+        """Return whether the account's receive loop has caught up and still runs."""
+        return self._observer_open.get(observer_user_id, False)
 
     def pre_admit_ingestion(
         self,

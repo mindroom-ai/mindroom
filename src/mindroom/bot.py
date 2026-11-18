@@ -242,8 +242,6 @@ class AgentBot:
     last_sync_time: datetime | None
     _last_sync_monotonic: float | None
     _first_sync_done: bool
-    # Whether this bot's receive loop has caught up, so its account may observe room members for reply access.
-    observes_room_members: bool = False
     _sync_shutdown_budget: ShutdownBudget | None
     _deferred_stop_required: bool
     _deferred_stop_phase: DeferredStopPhase | None
@@ -1181,21 +1179,18 @@ class AgentBot:
         self._deferred_stop_required = False
         self._deferred_stop_phase = None
         self._request_call_reconciliation()
-        self.invalidate_agent_reply_memberships(reason="sync_loop_started")
+        self.orchestrator.agent_reply_membership_sync.observer_loop_started(self.config, self.matrix_id.full_id)
         mark_matrix_sync_loop_started(self.agent_name)
 
-    def invalidate_agent_reply_memberships(self, *, reason: str, observing: bool = False) -> None:
-        """Fail closed the room-backed reply grants this bot's account observes, which its sync no longer vouches for.
+    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+        """End this account's observation of room members; the grants of the rooms it observed fail closed."""
+        membership_sync = self.orchestrator.agent_reply_membership_sync
+        membership_sync.observer_closed(self.config, self.matrix_id.full_id, reason=reason)
 
-        The account also stops observing room members, until the first settled frame of a receive loop calls this
-        with ``observing``.
-        """
-        self.observes_room_members = observing
-        self.orchestrator.agent_reply_membership_sync.invalidate_observer(
-            self.config,
-            self.matrix_id.full_id,
-            reason=reason,
-        )
+    @property
+    def observes_room_members(self) -> bool:
+        """Return whether this bot's receive loop has caught up, so its account observes room members."""
+        return self.orchestrator.agent_reply_membership_sync.observer_is_open(self.matrix_id.full_id)
 
     @property
     def call_manager(self) -> CallManager | None:
@@ -1367,9 +1362,7 @@ class AgentBot:
     ) -> None:
         """Run side effects that do not own raw sync checkpoint safety."""
         orchestrator = self.orchestrator
-        if not self.observes_room_members and self.accepting_work:
-            # This receive loop caught up, so the account observes rooms from now on, and may be the only one in some.
-            self.invalidate_agent_reply_memberships(reason="sync_caught_up", observing=True)
+        orchestrator.agent_reply_membership_sync.observer_frame_settled(self.matrix_id.full_id)
         orchestrator.agent_reply_membership_sync.request_refresh(
             orchestrator.config,
             orchestrator.refresh_agent_reply_memberships,
@@ -2053,10 +2046,14 @@ class AgentBot:
         )
         tasks = (runner, pump)
         try:
-            done, pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            try:
+                done, pending = await asyncio.wait(
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                # A child ended or this loop was cancelled: its account stops observing before any cleanup is awaited.
+                self.invalidate_agent_reply_memberships(reason="receive_loop_ended")
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)

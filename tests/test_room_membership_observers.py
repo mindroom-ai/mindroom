@@ -151,6 +151,66 @@ def _sync(index: AgentReplyMembershipIndex) -> AgentReplyMembershipSync:
     return AgentReplyMembershipSync(index, lambda: ())
 
 
+_OBSERVER_STATES = {None: "closed", False: "armed", True: "open"}
+
+
+def _enter(membership_sync: AgentReplyMembershipSync, config: Config, state: str) -> None:
+    """Bring account A's receive loop into one eligibility state through the events that lead there."""
+    if state != "closed":
+        membership_sync.observer_loop_started(config, _A)
+    if state == "open":
+        membership_sync.observer_frame_settled(_A)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "event", "next_state", "invalidated"),
+    [
+        ("closed", "loop_started", "armed", False),
+        ("closed", "frame_settled", "closed", False),
+        ("closed", "closed", "closed", False),
+        ("armed", "loop_started", "armed", False),
+        ("armed", "frame_settled", "open", False),
+        ("armed", "closed", "closed", False),
+        ("open", "loop_started", "armed", True),
+        ("open", "frame_settled", "open", False),
+        ("open", "closed", "closed", True),
+    ],
+)
+async def test_observer_eligibility_moves_only_by_its_table(
+    tmp_path: Path,
+    state: str,
+    event: str,
+    next_state: str,
+    *,
+    invalidated: bool,
+) -> None:
+    """Every (state, event) pair: the next state, and rows and epoch change only when an open account closes."""
+    config, runtime_paths = _config(tmp_path)
+    index = AgentReplyMembershipIndex()
+    membership_sync = _sync(index)
+    _enter(membership_sync, config, state)
+    await _refresh(index, config, runtime_paths, _Account(_A, {_ROOM: (_A, _ALICE)}))
+    assert _observers(index) == {_ROOM: _A}
+    epoch = index._epoch
+    membership_sync._refresh_retry_at = float("inf")
+
+    if event == "loop_started":
+        membership_sync.observer_loop_started(config, _A)
+    elif event == "frame_settled":
+        membership_sync.observer_frame_settled(_A)
+    else:
+        membership_sync.observer_closed(config, _A, reason="sync_failure")
+
+    assert _OBSERVER_STATES[membership_sync._observer_open.get(_A)] == next_state
+    assert membership_sync.observer_is_open(_A) is (next_state == "open")
+    assert (_observers(index) == {}, index._epoch != epoch) == (invalidated, invalidated)
+    # Only the edge that opens an account asks for discovery at once, and a lost observer for a rebuild.
+    assert (membership_sync._refresh_retry_at == 0.0) is (invalidated or (state, next_state) == ("armed", "open"))
+    # While a loop is armed, its account's rooms are in no census, so no room counts as proven absent.
+    assert index.knows_joined_rooms() is (not invalidated and event != "loop_started")
+
+
 @pytest.mark.asyncio
 async def test_room_without_owner_gets_ready_row_from_its_steward(tmp_path: Path) -> None:
     """A room only agents have joined is read through its steward, the joined account with the most power."""
@@ -570,18 +630,16 @@ async def test_power_change_keeps_ready_observer(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["observes_room_members", "accepting_work", "running"])
-async def test_bot_before_first_sync_is_not_picked(tmp_path: Path, missing: str) -> None:
-    """A bot whose own sync is not live, before its loop caught up or while it stops, observes no room despite its power."""
+async def test_bot_before_first_sync_is_not_picked(tmp_path: Path) -> None:
+    """A bot whose receive loop is not open observes no room despite its power."""
     config, runtime_paths = _config(tmp_path)
     room = nio.MatrixRoom(_ROOM, _B)
     room.power_levels.users[_B] = 100
     a = _Account(_A, {_ROOM: (_A, _B, _ALICE)})
     b = _Account(_B, {_ROOM: (_A, _B, _ALICE)}, rooms={_ROOM: room})
-    live = {"running": True, "observes_room_members": True, "accepting_work": True}
     bots = {
-        "a": SimpleNamespace(client=a, **live),
-        "b": SimpleNamespace(client=b, **(live | {missing: False})),
+        "a": SimpleNamespace(client=a, running=True, observes_room_members=True),
+        "b": SimpleNamespace(client=b, running=True, observes_room_members=False),
     }
     index = AgentReplyMembershipIndex()
 
@@ -590,7 +648,7 @@ async def test_bot_before_first_sync_is_not_picked(tmp_path: Path, missing: str)
     assert _observers(index) == {_ROOM: _A}
     assert b.reads == []
 
-    bots["b"] = SimpleNamespace(client=b, **live)
+    bots["b"] = SimpleNamespace(client=b, running=True, observes_room_members=True)
     assert membership_observers(cast("Mapping[str, AgentBot]", bots))[1](_ROOM, [_A, _B]) == _B
 
 
