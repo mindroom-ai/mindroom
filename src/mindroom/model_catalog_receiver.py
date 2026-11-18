@@ -278,13 +278,12 @@ class _Receiver:
             return
         deadline, target = admitted
         received = deadline - _DEADLINE_SECONDS
+        deadline_scope = asyncio.timeout(max(0, deadline - time.monotonic()))
         try:
-            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+            async with deadline_scope:
                 model_count = await self._respond(event, request, target)
         except _DroppedError as dropped:
             _drop(event, request, dropped.reason, received)
-        except TimeoutError:
-            _drop(event, request, "timeout", received)
         except asyncio.CancelledError:
             # Shutdown or restart cancels the task mid-request. Only the awaited
             # body can raise it: the outcome handlers never await, so no request
@@ -292,6 +291,10 @@ class _Receiver:
             _drop(event, request, "cancelled", received)
             raise
         except Exception as exc:
+            # An inner TimeoutError, such as an upload timeout, is an error, not this deadline.
+            if isinstance(exc, TimeoutError) and deadline_scope.expired():
+                _drop(event, request, "timeout", received)
+                return
             # Operational unavailability is a timeout to the client, never a
             # partial catalog or a provider/configuration error disclosure.
             logger.warning(

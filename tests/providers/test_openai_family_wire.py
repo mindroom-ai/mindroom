@@ -617,8 +617,8 @@ async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fiel
 
 
 @pytest.mark.asyncio
-async def test_a_reply_v2026_11_387_stored_sends_its_reasoning_details_whole(tmp_path: Path) -> None:
-    """Reasoning details v2026.11.387 stored as their streamed pieces are sent whole, the stored pieces kept.
+async def test_a_reply_v2026_11_389_stored_sends_its_reasoning_details_whole(tmp_path: Path) -> None:
+    """Reasoning details v2026.11.389 stored as their streamed pieces are sent whole, the stored pieces kept.
 
     Pieces join within one type, index, and id up to a text's signature; encrypted details stay apart.
     """

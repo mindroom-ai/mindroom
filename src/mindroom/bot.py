@@ -1578,7 +1578,7 @@ class AgentBot:
 
         Both happen before journal replay, so a message to a held conversation waits for its approval after a restart.
         """
-        await self._reply_runtime.start()
+        self._response_runner.note_continued_sources(await self._reply_runtime.start())
         self._response_runner.follow_approval_holds(self._journal_store.approval_signals, self._journal_principal_id)
 
     async def start(self) -> None:
@@ -2022,7 +2022,7 @@ class AgentBot:
                 after_sync=self._on_ingestion_frame_completion,
                 after_ack=self._ingestion_admission_progress.set,
                 on_decryption_failure=self._decryption_diagnostics.schedule,
-                schedule_trigger_sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
+                sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
             ),
             name=f"matrix_ingestion_pump_{self.agent_name}",
         )

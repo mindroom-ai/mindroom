@@ -2,7 +2,8 @@
 
 Every read takes a limit. There is no API that materializes a whole room,
 because the only thing standing between a busy room and an unbounded query is
-whether such a call exists to be made.
+whether such a call exists to be made. A thread's fingerprint reads all of one
+thread's rows, but only their IDs and refresh tokens, never their content.
 """
 
 from __future__ import annotations
@@ -702,6 +703,41 @@ def conversation_is_complete(
     """
     row = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
     return row is not None and bool(row["complete"]) and row["recovery_state"] is None
+
+
+# A thread's hydration marker, and each of its rows' logical ID, visible revision, and refresh token.
+type ThreadFingerprint = tuple[tuple[object, ...], frozenset[tuple[str, str, int | None]]]
+
+
+def thread_fingerprint(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> ThreadFingerprint | None:
+    """Return what a strict read of one thread depends on, loading no content, or None while no marker stands.
+
+    Every write to a visible message adds or removes its row, installs another revision, or sets or clears its refresh
+    token, which a redaction sets to its own receipt order. Without a marker a strict read walks the server again.
+    """
+    marker = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
+    if marker is None:
+        return None
+    rows = transaction.fetchall(
+        """
+        SELECT logical_event_id, revision_event_id, refresh_token FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        UNION ALL
+        SELECT logical_event_id, revision_event_id, refresh_token FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        """,
+        (principal_id, room_id, encode_thread_id(thread_id), principal_id, room_id, thread_id),
+    )
+    return (
+        tuple(marker[column] for column in ("hydrated_epoch", "complete", "attempted_policy_rank", "recovery_state")),
+        frozenset((row["logical_event_id"], row["revision_event_id"], row["refresh_token"]) for row in rows),
+    )
 
 
 def conversation_hydration_coverage(

@@ -23,6 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.resolution import show_tool_calls
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
+    AGENT_AUTHORED_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
@@ -542,6 +543,39 @@ async def test_own_messages_not_heard(listening: _Listening) -> None:
 
     assert listening.turns.heard() == ["$alice"]
     assert own not in listening.turns.contexts[0].prompt
+
+
+async def test_a_marked_message_from_a_person_is_not_heard(listening: _Listening) -> None:
+    """A message an agent wrote through a person's account carries the marker, and no listening agent hears it."""
+    await listening.service._poll_once(T0)
+    marked = {**text("Written by an agent"), AGENT_AUTHORED_KEY: True}
+    await admit(listening.journal, "$marked", room_id=ROOM, sender=ALICE, ts=_ms(10), content=marked)
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.contexts == []
+
+
+async def test_a_marked_edit_from_a_person_is_not_heard(listening: _Listening) -> None:
+    """History keeps only an edit's replacement content, so the marker is read from there."""
+    await listening.service._poll_once(T0)
+    await admit(listening.journal, "$said", room_id=ROOM, sender=ALICE, ts=_ms(10), content=text("Hello"))
+    revision = edit("$said", "Written by an agent")
+    revision["m.new_content"] = {**cast("dict[str, object]", revision["m.new_content"]), AGENT_AUTHORED_KEY: True}
+    await admit(listening.journal, "$said-edit", room_id=ROOM, sender=ALICE, ts=_ms(11), content=revision)
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.contexts == []
+
+
+async def test_a_marked_message_from_a_managed_sender_is_still_heard(listening: _Listening) -> None:
+    """An agent's own account already speaks only for that agent, so the marker takes nothing from its reply."""
+    helper = entity_ids(listening.config, listening.runtime_paths)["helper"].full_id
+    await listening.service._poll_once(T0)
+    marked = {**text("Written by an agent"), ACTING_REQUESTER_KEY: ALICE, AGENT_AUTHORED_KEY: True}
+    await admit(listening.journal, "$marked", room_id=ROOM, sender=helper, ts=_ms(10), content=marked)
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.heard() == ["$marked"]
 
 
 @pytest.mark.parametrize("source_kind", [TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND])
