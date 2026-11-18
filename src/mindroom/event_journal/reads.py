@@ -8,6 +8,7 @@ thread's rows, but only their IDs and refresh tokens, never their content.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from .membership_state import claim_membership_epoch
 from .models import (
     ConversationCursor,
     ConversationPage,
+    EventKind,
     HydrationCoverage,
     RefreshRequest,
     RoomPage,
@@ -738,6 +740,111 @@ def thread_fingerprint(
         tuple(marker[column] for column in ("hydrated_epoch", "complete", "attempted_policy_rank", "recovery_state")),
         frozenset((row["logical_event_id"], row["revision_event_id"], row["refresh_token"]) for row in rows),
     )
+
+
+# More events than this since the earlier position cost less to answer by fingerprinting every thread.
+_MAX_PLACED_EVENTS = 256
+
+
+@dataclass(frozen=True, slots=True)
+class RoomChanges:
+    """Where one room's projection stands, and which of its threads changed since an earlier standing."""
+
+    # The newest receipt, and the room's membership epoch and history-recovery state and revision.
+    position: tuple[int, tuple[object, ...]]
+    # Each thread's hydration row, which a walk, a recovery, or a discarded delivery writes and a rejoin deletes.
+    hydrations: dict[str, tuple[object, ...]]
+    # The threads events admitted since the earlier position touched, or None when that cannot be told.
+    touched: frozenset[str] | None
+
+
+def room_changes(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    since: tuple[int, tuple[object, ...]] | None,
+) -> RoomChanges:
+    """Return which of a room's threads may have changed since position ``since``, reading no thread's rows.
+
+    Admission writes visible rows with a receipt. Every other write to them also writes a hydration row, the room's
+    history recovery, or its membership epoch, so a thread none of these name still has the fingerprint it had.
+    """
+    room = transaction.fetchone(
+        """
+        SELECT (SELECT MAX(receipt_order) FROM journal_events) AS receipt,
+               (SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?) AS epoch,
+               (SELECT state FROM room_history_recovery WHERE principal_id = ? AND room_id = ?) AS recovery,
+               (SELECT revision FROM room_history_recovery WHERE principal_id = ? AND room_id = ?) AS revision
+        """,
+        (principal_id, room_id) * 3,
+    )
+    assert room is not None
+    position = (int(room["receipt"] or 0), (room["epoch"], room["recovery"], room["revision"]))
+    hydrations = transaction.fetchall(
+        """
+        SELECT thread_id, membership_epoch, complete, attempted_policy_rank, walk_version FROM conversation_hydration
+        WHERE principal_id = ? AND room_id = ?
+        """,
+        (principal_id, room_id),
+    )
+    return RoomChanges(
+        position=position,
+        hydrations={
+            row["thread_id"]: (
+                row["membership_epoch"],
+                row["complete"],
+                row["attempted_policy_rank"],
+                row["walk_version"],
+            )
+            for row in hydrations
+        },
+        touched=None
+        if since is None or since[1] != position[1]
+        else _touched_threads(transaction, principal_id, room_id=room_id, after=since[0]),
+    )
+
+
+def _touched_threads(transaction: Transaction, principal_id: str, *, room_id: str, after: int) -> frozenset[str] | None:
+    """Return every thread an event admitted after receipt ``after`` may have added, revised, or redacted a row of.
+
+    That is the event's own thread, the thread of the row it is or revises, and, for a redaction, the thread of the
+    row it named. None when a redaction's target is in neither the projection nor the journal, so its thread is lost.
+    """
+    events = transaction.fetchall(
+        """
+        SELECT event_id, thread_id, kind, source_json FROM journal_events
+        WHERE receipt_order > ? AND principal_id = ? AND room_id = ?
+        LIMIT ?
+        """,
+        (after, principal_id, room_id, _MAX_PLACED_EVENTS + 1),
+    )
+    if len(events) > _MAX_PLACED_EVENTS:
+        return None
+    if not events:
+        return frozenset()
+    redacted: set[object] = set()
+    for event in events:
+        if event["kind"] == EventKind.REDACTION:
+            source = json.loads(event["source_json"] or "{}")
+            content = source.get("content")
+            redacted.add(source.get("redacts") or (content.get("redacts") if isinstance(content, dict) else None))
+    ids = tuple({event["event_id"] for event in events} | redacted - {None})
+    marks = ", ".join("?" * len(ids))
+    rows = transaction.fetchall(
+        f"""
+        SELECT thread_id, logical_event_id, revision_event_id FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND (logical_event_id IN ({marks}) OR revision_event_id IN ({marks}))
+        UNION ALL
+        SELECT thread_id, event_id, event_id FROM journal_events WHERE principal_id = ? AND event_id IN ({marks})
+        """,  # noqa: S608 - placeholders are generated, values are still bound
+        (principal_id, room_id, *ids, *ids, principal_id, *ids),
+    )
+    placed = {row["logical_event_id"] for row in rows} | {row["revision_event_id"] for row in rows}
+    if not redacted <= placed:
+        return None
+    # A row's logical ID is the thread it roots, if it roots one.
+    return frozenset({row["thread_id"] for row in rows} | {row["logical_event_id"] for row in rows})
 
 
 def conversation_hydration_coverage(

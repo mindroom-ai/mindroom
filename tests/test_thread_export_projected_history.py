@@ -35,7 +35,7 @@ from mindroom.matrix.conversation_hydration import (
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.thread_export import ThreadExportSource, ThreadExportTarget, export_threads_to_sources, projected_history
-from mindroom.thread_export.models import ThreadExportRoom
+from mindroom.thread_export.models import ExportedThreads, ThreadExportRoom
 from mindroom.thread_export.projected_history import (
     ProjectedThreadReader,
     ThreadExportIncompleteError,
@@ -61,7 +61,6 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.thread_export.execution import ExportedThreads
 
 pytestmark = pytest.mark.asyncio
 
@@ -901,7 +900,7 @@ async def test_a_rejoin_after_a_cold_export_exports_what_changed_while_away(
     root = raw(ROOT, "root", ts=100)
     first = raw("$a:example.org", "first", ts=200, thread_id=ROOT)
     serve_thread(homeserver, root, [first])
-    exported: ExportedThreads = {}
+    exported = ExportedThreads()
 
     assert await workspace_pass(router, homeserver, tmp_path, exported) == ["root", "first"]
     await admit_room_membership(router, ROOM, "leave", source=DepartureSource.LOCAL)
@@ -923,7 +922,7 @@ async def test_a_reply_a_pass_read_and_its_sender_deleted_since_leaves_the_expor
     """
     homeserver = FakeHomeserver()
     serve_thread(homeserver, raw(ROOT, "root", ts=100), [raw("$a:example.org", "first", ts=200, thread_id=ROOT)])
-    exported: ExportedThreads = {}
+    exported = ExportedThreads()
     await workspace_pass(router, homeserver, tmp_path, exported)
     fingerprint = ExportProjectionView.thread_fingerprint
 

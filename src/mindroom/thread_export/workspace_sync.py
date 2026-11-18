@@ -18,7 +18,7 @@ from mindroom.logging_config import get_logger
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.runtime_shutdown import gather_shutdown_phase
-from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
+from mindroom.thread_export.models import ExportedThreads, ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader
 from mindroom.thread_export.selection import export_rooms
 from mindroom.thread_export.service import export_threads_once, export_threads_to_sources
@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import PrincipalStore
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_admission import ResponseAdmissionGate
-    from mindroom.thread_export.execution import ExportedThreads
     from mindroom.thread_export.models import ThreadExportGroup, ThreadExportStats
 
 logger = get_logger(__name__)
@@ -310,7 +309,7 @@ class WorkspaceThreadExportRunner:
                     config,
                     entity_name=agent_name,
                     membership_index=self._deps.agent_reply_memberships,
-                    exported=self._exported.setdefault(agent_name, {}),
+                    exported=self._exported.setdefault(agent_name, ExportedThreads()),
                 ),
             )
         stats = await export_threads_to_sources(

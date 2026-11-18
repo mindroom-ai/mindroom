@@ -22,8 +22,11 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_export import ThreadExportSource, ThreadExportTarget, export_threads_to_sources
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (
+)
+from mindroom.thread_export.execution import (
     export_threads_for_targets_for_client as _export_threads_for_targets_for_client,
 )
+from mindroom.thread_export.models import ExportedThreads
 from mindroom.thread_export.models import (
     ThreadExportRoom as _ThreadExportRoom,
 )
@@ -57,7 +60,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.thread_export import ThreadExportStats
-    from mindroom.thread_export.execution import ExportedThreads
 
 
 async def _export_threads_for_client(
@@ -1594,7 +1596,7 @@ async def test_a_pass_skips_a_thread_nothing_changed_in_since_it_wrote_it(tmp_pa
     config = _config(tmp_path)
     output_dir = tmp_path / "exports"
     fingerprint = _journal_answer()
-    source = _remembering_source({}, fingerprint)
+    source = _remembering_source(ExportedThreads(), fingerprint)
 
     await _remembering_pass(config, output_dir, source)
     written = _remembered_file(output_dir).read_bytes()
@@ -1618,7 +1620,7 @@ async def test_a_pass_restores_an_export_file_changed_since_it_wrote_it(tmp_path
     """A thread file someone edited or deleted is read and written again, even though the thread did not change."""
     config = _config(tmp_path)
     output_dir = tmp_path / "exports"
-    source = _remembering_source({}, _journal_answer())
+    source = _remembering_source(ExportedThreads(), _journal_answer())
     await _remembering_pass(config, output_dir, source)
     path = _remembered_file(output_dir)
     exported = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -1662,7 +1664,7 @@ async def test_a_thread_titled_by_a_person_is_read_on_every_pass(tmp_path: Path)
         thread_id=_REMEMBERED_THREAD,
     )
     # The journal holds exactly the rows the export reads, so only the person's title keeps the thread from a skip.
-    source = _remembering_source({}, _journal_answer("$pin:localhost"))
+    source = _remembering_source(ExportedThreads(), _journal_answer("$pin:localhost"))
 
     with patch("mindroom.thread_export.execution.human_summary_authorizer", return_value=lambda _sender: True):
         await _remembering_pass(config, output_dir, source, (*_REMEMBERED_HISTORY, pin))
@@ -1683,7 +1685,7 @@ async def test_a_pass_reads_a_thread_again_when_what_its_export_shows_besides_me
     """A renamed room or a changed set of trusted title senders has a pass read a thread whose messages did not change."""
     config = _config(tmp_path)
     output_dir = tmp_path / "exports"
-    exported: ExportedThreads = {}
+    exported = ExportedThreads()
     fingerprint = _journal_answer()
     await _remembering_pass(config, output_dir, _remembering_source(exported, fingerprint))
 
@@ -1710,7 +1712,7 @@ async def test_a_room_whose_thread_files_cannot_be_listed_is_exported_as_on_a_fi
     """When the room's export files cannot be listed, every thread is read and written as if nothing was remembered."""
     config = _config(tmp_path)
     output_dir = tmp_path / "exports"
-    source = _remembering_source({}, _journal_answer())
+    source = _remembering_source(ExportedThreads(), _journal_answer())
     await _remembering_pass(config, output_dir, source)
 
     with patch("mindroom.thread_export.execution.thread_file_identities", side_effect=error):

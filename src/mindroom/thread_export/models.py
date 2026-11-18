@@ -10,8 +10,8 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.thread_export.execution import ExportedThreads
     from mindroom.thread_export.projected_history import ProjectedThreadReader
+    from mindroom.thread_export.storage import WrittenIndexEntry
 
 
 @dataclass(frozen=True)
@@ -120,6 +120,28 @@ class ThreadExportGroup:
 
     rooms: tuple[ThreadExportRoom, ...]
     entity_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExportedThread:
+    """What one pass wrote for a thread, so a later pass can skip it while nothing it was built from changed."""
+
+    # The thread's hydration marker and the rows the export read, its room, and the trusted title senders, hashed.
+    fingerprint: int
+    # The thread's hydration row when the pass that wrote it began.
+    hydration: tuple[object, ...] | None
+    entries: dict[Path, WrittenIndexEntry]
+
+
+@dataclass(slots=True)
+class ExportedThreads:
+    """One source's exported threads by room and thread ID, and where each room stood when a pass last finished it."""
+
+    threads: dict[tuple[str, str], ExportedThread] = field(default_factory=dict)
+    # Each room's journal position, room, and trusted title senders.
+    rooms: dict[str, tuple[tuple[int, tuple[object, ...]], ThreadExportRoom, frozenset[str]]] = field(
+        default_factory=dict,
+    )
 
 
 @dataclass(frozen=True)

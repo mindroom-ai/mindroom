@@ -465,6 +465,10 @@ class ExportProjectionView(ConversationReadView, HydrationView):
         """Return what a strict read of one thread depends on: its hydration marker and rows, or None without a marker."""
         return await self._read(reads.thread_fingerprint, room_id=room_id, thread_id=thread_id)
 
+    async def room_changes(self, *, room_id: str, since: tuple[int, tuple[object, ...]] | None) -> reads.RoomChanges:
+        """Return where one room's projection stands and which of its threads may have changed since ``since``."""
+        return await self._read(reads.room_changes, room_id=room_id, since=since)
+
 
 class MatrixDeliveryView(_MembershipEpochView):
     """Delivering what was generated, plus the one journal fact delivery owns.

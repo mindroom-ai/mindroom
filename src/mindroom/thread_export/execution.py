@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
@@ -15,6 +15,8 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_history_reads import enumerate_room_thread_root_ids
 from mindroom.thread_export.models import (
+    ExportedThread,
+    ExportedThreads,
     ThreadExportAccumulator,
     ThreadExportRoom,
     ThreadExportTarget,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal.reads import RoomChanges
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.projected_history import ProjectedThreadReader
     from mindroom.thread_export.storage import FileIdentity, WrittenIndexEntry
@@ -49,17 +52,6 @@ if TYPE_CHECKING:
 type _CurrentSummary = Callable[[str, str, Sequence[ResolvedVisibleMessage]], tuple[str | None, bool]]
 
 
-@dataclass(frozen=True, slots=True)
-class _ExportedThread:
-    """What one pass wrote for a thread, so a later pass can skip it while nothing it was built from changed."""
-
-    # The thread's hydration marker and the rows the export read, its room, and the trusted title senders, hashed.
-    fingerprint: int
-    entries: dict[Path, WrittenIndexEntry]
-
-
-# One source's exported threads by room and thread ID.
-type ExportedThreads = dict[tuple[str, str], _ExportedThread]
 # The rows a strict read returned, as `thread_fingerprint` gives them: the read leaves no refresh owed.
 type _ReadRows = frozenset[tuple[str, str, None]]
 
@@ -204,44 +196,50 @@ async def _export_unless_unchanged(
     accumulators: Sequence[ThreadExportAccumulator],
     index_entries: dict[int, list[WrittenIndexEntry]],
     exported: ExportedThreads,
+    changes: RoomChanges | None,
     file_identities: dict[int, dict[str, FileIdentity]],
     trusted_sender_ids: frozenset[str],
 ) -> None:
-    """Count a thread unchanged when nothing it was built from changed and every target still holds its file, else write it."""
+    """Count a thread unchanged when nothing it was built from changed and every target still holds its file, else write it.
+
+    A thread no event touched since its room's last pass, with the hydration row it had then, is not even read.
+    """
     key = (room.room_id, thread_id)
-    try:
-        thread_fingerprint = await reader.completeness.thread_fingerprint(room_id=room.room_id, thread_id=thread_id)
-    except Exception as exc:
-        for accumulator in accumulators:
-            accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
-        return
-    if thread_fingerprint is None:
-        await write()
-        return
-    marker, rows = thread_fingerprint
+    previous = exported.threads.pop(key, None)
+    hydration = None if changes is None else changes.hydrations.get(thread_id)
+    held = previous is not None and all(
+        (entry := previous.entries.get(accumulator.target.output_dir)) is not None
+        and file_identities.get(id(accumulator), {}).get(entry.filename) == entry.file_identity
+        for accumulator in accumulators
+    )
+    untouched = changes is not None and changes.touched is not None and thread_id not in changes.touched
+    if not (previous is not None and held and untouched and hydration is not None and hydration == previous.hydration):
+        try:
+            thread_fingerprint = await reader.completeness.thread_fingerprint(room_id=room.room_id, thread_id=thread_id)
+        except Exception as exc:
+            for accumulator in accumulators:
+                accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
+            return
+        if thread_fingerprint is None:
+            await write()
+            return
+        marker, rows = thread_fingerprint
 
-    def fingerprint(of_rows: frozenset[tuple[str, str, int | None]]) -> int:
-        return hash((marker, of_rows, room, trusted_sender_ids))
+        def fingerprint(of_rows: frozenset[tuple[str, str, int | None]]) -> int:
+            return hash((marker, of_rows, room, trusted_sender_ids))
 
-    previous = exported.get(key)
-    if (
-        previous is not None
-        and previous.fingerprint == fingerprint(rows)
-        and all(
-            (entry := previous.entries.get(accumulator.target.output_dir)) is not None
-            and file_identities.get(id(accumulator), {}).get(entry.filename) == entry.file_identity
-            for accumulator in accumulators
-        )
-    ):
-        for accumulator in accumulators:
-            accumulator.threads_exported += 1
-            accumulator.threads_unchanged += 1
-            index_entries.setdefault(id(accumulator), []).append(previous.entries[accumulator.target.output_dir])
-        return
-    # The rows come from what the export read, so one added during the read and deleted since cannot match.
-    if (written := await write()) is not None:
-        read_rows, entries = written
-        exported[key] = _ExportedThread(fingerprint(read_rows), entries)
+        if not (previous is not None and held and previous.fingerprint == fingerprint(rows)):
+            # The rows come from what the export read, so one added during the read and deleted since cannot match.
+            if (written := await write()) is not None:
+                read_rows, entries = written
+                exported.threads[key] = ExportedThread(fingerprint(read_rows), hydration, entries)
+            return
+    assert previous is not None
+    exported.threads[key] = replace(previous, hydration=hydration)
+    for accumulator in accumulators:
+        accumulator.threads_exported += 1
+        accumulator.threads_unchanged += 1
+        index_entries.setdefault(id(accumulator), []).append(previous.entries[accumulator.target.output_dir])
 
 
 def _finish_room_exports_blocking(
@@ -394,6 +392,7 @@ async def _export_enumerated_room_threads(
     index_entries: dict[int, list[WrittenIndexEntry]] = {}
     # A thread is skipped only while each target still holds the file the pass that recorded it wrote.
     file_identities: dict[int, dict[str, FileIdentity]] = {}
+    changes: RoomChanges | None = None
     if exported is not None:
         for accumulator in authorized:
             with suppress(OSError, RuntimeError):
@@ -403,6 +402,15 @@ async def _export_enumerated_room_threads(
                     room,
                     trusted_root=accumulator.target.trusted_root,
                 )
+        last = exported.rooms.get(room.room_id)
+        try:
+            changes = await reader.completeness.room_changes(
+                room_id=room.room_id,
+                since=last[0] if last is not None and last[1:] == (room, trusted_sender_ids) else None,
+            )
+        except Exception:
+            # Each thread's own fingerprint read then records the failure.
+            logger.exception("Room export changes read failed", room_id=room.room_id)
 
     for thread_id in thread_ids:
         write = partial(
@@ -426,9 +434,15 @@ async def _export_enumerated_room_threads(
             accumulators=authorized,
             index_entries=index_entries,
             exported=exported,
+            changes=changes,
             file_identities=file_identities,
             trusted_sender_ids=trusted_sender_ids,
         )
+    if exported is not None and changes is not None:
+        # A touched thread this enumeration missed is read in full when one lists it.
+        for thread_id in (changes.touched or frozenset()).difference(thread_ids):
+            exported.threads.pop((room.room_id, thread_id), None)
+        exported.rooms[room.room_id] = (changes.position, room, trusted_sender_ids)
 
     await asyncio.to_thread(
         _finish_room_exports_blocking,
