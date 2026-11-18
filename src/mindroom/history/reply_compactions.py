@@ -24,7 +24,6 @@ if TYPE_CHECKING:
         CompactionOutcome,
     )
 
-_TERMINAL_STATUSES = frozenset({"success", "failed", "timeout"})
 # Every later write of the reply repeats the entry, so a provider's long error must not crowd out its answer.
 _FAILURE_REASON_MAX_CHARS = 300
 # Every write repeats the list too, so a long tool loop that compacts again and again shows only its newest ones.
@@ -82,7 +81,7 @@ class ReplyCompactions:
         if entry is None:
             return
         entry.update({key: value for key, value in fields.items() if value is not None})
-        if entry["status"] in _TERMINAL_STATUSES:
+        if entry["status"] != "running":
             entry.pop("runs_remaining", None)
 
     def content(self) -> list[dict[str, object]] | None:
