@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 _TERMINAL_STATUSES = frozenset({"success", "failed", "timeout"})
 # Every later write of the reply repeats the entry, so a provider's long error must not crowd out its answer.
 _FAILURE_REASON_MAX_CHARS = 300
+# Every write repeats the list too, so a long tool loop that compacts again and again shows only its newest ones.
+MAX_REPLY_COMPACTIONS = 8
 
 
 def _short_reason(reason: str) -> str:
@@ -81,10 +83,10 @@ class ReplyCompactions:
             entry.pop("runs_remaining", None)
 
     def content(self) -> list[dict[str, object]] | None:
-        """Return a copy of the entries for the reply's content, or ``None`` when there are none."""
+        """Return a copy of the newest entries for the reply's content and frames, or ``None`` when there are none."""
         if not self._entries:
             return None
-        return copy.deepcopy(self._entries)
+        return copy.deepcopy(self._entries[-MAX_REPLY_COMPACTIONS:])
 
 
 class ReplyCompactionLifecycle:

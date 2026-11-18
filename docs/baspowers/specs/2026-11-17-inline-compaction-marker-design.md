@@ -67,7 +67,7 @@ Detailed wiring with file:line evidence: [`2026-11-17-inline-compaction-backend-
 - `StreamingResponse` adds the key to every durable write (progress and final) and puts the list into `LiveDocs`, which the frame publisher sends on its next tick. A compaction change never triggers, gates or requires a durable write: entries ride on the writes the stream makes anyway (text and tool progress, checkpoints due for other reasons, the placeholder send, the terminal write).
 - Prompt cache: no impact. Content keys never enter the prompt; `COMPACTION_NOTICE_CONTENT_KEY` stays in `_NON_TURN_NOTICE_CONTENT_KEYS`, and the plural key must not make a reply look like a notice.
 - Unchanged: quiet/contact/participation turns and callers without a lifecycle stay silent; run-local summaries never use the lifecycle.
-- Known limits: without live frames, a running compaction shows only once the next durable write lands. Same as reasoning today: entries are not carried across approval resumes or restart replays; ledger-rendered terminal writes (cancel/error) drop the key.
+- Known limits: a reply keeps only its newest 8 compactions (`MAX_REPLY_COMPACTIONS`), in its writes and frames alike. Without live frames, a running compaction shows only once the next durable write lands. Same as reasoning today: entries are not carried across approval resumes or restart replays; ledger-rendered terminal writes (cancel/error) drop the key.
 
 ## Client (mindroom-chat)
 

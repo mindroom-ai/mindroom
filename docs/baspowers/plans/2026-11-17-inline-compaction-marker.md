@@ -24,7 +24,7 @@
 
 ## Review Focus
 
-- A compaction that starts while only the pending placeholder exists (pre-turn) must produce a durable edit of the placeholder carrying the entry, even with no text yet, and with live frames on (checkpoint) and off.
+- ~~A compaction that starts while only the pending placeholder exists (pre-turn) must produce a durable edit of the placeholder carrying the entry, even with no text yet, and with live frames on (checkpoint) and off.~~ Superseded by 6f751569e: a compaction never triggers, gates or requires a durable write; live frames show it at once, and the entries ride on the next write the stream makes anyway.
 - A compaction that fails or is cancelled must leave its entry in a terminal status (`failed`/`timeout`), never `running`, on the final event.
 - `show_tool_calls=False` anchors at 0; resumed tool trace (`resumed_tool_trace`) counts toward `after_tool`.
 - Non-streamed (collected) delivery puts the final entries on the single final message.

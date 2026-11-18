@@ -9,7 +9,7 @@ import nio
 import pytest
 
 from mindroom.constants import COMPACTIONS_CONTENT_KEY
-from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
+from mindroom.history.reply_compactions import MAX_REPLY_COMPACTIONS, ReplyCompactionLifecycle, ReplyCompactions
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
@@ -186,6 +186,42 @@ async def test_a_verbose_failure_reason_is_capped_so_a_short_answer_edit_still_f
         sidecar_required=True,
     )
     assert prepared["m.new_content"]["body"] == "Short answer."
+
+
+@pytest.mark.asyncio
+async def test_a_reply_writes_only_its_newest_compactions_so_a_short_answer_edit_fits_encrypted() -> None:
+    """A long tool loop that compacts again and again writes its newest 8 entries, so a short edit still fits."""
+    recorder = ReplyCompactions()
+    lifecycle = _lifecycle(recorder)
+    entry_ids = []
+    for _ in range(80):
+        entry_id = await lifecycle.start(_start())
+        assert entry_id is not None
+        await lifecycle.complete_failure(
+            replace(_failure(entry_id, "failed"), failure_reason="provider said: " + "x" * 400),
+        )
+        entry_ids.append(entry_id)
+
+    content = recorder.content()
+    assert content is not None
+    assert MAX_REPLY_COMPACTIONS == 8
+    assert [entry["id"] for entry in content] == entry_ids[-MAX_REPLY_COMPACTIONS:]
+    edit = {
+        "msgtype": "m.text",
+        "body": "* Short answer.",
+        "m.new_content": {"msgtype": "m.text", "body": "Short answer.", COMPACTIONS_CONTENT_KEY: content},
+        COMPACTIONS_CONTENT_KEY: content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+    }
+    prepared = await prepare_large_message(
+        _UploadClient(nio.UploadResponse("mxc://server/sidecar")),
+        "!room:server",
+        edit,
+        room_encrypted=True,
+        sidecar_required=True,
+    )
+    assert prepared["m.new_content"]["body"] == "Short answer."
+    assert len(prepared[COMPACTIONS_CONTENT_KEY]) == MAX_REPLY_COMPACTIONS
 
 
 @pytest.mark.asyncio
