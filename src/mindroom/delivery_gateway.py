@@ -406,6 +406,8 @@ class SendTextRequest:  # noqa: D101
     # command confirmation -- and takes the direct path, because a synthetic
     # turn ID would put a row in the outbox that recovery cannot reason about.
     delivery_turn_id: str | None = None
+    # The Matrix transaction of a send that is not a turn's, so its retry collapses onto the event already accepted.
+    transaction_id: str | None = None
     # The stored turn the producer recorded this answer for; its FINAL binds that turn and settles its sources.
     delivery_turn_key: str | None = None
     delivery_result: dict[str, object] | None = None
@@ -903,11 +905,7 @@ class DeliveryGateway:
                 result=request.delivery_result,
             )
         if request.delivery_turn_id is None:
-            return await send_message_outcome(
-                client,
-                room_id,
-                content,
-            )
+            return await send_message_outcome(client, room_id, content, transaction_id=request.transaction_id)
         requested_delivery: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:

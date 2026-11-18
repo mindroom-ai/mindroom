@@ -6,6 +6,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from uuid import NAMESPACE_URL, uuid5
 from weakref import WeakValueDictionary
 
 from mindroom.constants import (
@@ -77,6 +78,8 @@ class VisibleVoiceEchoLifecycle:
                     target=target,
                     response_text=transcript.body,
                     skip_mentions=True,
+                    # A retry after a lost acknowledgement or receipt gets the event the homeserver already accepted.
+                    transaction_id=str(uuid5(NAMESPACE_URL, f"mindroom-voice-transcript:{room_id}:{source_event_id}")),
                     extra_content={
                         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                         VISIBLE_ROUTER_VOICE_ECHO_KEY: True,

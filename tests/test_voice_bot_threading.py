@@ -29,8 +29,10 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.llm.media import Audio
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.thread_membership import ThreadResolution
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -664,6 +666,38 @@ async def test_answering_agent_posts_the_transcript_and_dispatches_canonical_voi
     transcript = bot._delivery_gateway.send_text.await_args.args[0]
     assert transcript.response_text == "canonical voice transcript"
     assert transcript.target.resolved_thread_id == "$thread_root"
+
+
+@pytest.mark.asyncio
+async def test_transcript_retry_sends_the_same_matrix_transaction(mock_home_bot: AgentBot) -> None:
+    """A transcript sent again after a lost acknowledgement carries its first send's transaction ID.
+
+    The homeserver then answers with the event it already accepted instead of a second transcript.
+    """
+    bot = mock_home_bot
+    bot.config.voice.visible_router_echo = True
+    echo = unwrap_extracted_collaborator(bot._visible_voice_echo)
+    target = MessageTarget.resolve("!test:server", "$thread_root", "$voice")
+    transcript = _normalized_voice_result(event=_make_threaded_voice_event(event_id="$voice"), text="hello").event
+    send = AsyncMock(
+        side_effect=[
+            MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "acknowledgement lost"),
+            DeliveredMatrixEvent("$transcript", {}),
+            DeliveredMatrixEvent("$other-transcript", {}),
+        ],
+    )
+
+    with patch("mindroom.delivery_gateway.send_message_outcome", new=send):
+        with pytest.raises(RuntimeError, match="could not be sent"):
+            await echo.publish("!test:server", "$voice", target, transcript)
+        await echo.publish("!test:server", "$voice", target, transcript)
+        await echo.publish("!test:server", "$other-voice", target, transcript)
+
+    failed, retried, other = (call.kwargs["transaction_id"] for call in send.await_args_list)
+    assert failed is not None
+    assert failed == retried
+    assert other not in (None, failed)
+    assert (await bot._turn_store.visible_echo("$voice")).event_id == "$transcript"
 
 
 @pytest.mark.asyncio
