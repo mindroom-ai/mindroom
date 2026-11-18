@@ -20,6 +20,7 @@ from mindroom.delegation.background import delegation_child
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import SUBAGENT_BUSY
 from mindroom.event_journal import BackgroundApprovalDecision, tool_job_run_id
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.response_turn import pending_approval_requirements
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -29,6 +30,7 @@ from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
+from tests.scripted_agent_helpers import PROBE_TOOL, registered_probe_tools
 from tests.tool_job_helpers import (
     DELEGATING_REQUESTER,
     JOB_TEST_TIMEOUT,
@@ -267,6 +269,54 @@ async def test_a_restart_interrupts_a_running_subagent_and_says_so(
         assert child_run is None or child_run.status not in {RunStatus.running, RunStatus.paused}
     finally:
         await conversation.runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_continues_a_child_a_restart_stopped_from_the_childs_own_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart mid-call leaves the child's finished calls and results in its history, the stopped call answered."""
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=delegating_config(child_tools=[PROBE_TOOL]))
+        await conversation.open(
+            calls(tool_call("read_file", "read", path="a")),
+            calls(tool_call("run_shell_command", "shell", cmd="sleep 60")),
+            answer("Continued"),
+        )
+        try:
+            record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            handle = json.loads(str(answer_of(record, "first").content))
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            await conversation.restart()
+            job = await conversation.job(handle["job_id"])
+            assert (job.status, job.result) == (
+                "failed",
+                "Subagent turn was interrupted by a restart. Send a follow-up to continue its history.",
+            )
+            follow_up = calls(
+                tool_call("continue_subagent", "again", subagent_id=handle["subagent_id"], message="Go on"),
+            )
+            second = str(answer_of(await conversation.reply(follow_up, answer("Done")), "again").content)
+            assert second.startswith("Continued")
+            [*_, resumed] = conversation.agents.models["code"].requests
+            replayed = [message for message in resumed.messages if message.role != "system"]
+            assert [(message.role, message.tool_call_id) for message in replayed] == [
+                ("user", None),
+                ("assistant", None),
+                ("tool", "read"),
+                ("assistant", None),
+                ("tool", "shell"),
+                ("user", None),
+            ]
+            assert [message.content for message in replayed if message.role == "tool"] == [
+                "contents of a",
+                INTERRUPTED_CALL_RESULT,
+            ]
+            assert "Report" in str(replayed[0].content)
+            assert "Go on" in str(replayed[-1].content)
+        finally:
+            await conversation.close()
 
 
 @pytest.mark.asyncio

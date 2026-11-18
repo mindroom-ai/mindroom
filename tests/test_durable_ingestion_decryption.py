@@ -6,7 +6,6 @@ import asyncio
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
@@ -19,6 +18,7 @@ from nio.durable.model import CryptoEvidence
 from mindroom.event_journal import EventKind, IngestionBatchIntegrityError
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
+from tests.durable_sync_helpers import skip_crypto_maintenance
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_durable_ingestion_admission import Session, principal_for
 
@@ -61,7 +61,7 @@ async def test_real_nio_late_decryption_preserves_work_and_history_silence(
         return await frames.get()
 
     session._transport.request = request
-    session._maintain_crypto = AsyncMock()
+    skip_crypto_maintenance(session)
     runner = asyncio.create_task(session.run())
 
     async def send_frame(position: str, room: dict[str, object]) -> None:

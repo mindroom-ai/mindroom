@@ -186,10 +186,11 @@ def _event_class_for(
     approval card, run a command with the person's rights, or stop a reply.
     The marker can only take authority away, so its presence decides and its
     value is never read. An entity's own account already speaks only for that
-    entity, so the marker takes nothing from it. The event still projects, so
-    history keeps it as it is. Every other kind keeps the class it would have
-    unmarked: a membership, call or redaction event changes the room itself,
-    and its handlers must see that change whoever wrote its content.
+    entity, so the marker takes nothing from it. A message or media event
+    still projects, so history keeps it as it is. Every other kind keeps the
+    class it would have unmarked: a membership, call or redaction event
+    changes the room itself, and its handlers must see that change whoever
+    wrote its content.
     """
     if not _happened_while_member(provenance):
         return EventClass.CONTEXT_ONLY

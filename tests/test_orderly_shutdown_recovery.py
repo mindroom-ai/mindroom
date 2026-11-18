@@ -97,7 +97,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
 ) -> None:
     """The edit is left pending for the successor runtime, then replay commits the exact edit."""
     # The store's storage is a mock here; which runs the edit removes is covered by the summary-row tests.
-    monkeypatch.setattr("mindroom.turn_store.remove_runs_answering", lambda *_args: False)
+    monkeypatch.setattr("mindroom.turn_store.remove_runs_answering", lambda *_args, **_kwargs: False)
     principal = journal_store.principal("agent@alice")
     store = await _store_with_storage(
         journal_store,

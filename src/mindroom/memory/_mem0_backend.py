@@ -259,6 +259,7 @@ class Mem0MemoryBackend:
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
         editable: bool = False,  # noqa: ARG002 - every mem0 ID is editable
+        recall: bool = False,  # noqa: ARG002 - the per-turn recall keeps Mem0's top hits
     ) -> MemorySearchOutcome:
         """Search mem0 memories visible to an agent: its own store, then its teams' scopes in the one team store.
 

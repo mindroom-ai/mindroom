@@ -143,7 +143,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         assert session is not None
         try:
             assert session._sliding is not None
-            request = json.loads(session._sliding.request()[2])
+            request = json.loads(session._sliding.request(0)[2])
             assert request["conn_id"] == "mindroom-general"
             assert request["room_subscriptions"]["!outside:example.org"]["timeline_limit"] == 17
         finally:
@@ -193,7 +193,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
             assert left
             if mode == "sliding":
                 assert session._sliding is not None
-                request = json.loads(session._sliding.request()[2])
+                request = json.loads(session._sliding.request(0)[2])
                 assert set(request["room_subscriptions"]) == {"!outside:example.org"}
                 assert request["room_subscriptions"]["!outside:example.org"]["timeline_limit"] == 19
                 assert ["m.room.member", "$LAZY"] in request["room_subscriptions"]["!outside:example.org"][
@@ -202,7 +202,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
                 monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
                 bot.rooms = []
                 await bot.ensure_rooms()
-                assert json.loads(session._sliding.request()[2])["room_subscriptions"] == {}
+                assert json.loads(session._sliding.request(0)[2])["room_subscriptions"] == {}
             else:
                 assert session.config.sliding is None
         finally:
@@ -256,7 +256,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
             assert bot._ingestion_session is session
             assert bot.rooms == ["!outside:example.org"]
             assert session._sliding is not None
-            subscriptions = json.loads(session._sliding.request()[2])["room_subscriptions"]
+            subscriptions = json.loads(session._sliding.request(0)[2])["room_subscriptions"]
             assert set(subscriptions) == {"!outside:example.org"}
             assert subscriptions["!outside:example.org"]["timeline_limit"] == 29
         finally:

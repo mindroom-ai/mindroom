@@ -19,7 +19,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-_CHUNK_SIZE = 5000
+# The most characters of one memory entry chunk; a longer entry is split into pieces.
+_CHUNK_SIZE = 1200
 _CHUNK_OVERLAP = 0
 _MEMORY_KNOWLEDGE_PREFIX = "file_memory"
 _FILE_MEMORY_DESCRIPTION = (
@@ -77,6 +78,8 @@ def resolve_file_memory_knowledge(
         chunk_overlap=_CHUNK_OVERLAP,
         include_extensions=[".md"],
         include_patterns=_memory_include_patterns(search_config),
+        exclude_patterns=search_config.exclude,
+        chunk_strategy="memory_entries",
     )
     return _FileMemoryKnowledgeResolution(
         base_id=base_id,

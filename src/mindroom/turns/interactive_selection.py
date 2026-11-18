@@ -357,15 +357,14 @@ class InteractiveSelections:
             attachment_ids=selection_attachment_ids,
         )
 
+        pending_event_ids = tuple(dict.fromkeys((source_event_id, *selection_handled_turn.source_event_ids)))
         fate = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 prompt=selection_payload.prompt,
                 model_prompt=selection_payload.model_prompt,
                 thread_history=thread_history,
                 sources=ResponseSources(
-                    pending_event_ids=tuple(
-                        dict.fromkeys((source_event_id, *selection_handled_turn.source_event_ids)),
-                    ),
+                    pending_event_ids=pending_event_ids,
                     logical_source_event_ids=selection_handled_turn.source_event_ids,
                     discovery_event_ids=selection_handled_turn.discovery_event_ids,
                 ),
@@ -385,7 +384,11 @@ class InteractiveSelections:
             ),
         )
         # A reply's records, a refused claim, or an approval owns the selection; any other ending leaves it here.
-        return isinstance(fate, Owned)
+        if isinstance(fate, Owned):
+            return True
+        # No answer took the acknowledgement's reply, so end it rather than leave it saying it is still processing.
+        await self.deps.delivery_gateway.settle_unclaimed_reply(pending_event_ids, source_deleted=False)
+        return False
 
     async def _interactive_selection_is_durably_terminal(self, room_id: str, source_event_id: str) -> bool:
         """Return whether the exact selection source is durably terminal.

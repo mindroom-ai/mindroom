@@ -741,7 +741,7 @@ async def search_messages(
 
     It searches the person's joined rooms, or only ``room_id``; ``limit`` defaults to 10, at most 50, and
     ``page_token`` continues. An edit found is shown under the ID of the message it edits, as its own sender wrote
-    it, unless that message is found too; a deleted message is not shown.
+    it, each sender's newest one, unless that sender's message is found too; a deleted message is not shown.
     """
     search_filter: dict[str, object] = {"limit": _clamped(limit, _SEARCH_LIMIT, _MAX_SEARCH_LIMIT)}
     if room_id is not None:
@@ -750,7 +750,8 @@ async def search_messages(
     path = "/search" + (f"?{urlencode({'next_batch': page_token})}" if page_token else "")
     answer = await matrix_json(client, "POST", path, {"search_categories": {"room_events": criteria}})
     found = _mapping(_mapping(answer.get("search_categories")).get("room_events"))
-    lines: dict[str, str] = {}
+    # By message and sender: an edit by anyone else never takes the place of the author's line.
+    lines: dict[tuple[object, object], str] = {}
     for hit in json_objects(found, "results"):
         event = _mapping(hit.get("result"))
         room = event.get("room_id")
@@ -759,14 +760,15 @@ async def search_messages(
         if _relation(event).get("rel_type") != _EDIT:
             if _is_message(event):
                 # The message itself, with the homeserver's latest edit of it, replaces the line of an edit found.
-                lines[event["event_id"]] = _line(room, *_message_columns(event, [], {}))
+                lines[event["event_id"], event.get("sender")] = _line(room, *_message_columns(event, [], {}))
             continue
         # The edit's sender need not be the message's author, so the edit is shown as its sender's, not the message.
         original = _relation(event).get("event_id")
         fields = ("type", "sender", "origin_server_ts")
         message = {"event_id": original, **{field: event.get(field) for field in fields}}
-        if isinstance(original, str) and original not in lines and _is_message(message) and _replaces(event, message):
-            lines[original] = _line(room, *_message_columns(message, [event], {}, edited="[edit]"))
+        shown = (original, event.get("sender"))
+        if isinstance(original, str) and shown not in lines and _is_message(message) and _replaces(event, message):
+            lines[shown] = _line(room, *_message_columns(message, [event], {}, edited="[edit]"))
     return _messages_page(list(lines.values()), found.get("next_batch"))
 
 
@@ -862,6 +864,7 @@ async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | No
     try:
         await matrix_json(client, "PUT", f"/user/{person}/rooms/{room}/account_data/m.marked_unread", {"unread": False})
     except REQUEST_FAILURES as error:
-        msg = f"The room is read up to {read_up_to}, but it is still marked unread: {request_failure(error)}"
+        failure = request_failure(error)
+        msg = f"The room is read up to {read_up_to}, but clearing its unread mark was not confirmed: {failure}"
         raise MatrixRequestError(msg) from None
     return {} if event_id is not None else {"read_up_to": read_up_to}

@@ -16,13 +16,19 @@ from structlog.testing import capture_logs
 
 import mindroom.live_frames.publisher as live_publisher_module
 import mindroom.streaming as streaming_module
+from mindroom import interactive, reply_scope
 from mindroom import reply_lifecycle as rl
-from mindroom import reply_scope
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.participation import ParticipationConfig
-from mindroom.constants import SKIP_MENTIONS_KEY, STREAM_STATUS_KEY
+from mindroom.constants import (
+    SKIP_MENTIONS_KEY,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+)
 from mindroom.delivery_gateway import DeliveryGateway
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.history.interrupted_replay import render_stopped_attempt
@@ -36,7 +42,13 @@ from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import ResponseRunner, _mid_turn_for_request
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, ProgressPermission, format_stream_error_note
+from mindroom.runtime_shutdown import CONFIG_RELOAD_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.streaming import (
+    CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    ProgressPermission,
+    format_stream_error_note,
+)
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
@@ -46,6 +58,7 @@ from tests.agent_tool_helpers import tool_policy
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    make_ingress_facts,
     message_origin,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
@@ -1092,6 +1105,18 @@ async def test_selection_answer_adopts_the_span_its_acknowledgement_created(tmp_
     assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
 
 
+async def test_a_selection_acknowledgement_is_pending_until_its_answer_completes_it(tmp_path: Path) -> None:
+    """Clients show the thread as working from the acknowledgement on, as they do for a Thinking placeholder."""
+    bot = await _streaming_bot(tmp_path)
+    ack_event_id, span_id = await _acknowledge_selection(bot)
+    assert _sent_statuses(bot) == [STREAM_STATUS_PENDING]
+
+    request = replace(_plain_request(_target()), existing_event_id=ack_event_id, interactive_span_id=span_id)
+    assert await _answer(bot, request, AsyncMock(return_value="Selected answer.")) == Owned()
+
+    assert _sent_statuses(bot)[-1] == STREAM_STATUS_COMPLETED
+
+
 async def test_a_selection_acknowledgement_wakes_no_agent_it_mentions(tmp_path: Path) -> None:
     """The acknowledgement echoes the member's selected value, so agents ignore any mention in it."""
     bot = await _streaming_bot(tmp_path)
@@ -1124,6 +1149,8 @@ async def test_a_dispatch_failure_before_the_answer_ends_the_selection_reply(tmp
     assert reply.owed_write is None
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.FAILED]
     assert _sent_bodies(bot)[-1] == "[general] ⚠️ Error: lookup failed"
+    # The error edit ends the acknowledgement's pending state.
+    assert _sent_statuses(bot) == [STREAM_STATUS_PENDING, STREAM_STATUS_ERROR]
     assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
 
 
@@ -1228,6 +1255,38 @@ async def test_a_selection_whose_source_ended_before_its_claim_removes_the_ackno
     bot.client.room_redact.assert_awaited_once()
     assert ack_event_id in (*bot.client.room_redact.await_args.args, *bot.client.room_redact.await_args.kwargs.values())
     assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response..."]
+
+
+async def test_a_selection_no_reply_took_does_not_leave_its_acknowledgement_processing(tmp_path: Path) -> None:
+    """A selection whose requester lost access before its answer ran removes its pending acknowledgement."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    selections = bot._interactive_selections
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question",
+        question_text="Proceed?",
+        selection_key="1",
+        selected_label="Yes",
+        selected_value="yes",
+        thread_id=None,
+    )
+    room = MagicMock()
+    room.room_id = "!room:localhost"
+
+    with patch.object(type(runner.locked), "request_remains_authorized", AsyncMock(return_value=False)):
+        handed_off = await selections._execute_admitted_interactive_selection(
+            room,
+            selection=selection,
+            facts=make_ingress_facts("@user:localhost", source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
+            source_event_id="$event",
+            response_target=selections._interactive_selection_target(room.room_id, selection),
+        )
+
+    assert handed_off is False
+    assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response..."]
+    reply = await _reply(bot)
+    assert reply.terminal
+    bot.client.room_redact.assert_awaited_once()
 
 
 async def test_a_final_transform_is_what_the_reply_shows_from_then_on(tmp_path: Path) -> None:
@@ -1698,8 +1757,13 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
 async def _restarted_after_partial(
     tmp_path: Path,
     shown_text: str | None = "Partial",
+    *,
+    replaced_by: RuntimeShutdownIntent | None = None,
 ) -> tuple[AgentBot, asyncio.Task[SourceFate]]:
-    """Stop an instance while its reply shows ``shown_text``, or only its placeholder; return the one that took over."""
+    """Stop an instance while its reply shows ``shown_text``, or only its placeholder; return the one that took over.
+
+    ``replaced_by`` stops it as that in-process replacement does; otherwise the process stops with it.
+    """
     old = await _streaming_bot(tmp_path)
     response = await _blocked_stream(old, shown_text)
 
@@ -1708,6 +1772,8 @@ async def _restarted_after_partial(
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(shown(), timeout=5)
+    if replaced_by is not None:
+        await old.stop(shutdown_intent=replaced_by)
     restarted = _bot(tmp_path)
     unique_room_send_responses(restarted.client)
     await restarted._take_over_replies()
@@ -1746,6 +1812,86 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
         response.cancel()
         with suppress(asyncio.CancelledError):
             await response
+
+
+async def _replayed_body(bot: AgentBot, response: asyncio.Task[SourceFate]) -> str:
+    """Replay the turn ``response`` left pending on ``bot``; return the body it ended with."""
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "The complete report."
+
+    try:
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await unwrap_extracted_collaborator(bot._response_runner).generate_response(_plain_request(_target()))
+        return _sent_bodies(bot)[-1]
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
+@pytest.mark.parametrize(
+    ("replaced_by", "note"),
+    [
+        (CONFIG_RELOAD_SHUTDOWN, CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE),
+        # A replacement no config edit caused, as an MCP catalog refresh's, says what it always said.
+        (SYNC_RESTART_SHUTDOWN, RESTART_INTERRUPTED_RESPONSE_NOTE),
+    ],
+    ids=["config_reload", "other_replacement"],
+)
+async def test_a_replay_after_a_config_reload_replaced_the_agent_names_the_config_change(
+    tmp_path: Path,
+    replaced_by: RuntimeShutdownIntent,
+    note: str,
+) -> None:
+    """A config reload replaces only the agent, so its successor's note says so rather than blaming a service restart."""
+    restarted, response = await _restarted_after_partial(tmp_path, replaced_by=replaced_by)
+
+    assert await _replayed_body(restarted, response) == f"Partial\n\n{note}\n\nThe complete report."
+
+
+async def test_a_config_reload_does_not_rename_what_an_earlier_restart_stopped(tmp_path: Path) -> None:
+    """The note names the stop of the span a replay continues, not of the instance that owned the reply last."""
+    owner, response = await _restarted_after_partial(tmp_path)
+    # The instance that took over after the restart is replaced before it replays the reply.
+    await owner.stop(shutdown_intent=CONFIG_RELOAD_SHUTDOWN)
+    replacement = _bot(tmp_path)
+    unique_room_send_responses(replacement.client)
+    await replacement._take_over_replies()
+
+    body = await _replayed_body(replacement, response)
+
+    assert body == f"Partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+
+
+async def test_a_retried_start_keeps_naming_the_config_change(tmp_path: Path) -> None:
+    """A replacement whose start runs again still names the config reload that stopped the reply."""
+    restarted, response = await _restarted_after_partial(tmp_path, replaced_by=CONFIG_RELOAD_SHUTDOWN)
+    await restarted._take_over_replies()
+
+    body = await _replayed_body(restarted, response)
+
+    assert body == f"Partial\n\n{CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+
+
+@pytest.mark.parametrize("config_reload", [False, True], ids=["restart", "config_reload"])
+async def test_an_owed_restart_note_names_why_its_own_span_stopped(tmp_path: Path, config_reload: bool) -> None:
+    """A restart note owed for a reply names a config change only when a config reload replaced that span's instance."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
+    answered = await _reply(bot)
+    if config_reload:
+        bot._reply_runtime.retire_for_config_change()
+    await _owe(bot, answered.reply_id, owed_write=rl.OwedWrite(answered.last_span_id, rl.NoteKind.RESTART))
+
+    await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
+
+    note = CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE if config_reload else RESTART_INTERRUPTED_RESPONSE_NOTE
+    assert _sent_bodies(bot)[-1] == f"An answer.\n\n{note}"
 
 
 async def _stopped_in_a_tool(bot: AgentBot, *, runs: bool = True) -> asyncio.Task[SourceFate]:

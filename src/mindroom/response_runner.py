@@ -15,12 +15,14 @@ from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
+from mindroom.ai_runtime import reply_ended_for_follow_up
 from mindroom.approval.response import continuation_response_kind, continuation_target
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
+    CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -32,6 +34,9 @@ from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.final_delivery import (
     Cancelled,
+    Completed,
+    Failed,
+    FailureCause,
     FinalDeliveryOutcome,
     Suppressed,
     Suppression,
@@ -42,6 +47,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.mid_turn import MidTurnMode
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     classify_cancel_source,
@@ -63,6 +69,7 @@ from mindroom.reply_scope import (
     current_reply_event_id,
     current_slot,
     current_span,
+    current_span_stopped,
     initial_write,
     release_decision,
     suppress_decision,
@@ -72,6 +79,7 @@ from mindroom.reply_turn.enrichment import (
     interrupted_attempt_model_prompt,
     matrix_message_target_item,
     prepare_memory_and_model_context,
+    thread_fork_item,
     with_matrix_message_target,
     with_silent_schedule_delivery,
 )
@@ -170,6 +178,10 @@ if TYPE_CHECKING:
         ResponseLifecycleCoordinator,
         ResponseLifecycleReservation,
     )
+
+
+# How many restarts may cut one turn short before its replay stops continuing from the stopped attempts' own messages.
+_NATIVE_RECOVERY_LIMIT = 2
 
 
 def _paused_with_committed_presentation(
@@ -485,6 +497,7 @@ class ResponseRunner:
         response_envelope: MessageEnvelope,
         mentions_nobody: bool = False,
         transcript: str | None = None,
+        mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve a queued-human notice for an active response before dispatch owns ingress."""
         return self.lifecycle_coordinator.reserve_waiting_human_message(
@@ -492,6 +505,7 @@ class ResponseRunner:
             response_envelope=response_envelope,
             mentions_nobody=mentions_nobody,
             transcript=transcript,
+            mode=mode,
         )
 
     async def reserve_response_lifecycle(
@@ -954,6 +968,9 @@ class ResponseRunner:
     ) -> ResponseTurnContext:
         """Build the inputs an agent turn and a team turn share; each adds its own."""
         target = runtime.tool_context.target
+        fork_item = thread_fork_item(thread_history, target.resolved_thread_id, self.deps.runtime.config)
+        if fork_item is not None:
+            transient_enrichment_items = (*transient_enrichment_items, fork_item)
         return ResponseTurnContext(
             entity_label=self.deps.agent_name,
             session_id=runtime.tool_context.target.session_id,
@@ -1087,7 +1104,14 @@ class ResponseRunner:
         )
         return claimed
 
-    async def _with_interrupted_attempt(self, request: ResponseRequest) -> ResponseRequest:
+    async def _with_interrupted_attempt(
+        self,
+        request: ResponseRequest,
+        *,
+        session_id: str,
+        history_scope: HistoryScope | None,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> ResponseRequest:
         """Tell a replayed turn, or a retried regeneration, what its stopped attempts showed and ran.
 
         A restart, whether a crash, an orderly shutdown, an entity replacement
@@ -1096,11 +1120,34 @@ class ResponseRunner:
         attempt may have shown, which stays in the message with the new attempt's
         answer below it, and every tool call it made, shown or not. The same
         account goes into the new attempt's prompt, where later turns keep it.
+
+        An attempt that takes over one a restart cut short, a replay or the retry of an
+        edit's regeneration, first recovers the runs those attempts stored in ``history_scope``,
+        so its request continues from their own messages; a regeneration nothing cut short
+        starts fresh. The account lists the recorded calls either way: a recovered run is
+        history like any run, which the agent's limits, the request's budget or a compaction
+        may leave out. A turn restarts cut short more than ``_NATIVE_RECOVERY_LIMIT`` times
+        recovers none and drops those it recovered before, in case continuing from them is
+        what stops it; an approval pause is no restart.
         """
         handle = current_span()
         if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION}:
             return request
         recorded = await handle.runtime.interrupted_tool_calls(handle)
+        restarts = await handle.runtime.restart_interruptions(handle)
+        recovered: list[str] = []
+        if restarts and history_scope is not None:
+            recovered = await self.deps.state_writer.recover_interrupted_turn(
+                execution_identity=execution_identity,
+                scope=history_scope,
+                session_id=session_id,
+                event_ids={*request.sources.pending_event_ids, *request.sources.logical_source_event_ids},
+                natively=restarts <= _NATIVE_RECOVERY_LIMIT,
+            )
+        if recovered:
+            # The turn's runs name the recovered runs they continue, so the message that answers the turn links them.
+            continued = {**(request.matrix_run_metadata or {}), CONTINUED_RUNS_METADATA_KEY: recovered}
+            request = replace(request, matrix_run_metadata=continued)
         return self._with_recorded_interrupted_attempt(request, handle, recorded)
 
     def _with_recorded_interrupted_attempt(
@@ -1237,13 +1284,24 @@ class ResponseRunner:
         *,
         resolved_target: MessageTarget,
         placeholder_event_id: str | None,
+        history_scope: HistoryScope | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> ResponseRequest | SourceFate:
-        """Refresh a claimed turn's history and payload, gate its sources again, and tell it what an earlier attempt did."""
+        """Refresh a claimed turn's history and payload, gate its sources again, and tell it what an earlier attempt did.
+
+        ``history_scope`` is the scope the turn's runs store in, as ``execution_identity``; a turn that runs nothing
+        names none.
+        """
         request = await self._prepare_request_after_lock(request, exclude_history_event_id=placeholder_event_id)
         prepared = await self._prepare_locked_source(request, resolved_target=resolved_target)
         if not isinstance(prepared, ResponseRequest):
             return prepared
-        return await self._with_interrupted_attempt(prepared)
+        return await self._with_interrupted_attempt(
+            prepared,
+            session_id=resolved_target.session_id,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+        )
 
     async def _begin_locked_turn(
         self,
@@ -1546,6 +1604,8 @@ class ResponseRunner:
                 request,
                 resolved_target=resolved_target,
                 placeholder_event_id=placeholder_event_id,
+                history_scope=history_scope,
+                execution_identity=execution_identity,
             )
             if not isinstance(prepared, ResponseRequest):
                 return prepared
@@ -1878,6 +1938,7 @@ class ResponseRunner:
             turn_recorder=recorder,
             run_metadata_collector=run_metadata_content,
             response_event_id=current_reply_event_id,
+            stopped_by_user=current_span_stopped,
         )
 
         def response_stream() -> AsyncIterator[StreamInputChunk]:
@@ -1891,7 +1952,7 @@ class ResponseRunner:
         # The turn's tool calls note how long they waited for a worker to start in the reply's timing.
         with bind_reply_pipeline_timing(request.pipeline_timing):
             if use_streaming:
-                return await self._deliver_streamed(
+                outcome = await self._deliver_streamed(
                     turn,
                     response_stream,
                     response_identity=response_identity,
@@ -1900,14 +1961,29 @@ class ResponseRunner:
                     final_extra_content=final_extra_content,
                     progress=progress,
                 )
-            return await self._deliver_collected(
-                turn,
-                response_stream,
-                response_identity=response_identity,
-                tool_trace=tool_trace,
-                final_extra_content=final_extra_content,
-                progress=progress,
+            else:
+                outcome = await self._deliver_collected(
+                    turn,
+                    response_stream,
+                    response_identity=response_identity,
+                    tool_trace=tool_trace,
+                    final_extra_content=final_extra_content,
+                    progress=progress,
+                )
+        if (
+            outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+            and not outcome.is_visible_response
+            and recorder.outcome == "completed"
+            and reply_ended_for_follow_up()
+        ):
+            # A waiting message ended the run after calls it showed nothing of: the run is complete and stored, and
+            # the message carries on as its own reply, so this one's placeholder goes without a failure note.
+            return FinalDeliveryOutcome(
+                ending=Completed(),
+                tool_trace=outcome.tool_trace,
+                extra_content=outcome.extra_content,
             )
+        return outcome
 
     async def _deliver_streamed(
         self,

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
+from mindroom.delegation.cost import received_subagent_cost_usd
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.usage import RunMetrics
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
@@ -321,7 +322,9 @@ def build_ai_run_metadata_content(
     describes the final run: its model, run id, status, tool count, and context.
     `context_run` is the run whose last own model request's context the reply reports: the reply's run, or a team's
     leader run, whose members' requests each held a context of their own.
-    `prices` maps recorded (provider, model ID) identities to prices for the reply's cost.
+    `prices` maps recorded (provider, model ID) identities to prices for the reply's cost, which covers the reply's own
+    model requests. What the subagent turns whose results the turn received cost is published beside it, read from the
+    turn running in this context when this builds: an approval resume makes its builder before its calls run.
     """
     metrics = turn_usage(prior_usage, metrics)
     model_config = config.models.get(model_name)
@@ -351,8 +354,13 @@ def build_ai_run_metadata_content(
         model_id=model_id,
         prices=prices,
     )
+    cost_payload: dict[str, str] = {}
     if cost is not None:
-        payload["cost"] = {"usd": format_cost_usd(cost)}
+        cost_payload["usd"] = format_cost_usd(cost)
+    if (subagents_usd := received_subagent_cost_usd()) is not None:
+        cost_payload["subagents_usd"] = format_cost_usd(subagents_usd)
+    if cost_payload:
+        payload["cost"] = cost_payload
     context = _reply_context_tokens(
         context_run,
         prepared_history,

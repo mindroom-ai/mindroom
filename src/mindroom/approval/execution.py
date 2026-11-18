@@ -22,12 +22,14 @@ from mindroom.approval.tool_owners import (
     required_approval_tool_names,
     validate_approval_tool_owners,
 )
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, resumed_subagent_cost
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, resume_from_approval
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.reply_scope import current_reply_event_id, current_span_stopped
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -190,8 +192,12 @@ async def _continue_persisted_agent(
     model_name: str,
     system_enrichment_items: tuple[EnrichmentItem, ...],
     quiet: bool,
+    subagent_cost: SubagentCost,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Resume a persisted agent with event streaming so presentation order is retained."""
+    """Resume a persisted agent with event streaming so presentation order is retained.
+
+    ``subagent_cost`` collects what the resumed turn's subagents cost, and its reply reports it.
+    """
     runner = ResumeRunner(
         build=build,
         config=config,
@@ -199,6 +205,7 @@ async def _continue_persisted_agent(
         model_name=model_name,
         storage=storage,
         user_id=continuation.requester_id,
+        steering=True,
     )
     native_events, driver_calls = resume_from_approval(persisted, continuation.calls, runner)
     events = drive_delegation_stream(
@@ -279,6 +286,7 @@ async def _continue_persisted_agent(
         progress=progress,
         system_enrichment_items=system_enrichment_items,
         quiet=quiet,
+        subagent_cost=subagent_cost,
     )
 
 
@@ -319,6 +327,7 @@ async def _stream_continuation_turn(
     resume: TurnResume,
     system_enrichment_items: tuple[EnrichmentItem, ...],
     quiet: bool,
+    subagent_cost: SubagentCost,
     reusable_build: AgentBuild | None = None,
     delegation_depth: int = 0,
     media: MediaInputs | None = None,
@@ -328,7 +337,8 @@ async def _stream_continuation_turn(
     The reply shows tool calls when ``presentation`` does. A recovered CLI call runs without a model request, so its
     follow-up, the turn whose ``resume`` restores no attempt, reads the approval receipt in its first attempt's run; a
     resumed run already read it. A resumed run keeps its stored system prompt; each fresh attempt renders
-    ``system_enrichment_items`` into its own. A ``quiet`` turn may end without an answer, as its turn could.
+    ``system_enrichment_items`` into its own. A ``quiet`` turn may end without an answer, as its turn could. A fresh
+    attempt the reply's user stops is stored as any reply's stopped run is, linked to the reply it continues.
     """
     if resume.attempt is None:
         run_id = str(uuid4())
@@ -354,7 +364,13 @@ async def _stream_continuation_turn(
         ),
         runtime_paths,
         config,
-        sinks=TurnSinks(run_metadata_collector=run_metadata, on_completed=completed.append),
+        sinks=TurnSinks(
+            run_metadata_collector=run_metadata,
+            on_completed=completed.append,
+            subagent_cost=subagent_cost,
+            response_event_id=current_reply_event_id,
+            stopped_by_user=current_span_stopped,
+        ),
         resume=resume,
     )
     try:
@@ -492,11 +508,13 @@ class AgentApprovalExecution:
             storage_factory=storage_factory,
         )
         storage = scope_run_storage(scope_context)
+        # The resumed turn goes on from what its subagents had cost before the pause.
+        subagent_cost = resumed_subagent_cost(persisted.metadata)
         try:
             with helper_usage_context(scope_context):
                 if cli_call is not None:
                     expected_worker_target = tool_context.resolve_worker_target()
-                    with tool_runtime_context(tool_context):
+                    with tool_runtime_context(tool_context), receiving_subagent_cost(subagent_cost):
                         recovered = await continue_cli_approval(
                             build,
                             continuation,
@@ -535,6 +553,7 @@ class AgentApprovalExecution:
                             progress=progress,
                             system_enrichment_items=system_enrichment_items,
                             quiet=quiet,
+                            subagent_cost=subagent_cost,
                         )
                 # The resume itself refuses decisions that do not cover the waiting calls exactly; this binds each
                 # approval to the toolkit it was granted for before the agent's tools are reached.
@@ -543,7 +562,7 @@ class AgentApprovalExecution:
                     approved_calls,
                     pending_approval_requirements(persisted),
                 )
-                with tool_runtime_context(tool_context):
+                with tool_runtime_context(tool_context), receiving_subagent_cost(subagent_cost):
                     return await _continue_persisted_agent(
                         build,
                         continuation,
@@ -560,6 +579,7 @@ class AgentApprovalExecution:
                         model_name=model.model_name,
                         system_enrichment_items=system_enrichment_items,
                         quiet=quiet,
+                        subagent_cost=subagent_cost,
                     )
         finally:
             await finalize_consumption()

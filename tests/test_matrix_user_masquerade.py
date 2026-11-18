@@ -364,31 +364,29 @@ async def test_a_send_body_that_is_not_a_json_object_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_state_events_are_stamped_and_account_data_is_not(tmp_path: Path) -> None:
-    """A state event is an event in the room, whatever endpoint carried it, so it carries the marker.
-
-    Account data is the person's own, outside any room, and passes unchanged; a read of state is never changed.
-    """
+async def test_a_state_event_is_stamped_and_account_data_is_not(tmp_path: Path) -> None:
+    """A state event carries the marker as a message does; account data, which is no event, passes unchanged."""
     client, homeserver = _client(tmp_path, {"event_id": "$state"})
     account_data = {"@bob:example.com": [ROOM]}
 
     await client.room_put_state(ROOM, "m.room.topic", {"topic": "Plans"})
-    await client.room_put_state(ROOM, "com.example.note", {"text": "Hi"}, state_key="@bob:example.com")
+    await client.room_put_state(ROOM, "com.example.setting", {"on": True}, state_key="lights")
+    await client.room_get_state_event(ROOM, "m.room.topic")
     await client.send(
         "PUT",
         "/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/m.direct",
         json.dumps(account_data),
     )
-    await client.send("GET", "/_matrix/client/v3/rooms/%21room%3Aexample.com/state/m.room.topic")
 
-    topic, keyed, direct, read = homeserver.requests
+    topic, keyed, read, direct = homeserver.requests
     assert "/rooms/%21room%3Aexample.com/state/m.room.topic" in topic.url
     assert topic.body == {"topic": "Plans", AGENT_AUTHORED_KEY: AGENT}
-    assert keyed.body == {"text": "Hi", AGENT_AUTHORED_KEY: AGENT}
+    assert keyed.url.split("?")[0].endswith("/state/com.example.setting/lights")
+    assert keyed.body == {"on": True, AGENT_AUTHORED_KEY: AGENT}
+    assert (read.method, read.body) == ("GET", None)
     # Parsed, the body sent equals the one given: no key was added.
     assert direct.body == account_data
-    assert read.body is None
-    assert topic.query["user_id"] == direct.query["user_id"] == [OWNER]
+    assert {tuple(request.query["user_id"]) for request in homeserver.requests} == {(OWNER,)}
 
 
 @pytest.mark.parametrize("source", ["variable", "file"])

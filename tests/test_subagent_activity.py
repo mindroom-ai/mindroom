@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -202,7 +203,7 @@ def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> No
     a = _activity()
     origin = ToolCallOrigin(parent_bash_call_id="bash-1", toolkit_name="files")
     keyed = "api_key=example-secret"
-    a.tool_started(ToolStarted(call=_call("c1", args={"query": keyed}), origin=origin))
+    a.tool_started(ToolStarted(call=_call("c1", args={"query": keyed}), origin=origin), now=1.0)
     (running,) = a.snapshot().items
     assert running.state == "running"
     assert "example-secret" not in (_checked_entry(running).args_preview or "")
@@ -219,13 +220,32 @@ def test_tool_rows_pair_by_call_id_and_carry_only_redacted_public_fields() -> No
 def test_a_call_announced_again_keeps_its_one_row() -> None:
     """A paused call that is announced again as it resumes runs on in its own row, which its completion finishes."""
     a = _activity()
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.add_text("Waiting")
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.tool_completed(ToolCompleted(call=_call("c1", result="x")))
     assert [(i.kind, i.tool_call_id, i.state) for i in a.snapshot().items] == [
         ("tool", "c1", "done"),
         ("text", None, None),
+    ]
+
+
+def test_a_tool_row_keeps_when_its_call_first_started() -> None:
+    """A row carries when its call started, which announcing it again on resume and completing it keep.
+
+    A completion with no row of its own appends a row that names no start.
+    """
+    a = _activity()
+    a.tool_started(ToolStarted(call=_call("c1")), now=100.0)
+    assert a.snapshot().items[0].started_at == 100.0
+    a.add_text("Waiting")
+    a.tool_started(ToolStarted(call=_call("c1")), now=200.0)
+    assert a.snapshot().items[0].started_at == 100.0
+    a.tool_completed(ToolCompleted(call=_call("c1", result="x")))
+    a.tool_completed(ToolCompleted(call=_call("c9", result="x")))
+    assert [(i.tool_call_id, i.state, i.started_at) for i in a.snapshot().items if i.kind == "tool"] == [
+        ("c1", "done", 100.0),
+        ("c9", "done", None),
     ]
 
 
@@ -239,7 +259,7 @@ def test_a_completion_without_a_start_appends_a_done_row() -> None:
 def test_failed_tool_call_is_an_error_row() -> None:
     """A failed call ends in state error."""
     a = _activity()
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.tool_completed(ToolCompleted(call=_call("c1", result="boom", is_error=True)))
     assert a.snapshot().items[0].state == "error"
 
@@ -248,7 +268,7 @@ def test_text_past_6000_characters_is_cut_to_the_newest_5000() -> None:
     """The oldest text loses its head first; the order of items stays."""
     a = _activity()
     a.add_text("a" * 4_000)
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.add_text("b" * 4_000)
     items = a.snapshot().items
     texts = [i.text for i in items if i.kind == "text"]
@@ -283,7 +303,7 @@ def test_an_emptied_text_item_is_removed_and_counted() -> None:
     """Text trimmed to nothing disappears and counts as dropped."""
     a = _activity()
     a.add_text("a" * 100)
-    a.tool_started(ToolStarted(call=_call("c1")))
+    a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.add_text("b" * 6_000)
     snapshot = a.snapshot()
     assert [i.kind for i in snapshot.items] == ["tool", "text"]
@@ -294,7 +314,7 @@ def test_tool_items_keep_the_newest_20_and_count_the_rest() -> None:
     """The 21st tool row removes the oldest one."""
     a = _activity()
     for n in range(23):
-        a.tool_started(ToolStarted(call=_call(f"c{n}")))
+        a.tool_started(ToolStarted(call=_call(f"c{n}")), now=1.0)
     snapshot = a.snapshot()
     assert len(snapshot.items) == 20
     assert snapshot.items[0].tool_call_id == "c3"
@@ -614,6 +634,52 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
     assert (last.caller_agent_name, last.agent_name) == ("leader", "child")
     assert last.parent_delegation_id is None
     assert not _OPEN
+
+
+@pytest.mark.asyncio
+async def test_a_childs_progress_names_when_its_tool_call_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """The caller's progress names the UTC time the child's call started, the start its feed row carries."""
+    reports: list[str] = []
+    monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
+    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+
+    with tool_runtime_context(runtime):
+        await ai_response(turn, paths, config)
+
+    last = await seen.wait_for_status("completed")
+    started_at = last.items[0].started_at
+    assert started_at is not None
+    assert abs(time.time() - started_at) < 60
+    started = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
+    assert f"\nCalling add (started {started} UTC)\n" in reports
+
+
+@pytest.mark.asyncio
+async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_anew(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: _Sink,
+) -> None:
+    """A provider may reuse a call id within a run; the later call names its own start, not the finished one's."""
+    clock = iter([100.0, 200.0])
+    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: next(clock)))
+    reports: list[str] = []
+    monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
+    child_turns = [calls(tool_call("add", "add", a=1, b=2)), calls(tool_call("add", "add", a=3, b=4)), answer("Done")]
+    turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
+
+    with tool_runtime_context(runtime):
+        await ai_response(turn, paths, config)
+
+    last = await seen.wait_for_status("completed")
+    assert [item.started_at for item in last.items if item.kind == "tool"] == [100.0]
+    calling = [line for line in reports[-1].splitlines() if line.startswith("Calling")]
+    assert calling == ["Calling add (started 00:01:40 UTC)", "Calling add (started 00:03:20 UTC)"]
 
 
 @pytest.mark.asyncio
