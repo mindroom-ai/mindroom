@@ -433,6 +433,28 @@ async def test_a_job_the_requester_may_not_access_does_not_hide_the_notice(tmp_p
         await runtime.shutdown()
 
 
+async def test_a_notice_is_not_sent_again_after_its_jobs_were_out_of_reach_for_a_while(tmp_path: Path) -> None:
+    """A held job that is briefly out of reach, as while a waiter claims it, keeps its sent notice from repeating."""
+    denied: set[str] = set()
+    runtime = await tool_job_runtime(tmp_path, grant=lambda job: "denied" if job.job_id in denied else "allowed")
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    last = _follow_up_event_id(_key(job_owner()), [], _FOLLOW_UP_LIMIT)
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            await _ended(runtime, "capped", BackgroundOutcome("completed", "a"), source_event_id=last)
+            await _ended(runtime, "unreachable", BackgroundOutcome("completed", "c"), source_event_id=last)
+            denied.add("unreachable")
+            await coordinator._admit_follow_ups(runtime)
+            denied.add("capped")
+            await coordinator._admit_follow_ups(runtime)
+            denied.discard("capped")
+            await coordinator._admit_follow_ups(runtime)
+            send.assert_awaited_once()
+    finally:
+        await runtime.shutdown()
+
+
 async def test_a_human_reply_collects_held_jobs_and_ends_their_notice(tmp_path: Path) -> None:
     """A reply that collects held jobs leaves no notice to repeat; a job a human message started gets a follow-up."""
     runtime = await tool_job_runtime(tmp_path)

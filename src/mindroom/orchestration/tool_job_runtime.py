@@ -156,6 +156,8 @@ class ToolJobRuntimeCoordinator:
     _publisher: JobStatePublisher = field(default_factory=JobStatePublisher, init=False)
     # Follow-ups this process admitted for jobs still waiting to be reported, which later passes leave alone.
     _admitted_follow_ups: set[str] = field(default_factory=set, init=False)
+    # Held-jobs notices this process posted, by the jobs each names; kept until one of those jobs is reported or gone.
+    _sent_notices: dict[str, frozenset[str]] = field(default_factory=dict, init=False)
 
     async def initialize(self) -> None:
         """Pin execution mode, then build the job runtime when the instance runs jobs, before dispatch can start."""
@@ -484,7 +486,7 @@ class ToolJobRuntimeCoordinator:
             candidates, held = follow_up_jobs(group), held_jobs(group)
             known = {next_follow_up_id(key, candidates)} if candidates else set()
             known |= {held_notice(key, held)[0]} if held else set()
-            if not known or known <= self._admitted_follow_ups:
+            if not known or known <= self._admitted_follow_ups | self._sent_notices.keys():
                 due |= known
                 continue
             # The jobs the requester may still access decide between a follow-up and a notice of jobs the limit holds.
@@ -499,11 +501,12 @@ class ToolJobRuntimeCoordinator:
                 due.add(follow_up_id)
             elif (held := held_jobs(ended)) and bot.client is not None:
                 notice_id, text = held_notice(key, held)
-                if notice_id in self._admitted_follow_ups or await _post_held_notice(bot.client, key, notice_id, text):
-                    self._admitted_follow_ups.add(notice_id)
-                    due.add(notice_id)
+                if notice_id in self._sent_notices or await _post_held_notice(bot.client, key, notice_id, text):
+                    self._sent_notices[notice_id] = frozenset(job.job_id for job in held)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
+        waiting = {job.job_id for group in _follow_up_candidates(runtime.retained_jobs()).values() for job in group}
+        self._sent_notices = {notice: ids for notice, ids in self._sent_notices.items() if ids <= waiting}
 
     async def _expire_ended_jobs(self) -> None:
         """Keep ended jobs for the retention period and as long as response or approval work owns them."""
