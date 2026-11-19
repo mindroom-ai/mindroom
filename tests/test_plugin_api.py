@@ -332,7 +332,7 @@ _SIGNATURES = {
     "get_tool_runtime_context": "()",
     "google_cloud_oauth_provider": "()",
     "google_workspace_oauth_providers": "(workspace)",
-    "hook": "(event, *, name, priority, timeout_ms, agents, rooms, required)",
+    "hook": "(event, *, name, priority, timeout_ms, agents, rooms, required, scope)",
     "is_human_user": "(user_id, config, runtime_paths)",
     "is_platform_administrator": "(user_id, config, runtime_paths)",
     "load_worker_target": "(data)",
@@ -659,7 +659,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 30), "0a7b1fbbec98d32b5440476028736a3bbc5cd8cd2d56818f7bc0b3e9fd26d73c")
+_PINNED_VERSION = ((1, 31), "38182bbbe3d8681cf4e987629f50f0ed1fc3c0cd9dac5d15d1b6e7abbb89e589")
 
 
 def _is_enum(obj: object) -> bool:

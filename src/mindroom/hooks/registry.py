@@ -7,16 +7,19 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom.automations.registry import AutomationCatalog, compile_automations
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
 from .decorators import get_hook_metadata
-from .types import HookCallback, RegisteredHook
+from .types import SERVICE_SCOPE_EVENTS, HookCallback, RegisteredHook
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from mindroom.automations.registry import CheckFn
     from mindroom.config.plugin import PluginEntryConfig
+
+    from .types import HookScope
 
 logger = get_logger(__name__)
 
@@ -76,6 +79,25 @@ class HookRegistry:
                     continue
 
                 seen_hook_names.add(qualified_name)
+                scope: HookScope = metadata.scope
+                agents = metadata.agents
+                # LEGACY_COMPAT: the `agents=(ROUTER_AGENT_NAME,)` hook filter that meant once per room or process.
+                # Legacy format: a plugin hook whose `agents` filter is exactly the router's name.
+                # Last legacy release: v2026.11.385 ran such hooks on the router bot; replacement: the next release
+                # has no bot in every room, and hooks say `scope="room"` or `scope="service"`.
+                # Handling: registered as service scope on the once-per-process events and as room scope on every
+                # other event, with the filter cleared and one warning naming the plugin and the hook.
+                # Coverage: tests/test_hook_registry.py::test_router_alias_on_bot_ready_becomes_service_scope,
+                # tests/test_hook_registry.py::test_router_alias_on_message_received_becomes_room_scope
+                if agents == (ROUTER_AGENT_NAME,):
+                    scope = "service" if metadata.event_name in SERVICE_SCOPE_EVENTS else "room"
+                    agents = None
+                    logger.warning(
+                        "Hook filter agents=(ROUTER_AGENT_NAME,) is deprecated; register the hook with this scope",
+                        plugin_name=plugin.name,
+                        hook_name=metadata.hook_name,
+                        scope=scope,
+                    )
                 hooks_by_event[metadata.event_name].append(
                     RegisteredHook(
                         plugin_name=plugin.name,
@@ -89,9 +111,10 @@ class HookRegistry:
                         settings=dict(plugin.entry_config.settings),
                         plugin_order=plugin.plugin_order,
                         source_lineno=_callback_source_lineno(callback),
-                        agents=metadata.agents,
+                        agents=agents,
                         rooms=metadata.rooms,
                         required=metadata.required,
+                        scope=scope,
                     ),
                 )
 
