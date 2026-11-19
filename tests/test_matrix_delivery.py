@@ -402,6 +402,58 @@ async def test_send_message_outcome_keeps_other_server_refusals_retryable() -> N
 
 
 @pytest.mark.asyncio
+async def test_send_message_outcome_maps_a_homeserver_that_refuses_encryption() -> None:
+    """A homeserver that refuses encrypted events will refuse every resend of one."""
+    client = _mock_client(encrypted=True)
+    client.room_send.return_value = nio.RoomSendError(
+        message="Encryption has been disabled",
+        status_code="M_FORBIDDEN",
+        room_id="!room:localhost",
+    )
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "already prepared", "msgtype": "m.text"},
+        content_is_prepared=True,
+    )
+
+    assert outcome == MatrixDeliveryFailure(
+        MatrixDeliveryFailureKind.ENCRYPTION_REFUSED,
+        "Encryption has been disabled",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("encrypted", "message"),
+    [
+        (True, "You are not in this room."),
+        (True, "Auth check failed: sender does not have enough power (0) for `m.room.encrypted` event type (50)"),
+        (False, "Encryption has been disabled"),
+    ],
+)
+async def test_send_message_outcome_keeps_other_forbidden_sends_retryable(encrypted: bool, message: str) -> None:
+    """Only an encrypted send refused for its encryption is permanent; other refusals may lift."""
+    client = _mock_client(encrypted=encrypted)
+    client.room_send.return_value = nio.RoomSendError(
+        message=message,
+        status_code="M_FORBIDDEN",
+        room_id="!room:localhost",
+    )
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "already prepared", "msgtype": "m.text"},
+        content_is_prepared=True,
+    )
+
+    assert isinstance(outcome, MatrixDeliveryFailure)
+    assert outcome.kind is MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE
+
+
+@pytest.mark.asyncio
 async def test_send_message_outcome_success_returns_delivered_event() -> None:
     """Successful sends keep returning the delivered event id and sent content."""
     client = _mock_client(encrypted=True)

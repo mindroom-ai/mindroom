@@ -52,6 +52,8 @@ class MatrixDeliveryFailureKind(enum.Enum):
     ENCRYPTION_GUARD = "encryption_guard"
     UNKNOWN_ENCRYPTION_STATE = "unknown_encryption_state"
     PAYLOAD_TOO_LARGE = "payload_too_large"
+    # The homeserver refuses encrypted events, so no resend of this one can succeed.
+    ENCRYPTION_REFUSED = "encryption_refused"
     SEND_EXCEPTION = "send_exception"
     UNEXPECTED_RESPONSE = "unexpected_response"
 
@@ -75,6 +77,17 @@ class _PreparedMatrixMessage:
 
     content: dict[str, Any]
     cache_bypass: bool
+
+
+def _refuses_encryption(response: nio.RoomSendError) -> bool:
+    """Return whether the homeserver refused an encrypted event because it refuses encryption.
+
+    Matrix has no errcode for this. Homeservers that can disable encryption (Conduwuit and its forks) answer
+    M_FORBIDDEN with a reason that names encryption. Any other refusal, such as one a membership or power-level
+    change can lift, stays retryable; a power-level refusal names the `m.room.encrypted` event type, so the match
+    is on "encryption", not "encrypt".
+    """
+    return response.status_code == "M_FORBIDDEN" and "encryption" in (response.message or "").lower()
 
 
 def _sanitized_delivery_error_message(error: Exception) -> str:
@@ -496,6 +509,9 @@ async def _send_resolved_message(
         status = transport.status if isinstance(transport, ClientResponse) else None
         if response.status_code == "M_TOO_LARGE":
             failure_kind = MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+            failure_detail = response.message
+        elif room_encrypted and _refuses_encryption(response):
+            failure_kind = MatrixDeliveryFailureKind.ENCRYPTION_REFUSED
             failure_detail = response.message
     emit_timing_event(
         "Matrix send timing",

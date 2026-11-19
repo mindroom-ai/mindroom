@@ -331,6 +331,34 @@ class TestEncryptCommand:
             ("@requester:localhost", "@sender:localhost"),
         )
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reason",
+        ["Encryption is disabled on this homeserver.", "You don't have permission to send m.room.encryption."],
+    )
+    async def test_confirm_reports_the_homeservers_refusal(self, reason: str) -> None:
+        """A refused confirm quotes the homeserver, so a server without encryption is not mistaken for a permission gap."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
+        client.room_put_state.return_value = nio.RoomPutStateError.from_dict(
+            {"errcode": "M_FORBIDDEN", "error": reason},
+            "!room:localhost",
+        )
+        admin_gate = AsyncMock(return_value="@requester:localhost")
+
+        with patch("mindroom.commands.encryption_commands.room_admin_power_user", new=admin_gate):
+            response = await handle_encrypt_command(
+                "confirm",
+                client=client,
+                room_id="!room:localhost",
+                requester_user_id="@requester:localhost",
+                sender_user_id="@sender:localhost",
+            )
+
+        assert response.startswith(f"❌ Failed to enable encryption: M_FORBIDDEN: {reason}\n\n")
+        assert "ask a room admin" in response
+
 
 class TestE2EECommand:
     """`!e2ee` diagnostics output."""

@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.client_room_admin import (
-    ensure_room_encryption_enabled,
     room_admin_power_user,
+    room_encryption_enable_failure,
     room_encryption_enabled,
 )
 from mindroom.matrix.cross_signing import cross_signing_status_line
@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 _ENCRYPT_USAGE = "Usage: `/encrypt` to review, then `/encrypt confirm` to enable."
 _CONFIRM_ARGUMENTS = frozenset({"confirm", "yes"})
+# The homeserver's reason is free text; a fallback can be a whole response repr.
+_FAILURE_REASON_MAX_CHARS = 200
 
 
 async def _confirm_encrypt(
@@ -29,11 +31,12 @@ async def _confirm_encrypt(
     admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
     if admin_user_id is None:
         return "❌ Room admin only."
-    if await ensure_room_encryption_enabled(client, room_id):
+    failure = await room_encryption_enable_failure(client, room_id)
+    if failure is None:
         return "🔐 End-to-end encryption is now enabled for this room. This cannot be undone."
     return (
-        "❌ Failed to enable encryption. "
-        "I may lack permission to change room state here; ask a room admin to enable it from their client."
+        f"❌ Failed to enable encryption: {failure[:_FAILURE_REASON_MAX_CHARS]}\n\n"
+        "If this is a permission error, ask a room admin to enable it from their client."
     )
 
 

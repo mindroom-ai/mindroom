@@ -280,11 +280,25 @@ async def ensure_room_encryption_enabled(
     Enabling encryption is irreversible; this helper never disables it.
     Returns whether the room is encrypted after the call.
     """
+    return await room_encryption_enable_failure(client, room_id, snapshot=snapshot) is None
+
+
+async def room_encryption_enable_failure(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    snapshot: RoomStateSnapshot | None = None,
+) -> str | None:
+    """Enable encryption like `ensure_room_encryption_enabled`; return None once encrypted, or why not.
+
+    A refusal is the homeserver's errcode and reason, such as `M_FORBIDDEN: Encryption is disabled on this
+    homeserver.`, which tells a server that refuses encryption apart from missing room permission.
+    """
     enabled = await room_encryption_enabled(client, room_id, snapshot=snapshot)
     if enabled:
-        return True
+        return None
     if enabled is None:
-        return False
+        return "the room's encryption state could not be read"
     response = await client.room_put_state(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
     if isinstance(response, nio.RoomPutStateResponse):
         cached_room = client.rooms.get(room_id)
@@ -294,9 +308,9 @@ async def ensure_room_encryption_enabled(
             # the sync window (e.g. the `!encrypt` confirmation) are not plaintext.
             cached_room.encrypted = True
         logger.info("matrix_room_encryption_enabled", room_id=room_id)
-        return True
+        return None
     logger.error("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
-    return False
+    return _describe_matrix_response_error(response)
 
 
 def _with_event_power_level(
@@ -957,5 +971,6 @@ __all__ = [
     "names_canonical_parent",
     "resolve_room_reference",
     "room_admin_power_user",
+    "room_encryption_enable_failure",
     "room_encryption_enabled",
 ]
