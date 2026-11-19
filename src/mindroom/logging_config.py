@@ -361,7 +361,7 @@ class _QueuedLogHandler(logging.handlers.QueueHandler):
         # An empty context keeps the bound fields of whichever task logged next off the note.
         self.queue.put_nowait(contextvars.Context().run(self.prepare, note))
 
-    def drain(self) -> None:
+    def flush(self) -> None:
         """Write every queued record; the next record starts the writer again."""
         self.acquire()
         try:
@@ -374,25 +374,20 @@ class _QueuedLogHandler(logging.handlers.QueueHandler):
 
     def close(self) -> None:
         """Write every queued record, then close the output."""
-        self.drain()
+        self.flush()
         self._target.close()
         super().close()
 
 
-def _drain_queued_log_handlers() -> None:
-    """Write every record the root logger's handlers still hold."""
-    for handler in logging.getLogger().handlers:
-        if isinstance(handler, _QueuedLogHandler):
-            handler.drain()
-
-
-def _drain_logs_before_excepthook(
+def _flush_logs_before_excepthook(
     exc_type: type[BaseException],
     exc: BaseException,
     tb: TracebackType | None,
 ) -> None:
     """Write queued records before the traceback of an uncaught exception, which would otherwise come first."""
-    _drain_queued_log_handlers()
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, _QueuedLogHandler):
+            handler.flush()
     assert _previous_excepthook is not None
     _previous_excepthook(exc_type, exc, tb)
 
@@ -581,7 +576,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     global _previous_excepthook
     if _previous_excepthook is None:
         # Hooks set later, such as Typer's when a command runs, call this one in turn, so wrapping once is enough.
-        _previous_excepthook, sys.excepthook = sys.excepthook, _drain_logs_before_excepthook
+        _previous_excepthook, sys.excepthook = sys.excepthook, _flush_logs_before_excepthook
     return renderer_name
 
 
