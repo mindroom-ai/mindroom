@@ -311,6 +311,27 @@ async def test_config_reloaded_hooks_get_the_service_capabilities_and_the_runtim
 
 
 @pytest.mark.asyncio
+async def test_config_reloaded_runs_service_scoped_hooks_and_no_router_filtered_one(config: Config) -> None:
+    """A reload runs a service-scoped hook, and a hook still filtered to the router stays as silent as it was."""
+    orchestrator = ready_runtime(config, runtime_paths_for(config))
+    calls: list[str] = []
+
+    @hook(EVENT_CONFIG_RELOADED, agents=(ROUTER_AGENT_NAME,))
+    async def legacy(ctx: ConfigReloadedContext) -> None:
+        calls.append(f"legacy:{ctx.event_name}")
+
+    @hook(EVENT_CONFIG_RELOADED, scope="service")
+    async def service(ctx: ConfigReloadedContext) -> None:
+        calls.append(f"service:{ctx.event_name}")
+
+    orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("p", [legacy, service])])
+
+    await orchestrator._emit_config_reloaded(ConfigUpdatePlan(new_config=orchestrator.config), set())
+
+    assert calls == ["service:config:reloaded"]
+
+
+@pytest.mark.asyncio
 async def test_config_reloaded_hooks_without_a_bot_get_no_matrix_capabilities(config: Config) -> None:
     """With no bot to send or hold state, config:reloaded still fires, stamped with the reload time; its helpers do nothing."""
     orchestrator = ready_runtime(config, runtime_paths_for(config))

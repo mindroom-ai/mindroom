@@ -108,10 +108,10 @@ A hook with `rooms` set never fires for `config:reloaded` or for custom events e
 
 - `"agent"`, the default, runs the hook each time an agent or team emits the event.
   Every agent and team in a room emits `message:received` and `reaction:received` for the same Matrix event, so the hook runs once for each of them.
-- `"room"` runs the hook for one MindRoom account in the room only: the one with the highest power level there, the lowest Matrix ID among equals.
-  In a room MindRoom created, that is MindRoom's own account.
-  A `message:received` or `reaction:received` hook therefore runs once per Matrix event, and still once when that account changes while the event is handled.
-  Any other event is emitted by the one agent or team it concerns, and the hook runs only when that is this account, so a room-scoped `message:after_response` hook sees only this account's replies.
+- `"room"` runs the hook for one MindRoom account in the room only.
+  A `message:received` or `reaction:received` hook runs once per Matrix event, for the first agent or team that receives the event and may answer its sender, so `ctx.envelope.agent_name` can be any of them.
+  Any other event is emitted by the one agent or team it concerns, and the hook runs only when that is the MindRoom account with the highest power level in the room, the lowest Matrix ID among equals.
+  In a room MindRoom created, that is MindRoom's own account, so a room-scoped `message:after_response` hook sees only that account's replies.
   Do not use this scope on `agent:started`, `agent:stopped`, or `bot:ready`, which belong to no single room.
   `agents` cannot be set with this scope.
 - `"service"` runs the hook once per MindRoom process and is accepted only on `bot:ready` and `config:reloaded`.
@@ -123,8 +123,9 @@ A hook with `rooms` set never fires for `config:reloaded` or for custom events e
 
 `agents=(ROUTER_AGENT_NAME,)` is deprecated.
 It used to mean once per room or once per process, because the router account was in every room.
-MindRoom still accepts it, logs a warning naming the plugin and the hook, and registers the hook with `scope="service"` on `bot:ready` and `config:reloaded` and with `scope="room"` on every other event.
-Replace it with the scope it stands for.
+MindRoom still accepts it, logs a warning naming the plugin and the hook, and registers the hook with `scope="service"` on `bot:ready` and with `scope="room"` on every other event but `config:reloaded`.
+On `config:reloaded` such a hook never ran and still does not; give it `scope="service"` to make it run.
+Replace the filter with the scope it stands for.
 
 ## Execution modes
 

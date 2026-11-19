@@ -263,17 +263,28 @@ def test_service_scope_rejected_on_message_received() -> None:
         assert _registered(per_process, event_name).scope == "service"
 
 
-@pytest.mark.parametrize("event_name", [EVENT_BOT_READY, EVENT_CONFIG_RELOADED])
-def test_router_alias_on_bot_ready_becomes_service_scope(event_name: str) -> None:
-    """The deprecated router filter on a once-per-process event is the service scope."""
+def test_router_alias_on_bot_ready_becomes_service_scope() -> None:
+    """The deprecated router filter on bot:ready is the service scope."""
 
-    @hook(event_name, agents=(ROUTER_AGENT_NAME,))
+    @hook(EVENT_BOT_READY, agents=(ROUTER_AGENT_NAME,))
     async def on_ready(ctx: object) -> None:
         del ctx
 
-    registered = _registered(on_ready, event_name)
+    registered = _registered(on_ready, EVENT_BOT_READY)
 
     assert (registered.scope, registered.agents) == ("service", None)
+
+
+def test_router_filter_on_config_reloaded_is_not_aliased() -> None:
+    """A router filter on config:reloaded stays a filter, which never matched that event, so the hook still never runs."""
+
+    @hook(EVENT_CONFIG_RELOADED, agents=(ROUTER_AGENT_NAME,))
+    async def on_reload(ctx: object) -> None:
+        del ctx
+
+    registered = _registered(on_reload, EVENT_CONFIG_RELOADED)
+
+    assert (registered.scope, registered.agents) == ("agent", (ROUTER_AGENT_NAME,))
 
 
 def test_router_alias_on_message_received_becomes_room_scope() -> None:

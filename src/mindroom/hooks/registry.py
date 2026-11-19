@@ -11,7 +11,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
 from .decorators import get_hook_metadata
-from .types import SERVICE_SCOPE_EVENTS, HookCallback, RegisteredHook
+from .types import EVENT_BOT_READY, EVENT_CONFIG_RELOADED, HookCallback, RegisteredHook
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -85,12 +85,12 @@ class HookRegistry:
                 # Legacy format: a plugin hook whose `agents` filter is exactly the router's name.
                 # Last legacy release: v2026.11.385 ran such hooks on the router bot; replacement: the next release
                 # has no bot in every room, and hooks say `scope="room"` or `scope="service"`.
-                # Handling: registered as service scope on the once-per-process events and as room scope on every
-                # other event, with the filter cleared and one warning naming the plugin and the hook.
-                # Coverage: tests/test_hook_registry.py::test_router_alias_on_bot_ready_becomes_service_scope,
-                # tests/test_hook_registry.py::test_router_alias_on_message_received_becomes_room_scope
-                if agents == (ROUTER_AGENT_NAME,):
-                    scope = "service" if metadata.event_name in SERVICE_SCOPE_EVENTS else "room"
+                # Handling: registered with one warning as service scope on bot:ready and as room scope elsewhere, with
+                # the filter cleared; on config:reloaded the filter stays and, as before, never matches.
+                # Coverage: tests/test_hook_registry.py::test_router_alias_on_bot_ready_becomes_service_scope and the
+                # `test_router_*` tests beside it
+                if agents == (ROUTER_AGENT_NAME,) and metadata.event_name != EVENT_CONFIG_RELOADED:
+                    scope = "service" if metadata.event_name == EVENT_BOT_READY else "room"
                     agents = None
                     logger.warning(
                         "Hook filter agents=(ROUTER_AGENT_NAME,) is deprecated; register the hook with this scope",
