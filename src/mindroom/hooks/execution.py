@@ -8,7 +8,10 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import owner_matrix_id
 from mindroom.logging_config import get_logger
 from mindroom.timing import elapsed_ms_since
 from mindroom.tool_system.tool_environment import ToolEnvironment
@@ -22,6 +25,7 @@ from .context import (
     CustomEventContext,
     FinalResponseDraft,
     FinalResponseTransformContext,
+    HookBindings,
     HookContext,
     MessageEnrichContext,
     MessageReceivedContext,
@@ -48,6 +52,12 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from mindroom.bot import AgentBot
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+
     from .registry import HookRegistry
 
 logger = get_logger(__name__)
@@ -312,6 +322,36 @@ async def emit(
             _merge_observer_context_changes(context, hook_context)
     finally:
         _EMIT_DEPTH.reset(token)
+
+
+async def emit_service_bot_ready(
+    bindings: HookBindings,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    bots: Iterable[AgentBot],
+) -> None:
+    """Emit the runtime's own ``bot:ready``, once per process start, to the service-scoped hooks.
+
+    Its context names the router entity with every configured room and every room a bot is in, which is what the
+    hooks filtered to the router bot received.
+    """
+    if not bindings.registry.has_hooks(EVENT_BOT_READY):
+        return
+    room_ids = (room_id for bot in bots for room_id in (*bot.rooms, *(bot.client.rooms if bot.client else ())))
+    context = AgentLifecycleContext(
+        **bindings.context_kwargs(
+            EVENT_BOT_READY,
+            config=config,
+            runtime_paths=runtime_paths,
+            correlation_id=f"{EVENT_BOT_READY}:service:{uuid4().hex}",
+        ),
+        entity_name=ROUTER_AGENT_NAME,
+        entity_type="router",
+        rooms=tuple(sorted(config.get_all_configured_rooms())),
+        matrix_user_id=owner_matrix_id(runtime_paths),
+        joined_room_ids=tuple(dict.fromkeys(room_id for room_id in room_ids if room_id.startswith("!"))),
+    )
+    await emit(bindings.registry, EVENT_BOT_READY, context, service=True)
 
 
 async def emit_gate(

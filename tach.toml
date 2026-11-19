@@ -3078,6 +3078,8 @@ depends_on = []
 [[modules]]
 path = "mindroom.hooks.execution"
 depends_on = [
+    "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.hooks.context",
     "mindroom.hooks.types",
     "mindroom.tool_system.tool_environment",
@@ -3495,6 +3497,7 @@ visibility = [
     "mindroom.api.external_triggers",
     "mindroom.bot_runtime_view",
     "mindroom.edit_regenerator",
+    "mindroom.hooks.context",
     "mindroom.listening.service",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.orchestrator",
@@ -5411,6 +5414,7 @@ depends_on = [
     "mindroom.hooks.state",
     "mindroom.hooks.types",
     "mindroom.matrix.conversation_reads",
+    "mindroom.response_admission",
     "mindroom.runtime_protocols",
     "mindroom.tool_system.events",
     "mindroom.tool_system.plugin_identity",
@@ -7394,6 +7398,7 @@ expose = [
     "emit_final_response_transform",
     "emit_gate",
     "emit_policy",
+    "emit_service_bot_ready",
     "emit_transform",
     "get_hook_metadata",
     "hook",
@@ -7406,6 +7411,7 @@ expose = [
     "render_transient_context",
     "send_hook_message",
     "send_matrix_message",
+    "service_hook_bindings",
     "validate_event_name",
 ]
 from = ["mindroom.hooks"]

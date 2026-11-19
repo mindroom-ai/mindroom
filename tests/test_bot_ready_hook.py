@@ -20,7 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.constants import ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.event_journal import (
     AdmissionFacts,
     IngestionBatchAdmission,
@@ -35,6 +35,7 @@ from mindroom.hooks import (
     EVENT_BOT_READY,
     AgentLifecycleContext,
     HookRegistry,
+    emit_service_bot_ready,
     hook,
 )
 from mindroom.matrix.durable_ingestion import validate_ingestion_batch
@@ -1509,3 +1510,70 @@ async def test_bot_ready_context_includes_joined_rooms_from_first_sync(tmp_path:
     assert len(captured_ctx) == 1
     assert captured_ctx[0].rooms == ("!room:localhost",)
     assert captured_ctx[0].joined_room_ids == ("!room:localhost", "!joined:localhost")
+
+
+def _two_bot_runtime(tmp_path: Path) -> tuple[ReadyRuntime, AgentBot, AgentBot]:
+    """Return a runtime with no owner account and two agents' bots, each with its own joined rooms."""
+    code = _agent_bot(tmp_path)
+    orchestrator = cast("ReadyRuntime", code.orchestrator)
+    general = _agent_bot(tmp_path, agent_name="general", orchestrator=orchestrator)
+    for bot, joined in ((code, "!code-only:localhost"), (general, "!general-only:localhost")):
+        bot.client = AsyncMock()
+        bot.client.rooms = {"!room:localhost": MagicMock(), joined: MagicMock()}
+    return orchestrator, code, general
+
+
+@pytest.mark.asyncio
+async def test_service_bot_ready_fires_once_per_start(tmp_path: Path) -> None:
+    """A service-scoped bot:ready hook runs on the runtime's one emission, and on no bot's own bot:ready."""
+    orchestrator, code, general = _two_bot_runtime(tmp_path)
+    calls: list[tuple[str, str]] = []
+
+    @hook(EVENT_BOT_READY, agents=(ROUTER_AGENT_NAME,))
+    async def once_per_process(ctx: AgentLifecycleContext) -> None:
+        calls.append(("service", ctx.entity_name))
+
+    @hook(EVENT_BOT_READY)
+    async def per_bot(ctx: AgentLifecycleContext) -> None:
+        calls.append(("agent", ctx.entity_name))
+
+    orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+        [_plugin("test-plugin", [once_per_process, per_bot])],
+    )
+
+    await code._emit_agent_lifecycle_event(EVENT_BOT_READY)
+    await emit_service_bot_ready(
+        orchestrator.service_hook_bindings(),
+        orchestrator.config,
+        orchestrator.runtime_paths,
+        orchestrator.agent_bots.values(),
+    )
+    await general._emit_agent_lifecycle_event(EVENT_BOT_READY)
+
+    assert calls == [("agent", "code"), ("service", ROUTER_AGENT_NAME), ("agent", "general")]
+
+
+@pytest.mark.asyncio
+async def test_service_context_lists_union_of_joined_rooms(tmp_path: Path) -> None:
+    """The service bot:ready names the router entity, every configured room, and every room any bot is in."""
+    orchestrator, _code, _general = _two_bot_runtime(tmp_path)
+    captured: list[AgentLifecycleContext] = []
+
+    @hook(EVENT_BOT_READY, scope="service")
+    async def on_ready(ctx: AgentLifecycleContext) -> None:
+        captured.append(ctx)
+
+    orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+
+    await emit_service_bot_ready(
+        orchestrator.service_hook_bindings(),
+        orchestrator.config,
+        orchestrator.runtime_paths,
+        orchestrator.agent_bots.values(),
+    )
+
+    [ctx] = captured
+    assert (ctx.entity_name, ctx.entity_type) == (ROUTER_AGENT_NAME, "router")
+    assert ctx.rooms == ("!room:localhost",)
+    assert ctx.joined_room_ids == ("!room:localhost", "!code-only:localhost", "!general-only:localhost")
+    assert ctx.is_active()

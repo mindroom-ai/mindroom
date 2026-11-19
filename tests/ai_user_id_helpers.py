@@ -18,6 +18,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
+    ROUTER_AGENT_NAME,
     RuntimePaths,
     resolve_runtime_paths,
 )
@@ -186,11 +187,12 @@ def team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleName
         config=config,
         runtime_paths=runtime_paths,
         knowledge_refresh_scheduler=knowledge_refresh_scheduler,
-        # A router without a client whose admin the team's hooks receive.
-        router_hook_context=lambda: SimpleNamespace(
-            runtime=SimpleNamespace(client=None),
-            matrix_admin=lambda: matrix_admin,
-        ),
+        # An owner account whose admin the team's hooks receive, in rooms with no other bot to send or hold state.
+        agent_bots={
+            ROUTER_AGENT_NAME: SimpleNamespace(hook_context=SimpleNamespace(matrix_admin=lambda: matrix_admin)),
+        },
+        room_poster=lambda _room_id: None,
+        room_steward=lambda _room_id: None,
         budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
         running_entity_names=lambda: frozenset({*config.agents, *config.teams}),
         response_admission_gate=ResponseAdmissionGate(),

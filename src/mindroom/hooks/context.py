@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.tool_system.events import tool_args_chat_preview
 from mindroom.tool_system.plugin_identity import plugin_state_root
@@ -42,19 +45,21 @@ class _UnsetType:
 _UNSET = _UnsetType()
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
     from typing import Protocol
 
     import nio
     import structlog
 
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling.tasks import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.turn_origin import TurnOrigin
@@ -186,38 +191,30 @@ class HookContextSupport:
             sender=sender,
         )
 
-    def _router(self) -> HookContextSupport | None:
-        """Return the router's hook support, or None for the router itself, which never asks for its own."""
-        return None if self.agent_name == ROUTER_AGENT_NAME else self.runtime.orchestrator.router_hook_context()
-
     def message_sender(self) -> HookMessageSender | None:
-        """Return the sender bound into hook contexts: this bot's own while it has a client, as the router always does."""
-        if self.runtime.client is not None or self.agent_name == ROUTER_AGENT_NAME:
+        """Return the sender bound into hook contexts: this bot's own while it has a client, else each room's poster."""
+        if self.runtime.client is not None:
             return self.send_message
-        router = self._router()
-        return None if router is None else router.send_message
+        return cast("HookMessageSender", partial(_send_as_room_poster, self.runtime.orchestrator))
 
     def room_state_querier(self) -> HookRoomStateQuerier | None:
-        """Return the room-state querier bound into hook contexts."""
-        router = self._router()
+        """Return the room-state querier bound into hook contexts: this bot's own client, else the room's steward."""
         return chain_hook_room_state_queriers(
             _client_room_state_querier(self.runtime.client),
-            None if router is None else _client_room_state_querier(router.runtime.client),
+            cast("HookRoomStateQuerier", partial(_query_state_as_steward, self.runtime.orchestrator)),
         )
 
     def room_state_putter(self) -> HookRoomStatePutter | None:
-        """Return the room-state putter bound into hook contexts."""
-        router = self._router()
+        """Return the room-state putter bound into hook contexts: this bot's own client, else the room's steward."""
         return chain_hook_room_state_putters(
             _client_room_state_putter(self.runtime.client),
-            None if router is None else _client_room_state_putter(router.runtime.client),
+            cast("HookRoomStatePutter", partial(_put_state_as_steward, self.runtime.orchestrator)),
         )
 
     def matrix_admin(self) -> HookMatrixAdmin | None:
-        """Return the Matrix admin helper bound into hook contexts, which only the router's client backs."""
+        """Return the Matrix admin helper bound into hook contexts, which only the owner account's client backs."""
         if self.agent_name != ROUTER_AGENT_NAME:
-            router = self._router()
-            return None if router is None else router.matrix_admin()
+            return _owner_matrix_admin(self.runtime.orchestrator)
         if self.runtime.client is None:
             return None
         # Imported on first use so the tool-registry import chain stays free
@@ -247,6 +244,99 @@ class HookContextSupport:
             runtime_paths=self.runtime_paths,
             correlation_id=correlation_id,
         ) | {"_emitter": self.agent_name}
+
+
+async def _as_borrowed_bot[T](
+    bot: AgentBot | None,
+    work: Callable[[AgentBot, nio.AsyncClient], Awaitable[T]],
+    refused: T,
+) -> T:
+    """Do ``work`` as another bot, which a reload waits for; a bot that is absent, stopping or closed gives ``refused``."""
+    # Imported on first use: the slim plugin-API import path must not pull nio.
+    import nio  # noqa: PLC0415
+
+    if bot is None:
+        return refused
+    try:
+        async with bot.admission_fence():
+            return refused if bot.client is None else await work(bot, bot.client)
+    except (ResponseAdmissionRefusedError, nio.LocalProtocolError):
+        return refused
+
+
+async def _send_as_room_poster(
+    orchestrator: OrchestratorRuntime,
+    room_id: str,
+    body: str,
+    thread_id: str | None,
+    source_hook: str,
+    extra_content: dict[str, Any] | None,
+    **options: Any,  # noqa: ANN401
+) -> str | None:
+    """Send a hook message as the poster of its room, the one voice for a post no agent of the room answers with."""
+    return await _as_borrowed_bot(
+        orchestrator.room_poster(room_id),
+        lambda poster, _client: poster.hook_context.send_message(
+            room_id,
+            body,
+            thread_id,
+            source_hook,
+            extra_content,
+            **options,
+        ),
+        None,
+    )
+
+
+async def _query_state_as_steward(
+    orchestrator: OrchestratorRuntime,
+    room_id: str,
+    event_type: str,
+    state_key: str | None,
+) -> dict[str, Any] | None:
+    return await _as_borrowed_bot(
+        orchestrator.room_steward(room_id),
+        lambda _steward, client: build_hook_room_state_querier(client)(room_id, event_type, state_key),
+        None,
+    )
+
+
+async def _put_state_as_steward(
+    orchestrator: OrchestratorRuntime,
+    room_id: str,
+    event_type: str,
+    state_key: str,
+    content: dict[str, Any],
+) -> bool:
+    return await _as_borrowed_bot(
+        orchestrator.room_steward(room_id),
+        lambda _steward, client: build_hook_room_state_putter(client)(room_id, event_type, state_key, content),
+        False,
+    )
+
+
+def _owner_matrix_admin(orchestrator: OrchestratorRuntime) -> HookMatrixAdmin | None:
+    """Return the owner account's Matrix admin helper while that account runs, None in a runtime without one."""
+    owner = orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
+    return None if owner is None else owner.hook_context.matrix_admin()
+
+
+def service_hook_bindings(orchestrator: OrchestratorRuntime, registry_state: HookRegistrySource) -> HookBindings:
+    """Return the bindings of the hooks a runtime emits for itself, which no one bot backs.
+
+    Each message goes out as the poster of its room, and room state is read and written as the room's steward.
+    The runtime started when its first bot did.
+    """
+    started = (bot.hook_context.runtime.runtime_started_at for bot in orchestrator.agent_bots.values())
+    return HookBindings(
+        registry=registry_state.registry,
+        registry_state=registry_state,
+        message_sender=cast("HookMessageSender", partial(_send_as_room_poster, orchestrator)),
+        matrix_admin=_owner_matrix_admin(orchestrator),
+        room_state_querier=cast("HookRoomStateQuerier", partial(_query_state_as_steward, orchestrator)),
+        room_state_putter=cast("HookRoomStatePutter", partial(_put_state_as_steward, orchestrator)),
+        runtime_started_at=min(started, default=time.time()),
+    )
 
 
 def _client_room_state_querier(client: nio.AsyncClient | None) -> HookRoomStateQuerier | None:

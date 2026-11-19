@@ -53,6 +53,8 @@ from mindroom.hooks import (
     HookRegistryLifetime,
     HookRegistryState,
     emit,
+    emit_service_bot_ready,
+    service_hook_bindings,
 )
 from mindroom.integrations import bind_integrations, unbind_integrations
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler, runtime_refresh_scheduler
@@ -153,7 +155,6 @@ if TYPE_CHECKING:
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
     from mindroom.event_journal.approval_signals import EndedApproval
-    from mindroom.hooks import HookContextSupport
 
     from .config.main import Config
     from .constants import RuntimePaths
@@ -1006,10 +1007,9 @@ class _MultiAgentOrchestrator:
         )
         return router_bot
 
-    def router_hook_context(self) -> HookContextSupport | None:
-        """Return the router bot's hook support, whose client backs what another bot's own cannot."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        return None if router_bot is None else router_bot.hook_context
+    def service_hook_bindings(self) -> HookBindings:
+        """Return the hook bindings of the runtime's own emissions, which each room's poster and steward back."""
+        return service_hook_bindings(self, self._hook_lifetime)
 
     def room_steward(self, room_id: str) -> AgentBot | None:
         """Return the bot that does one room's shared invisible work now."""
@@ -1178,6 +1178,7 @@ class _MultiAgentOrchestrator:
         # Stay alive until explicit shutdown. Hot reload replaces the fleet's sync
         # tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
+        await emit_service_bot_ready(self.service_hook_bindings(), config, self.runtime_paths, self.agent_bots.values())
         await runtime_shutdown_event.wait()
 
     async def _wait_for_initial_membership_sync(
@@ -1239,11 +1240,8 @@ class _MultiAgentOrchestrator:
         if not self.hook_registry.has_hooks(EVENT_CONFIG_RELOADED):
             return
 
-        router = self.router_hook_context()
-        bindings = HookBindings(runtime_started_at=time.time()) if router is None else router.bindings()
         context = ConfigReloadedContext(
-            # The router's Matrix capabilities, under the runtime's hook lifetime rather than the router bot's.
-            **replace(bindings, registry_state=self._hook_lifetime).context_kwargs(
+            **self.service_hook_bindings().context_kwargs(
                 EVENT_CONFIG_RELOADED,
                 config=plan.new_config,
                 runtime_paths=self.runtime_paths,

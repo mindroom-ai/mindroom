@@ -43,6 +43,7 @@ from .context import (
     ToolEnvironmentContext,
     TranscriptLine,
     TurnLifecycleContext,
+    service_hook_bindings,
 )
 from .decorators import get_hook_metadata, hook, iter_module_hooks
 from .enrichment import render_enrichment_block, render_system_enrichment_block, render_transient_context
@@ -53,6 +54,7 @@ from .execution import (
     emit_final_response_transform,
     emit_gate,
     emit_policy,
+    emit_service_bot_ready,
     emit_transform,
 )
 from .ingress import HookIngressPolicy, hook_ingress_policy
@@ -194,6 +196,7 @@ __all__ = [
     "emit_final_response_transform",
     "emit_gate",
     "emit_policy",
+    "emit_service_bot_ready",
     "emit_transform",
     "get_hook_metadata",
     "hook",
@@ -206,6 +209,7 @@ __all__ = [
     "render_transient_context",
     "send_hook_message",
     "send_matrix_message",
+    "service_hook_bindings",
     "validate_event_name",
 ]
 
