@@ -212,10 +212,7 @@ class ConfigReloadLifecycle:
         return not self._cancelled and not self.is_running() and self._fully_applied_config is None
 
     def startup_published(self, config: Config) -> None:
-        """Acknowledge startup's config and reopen admission, under the apply lock.
-
-        Reload at once if the config's files changed since startup loaded them.
-        """
+        """Acknowledge startup's config and reopen admission, under the apply lock; reload if its files changed since."""
         self.response_admission_gate.startup_hold = False
         self.response_admission_gate.reopen()
         if self._fully_applied_config is not None:
