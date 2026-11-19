@@ -246,18 +246,20 @@ def naming_logical_source(transaction: Transaction, principal_id: str, event_id:
 def waiting_to_replay(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> tuple[str, ...]:
     """Return the active replies no span runs whose last span left one of these sources pending."""
     placeholders = ", ".join("?" for _ in event_ids)
+    # Sorted here: an ORDER BY makes the planner walk every reply of the principal by its key.
     rows = transaction.fetchall(
         f"""
-        SELECT DISTINCT reply.reply_id FROM reply_span_sources AS source
-        JOIN reply_messages AS reply
-            ON reply.principal_id = source.principal_id AND reply.last_span_id = source.span_id
-        WHERE source.principal_id = ? AND source.role = 'pending' AND source.event_id IN ({placeholders})
-            AND reply.state = 'active' AND reply.current_span_id IS NULL
-        ORDER BY reply.reply_id
+        SELECT reply.reply_id FROM reply_messages AS reply
+        WHERE reply.principal_id = ? AND reply.state = 'active' AND reply.current_span_id IS NULL
+            AND EXISTS (
+                SELECT 1 FROM reply_span_sources AS source
+                WHERE source.principal_id = reply.principal_id AND source.span_id = reply.last_span_id
+                    AND source.role = 'pending' AND source.event_id IN ({placeholders})
+            )
         """,  # noqa: S608 - fixed placeholders
         (principal_id, *event_ids),
     )
-    return tuple(str(row["reply_id"]) for row in rows)
+    return tuple(sorted(str(row["reply_id"]) for row in rows))
 
 
 @dataclass(frozen=True, slots=True)
