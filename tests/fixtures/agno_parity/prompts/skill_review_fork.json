@@ -400,7 +400,7 @@
         },
         {
           "name": "invite_router",
-          "description": "Invite router to current Matrix room.",
+          "description": "No longer needed: agents need no router.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -1171,7 +1171,7 @@
         },
         {
           "name": "invite_router",
-          "description": "Invite router to current Matrix room.",
+          "description": "No longer needed: agents need no router.",
           "parameters": {
             "type": "object",
             "properties": {
