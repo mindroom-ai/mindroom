@@ -67,7 +67,7 @@ See [Multi-Human Thread Protection](threads.md#multi-human-thread-protection) fo
 ### Mentioning the MindRoom account
 
 The MindRoom account cannot be mentioned by name and is not a conversational agent.
-A message that tags only its Matrix ID gets no answer.
+A message that tags only its Matrix ID gets no answer, and a command in such a message is not run.
 Mention a specific agent or team to get an answer, or several agents for an ad-hoc collaboration.
 
 ## Responder Selection Judgments

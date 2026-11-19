@@ -61,26 +61,26 @@ MindRoom applies this policy to new and existing managed rooms on startup and on
 
 - `invite_users` is the desired invitation list, so a listed user who leaves or is kicked is invited again; remove the user from configuration before intentionally removing access.
 - `admins` grants missing admin power but never demotes anyone, so removing a user from `admins` only stops future grants; lowering an existing admin requires a Matrix account with higher power.
-- `listed: true` requires the router to have moderator or admin power in the room.
+- `listed: true` requires the MindRoom account to have moderator or admin power in the room.
 - `encrypted: true` turns on encryption in existing rooms, and setting it back to `false` never disables it.
 
 ## Room Management
 
-The router creates and maintains managed rooms:
+The MindRoom account, which administers the rooms in `config.yaml` and answers nobody, creates and maintains managed rooms:
 
 - Creates missing rooms with the alias `#<key>:<server>` (plus the `MINDROOM_NAMESPACE` suffix when set), a topic, and a [managed avatar](https://docs.mindroom.chat/matrix/#managed-avatars).
 - Uses the room's `description` as its topic, and generates a topic with the `default` model only when the description is empty.
 - Invites the configured agents and teams and the room's `invite_users`.
 - Sets the room name from `display_name`, and adds a topic only when the room has none, so changing `description` never replaces an existing topic.
-- Lets every room member write thread tags and call membership state, which requires the router to be joined and able to edit power levels.
+- Lets every room member write thread tags and call membership state, which requires the MindRoom account to be joined and able to edit power levels.
 - Applies the [room policy](#room-policy) above.
 
 Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms [one of their rooms lists](#rooms-under-a-room).
 
-On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the router created and aliased.
+On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the MindRoom account created and aliased.
 Otherwise it logs `managed_alias_target_refused`, never joins that room, and creates its own room without the alias.
 A recorded room stays in use even when its alias now points elsewhere, which logs `managed_alias_points_elsewhere`.
-If the alias of a recorded room is deleted, the router restores it, and creates a replacement room only when it can no longer read or is no longer joined to the recorded room.
+If the alias of a recorded room is deleted, the MindRoom account restores it, and creates a replacement room only when it can no longer read or is no longer joined to the recorded room.
 
 ## Rooms Under a Room
 

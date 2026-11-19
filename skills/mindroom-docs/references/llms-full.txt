@@ -702,7 +702,7 @@ See [Environment Variables](https://docs.mindroom.chat/configuration/#environmen
 
 ### Matrix account provisioning
 
-MindRoom creates a Matrix account for each agent, team, and the router.
+MindRoom creates a Matrix account for each agent and team, and one account of its own that administers the rooms in `config.yaml`.
 Configure one way for it to do so: hosted provisioning, `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, an [application service](https://docs.mindroom.chat/matrix/#agent-users), or intentionally open registration.
 If registration fails, check the selected credentials and the homeserver's registration policy.
 
@@ -2695,7 +2695,7 @@ Agents with voice calls enabled can still restart, because their call runtime ke
 
 ## Model Overrides in Chat
 
-Each agent, team, and the router normally answers with its own configured `model` (`router.model` for the router).
+Each agent and team normally answers with its own configured `model`, and [routing](https://docs.mindroom.chat/configuration/router/) picks a responder with `router.model`.
 Users can change that per thread or per room, and the most specific choice wins:
 
 1. An explicit model for one run, such as a delegated child run.
@@ -2713,7 +2713,7 @@ The client protocol is described in [Model Selection Protocol](https://docs.mind
 
 ### `!model`
 
-Show or switch the model that the agents, teams, and router you may address use in the current thread.
+Show or switch the model that the agents and teams you may address, and routing, use in the current thread.
 
 ```
 !model
@@ -2730,7 +2730,7 @@ Other threads and rooms are unaffected.
 
 ### `!room_model`
 
-Show or switch the default model for every agent, team, and the router in the current room.
+Show or switch the default model for every agent and team, and for routing, in the current room.
 
 ```
 !room_model
@@ -2915,7 +2915,7 @@ See [Multi-Human Thread Protection](https://docs.mindroom.chat/configuration/thr
 ### Mentioning the MindRoom account
 
 The MindRoom account cannot be mentioned by name and is not a conversational agent.
-A message that tags only its Matrix ID gets no answer.
+A message that tags only its Matrix ID gets no answer, and a command in such a message is not run.
 Mention a specific agent or team to get an answer, or several agents for an ad-hoc collaboration.
 
 ## Responder Selection Judgments
@@ -5286,6 +5286,7 @@ Any other command is answered by the agent or team in the room with the lowest M
 The first MindRoom account that sees a command saves who answers it, and only that agent or team answers.
 `/desktop` has its own room requirements; see [`/desktop`](https://docs.mindroom.chat/tools/desktop/#desktop).
 A command that changes room state, such as `/thread_mode`, `/auto_approve` or `/encrypt confirm`, answers `I need moderator rights in this room to ...` and changes nothing when no MindRoom account in the room may send state events.
+To grant the rights, open the room's member list in your Matrix client, select an agent that is already joined, and set its role to Moderator.
 
 Commands follow the same [authorization](https://docs.mindroom.chat/authorization/) rules as ordinary messages.
 "Room admin" means a Matrix room administrator, while "platform administrator" means a user listed in `administrators`.
@@ -7537,7 +7538,8 @@ Every agent is an ordinary Matrix user, so you can reach it from any Matrix clie
 
 ## Agent Users
 
-Each agent, team, and the router has its own Matrix user, created automatically at startup.
+Each agent and team has its own Matrix user, created automatically at startup.
+One more account, shown as "MindRoom", administers the rooms in `config.yaml` and answers nobody.
 Account credentials are stored in `matrix_state.yaml` in the storage directory (default `mindroom_data/`).
 
 In chat, address an agent or team by its configured key, such as `@assistant`.
@@ -7778,26 +7780,26 @@ MindRoom applies this policy to new and existing managed rooms on startup and on
 
 - `invite_users` is the desired invitation list, so a listed user who leaves or is kicked is invited again; remove the user from configuration before intentionally removing access.
 - `admins` grants missing admin power but never demotes anyone, so removing a user from `admins` only stops future grants; lowering an existing admin requires a Matrix account with higher power.
-- `listed: true` requires the router to have moderator or admin power in the room.
+- `listed: true` requires the MindRoom account to have moderator or admin power in the room.
 - `encrypted: true` turns on encryption in existing rooms, and setting it back to `false` never disables it.
 
 ## Room Management
 
-The router creates and maintains managed rooms:
+The MindRoom account, which administers the rooms in `config.yaml` and answers nobody, creates and maintains managed rooms:
 
 - Creates missing rooms with the alias `#<key>:<server>` (plus the `MINDROOM_NAMESPACE` suffix when set), a topic, and a [managed avatar](https://docs.mindroom.chat/matrix/#managed-avatars).
 - Uses the room's `description` as its topic, and generates a topic with the `default` model only when the description is empty.
 - Invites the configured agents and teams and the room's `invite_users`.
 - Sets the room name from `display_name`, and adds a topic only when the room has none, so changing `description` never replaces an existing topic.
-- Lets every room member write thread tags and call membership state, which requires the router to be joined and able to edit power levels.
+- Lets every room member write thread tags and call membership state, which requires the MindRoom account to be joined and able to edit power levels.
 - Applies the [room policy](#room-policy) above.
 
 Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms [one of their rooms lists](#rooms-under-a-room).
 
-On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the router created and aliased.
+On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the MindRoom account created and aliased.
 Otherwise it logs `managed_alias_target_refused`, never joins that room, and creates its own room without the alias.
 A recorded room stays in use even when its alias now points elsewhere, which logs `managed_alias_points_elsewhere`.
-If the alias of a recorded room is deleted, the router restores it, and creates a replacement room only when it can no longer read or is no longer joined to the recorded room.
+If the alias of a recorded room is deleted, the MindRoom account restores it, and creates a replacement room only when it can no longer read or is no longer joined to the recorded room.
 
 ## Rooms Under a Room
 
@@ -7902,7 +7904,7 @@ If the homeserver joins the owner itself within two seconds, as Tuwunel does wit
 - MindRoom's own accounts, agent and team accounts, accounts listed in `bot_accounts`, and the internal `mindroom_user` account never get personal rooms.
 - A human who leaves or is banned from their personal room is not re-added by restarts or backfill.
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
-- A personal room holds only the person and the agent: the agent posts its own [approval cards](https://docs.mindroom.chat/tool-approval/), transcripts and command replies and publishes the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution), so no other MindRoom account is invited.
+- A new personal room starts with only the person and the agent: the agent posts its own [approval cards](https://docs.mindroom.chat/tool-approval/), transcripts and command replies and publishes the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution), so no other MindRoom account is invited.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
   Adopted rooms instead allow only the participants listed in their record, because an adopted room may share its earlier history.

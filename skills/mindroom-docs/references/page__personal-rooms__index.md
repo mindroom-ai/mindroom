@@ -60,7 +60,7 @@ If the homeserver joins the owner itself within two seconds, as Tuwunel does wit
 - MindRoom's own accounts, agent and team accounts, accounts listed in `bot_accounts`, and the internal `mindroom_user` account never get personal rooms.
 - A human who leaves or is banned from their personal room is not re-added by restarts or backfill.
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
-- A personal room holds only the person and the agent: the agent posts its own [approval cards](https://docs.mindroom.chat/tool-approval/), transcripts and command replies and publishes the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution), so no other MindRoom account is invited.
+- A new personal room starts with only the person and the agent: the agent posts its own [approval cards](https://docs.mindroom.chat/tool-approval/), transcripts and command replies and publishes the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution), so no other MindRoom account is invited.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
   Adopted rooms instead allow only the participants listed in their record, because an adopted room may share its earlier history.

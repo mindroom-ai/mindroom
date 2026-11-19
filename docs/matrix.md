@@ -13,7 +13,8 @@ Every agent is an ordinary Matrix user, so you can reach it from any Matrix clie
 
 ## Agent Users
 
-Each agent, team, and the router has its own Matrix user, created automatically at startup.
+Each agent and team has its own Matrix user, created automatically at startup.
+One more account, shown as "MindRoom", administers the rooms in `config.yaml` and answers nobody.
 Account credentials are stored in `matrix_state.yaml` in the storage directory (default `mindroom_data/`).
 
 In chat, address an agent or team by its configured key, such as `@assistant`.

@@ -47,6 +47,7 @@ Any other command is answered by the agent or team in the room with the lowest M
 The first MindRoom account that sees a command saves who answers it, and only that agent or team answers.
 `/desktop` has its own room requirements; see [`/desktop`](tools/desktop.md#desktop).
 A command that changes room state, such as `/thread_mode`, `/auto_approve` or `/encrypt confirm`, answers `I need moderator rights in this room to ...` and changes nothing when no MindRoom account in the room may send state events.
+To grant the rights, open the room's member list in your Matrix client, select an agent that is already joined, and set its role to Moderator.
 
 Commands follow the same [authorization](authorization.md) rules as ordinary messages.
 "Room admin" means a Matrix room administrator, while "platform administrator" means a user listed in `administrators`.
