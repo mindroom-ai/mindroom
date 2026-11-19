@@ -71,6 +71,26 @@
       "name": "horizontal rule and setext",
       "md": "Title\n===\n\n---\n\nafter",
       "html": "<h1>Title</h1>\n<hr>\n<p>after</p>\n"
+    },
+    {
+      "name": "inline title tag then markdown",
+      "md": "Use the \"<title>\" tag for `head`\n\n1. first\n2. *second*",
+      "html": "<p>Use the &quot;&lt;title&gt;&quot; tag for <code>head</code></p>\n<ol>\n<li>first</li>\n<li><em>second</em></li>\n</ol>\n"
+    },
+    {
+      "name": "inline script and textarea tags",
+      "md": "Run <script>go()</script> then **bold** <textarea>note *x*</textarea> `y`",
+      "html": "<p>Run &lt;script&gt;go()&lt;/script&gt; then <strong>bold</strong> &lt;textarea&gt;note <em>x</em>&lt;/textarea&gt; <code>y</code></p>\n"
+    },
+    {
+      "name": "inline html comment",
+      "md": "before <!-- hidden --> *after*",
+      "html": "<p>before &lt;!-- hidden --&gt; <em>after</em></p>\n"
+    },
+    {
+      "name": "allowed inline tag unchanged",
+      "md": "H<sub>2</sub>O and x<sup>2</sup> with <foo> kept escaped",
+      "html": "<p>H<sub>2</sub>O and x<sup>2</sup> with &lt;foo&gt; kept escaped</p>\n"
     }
   ]
 }
