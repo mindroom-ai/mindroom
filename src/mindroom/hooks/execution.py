@@ -38,8 +38,10 @@ from .context import (
     message_envelope_for_hook_context,
 )
 from .types import (
+    EVENT_BOT_READY,
     EVENT_MESSAGE_RECEIVED,
     EVENT_TOOL_ENVIRONMENT,
+    ROOM_CLAIM_EVENTS,
     EnrichmentItem,
     RegisteredHook,
     default_timeout_ms_for_event,
@@ -105,7 +107,31 @@ def _scope_room_ids(context: HookContext) -> tuple[str, ...]:
     return ()
 
 
-def _hook_in_scope(hook: RegisteredHook, context: HookContext) -> bool:
+async def _emitter_runs_room_hooks(registry: HookRegistry, event_name: str, context: HookContext) -> bool:
+    """Return whether this emission runs the event's room-scoped hooks: its bot is the room's steward.
+
+    For an event that is one Matrix event the steward holds a claim, so the hooks run once however many bots emit it.
+    An emission no bot of a runtime made, as in a plugin's own tests, has no steward to wait for and runs them.
+    """
+    emitter = context._emitter
+    if registry.room_hook_owner is None or emitter is None:
+        return True
+    event_id: str | None = None
+    if isinstance(context, MessageReceivedContext):
+        event_id = context.envelope.source_event_id
+    elif event_name in ROOM_CLAIM_EVENTS:
+        event_id = cast("ReactionReceivedContext", context).event_id
+    for room_id in _scope_room_ids(context):
+        if await registry.room_hook_owner(emitter, room_id, event_name, event_id):
+            return True
+    return False
+
+
+def _hook_in_scope(hook: RegisteredHook, context: HookContext, *, service: bool) -> bool:
+    # The runtime's own bot:ready runs the service-scoped hooks and no others, and a bot's own runs the others.
+    if (hook.scope == "service" and hook.event_name == EVENT_BOT_READY) != service:
+        return False
+
     if hook.agents is not None:
         agent_name = _scope_agent_name(context)
         if agent_name is None or agent_name not in hook.agents:
@@ -219,19 +245,27 @@ async def _invoke_hook(hook: RegisteredHook, context: HookContext) -> _HookInvoc
     return _HookInvocationResult(succeeded=True, value=result)
 
 
-def _eligible_hooks(
+async def _eligible_hooks(
     registry: HookRegistry,
     event_name: str,
     context: HookContext,
+    *,
+    service: bool = False,
 ) -> tuple[RegisteredHook, ...]:
     hooks = registry.hooks_for(event_name)
     if not hooks:
         return ()
 
+    runs_room_hooks: bool | None = None
     eligible_hooks: list[RegisteredHook] = []
     for hook in hooks:
-        if not _hook_in_scope(hook, context):
+        if not _hook_in_scope(hook, context, service=service):
             continue
+        if hook.scope == "room":
+            if runs_room_hooks is None:
+                runs_room_hooks = await _emitter_runs_room_hooks(registry, event_name, context)
+            if not runs_room_hooks:
+                continue
         if (
             isinstance(context, MessageReceivedContext)
             and event_name == EVENT_MESSAGE_RECEIVED
@@ -248,8 +282,9 @@ async def emit(
     context: HookContext,
     *,
     continue_on_cancelled: bool = False,
+    service: bool = False,
 ) -> None:
-    """Run observer hooks serially for one event."""
+    """Run observer hooks serially for one event; ``service`` marks the runtime's own once-per-process ``bot:ready``."""
     depth = _EMIT_DEPTH.get()
     if depth >= _MAX_EMIT_DEPTH:
         logger.warning(
@@ -262,7 +297,7 @@ async def emit(
 
     token = _EMIT_DEPTH.set(depth + 1)
     try:
-        for hook in _eligible_hooks(registry, event_name, context):
+        for hook in await _eligible_hooks(registry, event_name, context, service=service):
             hook_context = _bind_hook_context(registry, hook, context)
             try:
                 await _invoke_hook(hook, hook_context)
@@ -297,7 +332,7 @@ async def emit_gate(
 
     token = _EMIT_DEPTH.set(depth + 1)
     try:
-        for hook in _eligible_hooks(registry, event_name, context):
+        for hook in await _eligible_hooks(registry, event_name, context):
             hook_context = cast(
                 "ToolBeforeCallContext",
                 _bind_hook_context(registry, hook, context),
@@ -337,7 +372,7 @@ async def emit_policy(
 
     token = _EMIT_DEPTH.set(depth + 1)
     try:
-        for hook in _eligible_hooks(registry, event_name, context):
+        for hook in await _eligible_hooks(registry, event_name, context):
             hook_context = cast(
                 "ContactBeforeSendContext",
                 _bind_hook_context(registry, hook, context),
@@ -374,7 +409,7 @@ async def _collect[C: HookContext](
     context: C,
 ) -> list[tuple[C, object | None]]:
     """Run collector hooks concurrently; return each finished hook's own context and return value, in hook order."""
-    hooks = _eligible_hooks(registry, event_name, context)
+    hooks = await _eligible_hooks(registry, event_name, context)
     if not hooks:
         return []
 
@@ -478,7 +513,7 @@ async def _emit_serial_transform(
     continue_on_cancelled: bool,
 ) -> _TransformDraft:
     current_draft = context.draft
-    for hook in _eligible_hooks(registry, event_name, context):
+    for hook in await _eligible_hooks(registry, event_name, context):
         hook_draft = deepcopy(current_draft) if copy_on_write else current_draft
         hook_context = cast("_TransformContext", _bind_hook_context(registry, hook, replace(context, draft=hook_draft)))
         try:

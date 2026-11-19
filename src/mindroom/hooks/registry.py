@@ -14,7 +14,7 @@ from .decorators import get_hook_metadata
 from .types import SERVICE_SCOPE_EVENTS, HookCallback, RegisteredHook
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.automations.registry import CheckFn
     from mindroom.config.plugin import PluginEntryConfig
@@ -44,6 +44,9 @@ class HookRegistry:
 
     _hooks_by_event: dict[str, tuple[RegisteredHook, ...]]
     automations: AutomationCatalog = field(default_factory=AutomationCatalog)
+    # Set by the runtime that emits to this snapshot: whether the bot of a name runs a room's room-scoped hooks,
+    # given ``(agent_name, room_id, event_name, event_id)`` with the Matrix event the emission is for, if it is one.
+    room_hook_owner: Callable[[str, str, str, str | None], Awaitable[bool]] | None = None
 
     @classmethod
     def empty(cls) -> HookRegistry:

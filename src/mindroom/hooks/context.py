@@ -240,13 +240,13 @@ class HookContextSupport:
         )
 
     def base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
-        """Return the base fields of a hook context the bot emits now."""
+        """Return the base fields of a hook context the bot emits now, which names it as the emitter."""
         return self.bindings().context_kwargs(
             event_name,
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
             correlation_id=correlation_id,
-        )
+        ) | {"_emitter": self.agent_name}
 
 
 def _client_room_state_querier(client: nio.AsyncClient | None) -> HookRoomStateQuerier | None:
@@ -337,6 +337,8 @@ class HookContext:
 
     _hook_registry_state: HookRegistrySource | None = field(default=None, kw_only=True, repr=False, compare=False)
     _hook_registry_snapshot: HookRegistry | None = field(default=None, kw_only=True, repr=False, compare=False)
+    # The bot that emits an event every bot in a room emits, which runs room-scoped hooks only as the room's steward.
+    _emitter: str | None = field(default=None, kw_only=True, repr=False, compare=False)
     event_name: str
     config: Config
     runtime_paths: RuntimePaths

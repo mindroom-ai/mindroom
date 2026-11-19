@@ -139,7 +139,7 @@ from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
 from .room_steward import membership_observers, room_poster, room_steward
-from .steward_duties import reconcile_held_room_states
+from .steward_duties import reconcile_held_room_states, runs_room_hooks
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -838,7 +838,8 @@ class _MultiAgentOrchestrator:
     ) -> PluginReloadResult:
         """Publish ``generation``, make its hooks for ``config`` live, and adopt the watcher baselines taken before it loaded."""
         result = publish_plugins(generation)
-        self.hook_registry_state.registry = config_plugins(config, self.runtime_paths).hooks
+        hooks = config_plugins(config, self.runtime_paths).hooks
+        self.hook_registry_state.registry = replace(hooks, room_hook_owner=partial(runs_room_hooks, self))
         self.plugin_watch.replace_snapshots(*watch)
         reset_worker_launch_config()
         for skipped in result.skipped:

@@ -3097,6 +3097,7 @@ depends_on = [
 path = "mindroom.hooks.registry"
 depends_on = [
     "mindroom.automations.registry",
+    "mindroom.constants",
     "mindroom.hooks.decorators",
     "mindroom.hooks.types",
 ]

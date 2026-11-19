@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -194,7 +195,7 @@ def test_hook_registry_scope_filtering_uses_decorator_agents_and_rooms(tmp_path:
         [_plugin("scoped-plugin", [matching_hook, wrong_agent_hook, wrong_room_hook])],
     )
 
-    eligible = _eligible_hooks(registry, EVENT_MESSAGE_RECEIVED, _message_received_context(tmp_path))
+    eligible = asyncio.run(_eligible_hooks(registry, EVENT_MESSAGE_RECEIVED, _message_received_context(tmp_path)))
 
     assert [hook.hook_name for hook in eligible] == ["matching"]
 

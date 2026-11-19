@@ -50,6 +50,27 @@ def moderator_rights_message(feature: str) -> str:
     return f"I need moderator rights in this room to {feature}."
 
 
+async def runs_room_hooks(
+    orchestrator: OrchestratorRuntime,
+    agent_name: str,
+    room_id: str,
+    event_name: str,
+    event_id: str | None,
+) -> bool:
+    """Return whether the bot of that name runs one emission's room-scoped hooks: it is the room's steward.
+
+    For a Matrix event the first bot to dispatch it claims it for the steward of that moment, or for itself where
+    the room has none, so the claim's holder runs the hooks when its own copy arrives, on each retry and after a
+    handover, and no other bot does.
+    """
+    steward = orchestrator.room_steward(room_id)
+    if event_id is None:
+        return steward is not None and steward.agent_name == agent_name
+    owner = agent_name if steward is None else steward.agent_name
+    purpose = f"hook:{event_name}"
+    return await orchestrator.event_journal_store().claim_room_event(room_id, event_id, purpose, owner) == agent_name
+
+
 async def put_room_state_as_steward(
     room_steward: Callable[[str], AgentBot | None],
     room_id: str,
@@ -244,7 +265,7 @@ class StewardDuties:
 
     async def _emit_member_joined(self, join: RoomMemberJoin) -> None:
         """Emit room:member_joined for one live human Matrix room join, where this bot holds the event's claim."""
-        if not await self._claims(join.room_id, join.event_id, "member_joined"):
+        if not await self._claims(join.room_id, join.event_id, EVENT_ROOM_MEMBER_JOINED):
             return
         await self.deps.personal_rooms.baseline_join(join)
         if self.deps.hook_context.registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
@@ -252,20 +273,13 @@ class StewardDuties:
 
     async def _emit_member_left(self, leave: RoomMemberLeave) -> None:
         """Emit room:member_left for one live human Matrix room self-leave, where this bot holds the event's claim."""
-        if await self._claims(leave.room_id, leave.event_id, "member_left"):
+        if await self._claims(leave.room_id, leave.event_id, EVENT_ROOM_MEMBER_LEFT):
             await self._emit_member_change(EVENT_ROOM_MEMBER_LEFT, RoomMemberLeftContext, leave)
 
-    async def _claims(self, room_id: str, event_id: str, purpose: str) -> bool:
-        """Claim the event for the room's steward now, unless it is claimed, and return whether this bot holds the claim.
-
-        The first bot to dispatch the event decides, so the claim's holder runs the hook when its own copy arrives,
-        on each retry and after a handover, and no other bot does.
-        """
+    async def _claims(self, room_id: str, event_id: str, event_name: str) -> bool:
+        """Return whether this bot holds the membership event's claim, the one its room-scoped hooks run under."""
         name = self.deps.hook_context.agent_name
-        orchestrator = self.deps.runtime.orchestrator
-        steward = orchestrator.room_steward(room_id)
-        owner = name if steward is None else steward.agent_name
-        return await orchestrator.event_journal_store().claim_room_event(room_id, event_id, purpose, owner) == name
+        return await runs_room_hooks(self.deps.runtime.orchestrator, name, room_id, event_name, event_id)
 
     async def _emit_member_change(
         self,
