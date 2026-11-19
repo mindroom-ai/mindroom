@@ -16,11 +16,10 @@ if TYPE_CHECKING:
 
 
 class _InvalidToolArgumentsError(ValueError):
-    """Expose one neutral failure without leaking validator details; only the schema's own missing names are told."""
+    """Expose one neutral failure without leaking validator or schema details."""
 
-    def __init__(self, missing: Sequence[str] = ()) -> None:
-        detail = f": missing {', '.join(missing)}" if missing else ""
-        super().__init__(f"Invalid tool arguments{detail}")
+    def __init__(self) -> None:
+        super().__init__("Invalid tool arguments")
 
 
 class UnknownToolError(ValueError):
@@ -46,9 +45,6 @@ def _no_remote_schema(uri: str) -> Never:
 
 def validate_tool_arguments(schema: dict[str, Any], arguments: dict[str, object]) -> None:
     """Validate arguments locally without resolving remote schema references."""
-    required = schema.get("required")
-    if missing := [name for name in required or () if isinstance(name, str) and name not in arguments]:
-        raise _InvalidToolArgumentsError(missing)
     try:
         Draft202012Validator(schema, registry=Registry(retrieve=_no_remote_schema)).validate(arguments)
     except Exception as exc:  # jsonschema and referencing expose separate exception families.

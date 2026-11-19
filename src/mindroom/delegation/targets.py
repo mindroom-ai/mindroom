@@ -220,13 +220,9 @@ def resolve_fresh_target(
     )
 
 
-# How much of a title redaction reads, far past the 80 characters shown, so a credential starting there is seen whole.
-_TITLE_REDACTION_SPAN = 4_000
-
-
 def display_title(title: str) -> str:
-    """Return ``title`` on one line, credentials redacted before the cut to 80 characters, so none survives in part."""
-    return redact_sensitive_text(" ".join(title[:_TITLE_REDACTION_SPAN].split()))[:80]
+    """Return ``title`` on one line of at most 80 characters, redacted by the bounded redactor before it is cut."""
+    return redact_sensitive_text(" ".join(title.split()), max_length=80)
 
 
 def _dedicated_worker_request(

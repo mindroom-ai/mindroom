@@ -75,8 +75,5 @@ def test_validate_tool_arguments_rejects_malformed_and_remote_schemas() -> None:
     validate_tool_arguments(schema, {"path": "/documents"})
     with pytest.raises(ValueError, match="Invalid tool arguments"):
         validate_tool_arguments(schema, {"path": 42})
-    # A missing argument is named, since the model was offered the schema that requires it.
-    with pytest.raises(ValueError, match=r"^Invalid tool arguments: missing path$"):
-        validate_tool_arguments(schema, {})
     with pytest.raises(ValueError, match="Invalid tool arguments"):
         validate_tool_arguments({"$ref": "https://schema.example.org/remote.json"}, {})

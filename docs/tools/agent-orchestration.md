@@ -84,7 +84,7 @@ continue_subagent(subagent_id: str, message: str) -> str
 
 The child starts with no history from the caller's conversation but keeps its own configured tools, workspace, memory, and tool policy.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
-`title` names the run in a few words for people watching it, such as MindRoom Chat's background jobs bar; it is cut to one line of 80 characters, follow-ups keep it, and a call without one still runs.
+`title` names the run in a few words for people watching it, such as MindRoom Chat's background jobs bar; it is cut to one line of 80 characters and follow-ups keep it. Every call must pass it, including calls through `mindroom-agent` and the MCP gateway, which refuse a call without it as invalid arguments.
 Omitting `agent_name` selects the caller itself, which still requires its own name in `delegate_to`.
 Set `model` to an alias from `models:`, or `name@level` for one of its [reasoning levels](../configuration/models.md#reasoning-levels), to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
 Set `minimal=True` to run the child in [minimal mode](agent-cli.md#minimal-subagents), which saves tokens when the child does not need its full system prompt.

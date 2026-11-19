@@ -145,3 +145,12 @@ def test_a_title_is_redacted_whole_before_its_cut_to_80_characters() -> None:
     assert "mrb1" not in title
     assert len(title) <= 80
     assert title.startswith("Check the deploy job on the staging host before ")
+
+
+def test_a_title_s_url_password_after_long_whitespace_is_redacted() -> None:
+    """Whitespace collapses before redaction, so a URL password far into the raw text is still masked."""
+    title = display_title(" " * 3_990 + "Fetch https://admin:Q7v-placeholder-pw@example.org/report")
+
+    assert "placeholder" not in title
+    assert title.startswith("Fetch https://")
+    assert len(title) <= 80
