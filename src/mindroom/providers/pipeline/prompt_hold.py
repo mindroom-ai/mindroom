@@ -3,15 +3,16 @@
 The system prompt leads every request, so a changed one makes the provider read the whole conversation again. A
 request that names its conversation's hold (``ModelRequest.prompt_hold``) to a route that takes a system prompt
 update (``Capabilities.system_updates``) is therefore sent the system prompt the conversation last sent, and a change
-to its stable first system message, such as an edited ``AGENTS.md``, as a system prompt update: a system message
-after the newest user message, which every later request sends again in the same place.
+to any of its leading system messages, such as an edited ``AGENTS.md`` or ``MEMORY.md``, as a system prompt update:
+a system message after the newest user message, which every later request sends again in the same place. So
+a line deleted from the prompt, such as a forgotten memory, stays quoted in the update until the hold starts over.
 
 One rule decides it, here and nowhere else: a request is sent the held prompt and its updates only if the file was
-written for the same model and tools, was used within the cache lifetime, holds the request's other system messages,
-and every anchor it stores (the digest of the first message, and of the messages before each update) matches the
-request's messages. Any other request is sent exactly as it was built, and the hold starts over from it. So a request
-whose conversation a compaction or a history limit rewrote sends its own prompt, and one that replays the same
-messages, such as a retry or a resumed run, sends the same held prompt and updates.
+written for the same model and tools, was used within the cache lifetime, holds as many system messages as the
+request, and every anchor it stores (the digest of the first message, and of the messages before each update)
+matches the request's messages. Any other request is sent exactly as it was built, and the hold starts over from it.
+So a request whose conversation a compaction or a history limit rewrote sends its own prompt, and one that replays
+the same messages, such as a retry or a resumed run, sends the same held prompt and updates.
 
 Only a conversation's own turns write its file. A run that only reads it (``ModelRequest.prompt_hold_pin``), such
 as a skill review's fork or an approval resumed after its turn, is sent what the file held at its first request
@@ -68,9 +69,8 @@ type _Plan = tuple[Sequence[Message], _State]
 
 # A hold no request continues any more is deleted once it has been idle this long.
 _PRUNE_IDLE_SECONDS = 24 * 3600
-# A longer update reads better as a new prompt, and so do more updates: every request sends each of them again.
+# An update longer than this reads better as a new prompt.
 _MAX_UPDATE_CHARS = 8000
-_MAX_UPDATES = 8
 # The unchanged lines an update quotes around each change.
 _CONTEXT_LINES = 2
 _UPDATE_HEADER = (
@@ -94,34 +94,37 @@ def prompt_hold_path(database: Path, session_id: str) -> Path:
 
 # Each sizing and send of a request recomputes its update until the hold stores it.
 @lru_cache(maxsize=8)
-def _update_text(held: str, fresh: str) -> str | None:
-    """Return the update that tells a model sent the ``held`` text that ``fresh`` is in force, or None when none may.
+def _update_text(held: tuple[str, ...], fresh: tuple[str, ...]) -> str | None:
+    """Return the update that tells a model sent the ``held`` system texts that ``fresh`` are in force, or None.
 
     It states the whole difference, so the newest update alone says what is in force: a unified diff without line
-    numbers, whose hunks quote each change with the lines around it and are split by a bare ``@@`` line. Every
-    hunk's old side stands exactly once in ``held``, and in the text the hunks above it made of ``held``, so the
-    update and ``held`` give ``fresh`` and no other text, read either way; a change that cannot be told so is not told.
-    Nor is any change to a prompt that inlines a ``MEMORY.md``, whose every preloaded file follows a heading of its
-    path: an update quotes lines and is sent again, so it would keep a memory the user asked to forget.
+    numbers, whose hunks quote each change with the lines around it and are split by a bare ``@@`` line. Each text
+    that changed is diffed on its own, so no hunk spans two. Every hunk's old side stands exactly once within the
+    held texts, and within the texts the hunks above it made of them (a passage never runs from one text into the
+    next), so the update and ``held`` give ``fresh`` and no other text, read either way; a change that cannot be
+    told so is not told.
     """
     if held == fresh:
         return _UPDATE_WITHDRAWN
-    old, new = held.split("\n"), fresh.split("\n")
-    if any(line.startswith("### ") and line.lower().endswith("/memory.md") for line in (*old, *new)):
-        return None
+    texts = [(old.split("\n"), new.split("\n")) for old, new in zip(held, fresh, strict=True)]
     body: list[str] = []
-    for group in SequenceMatcher(None, old, new, autojunk=False).get_grouped_opcodes(_CONTEXT_LINES):
-        before = old[group[0][1] : group[-1][2]]
-        # Read in ``held``, and in what the hunks above it made of ``held``.
-        for lines in (old, new[: group[0][3]] + old[group[0][1] :]):
-            if sum(lines[start : start + len(before)] == before for start in range(len(lines) - len(before) + 1)) != 1:
-                return None
-        body += ["@@"] if body else []
-        for tag, i1, i2, j1, j2 in group:
-            if tag == "equal":
-                body += [f" {line}" for line in old[i1:i2]]
-            else:
-                body += [f"-{line}" for line in old[i1:i2]] + [f"+{line}" for line in new[j1:j2]]
+    for at, (old, new) in enumerate(texts):
+        if old == new:
+            continue
+        for group in SequenceMatcher(None, old, new, autojunk=False).get_grouped_opcodes(_CONTEXT_LINES):
+            before = old[group[0][1] : group[-1][2]]
+            # Read in ``held``, and in what the hunks above it made of ``held``: any later held text is read in both.
+            made = [*(done for _, done in texts[:at]), [*new[: group[0][3]], *old[group[0][1] :]]]
+            for read in ([lines for lines, _ in texts], made):
+                spans = (lines[i : i + len(before)] for lines in read for i in range(len(lines) - len(before) + 1))
+                if sum(span == before for span in spans) != 1:
+                    return None
+            body += ["@@"] if body else []
+            for tag, i1, i2, j1, j2 in group:
+                if tag == "equal":
+                    body += [f" {line}" for line in old[i1:i2]]
+                else:
+                    body += [f"-{line}" for line in old[i1:i2]] + [f"+{line}" for line in new[j1:j2]]
     fence = "`" * max([3, *(len(run) + 1 for line in body for run in re.findall(r"`+", line))])
     text = "\n".join([_UPDATE_HEADER, "Change the system prompt as this diff shows:", f"{fence}diff", *body, fence])
     return text if len(text) <= _MAX_UPDATE_CHARS else None
@@ -171,13 +174,17 @@ def _read(path: Path, now: float) -> _State | None:
 
 def _continued(state: _State, route: object, system: Sequence[Message], rest: Sequence[Message]) -> _Plan | None:
     """Return the plan of a request that continues the hold ``state``, or None when the hold must start over."""
+    held, updates, current = state["system"], state["updates"], state["current"]
     fresh = [message.content for message in system]
-    held, updates = state["system"], state["updates"]
+    # A hold main wrote kept only the first text it was last told, and held the others as they were.
+    current = [current, *held[1:]] if isinstance(current, str) else current
     lengths = [length for length, _, _ in updates]
     first, *anchors = _anchors(rest, [1, *lengths])
     if (
         state["route"] != route
-        or held[1:] != fresh[1:]
+        or len(held) != len(system)
+        # A route leaves an empty text out, where an update could not say its lines go.
+        or any(bool(text) != bool(now) for text, now in zip(held, fresh, strict=True))
         or first is None
         or first != state["first"]
         or any(
@@ -186,14 +193,14 @@ def _continued(state: _State, route: object, system: Sequence[Message], rest: Se
         )
     ):
         return None
-    if fresh[0] != state["current"]:
+    if fresh != current:
         # It is told after the newest user message, which no earlier update follows, or not at all.
-        text = _update_text(held[0], fresh[0]) if len(updates) < _MAX_UPDATES else None
+        text = _update_text(tuple(held), tuple(fresh))
         anchor = _anchors(rest, [len(rest)])[0]
         if text is None or anchor is None or not _may_stand(rest, len(rest)) or len(rest) <= max(lengths, default=0):
             return None
         updates = [*updates, [len(rest), anchor, text]]
-        state = {**state, "current": fresh[0], "updates": updates}
+        state = {**state, "current": fresh, "updates": updates}
     sent = [
         message if message.content == text else replace(message, content=text) for message, text in zip(system, held)
     ]
@@ -248,7 +255,7 @@ def _plan(inner: ModelProvider, request: ModelRequest, state: _State | None) -> 
     if request.prompt_hold_pin is not None:
         return None
     first = _anchors(rest, [1])[0]
-    return messages, {"route": route, "system": texts, "current": texts[0], "first": first, "updates": []}
+    return messages, {"route": route, "system": texts, "current": texts, "first": first, "updates": []}
 
 
 def _identities(inner: ModelProvider, request: ModelRequest, sent: ModelRequest) -> list[str | None]:
@@ -287,8 +294,10 @@ def _commit(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
     try:
         with advisory_file_lock(path.parent / ".lock"):
             for other in path.parent.glob("*.json"):
-                if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:
-                    other.unlink()
+                # A hold a compaction check dropped outside the lock may be gone already.
+                with suppress(FileNotFoundError):
+                    if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:
+                        other.unlink()
             state = _read(path, now)
             plan = _plan(inner, request, state)
             if plan is None:

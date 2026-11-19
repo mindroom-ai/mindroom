@@ -352,41 +352,60 @@ async def test_a_turn_that_failed_before_storing_its_update_is_followed_by_one_t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["idle", "memory", "enrichment", "oversized"])
+@pytest.mark.parametrize("change", ["idle", "oversized"])
 async def test_a_change_no_update_may_tell_sends_the_current_prompt_without_one(
     change: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An idle cache, a forgotten memory, a changed turn context, or a rewritten file takes the prompt as it is now."""
+    """An idle cache or a rewritten file takes the prompt as it is now."""
     conversation = _Conversation.start(tmp_path, monkeypatch)
-    conversation.memory.write_text("# Memory\nFact one.\nThe door code is 4711.\n", encoding="utf-8")
     [first] = await conversation.turn("First question")
-    assert "4711" in _system_texts(first)[1]
 
     rules = [f"- Rule {number}: {'x' * 40}" for number in range(250)] if change == "oversized" else [_VIOLET]
     conversation.write_rules(*rules)
-    context: dict[str, Any] = {}
     if change == "idle":
         conversation.idle(2 * 3600)
-    elif change == "memory":
-        conversation.memory.write_text("# Memory\nFact one.\n", encoding="utf-8")
-    elif change == "enrichment":
-        context["system_enrichment_items"] = (EnrichmentItem(key="worktree", text="Work in /tmp/tree."),)
-    [second] = await conversation.turn("Second question", **context)
+    [second] = await conversation.turn("Second question")
 
     assert _updates(second) == []
     assert _HEADER not in json.dumps(second)
     assert _AMBER not in json.dumps(second)
     assert _system_texts(second) != _system_texts(first)
-    if change == "memory":
-        # A memory the user asked to forget is nowhere in the next request.
-        assert "4711" not in json.dumps(second)
     # The conversation holds the new prompt from here on, and tells its next change.
     conversation.write_rules(*rules, _GREEN)
-    [third] = await conversation.turn("Third question", **context)
+    [third] = await conversation.turn("Third question")
     assert [message["role"] for message in _extends(third, second, _assistant())] == ["user", "system"]
     assert f"+{_GREEN}" in _updates(third)[0][1].splitlines()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["memory", "enrichment"])
+async def test_a_changed_memory_or_turn_context_is_told_in_the_same_update_as_an_edited_file(
+    change: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every leading system message is held alike, so a forgotten memory stays quoted in the update while it lasts."""
+    conversation = _Conversation.start(tmp_path, monkeypatch)
+    conversation.memory.write_text("# Memory\nFact one.\nThe door code is 4711.\n", encoding="utf-8")
+    [first] = await conversation.turn("First question")
+    assert "4711" in _system_texts(first)[1]
+
+    conversation.write_rules(_VIOLET)
+    context: dict[str, Any] = {}
+    if change == "memory":
+        conversation.memory.write_text("# Memory\nFact one.\n", encoding="utf-8")
+    else:
+        context["system_enrichment_items"] = (EnrichmentItem(key="worktree", text="Work in /tmp/tree."),)
+    [second] = await conversation.turn("Second question", **context)
+
+    assert [message["role"] for message in _extends(second, first, _assistant())] == ["user", "system"]
+    [(_index, update)] = _updates(second)
+    told = update.splitlines()
+    assert {f"-{_AMBER}", f"+{_VIOLET}"} <= set(told)
+    changed = "-The door code is 4711." if change == "memory" else "+Work in /tmp/tree."
+    assert any(line.startswith(changed[0]) and changed[1:] in line for line in told)
 
 
 @pytest.mark.asyncio
@@ -700,13 +719,15 @@ async def test_a_missing_local_image_on_a_held_route_is_sized_and_sent_with_the_
 
 
 @pytest.mark.asyncio
-async def test_a_memory_file_inlined_in_the_role_is_never_told_as_an_update(
+async def test_a_memory_file_inlined_in_the_role_is_told_as_an_update_like_any_other_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An update quotes the lines it replaces and replays, so a forgotten memory would stay in every later request."""
+    """A fact deleted from an inlined ``MEMORY.md`` keeps the cache: the update quotes it while the hold lasts."""
     conversation = _Conversation.start(tmp_path, monkeypatch)
     conversation.config.agents["test_agent"].context_files = ["AGENTS.md", "MEMORY.md"]
+    # As with mem0: file memory would inline the file a second time, and a hunk naming no place once is not told.
+    conversation.config.memory.backend = "none"
     fact = "Fact to forget: cedar 4711."
     conversation.memory.write_text(f"# Memory\nFact one.\n{fact}\n", encoding="utf-8")
     [first] = await conversation.turn("First question")
@@ -714,17 +735,27 @@ async def test_a_memory_file_inlined_in_the_role_is_never_told_as_an_update(
 
     conversation.memory.write_text("# Memory\nFact one.\n", encoding="utf-8")
     [deleted] = await conversation.turn("Second question")
-    assert fact not in json.dumps(deleted)
-    # Nor does a fact added and deleted again under one held prompt ever enter an update, or a rule edited beside it.
-    conversation.memory.write_text(f"# Memory\nFact one.\n{fact}\n", encoding="utf-8")
+    assert [message["role"] for message in _extends(deleted, first, _assistant())] == ["user", "system"]
+    [(_index, update)] = _updates(deleted)
+    assert f"-{fact}" in update.splitlines()
+
+
+@pytest.mark.asyncio
+async def test_an_edited_agents_md_beside_an_inlined_memory_file_is_told_as_an_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prompt that preloads ``MEMORY.md`` holds like any other, so an edited rule beside it keeps the cache."""
+    conversation = _Conversation.start(tmp_path, monkeypatch)
+    conversation.config.agents["test_agent"].context_files = ["AGENTS.md", "MEMORY.md"]
+    [first] = await conversation.turn("First question")
+    assert "Fact one." in _system_texts(first)[0]
+
     conversation.write_rules(_VIOLET)
-    [added] = await conversation.turn("Third question")
-    assert _updates(added) == []
-    assert _VIOLET in _system_texts(added)[0]
-    conversation.memory.write_text("# Memory\nFact one.\n", encoding="utf-8")
-    [deleted_again] = await conversation.turn("Fourth question")
-    assert _updates(deleted_again) == []
-    assert fact not in json.dumps(deleted_again)
+    [second] = await conversation.turn("Second question")
+    assert [message["role"] for message in _extends(second, first, _assistant())] == ["user", "system"]
+    [(_index, update)] = _updates(second)
+    assert {f"-{_AMBER}", f"+{_VIOLET}"} <= set(update.splitlines())
 
 
 @pytest.mark.asyncio
@@ -960,24 +991,25 @@ async def test_a_turn_sizes_its_request_with_the_update_before_it_sends_it(
 
 
 @pytest.mark.asyncio
-async def test_a_memory_file_with_headings_of_its_own_is_never_told_as_an_update(
+async def test_a_memory_file_with_headings_of_its_own_is_told_as_updates_like_any_other_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A heading inside an inlined ``MEMORY.md`` hides the file from nothing: a fact deleted below it is sent nowhere."""
+    """A heading inside an inlined ``MEMORY.md`` changes nothing: a fact added below it, then deleted, is told."""
     conversation = _Conversation.start(tmp_path, monkeypatch)
     conversation.config.agents["test_agent"].context_files = ["AGENTS.md", "MEMORY.md"]
     memory = "# Memory\nFact one.\n### /notes/archive\nArchive starts here.\n"
     fact = "Forget this fact: CEDAR."
     conversation.memory.write_text(memory, encoding="utf-8")
-    await conversation.turn("First question")
+    [first] = await conversation.turn("First question")
     conversation.memory.write_text(f"{memory}{fact}\n", encoding="utf-8")
     [added] = await conversation.turn("Second question")
-    assert _updates(added) == []
+    assert [message["role"] for message in _extends(added, first, _assistant())] == ["user", "system"]
+    assert f"+{fact}" in _updates(added)[0][1].splitlines()
     conversation.memory.write_text(memory, encoding="utf-8")
     [deleted] = await conversation.turn("Third question")
-    assert fact not in json.dumps(deleted)
-    assert fact not in conversation.hold.read_text(encoding="utf-8")
+    assert [message["role"] for message in _extends(deleted, added, _assistant())] == ["user", "system"]
+    assert "withdrawn" in _updates(deleted)[-1][1]
 
 
 @pytest.mark.asyncio
@@ -1104,32 +1136,79 @@ async def test_usage_reported_for_a_request_sent_as_built_sizes_only_requests_se
     assert 7000 < size.tokens < 8500
 
 
+async def _summaries(root: Path, monkeypatch: pytest.MonkeyPatch, question: str) -> tuple[int, list[int]]:
+    """Edit the prompt at length before each of twelve turns; return the folds made and the updates each turn sent."""
+    conversation = _Conversation.start(root, monkeypatch)
+    conversation.config.defaults.compaction.threshold_tokens = 26_000
+    folds: list[None] = []
+
+    async def summarize(*_args: object, **_kwargs: object) -> str:
+        folds.append(None)
+        return "Short summary."
+
+    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", summarize)
+    await conversation.turn("First question")
+    told: list[int] = []
+    for revision in range(12):
+        conversation.write_rules(f"- Revision {revision}." + " Remain accurate and concise." * 190)
+        [body] = await conversation.turn(f"Question {revision}.{question}")
+        told.append(len(_updates(body)))
+    return len(folds), told
+
+
 @pytest.mark.asyncio
 async def test_a_prompt_edited_every_turn_folds_no_history_a_conversation_without_a_hold_keeps(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Updates are sent again by every request; past eight the hold starts over, so they never fill the window."""
-
-    async def summaries(root: Path) -> tuple[int, int]:
-        conversation = _Conversation.start(root, monkeypatch)
-        conversation.config.defaults.compaction.threshold_tokens = 26_000
-        folds: list[None] = []
-
-        async def summarize(*_args: object, **_kwargs: object) -> str:
-            folds.append(None)
-            return "Short summary."
-
-        monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", summarize)
-        await conversation.turn("First question")
-        most = 0
-        for revision in range(12):
-            conversation.write_rules(f"- Revision {revision}." + " Remain accurate and concise." * 190)
-            [body] = await conversation.turn(f"Question {revision}")
-            most = max(most, len(_updates(body)))
-        return len(folds), most
-
+    """Updates are sent again by every request; once they alone would fold the history, the hold starts over."""
     with monkeypatch.context() as unheld:
         unheld.setattr("mindroom.ai._with_prompt_hold", lambda _ctx, build, _scope: build)
-        assert await summaries(tmp_path / "unheld") == (0, 0)
-    assert await summaries(tmp_path / "held") == (0, 8)
+        assert await _summaries(tmp_path / "unheld", monkeypatch, "") == (0, [0] * 12)
+    folds, told = await _summaries(tmp_path / "held", monkeypatch, "")
+    # More updates than main kept, no fold, and a turn that sent the current prompt in its place.
+    assert (folds, max(told) > 8, 0 in told) == (0, True, True)
+
+
+@pytest.mark.asyncio
+async def test_updates_alone_never_trim_history_the_current_prompt_replays_whole_without_compaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With compaction off the replay window still trims; updates must not push the oldest turns out of it."""
+    conversation = _Conversation.start(tmp_path, monkeypatch)
+    compaction = conversation.config.defaults.compaction
+    compaction.enabled, compaction.replay_window_tokens, compaction.reserve_tokens = False, 16_000, 0
+
+    def reported(request: httpx.Request) -> httpx.Response:
+        """Answer reporting about the tokens the request's texts hold, as a provider counts what it was sent."""
+        texts = json.dumps([message["content"] for message in json.loads(request.content)["messages"]])
+        prompt = len(texts) // 4
+        usage = {"prompt_tokens": prompt, "completion_tokens": 5, "total_tokens": prompt + 5}
+        return sse_response([_chunk({"role": "assistant", "content": "ok"}), {**_chunk({}, "stop"), "usage": usage}])
+
+    conversation.wire.replies = [reported]
+    conversation.respond = conversation.wire.respond
+    await conversation.turn("First question")
+    bodies = []
+    for revision in range(12):
+        conversation.write_rules(f"- Revision {revision}." + " Remain accurate and concise." * 190)
+        bodies += await conversation.turn(f"Question {revision}.")
+    [follow_up] = await conversation.turn("Unedited question")
+    for body in (*bodies, follow_up):
+        assert "First question" in json.dumps(body)
+    # Updates were told until the request they made outgrew the window, and then the current prompt was sent.
+    told = [len(_updates(body)) for body in bodies]
+    dropped = told.index(0)
+    assert told[:dropped] == list(range(1, dropped + 1))
+    assert f"Revision {dropped}." in _system_texts(bodies[dropped])[0]
+
+
+@pytest.mark.asyncio
+async def test_a_held_conversation_whose_history_outgrows_the_window_still_folds_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A history too long even under the current prompt alone is compacted, as without a hold."""
+    folds, _told = await _summaries(tmp_path, monkeypatch, " Explain it in depth." * 800)
+    assert folds >= 1

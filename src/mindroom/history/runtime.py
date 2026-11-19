@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.storage import FoldBasis
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
-    from mindroom.llm.provider import ModelIdentity, ModelProvider
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
@@ -141,6 +141,39 @@ class PreparedScopeHistory:
     request_size: RequestSize | None = None
 
 
+async def _sized_without_held_updates(
+    sizer: RequestSizer,
+    request: ModelRequest,
+    size: RequestSize,
+    decide: Callable[..., CompactionDecision],
+    limit: int | None,
+) -> tuple[RequestSize, CompactionDecision]:
+    """Return the size and compaction decision of ``request``, which ``sizer`` sized as ``size``.
+
+    Updates of a held prompt alone must not fold or trim a history the current prompt fits with within ``limit``:
+    then the conversation's hold starts over, and the size and decision are those of the request with the current
+    prompt, ``size`` less what the route estimates the held prompt and its updates add.
+    """
+    decision = decide(request_tokens=size.tokens)
+
+    def loses_history(tokens: int, decided: CompactionDecision) -> bool:
+        return decided.mode == "required" or (limit is not None and tokens > limit)
+
+    if not loses_history(size.tokens, decision) or request.prompt_hold is None or request.prompt_hold_pin is not None:
+        return size, decision
+    fresh = replace(request, prompt_hold=None)
+    added = await asyncio.to_thread(lambda: sizer.model.request_tokens(request) - sizer.model.request_tokens(fresh))
+    fresh_size = replace(size, tokens=size.tokens - added)
+    fresh_decision = decide(request_tokens=fresh_size.tokens)
+    if loses_history(fresh_size.tokens, fresh_decision):
+        return size, decision
+    try:
+        request.prompt_hold.unlink(missing_ok=True)
+    except OSError:
+        return size, decision
+    return fresh_size, fresh_decision
+
+
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_scope_history(
     *,
@@ -201,13 +234,20 @@ async def prepare_scope_history(
     request_size = await asyncio.to_thread(sizer.size, request(native=native_history))
     summary_tokens = await asyncio.to_thread(estimate_summary_tokens, session, model)
     native_route = native_history_route(native_history)
-    compaction_decision = classify_compaction_decision(
+    decide = partial(
+        classify_compaction_decision,
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
-        request_tokens=request_size.tokens,
         summary_request_tokens=static_tokens + summary_tokens,
         # Only an active native route compacts between the trigger and the limit; without one, text compaction must.
         allow_native_compaction=native_route is not None,
+    )
+    request_size, compaction_decision = await _sized_without_held_updates(
+        sizer,
+        request(native=native_history),
+        request_size,
+        decide,
+        execution_plan.limit_tokens,
     )
     logger.info(
         "History preparation check",

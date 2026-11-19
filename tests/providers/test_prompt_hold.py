@@ -7,6 +7,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -35,8 +36,7 @@ from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import pipeline_provider
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
-    from pathlib import Path
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
     from mindroom.llm.provider import ModelProvider, StreamEvent, TokenCounter
 
@@ -238,7 +238,6 @@ async def test_each_update_states_the_whole_difference_and_a_revert_withdraws_th
 @pytest.mark.parametrize(
     "trigger",
     [
-        "turn_context",
         "tools",
         "deferred_tools",
         "model",
@@ -258,9 +257,7 @@ async def test_a_request_whose_anchors_or_route_no_longer_match_is_sent_as_built
     second, sent = await conversation.told()
     assert len(_updates(sent)) == 1
     third = [*_system(_B), *second[2:], _answer(), _user("three")]
-    if trigger == "turn_context":
-        third[1] = Message(role="system", content="Today is Thursday.")
-    elif trigger == "tools":
+    if trigger == "tools":
         conversation.tools = (ToolSpec(name="add", description=None, parameters={}, strict=None),)
     elif trigger == "deferred_tools":
         # The same definitions, one of them now left off the request until a tool search loads it.
@@ -320,28 +317,124 @@ async def test_a_change_that_cannot_follow_a_user_message_restarts_the_hold(conv
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("nested", ["", "### /notes/archive\nArchive starts here.\n"])
-async def test_a_prompt_that_inlines_a_memory_file_is_never_told_as_an_update(
+async def test_a_prompt_that_inlines_a_memory_file_is_told_as_an_update_like_any_other(
     nested: str,
     conversation: _Conversation,
 ) -> None:
-    """Any change to a prompt that preloads a ``MEMORY.md`` sends the current prompt, whatever headings the file holds.
-
-    An update quotes the lines around a change and is sent again, so it would keep a memory the user asked to forget.
-    """
+    """A ``MEMORY.md`` preloaded into the prompt is no special case, whatever headings the file holds."""
     fact = "The door code is 4711."
     memory = f"<your_role>\n### /agent/MEMORY.md\n# Memory\n{nested}Fact one.\n</your_role>\n\n- Be brief."
     first = [*_system(memory), _user("one")]
     await conversation.send(first)
     added = [*_system(memory.replace("Fact one.", f"Fact one.\n{fact}")), *first[2:], _answer(), _user("two")]
-    assert await conversation.send(added) == added
-    forgotten = [*_system(memory), *added[2:], _answer(), _user("three")]
-    assert await conversation.send(forgotten) == forgotten
-    # Nor is a rule beside the file, nor a file that the prompt starts or stops preloading.
-    edited = [*_system(memory.replace("brief", "thorough")), *forgotten[2:], _answer(), _user("four")]
+    sent = await conversation.send(added)
+    assert (sent[0].content, _shape(sent)[-1]) == (memory, "update")
+    assert f"+{fact}" in _updates(sent)[0].splitlines()
+    edited = [*_system(memory.replace("brief", "thorough")), *added[2:], _answer(), _user("three")]
+    sent = await conversation.send(edited)
+    assert (sent[0].content, _shape(sent)[-1]) == (memory, "update")
+    assert {"-- Be brief.", "+- Be thorough."} <= set(_updates(sent)[-1].splitlines())
+
+
+@pytest.mark.asyncio
+async def test_a_changed_turn_system_message_is_told_like_the_first_and_a_changed_count_restarts_the_hold(
+    conversation: _Conversation,
+) -> None:
+    """Each leading system message is diffed: one update tells a change to either of them."""
+    second, _sent = await conversation.told()
+    third = [*_system(_B, "Today is Thursday."), *second[2:], _answer(), _user("three")]
+    sent = await conversation.send(third)
+    assert [message.content for message in sent[:2]] == [_A, _TURN]
+    told = _updates(sent)[-1].splitlines()
+    assert {
+        "-- End every reply with AMBER.",
+        "+- End every reply with VIOLET.",
+        f"-{_TURN}",
+        "+Today is Thursday.",
+    } <= {*told}
+    # A prompt that gains or loses a system message is sent as built.
+    fewer = [third[0], *third[2:], _answer(), _user("four")]
+    assert await conversation.send(fewer) == fewer
+    assert conversation.state()["updates"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_change_that_moves_text_between_system_messages_is_told_message_by_message(
+    conversation: _Conversation,
+) -> None:
+    """Each system message is diffed on its own, so moving text across their boundary is a change to both."""
+    held, fresh = ["A\n\nB", "C"], ["A", "B\n\nC"]
+    first = [*_system(*held), _user("one")]
+    await conversation.send(first)
+    sent = await conversation.send([*_system(*fresh), *first[2:], _answer(), _user("two")])
+    assert [message.content for message in sent[:2]] == held
+    [update] = _updates(sent)
+    assert _applied("\n".join(held), update) == "\n".join(fresh)
+
+
+@pytest.mark.asyncio
+async def test_no_hunk_spans_two_system_messages_or_quotes_a_line_between_them(conversation: _Conversation) -> None:
+    """A change at the end of one message and the start of the next is two hunks of lines each message holds."""
+    first = [*_system(_A), _user("one")]
+    await conversation.send(first)
+    edited = [*_system(f"{_A}\n- Extra.", "Today is Thursday."), *first[2:], _answer(), _user("two")]
+    [update] = _updates(await conversation.send(edited))
+    assert update.splitlines()[3:-1] == [
+        " ## Tools",
+        " - Prefer the calculator.",
+        "+- Extra.",
+        "@@",
+        f"-{_TURN}",
+        "+Today is Thursday.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_change_whose_lines_another_system_message_repeats_restarts_the_hold(
+    conversation: _Conversation,
+) -> None:
+    """A message that ends with the next one's text, blank line included, leaves its change no place it names once."""
+    first = [*_system(f"{_A}\n\n{_TURN}"), _user("one")]
+    await conversation.send(first)
+    edited = [*_system(f"{_A}\n\n{_TURN}", "Today is Thursday."), *first[2:], _answer(), _user("two")]
     assert await conversation.send(edited) == edited
-    dropped = [*_system("- Be thorough."), *edited[2:], _answer(), _user("five")]
-    assert await conversation.send(dropped) == dropped
-    assert fact not in conversation.path.read_text(encoding="utf-8")
+    assert conversation.state()["updates"] == []
+
+
+def _as_main_wrote(conversation: _Conversation) -> None:
+    """Rewrite the conversation's hold as main writes it: ``current`` holds only the first system message."""
+    state = conversation.state()
+    state["current"] = state["current"][0]
+    conversation.path.write_text(json.dumps(state), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_hold_main_wrote_replays_its_stored_update_on_a_turn_and_a_read_only_run(
+    conversation: _Conversation,
+) -> None:
+    """Main kept the other system messages as held, so an unchanged prompt adds nothing to the update it stored."""
+    second, sent = await conversation.told()
+    _as_main_wrote(conversation)
+    before = conversation.path.read_bytes()
+    answered = conversation.answer()
+    resumed = [*_system(_B), *_replayed([*second[2:], answered]), _user("Review this conversation.")]
+    assert _updates(await conversation.send(resumed, read_only=True)) == _updates(sent)
+    third = [*_system(_B), *second[2:], answered, _user("three")]
+    assert _updates(await conversation.send(third)) == _updates(sent)
+    assert conversation.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_a_hold_main_wrote_without_an_update_adds_none_to_an_unchanged_prompt(
+    conversation: _Conversation,
+) -> None:
+    """Nor does a hold main wrote take its unchanged other system messages for a change."""
+    first = [*_system(_A), _user("one")]
+    await conversation.send(first)
+    _as_main_wrote(conversation)
+    second = [*_system(_A), *first[2:], _answer(), _user("two")]
+    assert await conversation.send(second) == second
+    assert conversation.state()["updates"] == []
 
 
 def _applied(held: str, update: str) -> str:
@@ -385,7 +478,7 @@ def _applied(held: str, update: str) -> str:
 def test_an_update_and_the_held_prompt_give_the_current_prompt_and_no_other(fresh: str) -> None:
     """Two different edits never read the same: a blank line, a line's place, and a final newline all show."""
     held = "Print these lines in order:\nred\nblue\n\nThen stop."
-    update = prompt_hold._update_text(held, fresh)
+    update = prompt_hold._update_text((held,), (fresh,))
     assert update is not None
     assert _applied(held, update) == fresh
 
@@ -395,7 +488,7 @@ def test_an_update_whose_later_hunk_restores_an_earlier_passage_reads_the_same_t
     tail = [f"n{i}" for i in range(8)]
     held = "\n".join(["old", *tail, "last"])
     fresh = "\n".join(["new", *tail, "last", "old", "n0", "n1"])
-    update = prompt_hold._update_text(held, fresh)
+    update = prompt_hold._update_text((held,), (fresh,))
     assert update is not None
     assert update.count("\n@@\n") == 1
     assert _applied(held, update) == fresh
@@ -409,7 +502,7 @@ def test_a_hunk_that_an_earlier_hunk_makes_stand_twice_is_not_told() -> None:
     fresh = "\n".join(
         ["# Helper", *tools, "- Ask first.", "", "## End", *rules, *tools, "- Never ask.", "", "## End", "- Sign off."],
     )
-    assert prompt_hold._update_text(held, fresh) is None
+    assert prompt_hold._update_text((held,), (fresh,)) is None
 
 
 def test_an_update_splits_its_hunks_by_a_bare_at_line_and_fences_them_past_any_backticks() -> None:
@@ -418,7 +511,7 @@ def test_an_update_splits_its_hunks_by_a_bare_at_line_and_fences_them_past_any_b
         ["## Reply rules", "Be terse.", "End with AMBER.", "", *[f"n{i}" for i in range(10)], "Last AMBER."],
     )
     fresh = held.replace("AMBER", "VIOLET")
-    update = prompt_hold._update_text(held, fresh)
+    update = prompt_hold._update_text((held,), (fresh,))
     assert update is not None
     assert update.split("\n")[2:] == [
         "```diff",
@@ -436,12 +529,12 @@ def test_an_update_splits_its_hunks_by_a_bare_at_line_and_fences_them_past_any_b
         "```",
     ]
     assert _applied(held, update) == fresh
-    fenced = prompt_hold._update_text("a\n```\nb", "a\n```\nc")
+    fenced = prompt_hold._update_text(("a\n```\nb",), ("a\n```\nc",))
     assert fenced is not None
     assert "\n````diff\n" in fenced
     assert fenced.endswith("\n````")
     assert _applied("a\n```\nb", fenced) == "a\n```\nc"
-    assert prompt_hold._update_text("a\nb", "a\n" + "c" * 9000) is None
+    assert prompt_hold._update_text(("a\nb",), ("a\n" + "c" * 9000,)) is None
 
 
 def test_a_change_among_repeated_lines_that_no_passage_names_once_is_not_told() -> None:
@@ -449,7 +542,66 @@ def test_a_change_among_repeated_lines_that_no_passage_names_once_is_not_told() 
     held = "\n".join(["- Check the build.", "- Run the tests.", "- Report."] * 4)
     fresh = held.replace("- Run the tests.", "- Run the linter.", 2).replace("- Run the linter.", "- Run the tests.", 1)
     assert fresh != held
+    assert prompt_hold._update_text((held,), (fresh,)) is None
+
+
+@pytest.mark.parametrize(
+    ("held", "fresh"),
+    [
+        # The first hunk makes a second ``a`` in the lines above the second hunk.
+        (("x", "a"), ("x\na", "b")),
+        # The second hunk's ``a`` stands in the first held message too.
+        (("a\nx", "a"), ("x", "b")),
+    ],
+)
+def test_a_hunk_whose_lines_another_system_message_holds_is_not_told(
+    held: tuple[str, ...],
+    fresh: tuple[str, ...],
+) -> None:
+    """Each old side is read in every held message, and in every message the hunks above it made."""
     assert prompt_hold._update_text(held, fresh) is None
+
+
+def test_a_passage_that_stands_once_in_each_message_is_told_though_two_messages_join_to_repeat_it() -> None:
+    """No message ends where the next begins on the wire, so a passage counts only within one."""
+    held, fresh = ("A\nB\nA", "B\nA"), ("A\nX\nA", "B\nA")
+    update = prompt_hold._update_text(held, fresh)
+    assert update is not None
+    # Only the first message changed, and its hunk applies within it.
+    assert _applied(held[0], update) == fresh[0]
+
+
+def test_an_unchanged_system_message_is_never_diffed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Diffing is quadratic in a message's lines, so only a message that changed is diffed."""
+    diffed: list[list[str]] = []
+    matcher = prompt_hold.SequenceMatcher
+
+    def recording(junk: None, old: list[str], new: list[str], **kwargs: bool) -> object:
+        diffed.append(old)
+        return matcher(junk, old, new, **kwargs)
+
+    monkeypatch.setattr(prompt_hold, "SequenceMatcher", recording)
+    stable = "\n".join(f"- Note {number}." for number in range(50))
+    assert prompt_hold._update_text((stable, "Monday"), (stable, "Tuesday")) is not None
+    assert diffed == [["Monday"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("held", "fresh"),
+    [(["X", "", "Z"], ["X", "Y", "Z"]), (["X", "Z", ""], ["X", "Z", "Y"]), (["X", "Y", "Z"], ["X", "", "Z"])],
+)
+async def test_a_system_message_that_turns_empty_or_stops_being_empty_restarts_the_hold(
+    held: list[str],
+    fresh: list[str],
+    conversation: _Conversation,
+) -> None:
+    """A route leaves an empty system text out, so an update could not say where its lines go."""
+    first = [*(Message(role="system", content=text) for text in held), _user("one")]
+    await conversation.send(first)
+    edited = [*(Message(role="system", content=text) for text in fresh), *first[3:], _answer(), _user("two")]
+    assert await conversation.send(edited) == edited
+    assert conversation.state()["updates"] == []
 
 
 @pytest.mark.asyncio
@@ -674,20 +826,22 @@ async def test_every_request_of_a_run_that_only_reads_the_hold_is_sent_the_promp
 
 
 @pytest.mark.asyncio
-async def test_a_conversation_tells_eight_updates_and_starts_over_at_the_ninth(conversation: _Conversation) -> None:
-    """Every request sends each update again, so a prompt edited over and over is sent as it is, as without a hold."""
+async def test_a_conversation_tells_every_edit_as_an_update_however_many_it_had(conversation: _Conversation) -> None:
+    """No count caps the updates: each request extends the one before it, and its newest update is in force."""
     messages = [*_system(_A), _user("turn 0")]
-    await conversation.send(messages)
-    for turn in range(1, 9):
-        messages = [*_system(f"{_A}\n- Revision {turn}."), *messages[2:], _answer(), _user(f"turn {turn}")]
-        sent = await conversation.send(messages)
+    sent = await conversation.send(messages)
+    for turn in range(1, 13):
+        fresh = f"{_A}\n- Revision {turn}."
+        messages = [*_system(fresh), *messages[2:], _answer(), _user(f"turn {turn}")]
+        before, sent = sent, await conversation.send(messages)
+        assert [(message.role, message.content) for message in sent[: len(before)]] == [
+            (message.role, message.content) for message in before
+        ]
         assert (sent[0].content, len(_updates(sent))) == (_A, turn)
-    # A turn that changes nothing adds none, so the eight stay; the next change starts the hold over.
-    messages = [*messages, _answer(), _user("turn 9")]
-    assert len(_updates(await conversation.send(messages))) == 8
-    ninth = [*_system(f"{_A}\n- Revision 9."), *messages[2:], _answer(), _user("turn 10")]
-    assert await conversation.send(ninth) == ninth
-    assert conversation.state()["updates"] == []
+        assert _applied(f"{_A}\n{_TURN}", _updates(sent)[-1]) == f"{fresh}\n{_TURN}"
+    # A turn that changes nothing adds none.
+    messages = [*messages, _answer(), _user("turn 13")]
+    assert len(_updates(await conversation.send(messages))) == 12
 
 
 @pytest.mark.asyncio
@@ -716,6 +870,26 @@ async def test_holds_are_kept_per_conversation_pruned_when_idle_and_survive_conc
     monkeypatch.setattr(prompt_hold, "write_text_atomic", _refuse)
     request = conversation.request([*_system(_C), _user("another conversation")])
     assert prompt_hold._commit(conversation.model, request).messages == request.messages
+
+
+@pytest.mark.asyncio
+async def test_a_hold_deleted_while_another_request_lists_the_holds_keeps_that_request_held(
+    conversation: _Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compaction check drops a hold outside the lock, so the prune scan may list a file that is gone by its stat."""
+    first = await conversation.send([*_system(_A), _user("one")])
+    gone = conversation.path.with_name("gone.json")
+    listed = Path.glob
+
+    def glob(self: Path, pattern: str) -> Iterator[Path]:
+        yield gone
+        yield from listed(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", glob)
+    second = await conversation.send([*_system(_B), _user("one"), _answer(), _user("two")])
+    assert second[0].content == first[0].content == _A
+    assert len(_updates(second)) == 1
 
 
 def _refuse(*_args: object, **_kwargs: object) -> None:
