@@ -1,6 +1,6 @@
 # Agent graphs: workflows as Python scripts
 
-Date: 2026-11-19. Status: decided by Bas (approach B), revised after review round 1, ready to plan.
+Date: 2026-11-19. Status: decided by Bas (approach B), revised after review rounds 1 and 2, ready to build.
 
 ## Intent
 
@@ -480,17 +480,20 @@ Delivery semantics:
   Several agents may share a name (a `foreach` of reviewers named `reviewer`); each gets its own copy, and `*` reaches every agent that has not finished.
   A message to a name whose agents have all finished returns the error from the table above instead of vanishing.
 - **Exactly once.** Each of these operations has a stable identity and its result is saved in the same transaction as its effect (the row, the cursor, the value).
-  For an agent the identity is its node, generation and tool call ID, so a provider retry of the same call returns the saved result.
+  For an agent the identity is its node, generation, the child's model run ID, the tool call ID and a digest of the operation and its arguments, so a provider retry returns the saved result and a reused call ID with other arguments is a new operation.
   For the script, `send`, `inbox`, `state.get` and `state.set` are nodes with lane keys like every other SDK call, so a replayed `send` does not send again and a replayed `inbox` returns the same messages.
 - **Reruns.** When a node runs again as a new generation, its unread outgoing messages of the old generation are withdrawn and its own read cursor starts at zero, so the fresh agent sees what its predecessor saw.
 - **Waiting does not hold a slot.** `read_peer_messages(wait_seconds=N)` and `inbox(wait_seconds=N)` wake on the first message; while they wait the node gives up its place in the run's concurrency limit and shows as waiting on `peer`.
+  A lane of the script that is blocked in a waiting call also gives its thread to the next lane, so a fan-out at `max_concurrent=1` cannot block its own sender.
   N has no ceiling: no provider request is open while a tool call waits.
-- **No silent deadlock.** When every unfinished agent waits for a message, nothing is queued, and the script is not in a call that could produce one, every wait returns at once with no messages and the note `Every agent is waiting for a message and nobody is left to send one.`
+- **No silent deadlock.** Every SDK request reports how many lanes of the script can still act (not started yet, or running Python between calls).
+  When every unfinished agent waits for a message, nothing is queued or running, and the newest report says zero, every wait returns at once with no messages and the note `Every agent is waiting for a message and nobody is left to send one.`
 - A session that is between turns keeps its mailbox; queued messages are put in front of its next `ask` as "Messages received since your last turn".
 - A message or a state value is at most 1 MiB, the request limit; larger data goes in a workspace file whose path is sent.
 - Messages and shared state survive restarts and resume with the run.
 
-In the graph a message is an edge from sender to recipient with a count; selecting the edge shows its last messages, and `get_workflow(run_id, messages=True)` returns messages and shared state.
+In the graph a message is an edge from sender to recipient with a count and nothing else.
+Message texts and shared state never enter a frame, a card or room state, because every room member can read those; only `get_workflow(run_id, messages=True)`, which checks the run's owner, returns them.
 Not in v1: pushing a message into a busy agent's next tool result (it reads its inbox when it chooses), and messages between different runs.
 
 ### 3. With people and with the room
@@ -505,7 +508,7 @@ Workflow agents keep `matrix_message`, so they can post in the originating threa
 3. **Graph panel.** Phases top to bottom, fan-out groups with a progress count, one chip per agent with status, model, tokens, cost and time, and curved edges for messages.
    Selecting a chip shows its prompt label, result preview and error, with Open (the existing Sub-agents view of that agent's live text and tool calls) and Stop (cancel only that agent).
 4. **Questions.** `ask_user` shows a card with option buttons or a text box; the answer is visible to the room afterwards.
-   Its plain-text fallback carries a short ID: `Question q7: Deploy to production? 1. Yes 2. No. Answer with !answer q7 <number or text>.`
+   Its plain-text fallback carries a short ID that no other run or rerun shares: `Question q3fa91c: Deploy to production? 1. Yes 2. No. Answer with !answer q3fa91c <number or text>.`
    `!answer <text>` with no ID works only when the sender has exactly one open question in the thread; otherwise the reply lists the open ones.
    Every answer gets feedback: the card changes to "Answered", or a notice says why not (`already answered`, `not for you`, `no longer open`, `not one of the options`).
 5. **Approvals.** A workflow agent that needs an approval shows the existing approval card, named after that agent; its chip and the run turn to Waiting for you.
@@ -525,14 +528,13 @@ Workflow agents keep `matrix_message`, so they can post in the originating threa
 
 ### Where the script runs
 
-- **Worker backend configured (Docker, Kubernetes, static runner):** each attempt runs in its own dedicated worker, exactly as a background script does today.
+- **Worker backend configured (Docker, Kubernetes):** each attempt runs in its own dedicated worker, exactly as a background script does today; the shared static runner is refused, as it is for scripts.
   When that backend is down or refuses, the run does not start (or its attempt ends `interrupted` and is retried); it never falls back to the host.
-- **No worker backend configured:** the script runs as a child process of the primary under the primary's shell supervisor, on Linux and macOS, when `defaults.allow_shell_without_worker` is true or the sandbox mode is explicitly local.
+- **No worker backend configured:** the script runs as a child process of the primary under the primary's shell supervisor, on Linux, when `defaults.allow_shell_without_worker` is true or the sandbox mode is explicitly local.
   That is the operator's existing statement that code may run as the primary's user, so there is no new setting.
   Otherwise `start_workflow` refuses: `Workflows run code. Route this agent to a worker, or set defaults.allow_shell_without_worker: true to run it on this machine.`
 - **Never inside the primary process.** A script that blocks or crashes must not stop the event loop.
-- **macOS.** Scripts are refused there today because only Linux kills the script's process group when the supervisor dies.
-  Workflow attempts start through a wrapper that checks the expected parent before it starts any user code and kills its process group when that parent exits (`prctl` on Linux as today, a `kqueue` process watch on macOS).
+- **Local runs are Linux only in v1,** as scripts are: only Linux kills the script's process group when the supervisor dies; a macOS wrapper is under Later.
 - Kubernetes keeps its gateway-only listener requirement; the workflow routes are mounted on both listeners explicitly.
 - Every attempt runs with `PYTHONHASHSEED=0`, so a prompt built from a `set` is the same on replay.
 
@@ -560,15 +562,21 @@ That covers the six tool functions, the peer tools, shared state and `save_workf
 
 **The run's job.** The run is one background job of kind `workflow` in the existing `ToolJobRuntime`.
 That gives it a jobs-bar entry, every existing cancel path, the `job` tool, and delivery of the report to the calling agent.
-The order is: the tool call passes the operator's approval rules like any call, the job runtime admits the job, and only the admitted operation reserves the run (one run per job ID, so a redelivered call finds the same run) and launches the first attempt.
-A refused admission therefore starts no process.
+The order is: the tool call passes the operator's approval rules like any call (the toolkit's job hook is asked only after that gate); the run is written as an **intent** (state `starting`, attempt 0, its preassigned ID, source, args and options, no process); the job runtime admits a job whose saved fields name that run; and only the admitted operation launches the first attempt.
+A refused admission deletes the intent and starts no process.
+Every crash point has one owner: an intent whose job the runtime does not know after its own recovery is deleted, a `starting` run with a live job gets its first attempt from the job's continuation, and an attempt process the run does not name is retired like any inherited attempt.
+
+**Run identity.** A run is found again only by a key that hashes the canonical owner (agent, requester, room, thread), the originating model run and the tool call ID, as job IDs are made today; a provider's call ID alone is never a key.
+A hit must also match the owner, the source digest and the args, or the call is refused; it never returns another run.
 The job kind has its own authority check (the agent still has `workflow`, the requester still has access), its own recovery (below), a handle with `run_id` and `title`, and delivers the whole report, not the 500-character summary of generic jobs.
 Once launched, the job is never `awaiting_approval`: it stays `running` while the run waits, and it is started without a reply ID, so Stop on the starting reply does not block its continuation.
 Cancelling a run revokes the attempt's capability, cancels every live node job, closes open question cards, cancels nested runs, and ends the run `cancelled`; completed nodes stay saved for a later resume.
 
 ### How the script talks to MindRoom
 
-MindRoom launches a fixed bootstrap, not the user's file: it loads the source as the module `__workflow__` (so tracebacks keep the user's line numbers and an `if __name__ == "__main__":` block does nothing), then calls `main(args)` and posts the return value or the traceback.
+MindRoom launches the existing script shim, which validates the snapshot's digest and the capability token and removes the token afterwards, as today.
+The trusted launch description gains a versioned `entry` field (`script` or `workflow`) that crosses the worker wire; for `workflow` the validated shim hands the source to the SDK instead of running it as `__main__`, and a worker that does not know the field refuses the launch.
+The SDK loads the source as the module `__workflow__` (so tracebacks keep the user's line numbers and an `if __name__ == "__main__":` block does nothing), then calls `main(args)` and posts the return value or the traceback.
 The root lane exists only while `main` runs, so an SDK call at module level fails at that call.
 The SDK calls routes under `/api/script-gateway/workflow/`, authenticated by the attempt's existing capability token.
 
@@ -577,16 +585,17 @@ GET  run                            -> {run_id, attempt, args}
 GET  sources/{name}                 -> the saved workflow's bytes for run(), snapshotted once per attempt
 POST nodes {key, kind, args, meta}  -> {id, state, cached, result, error}
 GET  nodes/{id}?wait=25             -> the same receipt, held up to 25 s until it changes
+GET  results/{id}                   -> the node's full result as JSON, streamed
 POST log {text}    POST finish {result | error}
 ```
 
 - A blocked `agent()` is a thread that polls `GET nodes/{id}?wait=25` with a 40 s client timeout, for hours if needed; a gateway restart looks like a retryable transport error and the SDK keeps polling.
 - Only the run's current attempt is served; an older attempt gets `409 superseded` and exits, so a zombie process cannot act.
 - **Sizes, per direction.** A request from the script is at most 1 MiB including its envelope, refused with the message in the error table.
-  A result returned to the script is at most 8 MiB; a larger one returns the reference and the 64 KiB preview.
+  A result over 8 MiB is not inlined in the receipt: the SDK reads it from `results/{id}`, so the script always gets the complete typed value; the 64 KiB preview is only for frames and `get_workflow`.
   `finish` accepts up to 8 MiB; the report is stored on the run and delivered from there.
 - The 64 KiB receipt cap of plain script calls does not apply: `tool` node results are saved in the node store like agent results.
-- A node's `result` is the child's raw final answer; the delegation receipt, IDs and usage are separate fields.
+- A node's `result` is the child's raw final answer, read from the owner-checked child run (not from the audit record, which redacts and shortens) and saved on the node before the job is acknowledged; the delegation receipt, IDs and usage are separate fields.
 
 ### Replay and resume
 
@@ -596,26 +605,29 @@ Every node has a **key** and a **digest**.
   For `foreach`, `<item>` is a hash of the item's JSON value with an occurrence counter for duplicates, so adding, removing or reordering items keeps the other lanes' keys; an item that is not JSON gets its position instead, marked as positional.
   For `parallel` it is the position.
 - The digest is the SHA-256 of the call's kind and arguments (prompt, schema, target, model, system, tools, profile, mode, and `name`, because it is a mailbox address), computed again by the gateway.
-  A `turn` digest also covers its session and the digests of that session's earlier turns, so a changed turn changes every later turn of the session, in whichever lane it is asked.
+  A `turn` digest also covers its session and, added by the gateway, the digest and generation of each earlier turn of that session, so a turn that changed or ran again changes every later turn of the session, in whichever lane it is asked.
   A `run()` group's digest covers the hash of the bytes that are executed.
 - A group node completes when it is submitted and stores its ordered member list; it is never `running`, so a restart cannot leave one half open.
+  When the submitted member list differs from the saved one (an item added, removed or moved), the parent lane is dirty after the group; the lanes of the items that stayed are not.
 
 **Dispatch handles.** Before a node's work is dispatched, the node row is written with a handle to exactly that dispatch: the broker's script run and call ID for a `tool` node, the job ID for an agent turn.
 Settling a node means copying the result the handle points at.
 So the two places a crash can fall between (the work finished, the node not yet updated) are repaired by reading the handle, never by doing the work again.
+A handle with nothing behind it means "never started" only when the attempt's call records still exist and hold no claim for it; when they were retired or pruned, the call is `indeterminate`.
+The broker's receipt records the moment the effect starts (after hooks and approval, before the tool runs), so a call that was still waiting for approval is known not to have run.
 
 On a node request the gateway decides in this order.
 
 1. **The same attempt already submitted this key:** it returns that node's receipt, whatever its state.
    A lost response therefore never repeats work, not even failed work.
-2. **A saved node with the same digest, in a lane that is not dirty here:**
+2. **A saved node left `queued` or `running` by a dead attempt is reconciled first,** before its digest or its lane is looked at.
+   A completed broker receipt or ended job is copied; a refusal, or an approval wait before the effect started, is a failure; a call whose effect started with no recorded end becomes `indeterminate`.
+3. **A saved node that is `indeterminate` raises** `ToolError` or `AgentError` of that kind and nothing is dispatched, on every attempt, whatever the new digest and also in a dirty lane, until someone names the node in `resume_workflow(rerun=[...])`.
+4. **A saved node with the same digest, in a lane that is not dirty here:**
    - `completed`: the saved result returns at once, marked `cached`, so nothing runs and nothing is paid.
    - still live (an open question, a job that survived): the call attaches to it through its handle.
-   - left `queued` or `running` by a dead attempt: its handle is reconciled first.
-     A completed broker receipt or ended job is copied and returned as a hit; a refusal before execution is a failure; a call that was dispatched with no recorded end becomes `indeterminate`.
-   - `indeterminate`: the call raises `ToolError` or `AgentError` of that kind again and nothing is dispatched, on every attempt, until someone names the node in `resume_workflow(rerun=[...])`.
    - `failed` or `cancelled`: the call runs again as the next generation.
-3. **Otherwise** (a different digest, no saved node, a dirty lane, a node named in `rerun`): the call runs as the next generation, and any live work of the node it replaces is cancelled and its open card closed.
+5. **Otherwise** (a different digest, no saved node, a dirty lane, a node named in `rerun`): the call runs as the next generation, and any live work of the node it replaces is cancelled and its open card closed.
 
 **Dirty lanes.** When a node at index i runs in this attempt instead of hitting, its lane is dirty from index i + 1: later calls in that lane run again, because the earlier call's effects may have changed what they would see.
 The same reaches upward through joins: when any call inside a `foreach` or `parallel` ran, the calls after that group in the parent lane run again too.
@@ -628,7 +640,7 @@ A `cached=False` call always runs; when its result equals the saved one the lane
 The tool description says to put effects in `shell()`, `tool()` or an agent, and the docs say it again.
 
 **Resume** starts a new attempt of the same run and replays the script from the top.
-It happens in three ways: `resume_workflow` (optionally with an edited script or `rerun`), the Resume and Run again buttons, and automatically after an infrastructure interruption (runtime restart or shutdown, plugin reload, worker or supervisor loss).
+It happens in three ways: `resume_workflow` (optionally with an edited script or `rerun`), the Resume and Run again buttons, and automatically after an infrastructure interruption (runtime restart or shutdown, plugin reload, worker or supervisor loss, or an attempt that reached its own process limit while the run has working time left).
 Both the tool and the button register a new job for the run when the old one has ended.
 Automatic resume stops after 5 attempts in a row that finish no new node, because a script that takes the runtime down on start would otherwise loop forever.
 
@@ -641,7 +653,7 @@ Automatic resume stops after 5 attempts in a row that finish no new node, becaus
   The replayed script reaches that node, finds it live, and attaches.
   No finished or running work is thrown away, and no child runs twice.
 - An agent turn that could not be continued (the continuation limit, a lost session) is `failed` and reruns on replay when the child had made no tool call, and `indeterminate` when it had.
-- A `tool()` call that was dispatched and has no receipt is `indeterminate`, as script calls are today.
+- A `tool()` call whose effect started and has no recorded end is `indeterminate`, as script calls are today.
 - Removing `workflow` from an agent revokes its attempts and ends its runs `interrupted`; the existing reload checks that look for the `script` tool accept either tool.
 
 **Determinism.** Nothing throws: Python's logging and HTTP stack need the real clock.
@@ -662,13 +674,17 @@ A turn that changes in the middle starts a fresh child whose first prompt carrie
   Such an agent runs as configured, with its own tools, knowledge and memory, and `model` may still be overridden.
   The docs say that enabling `workflow` lets an agent run the room's agents.
 - **One launch path.** SDK `agent()`, a session turn, a script's `tool("delegate", "run_subagent", ...)` and a nested `start_workflow` all go through the engine's child launch, so each gets job admission, native approval handling and recovery.
+  A script `tool("delegate", ...)` or `tool("workflow", "start_workflow", ...)` call first passes the broker's ordinary steps for that function (live grant, hooks, the operator's approval rule) and is diverted only where the broker would execute it, so a denial launches nothing.
   The node stores the resolved target (agent, persona, tool narrowing, model), the caller's real depth and the worker scope, and recovery uses those, never the owner's current configuration.
 - **Child turn.** `prepare_child_turn` with the caller's depth (it adds one itself), run as a delegation job in `ToolJobRuntime`.
-  Each model turn has its own job, with the ID `sha256(owner, run, key, generation, turn)`; a schema correction and a restart continuation are further turns of the same generation.
+  Each turn the engine starts has its own job, with the ID `sha256(owner, run, key, generation, turn)`; a schema correction is a further turn of the same generation, and a restart continuation keeps its job's ID, as the runtime continues jobs today.
   The engine starts a job once and afterwards only waits on its saved ID; it never asks the runtime to reattach by restarting.
   A result is accepted only from the node's current generation, so a late completion of a replaced node changes nothing.
-- **Jobs stay inside the run.** Node jobs have depth 1 or more, the engine holds their claims, and it acknowledges each ended job after saving the node, so none becomes a follow-up turn or a held-jobs notice for the owner.
+- **Jobs stay inside the run.** A node job is admitted at the caller's real depth, exactly as a delegation job is, because the restart continuation requires the child one level below its job.
+  One filter keeps node jobs out of follow-up turns, held-jobs notices, the `job` tool's list and room state: a job that carries `workflow` and is not of kind `workflow` is skipped, also when it ended while MindRoom was down.
+  The engine holds their claims and acknowledges each ended job after saving the node.
 - **Label and prompt.** The child's `task` is the node label (80 characters); the full prompt goes in `prompt=`, so a 1 MiB prompt is not copied into every job snapshot.
+  Whenever a continuation needs the original prompt (a restart before the first tool call, a child stopped during its calls), it is read from the node's saved request, never from the label, through a lookup the workflow runtime registers with the delegation code.
 - **Mode.** Standard by default, so the child has its full tool schemas and can pause for approval; `minimal=True` follows `run_subagent`'s rules.
 - **Tools.** A plain copy inherits every tool of the caller, including `delegate`, `memory` and `workflow`, plus `workflow_peers`; `tools=[...]` narrows it.
 - **Knowledge and history.** The child runs under the owner's room, thread and requester identity, so its knowledge bases, memory and Matrix tools reach what the owner's reach; the thread is not preloaded, because a fresh context is the point.
@@ -676,40 +692,43 @@ A turn that changes in the middle starts a fresh child whose first prompt carrie
 - **Result.** The node stores the child's raw final answer; a child that a config reload stopped ends with a notice instead of an answer today, and the engine treats that as interrupted, not as a result.
 - **Timeout.** A node timeout cancels its job and waits for it to end before the node fails.
 - **Nesting.** A child that calls `start_workflow` is not a job caller, so the call runs inline: it reserves a child run that names its parent run and node, waits, and returns the report.
+  The child run's key is its parent run, node and generation plus the source digest and the args, not a call ID, because an agent continued after a restart repeats its call under a new ID: the same call attaches to the live child run or returns its stored report.
   The child run shows as a group under that agent, Stop on the parent or on the agent cancels it, its cost is counted once (below), and it has its own `max_concurrent`, so a parent at limit one cannot deadlock on its own child.
   Depth counts real delegation ancestry (`MAX_DELEGATION_DEPTH`, 3); `run(name)` is an inline call and adds none.
 
 ### Concurrency
 
-`foreach` and `parallel` run their functions on threads in the script (one per item, at most 256 per call; more items are fed as threads free up).
+`foreach` and `parallel` run their functions on threads in the script (one per item, at most 256 active per call; more items are fed as threads free up, and a lane blocked in a call that waits for a person or a message does not count).
 The limit that matters is in the gateway: one limit per run, `max_concurrent` (default 16, any value the caller asks for unless the operator set a ceiling).
 It counts running `agent`, `turn` and `tool` nodes across all lanes of that run; a node that waits for a person or for a peer message does not count.
 The script broker's per-run lock becomes a per-run semaphore of size 1 for plain scripts (no change) and of the run's limit for workflows, so `tool()` and `shell()` calls in parallel lanes run in parallel.
 `max_concurrent_runs` (default 8 per requester and agent) counts top-level runs only.
 
-**Prompt-cache stagger.** Agents with the same target, model, mode, system prompt, tools and schema share a prompt prefix.
-When several are queued at once, the first starts and the others are held until its first live frame arrives or 5 seconds pass (`prefix_stagger_seconds`, 0 turns it off); then they start together and read the cache the first one wrote.
-
 ### Pauses for people
 
 - **`ask_user`** creates an `ask` node in state `waiting` and posts an agent message with `io.mindroom.workflow_question` (`{run, node, question_id, requester, text, options, free_text, status, answer}`, status `open`, `answered` or `cancelled`) and the plain-text fallback.
   The message is sent with a transaction ID made from the run, node and generation, so a restart between sending and saving does not post it twice.
-  The answer is the event `io.mindroom.workflow_answer` (`{run, node, option | text}`) or `!answer`.
+  The answer is the event `io.mindroom.workflow_answer` (`{run, node, option | text}`) or `!answer <question_id> ...`.
+  The ID is `q` plus six hex characters of a hash of the run, node and generation, so two runs in one thread, or a question and its rerun, never share one.
   An answer counts only when it comes from the run's requester, in the run's room and the card's thread, and refers to the card of the node's current generation; every other answer gets the rejection notice (`io.mindroom.workflow_answer_rejected`, `{run, node, reason}`).
   The card is edited to show the answer and the node completes with it, so a resumed run does not ask twice.
 - **An agent's `ask_user` tool** creates its own `ask` node under the agent's node, keyed by the question, and the agent's job waits in the runtime's existing human-decision wait.
   If a restart continues the agent and it asks the same question again, it gets the saved answer.
 - **Approvals of an agent's call.** The node's job goes to `awaiting_approval` and shows the existing card; the node is `waiting` on `approval`.
-  Across a restart, a job that carries `workflow` and waits for approval is kept, not ended: its continuation loads the paused run from the child's session, shows the cards for its pending calls again, and resumes that paused run with the decisions, so the calls the child made before the pause are not made again.
-  When the paused run cannot be restored, the node is `indeterminate`.
+  Across a restart there are three outcomes, tried in this order (PR B4b; before it ships, such an agent runs again when it had called no tool and is `indeterminate` otherwise).
+  Restore: the paused run is saved before the stopped job's cleanup rewrites it, loaded from the child's session, and resumed with the exact decisions already given and the cards' original expiry.
+  Follow-up turn: the gated call never ran, so the child is continued as a running job is and told which calls finished; it makes the gated call again and a new card appears.
+  `indeterminate`: only when it cannot be excluded that a call of the child started and was not recorded.
+  A child that waits in its own `ask_user` is marked so on its job, because both waits share one job status.
 - **Approvals of a script `tool()` call.** The broker's card path tells the engine, so the node is `waiting` on `approval` and gives up its slot.
-  Such a call has not been dispatched, so after a restart the replay asks again with the same call ID; a denial or an expired card raises `ToolError(kind="denied")`.
+  The broker has claimed such a call but its effect has not started, which the receipt records, so after a restart the replay runs it as the next generation and asks again; a denial or an expired card raises `ToolError(kind="denied")`.
 - **Operator policy is unchanged.** Workflow attempts use the operator's live `tool_approval` default and rules for script `tool()` calls, exactly what the owner's own turn would get; they do not use the pre-approval list that plain scripts build.
   The functions a script may call are resolved live from the owner's tools, at launch and at each call.
 - **Budget.** With `max_cost_usd`, reaching the amount starts no new node, lets running ones finish, and asks through a system `ask` node.
 - The run is `waiting` when nothing runs and nothing queued may start until a person acts; the script simply stays blocked in its poll.
 - **Lifetime.** A run may work for `max_runtime_hours` (default 72, configurable, 0 for no limit); time spent `waiting` for a person does not count.
-  At the limit it ends `interrupted` with its work saved, and Resume continues it with a fresh allowance.
+  The engine alone enforces it: the script runtime's own wall-clock limit for a workflow attempt is a fixed 30 days, and an attempt that reaches it while the run has working time left is resumed automatically, so a run that waits for a person for months continues when the answer comes.
+  An automatic resume keeps the time already used; at the limit the run ends `interrupted` with its work saved, and a person's Resume continues it with a fresh allowance.
 
 Considered: MindRoom already has questions answered by reactions (`mindroom/interactive.py`, Chat's `QuestionCard`), which give buttons in every Matrix client.
 They are not reused, because any room member can answer one and they have no free text; a run's question is answered by its requester only, the rule approvals follow.
@@ -749,7 +768,7 @@ Existing budgets apply unchanged: each child turn passes through the requester's
 
 ### `tool()` and `shell()`
 
-- A script `tool("delegate", ...)` call becomes an agent node, and `tool("workflow", "start_workflow", ...)` a nested run, through the launch path above; every other call goes through the script broker with hooks, approval rules, worker routing and audit.
+- A script `tool("delegate", ...)` call becomes an agent node, and `tool("workflow", "start_workflow", ...)` a nested run, through the launch path above and after the broker's gate; every other call goes through the script broker with hooks, approval rules, worker routing and audit.
 - `shell()` calls the owner's `run_shell_command` through that path with `timeout=3600` and `tail=2000` unless told otherwise, and the docstring says so.
 - The exit status is the command's real status: the shell tool reports it as structured metadata of the call, which the broker saves on the receipt.
   Nothing is appended to the command and no marker is parsed from its output, so a trailing comment or an `exit` cannot fake a result.
@@ -788,10 +807,10 @@ Its structure is what the engine does know: phase, lane (which `foreach` or `par
 - **Fitting.** A frame must pass the transport's own size check, which measures the encrypted, ASCII-escaped event, not the plain JSON.
   Rows are added in order of what a person can act on: nodes waiting for a person, failed and indeterminate, running, queued, then completed, newest first; an error is cut to 200 characters in a frame.
   Whatever does not fit is counted per status in `omitted`, groups always carry their true totals, and when groups alone do not fit, inner groups fold into their parent's counts.
+  Every other field is bounded in the frame, not in the run: the title and phase names are cut to 80 characters and the log to its last 20 lines of 200 characters, and when even that does not fit, phases, groups and the log are replaced by their counts.
+  That last form (`meta` and `omitted` only) has a fixed size, so a frame can always be sent.
   The counts in `meta` are always the true ones, so the client can say "and 412 more queued" honestly; nothing here limits the run.
-- **Drill-down.** A client asks for rows that were left out with `io.mindroom.workflow_control` `{run, action: "page", request, status?, group?, after?, edge?}`, and the agent answers with one frame `{v, run, page: {request, nodes, messages, next}}`.
-  The same request with `edge` returns the last messages between two agents.
-  It works for finished runs within retention, so a graph opened from history can still show its failures.
+- Rows a frame left out are not paged to clients in v1 (see Later); the owner's agent reads them with `get_workflow`.
 - A node's live text and tool calls are not in this frame: `run` and `subagent` join it to the existing `io.mindroom.subagents` feed.
 - `sid` and `seq` order frames as they do for subagent frames: a restarted MindRoom starts a new `sid`, and a delta applies only to the frame right before it.
   A delta carries changed and new rows; when rows disappear or the phases change, the next frame is a snapshot instead.
@@ -824,10 +843,11 @@ Its structure is what the engine does know: phase, lane (which `foreach` or `par
 |---|---|
 | Operator `tool_approval` default and rules apply to `start_workflow`, to script `tool()` calls and inside every agent | The operator's policy, unchanged in both directions. |
 | Requester authorization is rechecked on every node | A run must stop acting for someone who lost access (existing check). |
-| Only the requester answers questions, approves and resumes; only the owner reads a run | The existing rule for approval cards and scripts. |
+| Only the requester answers questions, approves and resumes; only the owner reads a run, its messages and its shared state | The existing rule for approval cards and scripts; the room sees the graph and message counts only. |
 | A target agent must be the caller, in `delegate_to`, or joined to the room and addressable by the requester | A run must not reach an agent the requester could not reach from this room. |
 | An indeterminate call is never issued again without `rerun` | A write must not happen twice. |
-| Local runs need `allow_shell_without_worker` or local sandbox mode | The script runs as the primary's OS user; that is the operator's existing switch for it. |
+| Local runs need `allow_shell_without_worker` or local sandbox mode, and Linux | The script runs as the primary's OS user; that is the operator's existing switch for it, and only Linux kills an orphaned script. |
+| One agent node cannot run the same nested workflow with the same args twice | A continued agent repeats its call under a new ID, and the run must not start twice; vary the args to run it again. |
 | Budgets | Existing per-requester budget monitor, applied per child turn. |
 | Depth 3 (`MAX_DELEGATION_DEPTH`) of real delegation ancestry | A workflow that starts itself would recurse forever. |
 | `max_concurrent` default 16 | Provider rate limits; it is a default the caller raises. |
@@ -852,7 +872,6 @@ Its structure is what the engine does know: phase, lane (which `foreach` or `par
 - Room agents keep their tools and may get a `model` override.
 - No serialized tool calls, no 30 calls per minute, no 64 KiB cap on tool, shell or agent results, no 120-second shell limit.
 - No ceiling on a peer wait and no 64 KiB message cap.
-- No Linux-only rule for local runs.
 
 ## The old toolkit
 
@@ -867,13 +886,14 @@ The removal gives back about 3,000 source lines.
 - `script_runs` gains the nullable column `workflow_run_id` through the store's explicit column migration, with its `LEGACY_COMPAT` entry and test; `CREATE TABLE IF NOT EXISTS` alone would not add it.
 - Delegation snapshots written before this change lack the new fields; they read as `None`.
 - The workflow store migrates by schema version; a test opens a database of each earlier version.
-- `mindroom.workflow` is a supported import for skill scripts and plugin-bundled workflows: `plugin_check.py` allows it, `docs/plugins.md` lists it, the compatibility fixture covers it, and the plugin API minor version goes up by one.
+- The launch description's `entry` field raises the worker protocol version; a test launches a workflow on a real Docker worker and checks the snapshot digest, the import path and the token cleanup.
 - A test imports `mindroom.workflow` in the worker image's environment, and another calls the new routes through the gateway-only listener.
 - New files a toolkit needs: `tools/__init__.py` registration, `tools_metadata.json`, the per-tool extra in `pyproject.toml`, toolkit construction in `agents.py`, the usage kind in `usage/storage.py`, `vulture_whitelist.py`, and the generated docs skill references.
 
 ## v1 and later
 
 In v1: everything above.
+Cut from v1 in review round 2: paging of rows a frame left out and message texts in the panel (both need delivery to one person, not to the room); a workflow run as a report-publishing source and `mindroom.workflow` as a plugin import; local runs on macOS (a `kqueue` parent watch); the prompt-cache stagger for agents that share a prompt prefix.
 Later, in rough order of value: pushing peer messages into a busy agent's next tool result; early exit from a fan-out (the first good answer wins and the rest are cancelled); `agent(..., thread=True)` to show one agent's turn as a Matrix thread; stopping the script process while a run waits for hours and relaunching it on the answer (replay makes that possible); bundled and shared workflows; a `!workflow run` command with no model turn; stall detection with automatic agent restart.
 
 ## Testing
@@ -883,11 +903,11 @@ Four levels, and each test names its level.
 - **Pure:** replay rules, graph fitting, schema helpers, the SDK against a fake gateway.
 - **Engine harness** (`WorkflowStack` in `tests/workflow_helpers.py`): the real run store, the real `ToolJobRuntime` on its real store, real delegation with the scripted model of `tests/scripted_agent_helpers.py`, a fake Matrix client, and a fake script runtime in which the test plays the script by calling the engine's gateway methods.
   Everything about jobs, generations, claims, approvals and restarts runs here, because a fake child runner cannot show those faults.
-- **Local integration:** the real script runtime in local mode with a real child process, for the bootstrap, the SDK, placement and restart.
+- **Local integration:** the real script runtime in local mode with a real child process, for the shim entry, the SDK, placement and restart.
 - **Live** (a throwaway deployment from `~/repos/dev/scripts/live.py`, `just live up`, torn down afterwards), with fault scripts kept in `tests/workflow_live/`.
 
 The first acceptance test, before any agent feature: a script's tool call appends one line to a file; the primary is stopped after the write and before the node is settled; the run resumes; the file has one line and one report is delivered.
-It runs in both variants (receipt saved, so the result is copied; receipt missing, so the call is `indeterminate` until `rerun`), locally and on a worker.
+It runs in both variants, each stopped at a barrier the test controls and not on file visibility: before the receipt commits (the call is `indeterminate` and nothing is reported until `rerun`), and after the commit but before the node settles (the result is copied, marked cached, one report), locally and on a worker.
 Other tests assert cardinalities the same way (one effect, one card, one report) and recovery states, not mock call counts.
 Each example workflow above runs with the scripted model, and a blind test gives a fresh model only the tool description and runs what it writes.
 Chat: vitest for the parser, store and presenter; Playwright with placeholder frames for the card, panel, question card and jobs-bar row, and through `/sync` for delivery.
@@ -896,26 +916,47 @@ Chat: vitest for the parser, store and presenter; Playwright with placeholder fr
 
 | PR | Content | Net source lines (estimate) |
 |---|---|---|
-| B1 | Run store with migrations, models, replay rules | +650 |
-| B2 | SDK core and bootstrap, engine core, gateway routes on both listeners, workflow attempts (placement, wrapper, live approval policy), `tool` and `shell` nodes with dispatch handles | +800 |
-| B3 | `start_workflow`, `get_workflow`, `cancel_workflow`, `resume_workflow`, the admitted `workflow` job kind, the inline path, replay in the engine, restart recovery, registration; the first acceptance test | +750 |
-| B4 | Agent nodes: grant, launch path, a job per turn with generations, claims, continuation, approval waits and their restart path | +750 |
-| B5 | `foreach`, `parallel`, `PartialFailure`, concurrency, stagger, joins, the usage ledger, nested runs | +600 |
-| B6 | Graph frames with fitting and paging, the run card, room-state rule, `io.mindroom.workflow_control` | +650 |
-| B7 | `schema`, `ask_user`, `!answer`, `max_cost_usd`, the large-run notice | +550 |
-| B8 | Saved workflows (`save_workflow`, `list_workflow_runs`, `name=`, `run`, `!workflows`), report-publishing source, plugin SDK import, deprecation note | +400 |
-| B9 | Sessions (`spawn`), `workflow_peers` with exactly-once operations, slot release and deadlock notice, the agents' `ask_user` | +700 |
-| C1 | Chat: sync filter, parser, store, run card, question card, jobs-bar row | +800 |
-| C2 | Chat: graph panel with paging and message edges | +800 |
+| B1 | Run store with migrations, models, replay rules | +680 |
+| B2a | SDK core, workflow attempts (placement, the launch `entry` field, live approval policy, the fixed attempt limit) | +410 |
+| B2b | Engine core, gateway routes on both listeners, `tool` and `shell` nodes with dispatch handles and receipt phases | +430 |
+| B3a | `start_workflow`, `get_workflow`, `cancel_workflow`, the intent and the admitted `workflow` job kind, the inline path, registration | +410 |
+| B3b | Replay in the engine, `resume_workflow`, working time, restart recovery; the first acceptance test with barriers | +460 |
+| B4 | Agent nodes: grant, launch path, a job per turn with generations, the job filter, continuation with the saved prompt, approval waits | +660 |
+| B4b | An approval wait across a restart: restore, then a follow-up turn, then `indeterminate` | +250 |
+| B5 | `foreach`, `parallel`, `PartialFailure`, concurrency, joins, the usage ledger, nested runs, the gate on diverted calls | +580 |
+| B6 | Graph frames with fitting and the counts-only form, the run card, room-state rule, `io.mindroom.workflow_control` (resume) | +530 |
+| B7 | `schema`, `ask_user`, `!answer`, `max_cost_usd`, the large-run notice | +560 |
+| B8 | Saved workflows (`save_workflow`, `list_workflow_runs`, `name=`, `run`, `!workflows`), deprecation note | +250 |
+| B9a | Sessions (`spawn`) | +250 |
+| B9b | `workflow_peers` with exactly-once operations, slot release and deadlock notice, the agents' `ask_user` | +500 |
+| C1 | Chat: sync filter, parser, store, run card, question card, jobs-bar row | +750 |
+| C2 | Chat: graph panel with message-count edges | +700 |
 
-Backend total about +5,850, Chat about +1,600; removing `dynamic_workflow` later gives back about 3,000.
-The first estimate (+2,700 and +950) left out job admission, dispatch handles, the restart paths, the ledger and the exactly-once peer operations.
-Order: B1 to B7 in sequence; B8 after B6; B9 after B7; C1 is built against a pinned contract after B6 and merges after B7 and a check against real captured frames; C2 after C1 and B9.
-No PR is planned above 800 lines; one that passes its estimate by more than 40% stops for the `stopping-runaway-prs` check.
-Each PR's live gate uses only what has shipped: tools only at B3, sequential text agents at B4, a text-only diamond at B5, examples 1 and 2 at B7, examples 3 and 6 at B9.
+Backend total about +5,970, Chat about +1,450; removing `dynamic_workflow` later gives back about 3,000.
+The round 2 cuts took out about 480 backend and 150 Chat lines, and the round 2 fixes (the intent, receipt phases, the launch field, the results route, the restore path) put about 600 backend lines back.
+Order: B1, B2a, B2b, B3a, B3b, B4, B4b, B5, B6 and B7 in sequence; B8 after B6; B9a after B7 and B9b after B9a; C1 is built against a pinned contract after B6 and merges after B7 and a check against real captured frames; C2 after C1 and B9b.
+No PR is planned above 700 lines; one that passes its estimate by more than 40% stops for the `stopping-runaway-prs` check.
+Two checkpoints report real sizes and crash-test results to Bas before work goes on: after B3b and after B5.
+Each PR's live gate uses only what has shipped: tools only at B3b, sequential text agents at B4, a text-only diamond at B5, examples 1 and 2 at B7, example 3 at B9a, example 6 at B9b.
 The docs page `docs/tools/workflows.md` grows inside each backend PR.
 
-## Decisions on the open questions (review round 1)
+## Known limits, and what the build must prove
+
+Each line is a claim from reading code; the named test is its proof, and its PR does not merge without it.
+
+- **Approval wait across a restart** (Task 11b, `test_crash_on_either_side_of_an_approval_decision_does_not_repeat_a_write`): until B4b merges, an agent that waited for approval at a restart runs again when it had called no tool and otherwise ends `indeterminate`; restore is unproven until its spike passes on a graceful restart and on a kill.
+- **Ambiguous writes** (Task 8, `kill_after_write.py --barrier before-receipt` and `after-receipt`): one line in the file in both cases; `indeterminate` and no report in the first, a cached copy and one report in the second.
+- **Admission crash points** (Task 8, `test_crash_between_admission_and_launch_launches_once`, `test_intent_without_a_job_is_deleted`).
+- **A wait longer than the attempt limit** (Task 8, `test_attempt_that_hits_its_process_limit_is_resumed_while_working_time_is_left`, and Task 18, `test_waiting_past_the_attempt_limit_then_an_answer_continues_the_run`, both on a real process).
+- **The launch field on a real worker** (Task 4, `test_workflow_entry_crosses_the_worker_wire_and_the_shim_validates_before_it_dispatches`, and the Docker run of B3b's live gate).
+- **A sender lane that has not started** (Task 23, `test_sender_lane_not_yet_started_is_not_a_deadlock`, with the real SDK).
+- **Large typed results** (Tasks 3, 5 and 10, `test_result_over_the_inline_limit_is_fetched_in_full_and_keeps_its_type` and its two engine tests, after a restart too, and on a Docker worker in B3b's live gate).
+- A provider that repeats a tool call ID with the same arguments inside one model run is treated as a retry of that call; nothing can tell the two apart.
+- Rows a frame left out, and message texts, are readable only through the owner's agent in v1.
+
+## Decisions on the open questions
+
+Round 1:
 
 1. A workflow may run the caller, agents in `delegate_to`, and agents joined to the run's room that the requester may address.
 2. `dynamic_workflow` is deprecated at parity and removed after two weeks of dogfooding, with old records, the usage kind and report publishing kept readable.
@@ -924,9 +965,9 @@ The docs page `docs/tools/workflows.md` grows inside each backend PR.
 5. `foreach` and `parallel` raise `PartialFailure` after all siblings settle, with partial results and errors by position.
 6. `max_runtime_hours` is 72 by default and configurable; waiting for a person does not count, and an answer or Resume continues the run.
 
-## Open questions
+Round 2, decided by both reviewers at Bas's request:
 
-1. Restoring a paused child across a restart needs the child's paused run to load from its session, which the code suggests but no test proves; PR B4 starts with that check.
-   Recommended: keep the restore design, with `indeterminate` as the outcome when it cannot load (70%), over ending such agents as `indeterminate` always.
-2. The honest size is about 5,850 backend and 1,600 Chat lines.
-   Recommended: build in the order above and look again after B5, when agents, fan-out and resume work end to end (75%), over cutting sessions and peers from v1 now.
+7. An approval wait across a restart restores the exact paused child, then falls back to a follow-up turn, then to `indeterminate`; it is its own PR after B4.
+8. The PRs are built in order with checkpoints after B3b and B5; sessions and peers stay in v1 as separate PRs.
+
+No question is open.
