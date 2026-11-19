@@ -48,6 +48,7 @@ from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _TRUNCATION_SAMPLE_SIZE,
+    GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
     _ThreadEnrichment,
     _ThreadSummary,
@@ -446,9 +447,26 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 def test_thread_summary_model_rejects_overlong_summary() -> None:
-    """Structured summary responses should reject content beyond the hard length limit."""
+    """A generated title is capped well below the length a person's pin may use."""
+    assert GENERATED_TITLE_MAX_LENGTH < THREAD_SUMMARY_MAX_LENGTH
+    _ThreadSummary(summary="x" * GENERATED_TITLE_MAX_LENGTH)
     with pytest.raises(ValidationError):
-        _ThreadSummary(summary="x" * (THREAD_SUMMARY_MAX_LENGTH + 1))
+        _ThreadSummary(summary="x" * (GENERATED_TITLE_MAX_LENGTH + 1))
+
+
+@pytest.mark.parametrize(
+    ("title", "keepable"),
+    [
+        ("🧵 Login failure investigation", True),
+        ("🧪 ISSUE-148 cache refetch live test now", True),
+        ("🧪 ISSUE-148 cache refetch live test (forked)", True),
+        ("🧵 Review of PR #548 session persistence hooks", False),
+        ("x" * (GENERATED_TITLE_MAX_LENGTH + 1), False),
+    ],
+)
+def test_only_a_title_within_the_short_rule_may_be_kept(title: str, keepable: bool) -> None:
+    """A refresh offers to keep a title of at most 6 words after the emoji, so a long legacy title is rewritten once."""
+    assert automatic._keepable_title(title) is keepable
 
 
 def test_normalize_thread_summary_text_strips_common_markdown_syntax() -> None:
@@ -1627,6 +1645,84 @@ class TestMaybeGenerateThreadSummary:
         assert load_tag_vocabulary_snapshot(self.rp, _ROOM) is not None
         self.client.room_put_state.assert_not_awaited()
 
+    def _refresh_due(self, summary: str = "🧵 Existing thread summary", count: int = 15) -> None:
+        """Serve a thread titled ``summary`` at 5 messages that has reached ``count``."""
+        self.baselines.record(_ROOM, _THREAD, 5)
+        self._history(
+            [*_make_thread_history(count), _make_summary_notice_message(_THREAD, message_count=5, summary=summary)],
+        )
+
+    async def test_refresh_that_keeps_the_title_sends_nothing_and_waits_a_full_interval(self) -> None:
+        """A repeated current title posts no notice, and the next refresh is due a full interval later."""
+        model = self._summarizer(_title("🧵 existing thread  summary"))
+        self._refresh_due()
+
+        await self._maybe_generate(_mock_config())
+
+        (request,) = model.requests
+        assert "<current_title>\n🧵 Existing thread summary\n</current_title>" in _prompt(request)
+        assert _sent_summaries(self.client) == []
+        assert self._count() == 15
+
+        self._refresh_due(count=24)
+        await self._maybe_generate(_mock_config())
+        assert len(model.requests) == 1
+
+    async def test_refresh_on_a_changed_topic_sends_the_new_title(self) -> None:
+        """A different title still replaces the current one."""
+        self._summarizer(_title("🔧 Deploy pipeline migration"))
+        self._refresh_due()
+
+        await self._maybe_generate(_mock_config())
+
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🔧 Deploy pipeline migration"
+        assert sent["message_count"] == 15
+
+    @pytest.mark.parametrize("case", ["long-legacy-title", "retitle"])
+    async def test_keep_is_not_offered_for_a_long_title_or_a_retitle(self, case: str) -> None:
+        """A title past the 6-word rule is rewritten once, and a retitle asks for a new title outright."""
+        title = "🧵 Review of PR #548 session persistence hooks" if case == "long-legacy-title" else "🧵 Short title"
+        model = self._summarizer(_title(title))
+        self._refresh_due(summary=title)
+
+        await self._maybe_generate(_mock_config(), retitle=case == "retitle")
+
+        (request,) = model.requests
+        assert "<current_title>" not in _prompt(request)
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == title
+
+    async def test_kept_title_still_applies_first_refresh_tags(self) -> None:
+        """Keeping the title on the tagged first refresh writes the tags and no notice."""
+        model = self._summarizer(_ThreadEnrichment(summary="🧵 Existing thread summary", tags=["bug"]))
+        self._history(_make_due_second_summary_history())
+
+        await self._maybe_generate(_mock_config(first_threshold=1))
+
+        assert model.requests[0].output_schema is _ThreadEnrichment
+        assert _sent_summaries(self.client) == []
+        assert self.room_state.tags(_THREAD) == ["bug"]
+        assert self._count() == 12
+
+    async def test_kept_provisional_title_is_the_only_title_and_the_next_refresh_tags(self) -> None:
+        """A new thread whose first reply keeps its prompt title changes title once, and still gets its tags."""
+        model = self._summarizer(
+            _title("🧵 Existing thread summary"),
+            _ThreadEnrichment(summary="🧵 Existing thread summary", tags=["bug"]),
+        )
+        provisional = _make_summary_notice_message(_THREAD, message_count=0, initial_enrichment_complete=None)
+        config = _mock_config(first_threshold=1)
+
+        self._history([*_make_thread_history(2), provisional])
+        await self._maybe_generate(config)
+        self._history([*_make_thread_history(12), provisional])
+        await self._maybe_generate(config)
+
+        assert [request.output_schema for request in model.requests] == [_ThreadSummary, _ThreadEnrichment]
+        assert _sent_summaries(self.client) == []
+        assert self.room_state.tags(_THREAD) == ["bug"]
+
     async def test_vocabulary_and_summary_send_failures_do_not_block_initial_tags(self) -> None:
         """Background maintenance and Matrix summary failures should stay isolated from tag writes."""
         self.room_state.failing_reads = frozenset({1})
@@ -2397,7 +2493,10 @@ class TestGenerateSummary:
         instructions = system.get_content_string()
         assert "DURABLE TOPIC" in instructions
         assert "It must remain accurate whether the thread has 5 messages or 50+." in instructions
-        assert "Prefer stable noun phrases" in instructions
+        assert "exactly one emoji for the topic category, then at most 6 words" in instructions
+        assert "Use sentence case" in instructions
+        assert "Keep a ticket, issue, or PR number exactly as written" in instructions
+        assert "Under 160 characters" not in instructions
         assert "Do NOT include transient state." in instructions
         assert 'Never return "resolved"' in instructions
         assert "approval or merge status" in instructions
@@ -2405,7 +2504,7 @@ class TestGenerateSummary:
         assert "test counts or pass/fail tallies" in instructions
         assert "progress markers like" in instructions
         assert "plain text only" in instructions
-        assert "NOVEL summary" in instructions
+        assert "NOVEL title" in instructions
         assert "Do NOT copy" in instructions
         assert "current status or outcome" not in instructions
 
@@ -2419,6 +2518,32 @@ class TestGenerateSummary:
             "Summarize the above thread and follow the response schema."
         )
         assert request.output_schema is _ThreadSummary
+
+    async def test_current_title_follows_an_overridden_user_prompt_escaped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A refresh's current title and keep rule come after the user prompt, which needs no new placeholder."""
+        model = self._summarizer(monkeypatch, _title("🧵 Q&A prep"))
+        config = Config(prompts={"THREAD_SUMMARY_USER_PROMPT_TEMPLATE": "{tag_vocabulary}|{conversation}"})
+
+        await generate_summary(
+            _make_thread_history(1),
+            config,
+            _mock_runtime_paths(),
+            model_name="default",
+            tag_vocabulary=None,
+            current_title="🧵 Q&A prep",
+        )
+
+        prompt = _prompt(model.requests[0])
+        assert prompt.startswith("(tags are not requested for this summary refresh)|@user0:localhost: Message 0\n\n")
+        assert prompt.endswith(
+            "<current_title>\n🧵 Q&amp;A prep\n</current_title>\n\n"
+            "Keep the current title unless the thread's main topic has clearly changed; a new detail, a new step, "
+            "progress or a status change is not a topic change.\n"
+            "To keep it, answer with the current title exactly as written.",
+        )
 
     async def test_initial_enrichment_reuses_summary_model_call_and_escapes_input(
         self,
@@ -2669,7 +2794,7 @@ class TestGenerateSummary:
 
         assert good_examples
         for example in good_examples:
-            assert len(example) <= THREAD_SUMMARY_MAX_LENGTH
+            assert automatic._keepable_title(example), example
             assert not any(term in example.lower() for term in _TRANSIENT_STATUS_TERMS)
 
     async def test_summary_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:

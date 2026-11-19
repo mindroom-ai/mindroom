@@ -386,6 +386,9 @@ It only does so when the first threshold below is 1 or 2, so the first reply wou
 MindRoom posts a summary notice in a thread after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`).
 Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped, as are threads whose full history cannot be read, which always includes threads longer than 2,000 messages or 16 MiB of content.
 For threads with more than 50 messages, the summary model sees only the first three and last three.
+A title is one emoji and at most six words, such as `🧪 Attachment cache live test`; the model may write at most 80 characters.
+A refresh shows the model the current title and keeps it unless the thread's main topic has clearly changed: a kept title posts no new notice, and the next refresh is still a full interval later.
+A longer title from an older version is always rewritten once, and a retitle (such as after a call's notes) always asks for a new title.
 
 The summary uses the first match of:
 
@@ -414,7 +417,8 @@ Values are trimmed and cut to 2,000 characters.
 To clear the setting, send `{}`; a missing event, `{}`, a non-string or blank `value`, or a failed read all mean the normal instructions, and a failed read never skips the title.
 Titles already set keep their wording until the next refresh.
 
-The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags.
+The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags, and also when that refresh keeps the title.
+Override `THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE` (placeholder `{current_title}`) to change how a refresh shows the current title; MindRoom appends it after `THREAD_SUMMARY_USER_PROMPT_TEMPLATE`, so existing overrides of that template keep working.
 Later summaries never change tags, so tags someone removed are not re-added.
 These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; a later summary adds them once the power level allows it.
 
