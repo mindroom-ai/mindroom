@@ -76,7 +76,7 @@ class _PendingConfigChange:
     requester: str  # User who requested the change
     # The bot that sent the preview, which alone resolves it; the bots of one process share the store.
     sender: str | None = None
-    # A new value that display redaction would mask is withheld from the local store and kept only in this process.
+    # A new value that display redaction changes, a secret or one JSON cannot hold, is kept only in this process.
     new_value_withheld: bool = False
     # A withheld change read back from the store after a restart, whose new value is gone.
     new_value_lost: bool = False

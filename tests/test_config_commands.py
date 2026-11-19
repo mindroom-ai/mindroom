@@ -1820,15 +1820,24 @@ async def test_handle_config_command_set_previews_and_applies_ordinary_values(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "command",
+    ("command", "applied"),
     [
-        "set models.default.api_key sk-new-config-sentinel",
-        "set mcp_servers.home.env {HOMEASSISTANT_TOKEN: new-env-sentinel}",
-        "set models.default.extra_kwargs {default_headers: {X-Auth: new-header-sentinel}}",
+        ("set models.default.api_key sk-new-config-sentinel", "sentinel"),
+        ("set mcp_servers.home.env {HOMEASSISTANT_TOKEN: new-env-sentinel}", "sentinel"),
+        ("set models.default.extra_kwargs {default_headers: {X-Auth: new-header-sentinel}}", "sentinel"),
+        # A YAML date is no JSON value, so the store cannot hold it either.
+        (
+            "set defaults.automations '[{name: digest, cron: \"0 9 * * *\", options: {since: 2026-11-18}}]'",
+            "2026-11-18",
+        ),
     ],
 )
-async def test_config_set_secret_value_never_reaches_the_local_store(tmp_path: Path, command: str) -> None:
-    """A credential value is shown masked, kept only in memory, and applied from memory on confirmation."""
+async def test_config_set_secret_value_never_reaches_the_local_store(
+    tmp_path: Path,
+    command: str,
+    applied: str,
+) -> None:
+    """A value that is a credential or no JSON is kept only in memory, and applied from memory on confirmation."""
     config_path = _write_config_with_secrets(tmp_path)
     runtime_paths = _runtime_paths_for_config(config_path)
     response, change_info = await handle_config_command(command, runtime_paths)
@@ -1874,7 +1883,7 @@ async def test_config_set_secret_value_never_reaches_the_local_store(tmp_path: P
     assert "new_value" not in stored
     assert "sentinel" not in json.dumps(stored)
     assert _stored_pending_changes(runtime_paths) == {}
-    assert "sentinel" in config_path.read_text(encoding="utf-8")
+    assert applied in config_path.read_text(encoding="utf-8")
     response_text = bot._delivery_gateway.send_text.await_args.args[0].response_text
     assert "Configuration updated successfully" in response_text
 
