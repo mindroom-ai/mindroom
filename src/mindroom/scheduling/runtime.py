@@ -518,13 +518,24 @@ class _TaskRunner:
         The write fails while the task's owner, or the room's steward it goes through, restarts.
         Its slot is absent until the replacement finished its first sync, so only time bounds the retry.
         The write holds the task's state lock, so an edit still writing cannot land after it and revive the task.
+        An edit or cancellation saved between two attempts wins: the retry writes nothing, and an edited task gets
+        this runner's slot for a new runner.
         """
+        paths = self.runtime.runtime_paths
         loop = asyncio.get_running_loop()
         give_up_at = loop.time() + _STATUS_WRITE_RETRY_SECONDS
+        retrying = False
         while True:
             async with self.runtime.operation(self.owner) as (_bot, client):
                 try:
                     async with scheduled_task_state_lock(client, self.room_id, self.task_id):
+                        if retrying and task != (
+                            stored := await _get_pending_task_record(client, task.room_id, task.task_id, paths)
+                        ):
+                            self.runtime._runner_finished(self.task_id)
+                            if stored is not None:
+                                self.runtime._start_runner(self.owner, self.task_id, stored.workflow)
+                            return
                         await _save_task_status(client, task, status, writers=self.runtime)
                 except Exception as exc:
                     if loop.time() >= give_up_at:
@@ -542,6 +553,7 @@ class _TaskRunner:
                     )
                 else:
                     return
+            retrying = True
             await asyncio.sleep(_OWNER_POLL_INTERVAL_SECONDS)
 
     async def run_cron(self, workflow: ScheduledWorkflow) -> None:

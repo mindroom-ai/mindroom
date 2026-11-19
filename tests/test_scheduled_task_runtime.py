@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -329,11 +330,13 @@ async def test_status_write_cut_off_by_its_owners_stop_is_written_again_by_the_r
             msg = "client closed"
             raise RuntimeError(msg)
 
-    with patch("mindroom.scheduling.runtime._save_task_status", new=AsyncMock(side_effect=write_status)):
-        await scheduling_runtime._TaskRunner(runtime, "general", ROOM_ID, TASK_ID)._save_status(
-            _record(_workflow()),
-            "completed",
-        )
+    record = _record(_workflow())
+    with (
+        patch("mindroom.scheduling.runtime._save_task_status", new=AsyncMock(side_effect=write_status)),
+        # The retry finds the task as the runner settled it.
+        patch("mindroom.scheduling.runtime._get_pending_task_record", new=AsyncMock(return_value=record)),
+    ):
+        await scheduling_runtime._TaskRunner(runtime, "general", ROOM_ID, TASK_ID)._save_status(record, "completed")
 
     assert writers == [old_bot.client, new_bot.client]
 
@@ -1111,6 +1114,49 @@ async def test_a_final_status_write_refused_while_the_steward_is_replaced_lands_
 
     execute.assert_awaited_once()
     assert (room.task()["sender"], room.task()["content"]["status"]) == (ids["helper"], "completed")
+
+
+@pytest.mark.asyncio
+async def test_an_edit_saved_before_a_final_status_write_is_retried_is_kept_and_fires(tmp_path: Path) -> None:
+    """A retried status write never replaces an edit acknowledged since its failed attempt; the edited task runs."""
+    room, runtime, bots, ids = _due_task_under_a_steward(tmp_path)
+    edited = _workflow().model_copy(update={"message": "Water the plants twice"})
+    write_state = bots["helper"].client.room_put_state.side_effect
+    edits: list[asyncio.Task[object]] = []
+
+    async def edit() -> object:
+        client = bots["general"].client
+        existing = await get_scheduled_task(client, ROOM_ID, TASK_ID, runtime.runtime_paths)
+        assert existing is not None
+        return await save_edited_scheduled_task(
+            client,
+            edited,
+            existing,
+            runtime.runtime_paths,
+            config=runtime.config_provider(),
+            writers=runtime,
+        )
+
+    async def fail_once(**kwargs: Any) -> object:  # noqa: ANN401
+        if edits:
+            return await write_state(**kwargs)
+        # The edit waits for the task's state lock, which the failed attempt still holds, and lands before the retry.
+        edits.append(asyncio.create_task(edit()))
+        return nio.RoomPutStateError("slow down", "M_LIMIT_EXCEEDED")
+
+    bots["helper"].client.room_put_state.side_effect = fail_once
+
+    with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()) as execute:
+        runtime.start_new_task(TASK_ID, _workflow(), owner_id=ids["general"])
+        await asyncio.wait_for(runtime._runners[TASK_ID][1], timeout=2)
+        await asyncio.wait_for(edits[0], timeout=2)
+        if TASK_ID in runtime._runners:
+            await asyncio.wait_for(runtime._runners[TASK_ID][1], timeout=2)
+
+    assert [call.args[1].message for call in execute.await_args_list] == ["Water the plants", "Water the plants twice"]
+    stored = room.task()["content"]
+    assert (json.loads(stored["workflow"])["message"], stored["status"]) == ("Water the plants twice", "completed")
+    assert TASK_ID not in runtime._runners
 
 
 @pytest.mark.asyncio
