@@ -47,7 +47,9 @@ def _transport(
     """Return the transport over these bots, reading each card's sender from ``senders`` or from ``cards``."""
     if cards is None:
         cards = MagicMock()
-        cards.approvals.approval_card_sender = AsyncMock(side_effect=lambda *, delivery_id: (senders or {})[delivery_id])
+        cards.approvals.approval_card_sender = AsyncMock(
+            side_effect=lambda *, delivery_id: (senders or {})[delivery_id]
+        )
     return ApprovalMatrixTransport(
         bot_provider=bots.get,
         room_poster=lambda _room_id: next(iter(bots.values()), None),

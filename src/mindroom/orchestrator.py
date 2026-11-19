@@ -106,7 +106,7 @@ from mindroom.workers.runtime import (
 
 from . import file_watcher
 from .bot import AgentBot, create_bot_for_entity
-from .entity_resolution import entity_identity_registry
+from .entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from .event_journal.identity import journal_principal_id
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
@@ -625,9 +625,15 @@ class _MultiAgentOrchestrator:
         finally:
             self.response_admission_gate.release()
 
-    def _approval_cards(self) -> ApprovalDeliveryView:
-        """Return the one principal that keeps every approval's calls, cards and grants, whichever account sends a card."""
-        router_id = entity_identity_registry(self.config, self.runtime_paths).current_ids[ROUTER_AGENT_NAME]
+    def _approval_cards(self) -> ApprovalDeliveryView | None:
+        """Return the one principal that keeps every approval's calls, cards and grants, whichever account sends a card.
+
+        None before the Matrix accounts are prepared, when no card is recoverable yet.
+        """
+        try:
+            router_id = entity_identity_registry(self.config, self.runtime_paths).current_ids[ROUTER_AGENT_NAME]
+        except MissingManagedEntityAccountError:
+            return None
         return self.event_journal_store().principal(journal_principal_id(ROUTER_AGENT_NAME, router_id.full_id))
 
     def _bind_started_runtime_support_services(self) -> None:

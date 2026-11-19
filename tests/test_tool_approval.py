@@ -28,13 +28,13 @@ from mindroom.approval.manager import (
 )
 from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import (
-    human_gate,
     ApprovalActionResult,
     MatrixApprovalAction,
     ToolApprovalScriptError,
     ToolApprovalTransportError,
     evaluate_tool_approval,
     handle_matrix_approval_action,
+    human_gate,
     resolve_tool_approval_approver,
     shutdown_approval_runtime,
     tool_may_require_approval,

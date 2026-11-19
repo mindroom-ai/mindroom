@@ -6,9 +6,9 @@ import asyncio
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
+from unittest.mock import AsyncMock
 
 import pytest
-from unittest.mock import AsyncMock
 
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.config.agent import AgentConfig

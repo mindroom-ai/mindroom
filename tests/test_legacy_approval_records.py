@@ -12,14 +12,12 @@ from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-
 from unittest.mock import AsyncMock
 
 import psycopg
 import pytest
 
 from mindroom.approval.recovery import ApprovalRecovery
-
 from mindroom.event_journal import (
     JOB_ENDED_REASON,
     ApprovalCardReservation,

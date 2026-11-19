@@ -255,7 +255,7 @@ def _serving_runtime(runtime_paths: RuntimePaths, script_runtime: object | None 
 @contextmanager
 def _mock_approval_recovery(orchestrator: _MultiAgentOrchestrator, **kwargs: object) -> Iterator[AsyncMock]:
     recovery = AsyncMock(**kwargs)
-    manager = MagicMock(recover_cards_on_startup=recovery)
+    manager = MagicMock(recover_cards_on_startup=recovery, expire_cards_without_sender=AsyncMock(return_value=0))
     with (
         patch.object(orchestrator._approval_recovery, "manager", manager),
         patch("mindroom.orchestrator.initialize_approval_store", return_value=manager),
@@ -5141,12 +5141,7 @@ class TestMultiAgentOrchestrator:
 
     @pytest.mark.asyncio
     async def test_sync_runtime_support_services_rebinds_approval_cards(self, tmp_path: Path) -> None:
-        """Approval transport should track the router bot that owns the card store.
-
-        The cards belong to the router's journal, not to runtime support, so a
-        reload that replaces the router bot has to hand the manager the new
-        store; keeping the old one would recover cards from a closed database.
-        """
+        """The approval manager keeps its books in one journal principal, with no bot to take the store from."""
         config = _runtime_bound_config(
             Config(
                 agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
@@ -5156,13 +5151,7 @@ class TestMultiAgentOrchestrator:
         )
         runtime_paths = runtime_paths_for(config)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
-        old_cards = MagicMock()
-        router_cards = MagicMock()
-        install_bots(
-            orchestrator,
-            {ROUTER_AGENT_NAME: MagicMock(journal_principal=MagicMock(return_value=router_cards))},
-        )
-        store = initialize_approval_store_for_test(runtime_paths, cards=old_cards)
+        store = initialize_approval_store_for_test(runtime_paths, cards=MagicMock())
 
         try:
             with (
@@ -5172,7 +5161,7 @@ class TestMultiAgentOrchestrator:
                 await orchestrator._sync_runtime_support_services(config)
 
             assert get_approval_store() is store
-            assert store.cards is router_cards
+            assert store.cards.principal_id == "router@@mindroom_router:localhost"
         finally:
             await shutdown_approval_runtime()
 

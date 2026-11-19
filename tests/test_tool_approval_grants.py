@@ -15,7 +15,7 @@ from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.response import plan_approval_calls, publish_generation
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
-from mindroom.approval.transport import ApprovalMatrixTransport, _approval_delivery_content
+from mindroom.approval.transport import _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import (

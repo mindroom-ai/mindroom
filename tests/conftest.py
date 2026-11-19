@@ -86,6 +86,7 @@ from mindroom.approval.manager import (
     ToolApprovalTransportError,
     initialize_approval_store,
 )
+from mindroom.approval.transport import ApprovalMatrixTransport
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import PendingEvent
@@ -95,7 +96,6 @@ from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.resolution import entity_model_name
-from mindroom.approval.transport import ApprovalMatrixTransport
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (

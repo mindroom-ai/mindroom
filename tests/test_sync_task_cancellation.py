@@ -2372,6 +2372,8 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     general_bot.schedule_reply_authorized_call_revocation = MagicMock()
 
     install_bots(orchestrator, {"router": router_bot, "general": general_bot})
+    # The config is a mock, so no Matrix account names the principal that keeps the approval cards.
+    orchestrator._approval_cards = MagicMock(return_value=None)
 
     exited_sync_loops: set[str] = set()
     first_generation_exited = asyncio.Event()
@@ -2450,6 +2452,8 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
     general_bot.first_sync_complete = True
 
     install_bots(orchestrator, {"router": router_bot, "general": general_bot})
+    # The config is a mock, so no Matrix account names the principal that keeps the approval cards.
+    orchestrator._approval_cards = MagicMock(return_value=None)
 
     setup_started = asyncio.Event()
     setup_can_finish = asyncio.Event()
@@ -2564,6 +2568,8 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
 ) -> None:
     """A reload must not share or prematurely reopen startup admission ownership."""
     orchestrator, router_bot, general_bot = _orchestrator_with_membership_startup_bots(tmp_path, monkeypatch)
+    # The config is a mock, so no Matrix account names the principal that keeps the approval cards.
+    orchestrator._approval_cards = MagicMock(return_value=None)
     # Normal initialization completes the passive scan before runtime startup.
     await orchestrator._tool_job_runtime.initialize()
 

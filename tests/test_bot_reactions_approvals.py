@@ -13,7 +13,6 @@ import pytest
 
 from mindroom import interactive
 from mindroom.approval import manager as approval_manager
-from mindroom.approval import transport as approval_transport
 from mindroom.approval.inbound import maybe_handle_tool_approval_reply
 from mindroom.approval.tool_approval import (
     ApprovalActionResult,
