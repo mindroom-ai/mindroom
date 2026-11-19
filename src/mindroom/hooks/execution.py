@@ -45,7 +45,6 @@ from .types import (
     EVENT_BOT_READY,
     EVENT_MESSAGE_RECEIVED,
     EVENT_TOOL_ENVIRONMENT,
-    ROOM_CLAIM_EVENTS,
     EnrichmentItem,
     RegisteredHook,
     default_timeout_ms_for_event,
@@ -114,23 +113,16 @@ def _scope_room_ids(context: HookContext) -> tuple[str, ...]:
 
 
 async def _emitter_runs_room_hooks(event_name: str, context: HookContext) -> bool:
-    """Return whether this emission runs the event's room-scoped hooks: its bot is the room's steward.
-
-    For an event that is one Matrix event the steward holds a claim, so the hooks run once however many bots emit it.
-    An emission no bot of a runtime made, as the runtime's own or one in a plugin's tests, has no steward and runs them.
-    """
+    """Return whether this emission runs the event's room-scoped hooks, which one no runtime's bot made always does."""
     lifetime = context._hook_registry_state
-    if not isinstance(lifetime, HookRegistryLifetime) or lifetime.emitter is None or lifetime.room_hook_owner is None:
+    if not isinstance(lifetime, HookRegistryLifetime):
         return True
-    event_id: str | None = None
+    event_id = None
     if isinstance(context, MessageReceivedContext):
         event_id = context.envelope.source_event_id
-    elif event_name in ROOM_CLAIM_EVENTS:
-        event_id = cast("ReactionReceivedContext", context).event_id
-    for room_id in _scope_room_ids(context):
-        if await lifetime.room_hook_owner(lifetime.emitter, room_id, event_name, event_id):
-            return True
-    return False
+    elif isinstance(context, ReactionReceivedContext | RoomMemberJoinedContext | RoomMemberLeftContext):
+        event_id = context.event_id
+    return await lifetime.runs_room_hooks(_scope_room_ids(context), event_name, event_id)
 
 
 def _hook_in_scope(hook: RegisteredHook, context: HookContext, *, service: bool) -> bool:

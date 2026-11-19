@@ -68,10 +68,6 @@ BUILTIN_EVENT_NAMES = frozenset(
 type HookScope = Literal["agent", "room", "service"]
 # The events one process emits once for itself, where a hook may take the service scope.
 SERVICE_SCOPE_EVENTS = frozenset({EVENT_BOT_READY, EVENT_CONFIG_RELOADED})
-# The events that carry one Matrix event, which a room-scoped hook runs once for, on the bot holding its claim.
-ROOM_CLAIM_EVENTS = frozenset(
-    {EVENT_MESSAGE_RECEIVED, EVENT_REACTION_RECEIVED, EVENT_ROOM_MEMBER_JOINED, EVENT_ROOM_MEMBER_LEFT},
-)
 _RESERVED_EVENT_NAMESPACES = frozenset(
     {
         "message",

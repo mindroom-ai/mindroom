@@ -165,8 +165,7 @@ class HookRegistryState:
     """
 
     registry: HookRegistry
-    # Set by the runtime: whether the bot of a name runs a room's room-scoped hooks, given
-    # ``(agent_name, room_id, event_name, event_id)`` with the Matrix event the emission is for, if it is one.
+    # Set by the runtime: whether a bot runs room-scoped hooks, given ``(agent_name, room_id, event_name, event_id)``.
     room_hook_owner: Callable[[str, str, str, str | None], Awaitable[bool]] | None = None
 
     def lifetime(self, emitter: str | None = None) -> HookRegistryLifetime:
@@ -181,22 +180,23 @@ class HookRegistryLifetime:
     view holds no hooks, so hooks it emitted report inactive and a stopped bot generation emits nothing more.
     """
 
-    __slots__ = ("_source", "emitter")
+    __slots__ = ("_emitter", "_source")
 
     def __init__(self, runtime: HookRegistryState, emitter: str | None = None) -> None:
         self._source = runtime
-        # The bot whose hooks this lifetime binds, which runs room-scoped hooks only as the room's steward.
-        self.emitter = emitter
+        self._emitter = emitter
 
     @property
     def registry(self) -> HookRegistry:
         """Return the runtime's current snapshot, or this lifetime's own empty registry once it ended."""
         return self._source.registry
 
-    @property
-    def room_hook_owner(self) -> Callable[[str, str, str, str | None], Awaitable[bool]] | None:
-        """Return the runtime's answer to which bot runs a room's room-scoped hooks, None once this lifetime ended."""
-        return self._source.room_hook_owner
+    async def runs_room_hooks(self, room_ids: Iterable[str], event_name: str, event_id: str | None) -> bool:
+        """Return whether this lifetime's bot runs an emission's room-scoped hooks; a lifetime of no bot always does."""
+        owner = self._source.room_hook_owner
+        if self._emitter is None or owner is None:
+            return True
+        return any([await owner(self._emitter, room_id, event_name, event_id) for room_id in room_ids])
 
     def end(self) -> None:
         """End this lifetime; its view holds no hooks from now on."""
