@@ -54,8 +54,8 @@ class ToolTraceEntry:
     member_id: str | None = field(default=None, compare=False)
     parent_bash_call_id: str | None = field(default=None, compare=False)
     toolkit_name: str | None = field(default=None, compare=False)
-    # Whether the completed call failed, as its run recorded it, so an interrupted replay can say so. Internal like
-    # the identity above: the reply's records keep it, and public Matrix metadata omits it.
+    # Whether the completed call failed, as its run recorded it, so an interrupted replay and a client can say so. The
+    # reply's records keep it, and public Matrix metadata carries it on a failed completed call only.
     is_error: bool = field(default=False, compare=False)
     # The call as its tool event reported it, with its full arguments and result, which an interrupted replay renders.
     # Never serialized, so Matrix metadata and the reply's records keep only the previews, and a restored entry has none.
@@ -903,7 +903,7 @@ def serialize_tool_trace(
     *,
     include_internal: bool = False,
 ) -> tuple[dict[str, object], ...]:
-    """Serialize trace entries with their call ids, optionally retaining restart-only identity and failure."""
+    """Serialize trace entries with their call ids and a completed call's failure, optionally with restart-only fields."""
     serialized: list[dict[str, object]] = []
     for entry in tool_trace:
         event: dict[str, object] = {
@@ -916,6 +916,8 @@ def serialize_tool_trace(
             event["result_preview"] = _redact_preview(entry.result_preview)
         if entry.truncated:
             event["truncated"] = True
+        if entry.is_error and entry.type == "tool_call_completed":
+            event["is_error"] = True
         if include_internal:
             event.update(_internal_fields(entry))
         elif entry.tool_call_id is not None:

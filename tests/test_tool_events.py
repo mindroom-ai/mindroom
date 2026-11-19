@@ -728,6 +728,27 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
     assert restored[0].member_id == "general"
 
 
+def test_public_tool_trace_says_only_a_failed_completed_call_failed() -> None:
+    """Matrix clients read a call's failure from ``is_error``, which a call that worked or still runs never carries."""
+    failed = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="schedule",
+        result_preview="Missing when",
+        is_error=True,
+    )
+    worked = ToolTraceEntry(type="tool_call_completed", tool_name="read_file", result_preview="notes")
+    running = ToolTraceEntry(type="tool_call_started", tool_name="shell", is_error=True)
+
+    payload = build_tool_trace_content([failed, worked, running])
+
+    assert payload is not None
+    events = payload[_TOOL_TRACE_KEY]["events"]
+    assert [event.get("is_error") for event in events] == [True, None, None]
+    assert serialize_tool_trace([worked]) == (
+        {"type": "tool_call_completed", "tool_name": "read_file", "result_preview": "notes"},
+    )
+
+
 @pytest.mark.parametrize(("scope_key", "member_id"), [("team", None), ("agent:code-review", "code-review")])
 def test_a_trace_entry_stored_with_a_scope_key_reads_as_its_member(scope_key: str, member_id: str | None) -> None:
     """A reply record v2026.10.674 stored names a team slot as ``team`` or ``agent:<id>``; it reads as that member."""
@@ -739,8 +760,8 @@ def test_a_trace_entry_stored_with_a_scope_key_reads_as_its_member(scope_key: st
     assert "scope_key" not in serialize_tool_trace([restored], include_internal=True)[0]
 
 
-def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
-    """Restart state keeps which call failed, Matrix clients never see it, and an entry stored without it did not fail."""
+def test_a_failed_calls_flag_reaches_restart_state_and_matrix_clients() -> None:
+    """Restart state and Matrix clients both see which call failed, and an entry stored without it did not fail."""
     failed = ToolTraceEntry(
         type="tool_call_completed",
         tool_name="fetch",
@@ -754,7 +775,7 @@ def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
 
     assert durable[0]["is_error"] is True
     assert public is not None
-    assert "is_error" not in public[_TOOL_TRACE_KEY]["events"][0]
+    assert public[_TOOL_TRACE_KEY]["events"][0]["is_error"] is True
     assert deserialize_tool_trace(durable)[0].is_error is True
     assert deserialize_tool_trace([{"type": "tool_call_completed", "tool_name": "fetch"}])[0].is_error is False
 
