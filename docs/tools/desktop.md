@@ -209,6 +209,18 @@ After the lease expires, the bridge keeps observing but rejects every control ac
 The macOS app can grant or revoke without restarting; the terminal requires a new invocation.
 Leases are never saved or renewed automatically, so a restarted bridge is observe-only again.
 
+### Full Control
+
+**Full control of this Mac** in the macOS app gives the paired agent control of every app and the `primary-screen` target with no expiry, until a person turns it off.
+It is a preference of the macOS app and is never saved in the bridge's setup: each time access starts for that pairing, the app grants the running bridge control until revoked over the whole computer, and at launch the app starts access by itself.
+While that grant is live, `list_apps` returns every running app plus `primary-screen`, any bundle ID except MindRoom's own can be inspected, launched, and controlled, and `status` reports `control_scope` as `computer`.
+A list too long for one reply keeps `primary-screen` and the apps that fit, and sets `apps_truncated`.
+When the grant ends, the bridge is observe-only for the saved apps again.
+**Revoke** in the macOS app or its menu ends it at once and turns the preference off, **Stop Access** ends it until access starts again, and turning the switch off does both.
+Connecting the computer to a different agent, requester, or controller, or removing `primary-screen` from the saved apps, turns the preference off.
+Full control does not enable folders, shell commands, or the browser extension, and `mindroom desktop run` does not offer it.
+Only a person at the computer can turn it on; no chat message, agent, or cloud setting can.
+
 ### Approve Shell Commands in the Terminal
 
 With shell requests saved, each command appears in the terminal running `mindroom desktop run` with its requester, agent, working directory, length, expiry, and command, and waits for one answer:
@@ -247,20 +259,22 @@ For app-level control of the browser window, or for Safari and other browsers, a
 
 ## Security Model
 
-- **Control is local**: Applications are observe-only until a person at the computer grants a control lease in the macOS app's **Computer access** section or the local terminal.
+- **Control is local**: Applications are observe-only until a person at the computer grants a control lease in the macOS app's **Computer access** section or the local terminal, or turns on [full control](#full-control) in the macOS app.
 - **Exact identities**: The bridge accepts commands only from the paired cloud agent device, for locally allowed requesters, agents, and apps, and rejects expired or replayed commands.
-- **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled.
+- **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled, unless full control is live, which covers every app.
   An allowed app can still open a link or document in another app, which the bridge cannot then inspect or control unless that app is also allowlisted.
   Allowlisting a browser exposes whichever window and tab is selected, not one website.
-- **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because their windows grant shell auto-approval, control leases, and app access.
-- **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
-- **Emergency stop**: Moving the pointer to the upper-left corner of the primary display stops control and keeps it off until the bridge restarts or a person selects **Reset Emergency Stop** in the macOS app; the reset does not grant control.
+- **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
+- **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control or full control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
+- **Ending control**: **Revoke** in the macOS app or its menu, **Stop Access**, or stopping the terminal bridge ends input; the pointer position never does.
 - **Local audit log**: The bridge logs each completed or rejected command without its parameters, values, or typed text.
 - **One bridge per session**: While a shell command waits for local approval, the bridge refuses every control action except `launch_app`, so its own agents cannot click or type into the approval.
   Another bridge's agents could, so run at most one bridge in each logged-in graphical session.
 - **Not exposed**: The bridge offers no clipboard, microphone, webcam, unlock, privilege elevation, or arbitrary local RPC, and it cannot bypass operating-system permission prompts.
 
-!!! warning "Some allowlisted apps give an agent your own authority"
+!!! warning "Full control, and some allowlisted apps, give an agent your own authority"
+    Full control is the widest form of this: the agent can use Terminal, System Settings, password managers, and every browser and chat app signed in as you, and can click MindRoom's own windows through `primary-screen`.
+
     Controlling a terminal emulator, a scripting or automation app such as Script Editor, Shortcuts, or Automator, or the `primary-screen` target lets an agent run anything your account can, without any shell approval.
     The agent can type commands into a terminal or script, and `primary-screen` input reaches whatever app is under the pointer or has focus, including MindRoom's own windows while no shell request is pending.
     Controlling a web browser or Matrix client signed in as you, such as MindRoom Chat in a browser or Element, or a browser with a local MindRoom dashboard session, lets an agent act as you: it can answer its own Matrix tool approvals, send `!` commands, and instruct other agents.
@@ -288,7 +302,7 @@ Taking a screenshot on macOS brings the selected app to the front.
 Observation actions are `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
 With `return_attachment=true`, `screenshot` also returns an `att_*` handle that `matrix_message` can send in the same turn.
 
-Control actions require a control lease:
+Control actions require a control lease or full control:
 
 - `launch_app` launches or foregrounds one allowlisted app.
 - `click_element`, `perform_action`, `scroll_element`, and `set_value` act on an element from the latest state; `set_value` works only on elements that report they are writable.

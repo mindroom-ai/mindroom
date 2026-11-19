@@ -882,6 +882,22 @@ Applications start observe-only.
 Controlling a terminal, a scripting or automation app, the primary screen, or a browser or Matrix client signed in as you gives the agent your own authority; see [Security Model](https://docs.mindroom.chat/tools/desktop/#security-model).
 Optional browser settings and redacted diagnostics are in expandable sections; see the [Desktop guide](https://docs.mindroom.chat/tools/desktop/#use-the-signed-in-browser-profile) for browser-extension setup.
 
+### Full Control of This Mac
+
+**Full control of this Mac**, at the top of **Computer access**, lets the paired agent see and use every app and the primary screen, with no expiry, the way Codex computer use works.
+Turning it on asks once for confirmation, adds the primary screen to the saved apps if it is missing, makes MindRoom open at login, and starts access; the status reads **Full control** while it runs.
+If macOS needs approval for the login item, the app says so under the switch; allow it under System Settings > General > Login Items.
+At every later launch, including after a restart or reboot, MindRoom starts access by itself and grants full control again while the switch is on.
+The switch is a preference of the app on this Mac; the bridge itself never saves control.
+
+Full control gives the agent your own authority over everything you can do at this Mac: Terminal, scripting apps, System Settings, password managers, and browsers and chat apps signed in as you.
+It does not add folder or shell access, which stay separate, and it never targets MindRoom's own app by name, though the agent can still click MindRoom's windows through the primary screen.
+macOS still needs Accessibility and Screen Recording for MindRoom.
+
+Turn the switch off, or select **Revoke Now** or **Revoke Computer Control**, to end it and keep it off.
+**Stop Access** ends it until you start access again or MindRoom next opens.
+Connecting the Mac to another agent, or removing the primary screen from the saved apps, turns it off.
+
 ### Folders and Shell Commands
 
 In **Access**, **Read-only folders** lists the folders agents may list and read; **Add Folder…** adds one and **Remove** drops one.
@@ -917,10 +933,10 @@ See the [Desktop guide](https://docs.mindroom.chat/tools/desktop/) for pairing r
 ## Window, Menu Bar, and Login
 
 Closing the window keeps the app and its background work running in the menu bar; reopen it with **Open MindRoom…** or by opening the app again.
-The menu shows local-agent and computer-access status as shortcuts to their sections, plus chat, dashboard, start and stop, **Revoke Computer Control** while a control lease is active, **Revoke Shell Access** while shell auto-approval or a command is active, settings, and quit actions.
+The menu shows local-agent and computer-access status as shortcuts to their sections, plus chat, dashboard, start and stop, **Revoke Computer Control** while control is active, **Revoke Shell Access** while shell auto-approval or a command is active, settings, and quit actions.
 
 **Settings** > **Open menu bar app at login** launches the menu app at login.
-Local agents start at login through their own launchd service, while computer access always needs an explicit start in the app.
+Local agents start at login through their own launchd service, while computer access needs an explicit start in the app unless full control is on.
 
 **Quit MindRoom** stops computer access but leaves the local-agent service running; use **Stop Local Agents** to stop it.
 Let a running runtime action finish before quitting.
@@ -10348,6 +10364,18 @@ After the lease expires, the bridge keeps observing but rejects every control ac
 The macOS app can grant or revoke without restarting; the terminal requires a new invocation.
 Leases are never saved or renewed automatically, so a restarted bridge is observe-only again.
 
+### Full Control
+
+**Full control of this Mac** in the macOS app gives the paired agent control of every app and the `primary-screen` target with no expiry, until a person turns it off.
+It is a preference of the macOS app and is never saved in the bridge's setup: each time access starts for that pairing, the app grants the running bridge control until revoked over the whole computer, and at launch the app starts access by itself.
+While that grant is live, `list_apps` returns every running app plus `primary-screen`, any bundle ID except MindRoom's own can be inspected, launched, and controlled, and `status` reports `control_scope` as `computer`.
+A list too long for one reply keeps `primary-screen` and the apps that fit, and sets `apps_truncated`.
+When the grant ends, the bridge is observe-only for the saved apps again.
+**Revoke** in the macOS app or its menu ends it at once and turns the preference off, **Stop Access** ends it until access starts again, and turning the switch off does both.
+Connecting the computer to a different agent, requester, or controller, or removing `primary-screen` from the saved apps, turns the preference off.
+Full control does not enable folders, shell commands, or the browser extension, and `mindroom desktop run` does not offer it.
+Only a person at the computer can turn it on; no chat message, agent, or cloud setting can.
+
 ### Approve Shell Commands in the Terminal
 
 With shell requests saved, each command appears in the terminal running `mindroom desktop run` with its requester, agent, working directory, length, expiry, and command, and waits for one answer:
@@ -10386,20 +10414,22 @@ For app-level control of the browser window, or for Safari and other browsers, a
 
 ## Security Model
 
-- **Control is local**: Applications are observe-only until a person at the computer grants a control lease in the macOS app's **Computer access** section or the local terminal.
+- **Control is local**: Applications are observe-only until a person at the computer grants a control lease in the macOS app's **Computer access** section or the local terminal, or turns on [full control](#full-control) in the macOS app.
 - **Exact identities**: The bridge accepts commands only from the paired cloud agent device, for locally allowed requesters, agents, and apps, and rejects expired or replayed commands.
-- **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled.
+- **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled, unless full control is live, which covers every app.
   An allowed app can still open a link or document in another app, which the bridge cannot then inspect or control unless that app is also allowlisted.
   Allowlisting a browser exposes whichever window and tab is selected, not one website.
-- **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because their windows grant shell auto-approval, control leases, and app access.
-- **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
-- **Emergency stop**: Moving the pointer to the upper-left corner of the primary display stops control and keeps it off until the bridge restarts or a person selects **Reset Emergency Stop** in the macOS app; the reset does not grant control.
+- **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
+- **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control or full control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
+- **Ending control**: **Revoke** in the macOS app or its menu, **Stop Access**, or stopping the terminal bridge ends input; the pointer position never does.
 - **Local audit log**: The bridge logs each completed or rejected command without its parameters, values, or typed text.
 - **One bridge per session**: While a shell command waits for local approval, the bridge refuses every control action except `launch_app`, so its own agents cannot click or type into the approval.
   Another bridge's agents could, so run at most one bridge in each logged-in graphical session.
 - **Not exposed**: The bridge offers no clipboard, microphone, webcam, unlock, privilege elevation, or arbitrary local RPC, and it cannot bypass operating-system permission prompts.
 
-!!! warning "Some allowlisted apps give an agent your own authority"
+!!! warning "Full control, and some allowlisted apps, give an agent your own authority"
+    Full control is the widest form of this: the agent can use Terminal, System Settings, password managers, and every browser and chat app signed in as you, and can click MindRoom's own windows through `primary-screen`.
+
     Controlling a terminal emulator, a scripting or automation app such as Script Editor, Shortcuts, or Automator, or the `primary-screen` target lets an agent run anything your account can, without any shell approval.
     The agent can type commands into a terminal or script, and `primary-screen` input reaches whatever app is under the pointer or has focus, including MindRoom's own windows while no shell request is pending.
     Controlling a web browser or Matrix client signed in as you, such as MindRoom Chat in a browser or Element, or a browser with a local MindRoom dashboard session, lets an agent act as you: it can answer its own Matrix tool approvals, send `!` commands, and instruct other agents.
@@ -10427,7 +10457,7 @@ Taking a screenshot on macOS brings the selected app to the front.
 Observation actions are `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
 With `return_attachment=true`, `screenshot` also returns an `att_*` handle that `matrix_message` can send in the same turn.
 
-Control actions require a control lease:
+Control actions require a control lease or full control:
 
 - `launch_app` launches or foregrounds one allowlisted app.
 - `click_element`, `perform_action`, `scroll_element`, and `set_value` act on an element from the latest state; `set_value` works only on elements that report they are writable.
@@ -12975,7 +13005,7 @@ Attachment IDs (`att_*`) are limited to the current conversation and IDs registe
 
 ## [`matrix_room`]
 
-`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False)` reads room data and never writes.
+`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False, workflow=None)` reads room data and never writes.
 Use `matrix_message` or `matrix_api` for writes.
 
 | Action | Returns |
@@ -12983,7 +13013,7 @@ Use `matrix_message` or `matrix_api` for writes.
 | `room-info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
-| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread |
+| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread; `workflow` (`needs_you`, `working`, `later` or `all`) labels each row with its `workflow` group as MindRoom Chat computes it (`done` for resolved threads), adds `why` (`approval`, `question` or `your_turn`) to `needs_you` rows and `back_at` (ms) to `later` rows when known, and keeps only the named group, so a filtered page can hold fewer rows than `limit`; `room_id="all"` lists one page of threads from every room the requester is a member of and shares with the agent, each row with its `room_id`, waiting rows first, without `page_token` |
 | `state` | With `event_type`, one state event (`state_key` defaults to empty); without it, a summary of up to 100 non-member state events |
 
 Pass an `agents` result's `name` as `recipient` in [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to address that agent.
