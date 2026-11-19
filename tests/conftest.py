@@ -95,7 +95,8 @@ from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.resolution import entity_model_name
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
+from mindroom.approval.transport import ApprovalMatrixTransport
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
@@ -701,6 +702,22 @@ class FakeApprovalTransport:
     sender_device_id: Callable[[str], Awaitable[str | None]] = _no_device
     wake_continuation_sources: Callable[[str, str, tuple[str, ...]], Awaitable[None]] = _no_sources_to_wake
     responder_principal_id: Callable[[str], str | None] = lambda _entity_name: None
+
+
+def approval_transport_for_test(
+    bot_provider: "Callable[[str], Any]",
+    *,
+    cards: "ApprovalDeliveryView | None" = None,
+) -> ApprovalMatrixTransport:
+    """Build the approval transport over one bot lookup, with the router's bot as the poster of every room.
+
+    Without ``cards`` no card names a sender, so each card is one the router sent.
+    """
+    return ApprovalMatrixTransport(
+        bot_provider=bot_provider,
+        room_poster=lambda _room_id: bot_provider(ROUTER_AGENT_NAME),
+        cards=lambda: cards,
+    )
 
 
 def approval_manager_for_test(

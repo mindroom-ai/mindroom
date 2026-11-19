@@ -50,7 +50,12 @@ from tests.approval_card_helpers import (
     wait_for_pending_card,
 )
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import approval_manager_for_test, handle_card_response_for_test, test_runtime_paths
+from tests.conftest import (
+    approval_manager_for_test,
+    approval_transport_for_test,
+    handle_card_response_for_test,
+    test_runtime_paths,
+)
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 
@@ -529,7 +534,10 @@ async def test_republished_receipt_aliases_remain_terminal(
         manager.transport.resolve_approval_delivery = AsyncMock(return_value=None)
         manager.transport.send_approval_delivery = AsyncMock(return_value="$replacement-receipt")
         assert (
-            await manager._worker().flush(delivery_id="card-subsequent", stage=DeliveryStage.INITIAL)
+            await (await manager._worker("card-subsequent")).flush(
+                delivery_id="card-subsequent",
+                stage=DeliveryStage.INITIAL,
+            )
             == "$replacement-receipt"
         )
         if retire_before_reply:
@@ -557,7 +565,7 @@ async def test_republished_receipt_aliases_remain_terminal(
             approval_room_ids=frozenset({"!room:test"}),
             client=MagicMock(user_id="@router:test", room_get_event=AsyncMock(side_effect=get_event)),
         )
-        transport = ApprovalMatrixTransport(bot_provider=lambda name: router if name == "router" else None)
+        transport = approval_transport_for_test(lambda name: router if name == "router" else None)
         manager.transport.resolve_approval_action_delivery = transport.resolve_approval_action_delivery
         for event_id in ("$untrusted-receipt", "$unknown-delivery"):
             result = await handle_card_response_for_test(

@@ -72,6 +72,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     activate_interactive_prompt,
+    approval_transport_for_test,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     install_relation_lookup,
@@ -2030,33 +2031,30 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("router_is_ready_but_unserved", [False, True])
-    async def test_unverifiable_or_unserved_approval_action_does_not_block_later_room_events(
+    @pytest.mark.parametrize("room_has_reader", [False, True])
+    async def test_unverifiable_or_unreadable_approval_action_does_not_block_later_room_events(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         *,
-        router_is_ready_but_unserved: bool,
+        room_has_reader: bool,
     ) -> None:
-        """An unbound approval action settles before the room lane advances."""
+        """An unbound approval action settles before the room lane advances, with a bot that reads the room or none."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         dispatched: list[str] = []
-        router = (
-            MagicMock(
-                running=True,
-                client=MagicMock(room_get_event=AsyncMock()),
-                approval_room_ids=frozenset(),
-            )
-            if router_is_ready_but_unserved
+        not_found = nio.RoomGetEventError("not found", status_code="M_NOT_FOUND")
+        reader = (
+            MagicMock(running=True, client=MagicMock(room_get_event=AsyncMock(return_value=not_found)))
+            if room_has_reader
             else None
         )
 
         try:
             cards = bot._journal_store.principal("router@shared")
-            transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: router)
+            transport = approval_transport_for_test(lambda _name: reader)
             initialize_approval_store_for_test(
                 runtime_paths,
                 cards=cards,
@@ -2098,12 +2096,11 @@ class TestAgentBot(AgentBotTestBase):
 
         assert dispatched == [ignored.event_id, later.event_id]
         assert await bot._journal_dispatcher.store.pending() == ()
-        if router is None:
+        if reader is None:
+            warning.assert_not_called()
+        else:
             warning.assert_called_once()
             assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
-        else:
-            warning.assert_not_called()
-            router.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
