@@ -109,6 +109,19 @@ def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey
     return {key: tuple(groups[key]) for key in sorted(groups, key=_key_order)}
 
 
+async def _post_held_notice(client: nio.AsyncClient, key: ConversationKey, txn: str, text: str) -> bool:
+    """Post the agent's notice that the limit holds jobs; a failed send is retried on a later pass, as the same transaction."""
+    # An m.notice starts no turn; as a conversation a room-level one is listed, and a room-mode reply keeps its key.
+    content = build_message_content(
+        text,
+        thread_event_id=key.thread_id,
+        latest_thread_event_id=key.thread_id,
+        extra_content={"msgtype": "m.notice", CONVERSATION_CONTENT_KEY: True},
+    )
+    delivered = await send_message_result(client, key.room_id, content, operation="send_job_hold", transaction_id=txn)
+    return delivered is not None
+
+
 def _key_order(key: ConversationKey) -> tuple[str, str, str, str]:
     return (key.recipient, key.room_id, key.thread_id or "", key.requester_id)
 
@@ -467,12 +480,12 @@ class ToolJobRuntimeCoordinator:
         """
         due: set[str] = set()
         for key, group in _follow_up_candidates(runtime.retained_jobs()).items():
-            # Jobs an admitted follow-up already reports need no access check again, nor do jobs nothing reports.
-            candidates = follow_up_jobs(group)
-            if candidates and (follow_up_id := next_follow_up_id(key, candidates)) in self._admitted_follow_ups:
-                due.add(follow_up_id)
-                continue
-            if not candidates and not held_jobs(group):
+            # Jobs an admitted follow-up or a sent notice already reports need no access check again.
+            candidates, held = follow_up_jobs(group), held_jobs(group)
+            known = {next_follow_up_id(key, candidates)} if candidates else set()
+            known |= {held_notice(key, held)[0]} if held else set()
+            if not known or known <= self._admitted_follow_ups:
+                due |= known
                 continue
             # The jobs the requester may still access decide between a follow-up and a notice of jobs the limit holds.
             ended = await runtime.ended_jobs(key)
@@ -485,29 +498,12 @@ class ToolJobRuntimeCoordinator:
                     self._admitted_follow_ups.add(follow_up_id)
                 due.add(follow_up_id)
             elif (held := held_jobs(ended)) and bot.client is not None:
-                await self._notice_held_jobs(runtime, bot.client, key, held)
+                notice_id, text = held_notice(key, held)
+                if notice_id in self._admitted_follow_ups or await _post_held_notice(bot.client, key, notice_id, text):
+                    self._admitted_follow_ups.add(notice_id)
+                    due.add(notice_id)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
-
-    async def _notice_held_jobs(
-        self,
-        runtime: ToolJobRuntime,
-        client: nio.AsyncClient,
-        key: ConversationKey,
-        held: tuple[BackgroundJob, ...],
-    ) -> None:
-        """Tell the conversation, as its agent's notice, that the limit holds ``held``, and save on the jobs it was told."""
-        txn_id, text = held_notice(key, held)
-        # An m.notice starts no turn; as a conversation a room-level one is listed, and a room-mode reply keeps its key.
-        content = build_message_content(
-            text,
-            thread_event_id=key.thread_id,
-            latest_thread_event_id=key.thread_id,
-            extra_content={"msgtype": "m.notice", CONVERSATION_CONTENT_KEY: True},
-        )
-        # A failed send is retried on a later pass as the same transaction, which a delivered one does not post twice.
-        if await send_message_result(client, key.room_id, content, operation="send_job_hold", transaction_id=txn_id):
-            await runtime.note_held_notice(held)
 
     async def _expire_ended_jobs(self) -> None:
         """Keep ended jobs for the retention period and as long as response or approval work owns them."""

@@ -119,13 +119,9 @@ def follow_up_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
 
 
 def held_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
-    """Return the ended jobs the limit holds for a human message that no notice told of yet."""
+    """Return the ended jobs the limit holds for a human message, which `follow_up_jobs` leaves out."""
     return tuple(
-        job
-        for job in jobs
-        if job.status != "cancelled"
-        and not job.held_noticed
-        and _follow_up_streak(job.source_event_id) >= _FOLLOW_UP_LIMIT
+        job for job in jobs if job.status != "cancelled" and _follow_up_streak(job.source_event_id) >= _FOLLOW_UP_LIMIT
     )
 
 

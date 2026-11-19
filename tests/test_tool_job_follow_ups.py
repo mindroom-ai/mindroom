@@ -360,7 +360,7 @@ _SEND = "mindroom.orchestration.tool_job_runtime.send_message_result"
 
 
 async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) -> None:
-    """Jobs only the limit holds post one notice, which their records keep, so a restart does not post it again."""
+    """Jobs only the limit holds post one notice, which later passes of the process do not post again."""
     runtime = await tool_job_runtime(tmp_path)
     bot = _admitting_bot()
     coordinator = job_coordinator(tmp_path, runtime, bot)
@@ -383,12 +383,6 @@ async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) 
                 "⏸️ 1 background job finished while I was paused after 20 automatic follow-ups. "
                 "Reply here to let me continue."
             )
-            # A restart whose homeserver forgot the transaction finds the notice in the jobs' records.
-            await runtime.shutdown()
-            runtime = await tool_job_runtime(tmp_path)
-            await runtime.recover()
-            await job_coordinator(tmp_path, runtime, bot)._admit_follow_ups(runtime)
-            send.assert_awaited_once()
     finally:
         await runtime.shutdown()
 
@@ -414,7 +408,7 @@ async def test_a_room_level_hold_is_a_conversation_notice(tmp_path: Path) -> Non
 
 
 async def test_a_job_the_requester_may_not_access_does_not_hide_the_notice(tmp_path: Path) -> None:
-    """A below-limit job whose grant is gone is reported to nobody and leaves the held job's notice to be sent."""
+    """A below-limit job whose grant went after its follow-up was admitted leaves the held job's notice to be sent."""
     allowed = True
     runtime = await tool_job_runtime(
         tmp_path,
@@ -425,12 +419,15 @@ async def test_a_job_the_requester_may_not_access_does_not_hide_the_notice(tmp_p
     key = _key(job_owner())
     try:
         with patch(_SEND, AsyncMock()) as send:
+            await _ended(runtime, "denied", BackgroundOutcome("completed", "b"), source_event_id="$human")
+            await coordinator._admit_follow_ups(runtime)
+            bot.admit_job_follow_up.assert_awaited_once()
+            allowed = False
             last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
             await _ended(runtime, "capped", BackgroundOutcome("completed", "a"), source_event_id=last)
-            await _ended(runtime, "denied", BackgroundOutcome("completed", "b"), source_event_id="$human")
-            allowed = False
             await coordinator._admit_follow_ups(runtime)
-            bot.admit_job_follow_up.assert_not_awaited()
+            await coordinator._admit_follow_ups(runtime)
+            bot.admit_job_follow_up.assert_awaited_once()
             send.assert_awaited_once()
     finally:
         await runtime.shutdown()
