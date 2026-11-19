@@ -35,11 +35,13 @@ from .context import (
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    ToolResultTransformContext,
     message_envelope_for_hook_context,
 )
 from .types import (
     EVENT_MESSAGE_RECEIVED,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     EnrichmentItem,
     RegisteredHook,
     default_timeout_ms_for_event,
@@ -160,7 +162,10 @@ def _bind_hook_context(
         "logger": _context_logger(hook),
         "_hook_registry_snapshot": registry,
     }
-    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
+    if isinstance(
+        context,
+        ToolBeforeCallContext | ToolAfterCallContext | ToolResultTransformContext | ToolEnvironmentContext,
+    ):
         replacement_kwargs["arguments"] = deepcopy(context.arguments)
     if isinstance(context, ToolAfterCallContext):
         replacement_kwargs["result"] = _snapshot_tool_observer_value(context.result)
@@ -351,6 +356,43 @@ async def emit_policy(
             context.feedback = hook_context.feedback
             if context.verdict != "send":
                 return
+    finally:
+        _EMIT_DEPTH.reset(token)
+
+
+async def emit_tool_result_transform(registry: HookRegistry, context: ToolResultTransformContext) -> str | None:
+    """Run tool:result_transform hooks serially in priority order and return the text the model reads, failing closed.
+
+    Each hook sees the text the hook before it left: it returns a ``str`` to replace it or ``None`` to keep it.
+    A hook that fails, times out, or returns anything else withholds the result, as does a run nested too deeply:
+    the chain stops and this returns None.
+    """
+    log_kwargs = {"tool_name": context.tool_name, "agent_name": context.agent_name}
+    depth = _EMIT_DEPTH.get()
+    if depth >= _MAX_EMIT_DEPTH:
+        logger.warning(
+            "Withheld tool result",
+            **log_kwargs,
+            reason="hooks nested too deeply",
+            max_depth=_MAX_EMIT_DEPTH,
+        )
+        return None
+    token = _EMIT_DEPTH.set(depth + 1)
+    try:
+        text = context.result
+        for hook in _eligible_hooks(registry, EVENT_TOOL_RESULT_TRANSFORM, context):
+            hook_context = _bind_hook_context(registry, hook, replace(context, result=text))
+            invocation = await _invoke_hook(hook, hook_context)
+            if not invocation.succeeded or not isinstance(invocation.value, str | None):
+                logger.warning(
+                    "Withheld tool result",
+                    **log_kwargs,
+                    plugin_name=hook.plugin_name,
+                    hook_name=hook.hook_name,
+                )
+                return None
+            text = text if invocation.value is None else invocation.value
+        return text
     finally:
         _EMIT_DEPTH.reset(token)
 

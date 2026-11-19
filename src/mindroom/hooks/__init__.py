@@ -41,6 +41,7 @@ from .context import (
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    ToolResultTransformContext,
     TranscriptLine,
     TurnLifecycleContext,
 )
@@ -53,6 +54,7 @@ from .execution import (
     emit_final_response_transform,
     emit_gate,
     emit_policy,
+    emit_tool_result_transform,
     emit_transform,
 )
 from .ingress import HookIngressPolicy, hook_ingress_policy
@@ -83,6 +85,7 @@ from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     EVENT_TURN_ENDED,
     EVENT_TURN_PAUSED,
     EVENT_TURN_RESUMED,
@@ -130,6 +133,7 @@ __all__ = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "EVENT_TOOL_RESULT_TRANSFORM",
     "EVENT_TURN_ENDED",
     "EVENT_TURN_PAUSED",
     "EVENT_TURN_RESUMED",
@@ -177,6 +181,7 @@ __all__ = [
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
     "ToolEnvironmentContext",
+    "ToolResultTransformContext",
     "TranscriptLine",
     "TurnIntent",
     "TurnLifecycleContext",
@@ -194,6 +199,7 @@ __all__ = [
     "emit_final_response_transform",
     "emit_gate",
     "emit_policy",
+    "emit_tool_result_transform",
     "emit_transform",
     "get_hook_metadata",
     "hook",

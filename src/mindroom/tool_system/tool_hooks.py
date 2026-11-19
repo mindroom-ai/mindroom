@@ -23,13 +23,16 @@ from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     HookBindings,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    ToolResultTransformContext,
     emit,
     emit_collect_environment,
     emit_gate,
+    emit_tool_result_transform,
 )
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import denial_note_for
@@ -65,6 +68,7 @@ _DECLINED_RESULT_TEMPLATE = (
     "Reason: {reason}\n\n"
     "Adjust your approach — try a different tool or different arguments."
 )
+_WITHHELD_RESULT_TEMPLATE = "The result of {tool_name} was withheld because a result check failed."
 _ToolHookResult = Any
 
 
@@ -427,6 +431,34 @@ async def _emit_after_call(
     await emit(resolved_context.hooks.registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
+async def _transformed_result(
+    result: _ToolHookResult,
+    *,
+    resolved_context: _ResolvedToolContext,
+    arguments: dict[str, Any],
+    tool_name: str,
+) -> _ToolHookResult:
+    """Return ``result`` with the text the model reads as the result-transform hooks leave it.
+
+    A value with media keeps its media and flags, any other value the hooks left alone stays itself, and one whose
+    text they replaced becomes that text. A failed check withholds the whole result behind a failed notice.
+    """
+    text = result.content if isinstance(result, ToolValue) else str(result)
+    transformed = await emit_tool_result_transform(
+        resolved_context.hooks.registry,
+        ToolResultTransformContext(
+            **resolved_context.call_hook_context_kwargs(EVENT_TOOL_RESULT_TRANSFORM, arguments),
+            tool_name=tool_name,
+            result=text,
+        ),
+    )
+    if transformed is None:
+        return ToolOutcome(content=_WITHHELD_RESULT_TEMPLATE.format(tool_name=tool_name), is_error=True)
+    if transformed == text:
+        return result
+    return replace(result, content=transformed) if isinstance(result, ToolValue) else transformed
+
+
 async def _run_before_hooks(
     *,
     resolved_context: _ResolvedToolContext,
@@ -604,6 +636,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
     has_environment_hooks = hook_registry.has_hooks(EVENT_TOOL_ENVIRONMENT)
+    has_transform_hooks = hook_registry.has_hooks(EVENT_TOOL_RESULT_TRANSFORM)
     emit_timing_event(
         "Tool hook dispatch timing",
         phase="bridge_entry",
@@ -614,7 +647,9 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         has_after_hooks=has_after_hooks,
     )
     # The hooks of one call share one copy of its arguments, made only when a hook runs.
-    hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks or has_environment_hooks else {}
+    hook_arguments = (
+        deepcopy(args) if has_before_hooks or has_after_hooks or has_environment_hooks or has_transform_hooks else {}
+    )
 
     async def finish(
         outcome: str,
@@ -639,6 +674,15 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         timing.emit_finish(ready, tool_name=tool_name, agent_name=resolved_context.agent_name, outcome=outcome)
 
     async def answer(result: _ToolHookResult, outcome: str) -> _ToolHookResult:
+        # Only a successful result reaches the result-transform hooks; what they leave is what everything after reads.
+        if outcome == "success" and has_transform_hooks:
+            result = await _transformed_result(
+                result,
+                resolved_context=resolved_context,
+                arguments=hook_arguments,
+                tool_name=tool_name,
+            )
+            outcome = "result_withheld" if _answered_failure(result) else outcome
         ready = timing.result_ready()
         _record_answer(tool_name, args, result, ready, resolved_context)
         await finish(outcome, ready, result=_observed(result))
