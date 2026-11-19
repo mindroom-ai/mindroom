@@ -436,9 +436,19 @@ function AgentSection({
     const own = catalog?.oauth_providers.some(
       (option) => option.id === login.provider && option.requester_scoped,
     );
+    // A rule covers a host as the broker matches it: `*.github.com` takes one more label.
+    const covers = (rule: string, host: string) =>
+      rule === host ||
+      (rule.startsWith("*.") &&
+        host.endsWith(rule.slice(1)) &&
+        !host.slice(0, 1 - rule.length).includes("."));
     const hosts = preset?.rules.map((rule) => rule.host) ?? [];
     const taken =
-      agent.services.some((s) => s.rules.some((r) => hosts.includes(r.host))) ||
+      agent.services.some(
+        (s) =>
+          s.oauth?.provider === login.provider ||
+          s.rules.some((r) => hosts.some((host) => covers(r.host, host))),
+      ) ||
       agent.inactive_services.some((s) => s.oauth_provider === login.provider);
     return preset && own && login.connected && !taken
       ? [{ login, preset }]
@@ -466,6 +476,7 @@ function AgentSection({
     const name = freeName(preset.id);
     const allow = await confirmAccount(name, login, preset);
     if (!allow) return;
+    setError(null);
     try {
       const path = servicePath(agent.agent_name, name);
       const create = { "If-None-Match": "*" };

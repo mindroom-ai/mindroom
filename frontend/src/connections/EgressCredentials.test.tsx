@@ -3495,6 +3495,28 @@ describe("using the connected account", () => {
     ).toBeVisible();
   });
 
+  it("a confirmed Use it clears the error of the last try", async () => {
+    let refused = true;
+    answers[`PUT ${ADDED}`] = () => {
+      if (refused) return json({ detail: "Try later" }, 409);
+      return ok();
+    };
+    await renderPage();
+    const useIt = await screen.findByRole("button", {
+      name: "Use your GitHub account for Bare Agent",
+    });
+    fireEvent.click(useIt);
+    await pressInDialog("Let commands use it");
+    expect(await screen.findByText("Try later")).toBeVisible();
+    refused = false;
+    fireEvent.click(useIt);
+    await pressInDialog("Let commands use it");
+    await waitFor(() =>
+      expect(writes().map((call) => call.path)).toEqual([ADDED, ADDED, REUSE]),
+    );
+    expect(screen.queryByText("Try later")).toBeNull();
+  });
+
   it.each<[string, Partial<EgressCredentialAgent>]>([
     ["has a GitHub service", { services: [added({})] }],
     [
@@ -3516,6 +3538,18 @@ describe("using the connected account", () => {
             rules: [
               { host: "api.github.com", port: null, path_prefix: "/repos/x/" },
             ],
+          }),
+        ],
+      },
+    ],
+    [
+      "has a service on any single GitHub subdomain",
+      {
+        services: [
+          credentialService({
+            name: "gh_wild",
+            source: "user",
+            rules: [{ host: "*.github.com", port: null, path_prefix: "/" }],
           }),
         ],
       },
