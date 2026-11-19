@@ -198,7 +198,8 @@ It must also contain `type=app` and `common_name` exactly equal to `MINDROOM_USA
 | Status | Meaning |
 | --- | --- |
 | `503` `Usage export service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a service setting is missing |
-| `401` `Invalid usage service JWT` | Missing or invalid assertion; a `Service JWT rejected` or `Trusted upstream JWT rejected` warning in the MindRoom log names the failed check |
+| `401` `Invalid usage service JWT` | Invalid assertion; a `Service JWT rejected` or `Trusted upstream JWT rejected` warning in the MindRoom log names the failed check |
+| `401` `Missing trusted upstream JWT header: <header>` | The request carried no assertion |
 
 A service assertion authorizes only `/api/usage/export`, not `/api/usage`, personal usage, configuration, or other administrator routes.
 

@@ -393,7 +393,7 @@ async def _verified_trusted_upstream_jwt_claims(
             "Trusted upstream JWT rejected",
             detail=invalid_detail,
             error=type(exc).__name__,
-            claim=getattr(exc, "claim", None),
+            claim=exc.claim if isinstance(exc, jwt.MissingRequiredClaimError) else None,
         )
         raise HTTPException(status_code=401, detail=invalid_detail) from exc
     return claims

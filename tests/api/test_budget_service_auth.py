@@ -1,6 +1,7 @@
 """Budget service authentication integration tests."""
 # ruff: noqa: D103
 
+from collections.abc import Callable
 from pathlib import Path
 
 import jwt
@@ -157,6 +158,43 @@ def test_budget_service_rejects_other_service_assertions(
     assert response.json() == {"detail": "Invalid budget service JWT"}
     assert [log for log in logs if expected_log.items() <= log.items()]
     assert token not in repr(logs)
+
+
+_HEADER_MARKER = "header-text-marker"
+
+
+@pytest.mark.parametrize(
+    ("build_token", "expected_log"),
+    [
+        pytest.param(
+            lambda key: _budget_assertion(key, omit_claims=frozenset({"common_name"})),
+            {"error": "MissingRequiredClaimError", "claim": "common_name"},
+            id="missing-claim",
+        ),
+        pytest.param(
+            lambda key: jwt.encode({"aud": _BUDGET_AUDIENCE}, key, algorithm="RS256", headers={"kid": _HEADER_MARKER}),
+            {"error": "PyJWKClientError", "claim": None},
+            id="unknown-key",
+        ),
+        pytest.param(lambda _key: "x" * (16 * 1024 + 1), {"error": "too_large"}, id="too-large"),
+    ],
+)
+def test_budget_service_verifier_rejection_logs_the_error_without_token_text(
+    temp_config_file: Path,
+    tmp_path: Path,
+    budget_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+    build_token: Callable[[rsa.RSAPrivateKey], str],
+    expected_log: dict[str, object],
+) -> None:
+    env, private_key = budget_service_auth
+    client = _client(temp_config_file, tmp_path, env)
+
+    with capture_logs() as logs:
+        response = client.get("/api/budgets/service", headers={_ASSERTION_HEADER: build_token(private_key)})
+
+    assert response.status_code == 401
+    assert [log for log in logs if {"event": _JWT_REJECTED, **expected_log}.items() <= log.items()]
+    assert _HEADER_MARKER not in repr(logs)
 
 
 @pytest.mark.parametrize("path", ["/api/budgets", "/api/usage/export", "/api/config/raw"])
