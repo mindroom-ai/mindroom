@@ -14,7 +14,7 @@ You need the `shell` and `egress_credentials` tools, and an Agent Keys service f
 
 1. Call `list_egress_credentials` and look for a service on Overleaf (usually named `overleaf`, display name "Overleaf").
 2. No such service: the user adds it on the Agent Keys page (the `manage_url` from `list_egress_credentials`) with **Add service**, preset **Overleaf**.
-   Send them that link and wait; you cannot add the service yourself.
+   Send them that link and wait; you cannot add the service yourself. If `manage_url` is `null`, follow the `note` instead.
 3. The service has `configured: false`: call
    `request_secret(service="overleaf", reason="I need your Overleaf Git token to clone and update your project.", url="https://www.overleaf.com/user/settings", placeholder="olp_…")`.
    Use the service's real `name` from step 1. Tell the user the token is under **Git integration** in Overleaf's Account Settings, and that Git access needs an Overleaf premium plan.
@@ -73,6 +73,7 @@ Never commit build outputs such as `*.aux`, `*.log`, or a `.pdf`.
   `request_secret` for a missing key.
 - Otherwise `403` or `404` / `repository not found`: the project id is wrong, or the token's account cannot open
   the project. Ask the user for the project link and to check they are a collaborator.
+- `429` / too many requests: wait a minute, then retry once.
 - A push refused for a large file or a file name: Overleaf limits file sizes and some names; tell the user which file.
 - Self-hosted Overleaf (Server Pro) uses its own host, not `git.overleaf.com`.
   The user adds a **Custom** service on the Agent Keys page for that host, with basic auth and username `git`.
