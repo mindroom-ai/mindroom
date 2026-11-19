@@ -5930,6 +5930,34 @@ async def test_owner_login_failure_does_not_block_agents(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "outcome"),
+    [
+        (PermanentStartupError("localpart is taken"), "permanently_failed_entities"),
+        (RuntimeError("homeserver unavailable"), "retryable_entities"),
+    ],
+)
+async def test_owner_account_failure_is_only_the_owners_start_failure(
+    tmp_path: Path,
+    error: Exception,
+    outcome: str,
+) -> None:
+    """An owner account that cannot be prepared fails the owner's start alone, in the fleet's own outcome."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+    owner, general = _startable_bot(ROUTER_AGENT_NAME), _startable_bot("general")
+    owner.agent_user = AgentMatrixUser(ROUTER_AGENT_NAME, "@mindroom_router:localhost", "MindRoom", password=None)
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: owner, "general": general})
+
+    with patch("mindroom.orchestrator.prepare_owner_account", new=AsyncMock(side_effect=error)) as prepare:
+        results = await orchestrator.fleet.try_start(orchestrator.fleet.names)
+
+    assert results.started_bots == [general]
+    assert getattr(results, outcome) == [ROUTER_AGENT_NAME]
+    owner.start.assert_not_awaited()
+    prepare.assert_awaited_once_with(orchestrator.config, orchestrator.runtime_paths, owner.agent_user)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("ended_by", ["first_sync", "stop", "shutdown"])
 async def test_dispatch_waits_for_every_started_bot_first_sync(tmp_path: Path, ended_by: str) -> None:
     """Startup publication waits until every started bot synced once or stopped, then for one grant refresh.

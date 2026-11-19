@@ -110,7 +110,7 @@ from . import file_watcher
 from .bot import AgentBot, create_bot_for_entity
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
-from .orchestration.accounts import prepare_managed_accounts, validate_entity_accounts
+from .orchestration.accounts import prepare_managed_accounts, prepare_owner_account, validate_entity_accounts
 from .orchestration.call_transcripts_runtime import CallTranscriptsRuntimeCoordinator
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
@@ -333,6 +333,7 @@ class _MultiAgentOrchestrator:
         self.fleet = EntityFleet(
             EntityFleetHooks(
                 create_bots=self._create_bots,
+                before_start=self._prepare_owner_account,
                 start_blocked=self._entities_blocked_by_failed_mcp_servers,
                 entities_changing=self._entities_changing,
                 entities_started=self._entities_started,
@@ -777,6 +778,11 @@ class _MultiAgentOrchestrator:
             entity_name: create_bot_for_entity(entity_name, entity_users[entity_name], self)
             for entity_name in sorted(entity_names)
         }
+
+    async def _prepare_owner_account(self, bot: AgentBot) -> None:
+        """Prepare the optional owner's account at its start, apart from the agents', whose start it never blocks."""
+        if bot.agent_name == ROUTER_AGENT_NAME and (bot.agent_user.password or bot.agent_user.access_token) is None:
+            await prepare_owner_account(self.config, self.runtime_paths, bot.agent_user)
 
     def observe_room_activity(self, room_id: str) -> None:
         """Let thread exports know that a bot admitted a conversation event in one room."""

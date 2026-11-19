@@ -583,6 +583,7 @@ async def test_fleet_restart_stop_completes_with_real_supervisor_task(monkeypatc
     fleet = EntityFleet(
         EntityFleetHooks(
             create_bots=AsyncMock(return_value={}),
+            before_start=AsyncMock(),
             start_blocked=lambda _entity_names: set(),
             entities_changing=AsyncMock(),
             entities_started=AsyncMock(),

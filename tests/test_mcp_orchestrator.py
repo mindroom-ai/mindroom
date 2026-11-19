@@ -42,6 +42,7 @@ def _config(tmp_path: Path, *, tool_name: str = "mcp_demo", command: str = "npx"
     return Config.validate_with_runtime(
         {
             "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "server_emoji": {"enabled": True},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -219,7 +220,7 @@ async def test_router_start_does_not_bind_external_trigger_runtime_before_room_s
         runtime_paths=_runtime_paths(tmp_path),
         config=_config_with_code_agent(tmp_path),
     )
-    router_bot = MagicMock(spec=AgentBot, agent_name=ROUTER_AGENT_NAME)
+    router_bot = MagicMock(spec=AgentBot, agent_name=ROUTER_AGENT_NAME, agent_user=MagicMock())
     install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
     with (
@@ -995,6 +996,7 @@ async def test_update_config_removes_and_stops_entities_before_publishing_and_sy
     updated_config = Config.validate_with_runtime(
         {
             "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "server_emoji": {"enabled": True},
             "agents": {
                 "code": {
                     "display_name": "Code",

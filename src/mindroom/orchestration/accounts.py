@@ -9,6 +9,7 @@ from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
     MissingManagedEntityAccountError,
     entity_identity_registry,
+    owner_matrix_id,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import (
@@ -89,8 +90,15 @@ async def prepare_managed_accounts(
     Without entities, the configured identities are validated once; otherwise creation and validation retry together,
     so a transient failure validates again.
     """
-    requests = [_entity_request(config, entity_name) for entity_name in entity_names]
+    names = list(entity_names)
+    requests = [_entity_request(config, name) for name in names if name != constants.ROUTER_AGENT_NAME]
     display_names = {request.entity_name: config.entity_display_name(request.entity_name) for request in requests}
+    users: dict[str, AgentMatrixUser] = {}
+    if constants.ROUTER_AGENT_NAME in names:
+        # The optional owner's account is prepared at its start, so its failure blocks no agent.
+        owner_name = config.entity_display_name(constants.ROUTER_AGENT_NAME)
+        owner_id = owner_matrix_id(runtime_paths)
+        users[constants.ROUTER_AGENT_NAME] = AgentMatrixUser(constants.ROUTER_AGENT_NAME, owner_id, owner_name, None)
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
     mindroom_user = config.mindroom_user if include_internal_user else None
     if mindroom_user is not None:
@@ -103,8 +111,7 @@ async def prepare_managed_accounts(
     preflight_managed_account_provisioning(requests, runtime_paths)
     if not requests:
         validate_entity_accounts(config, runtime_paths)
-        return {}
-    users: dict[str, AgentMatrixUser] = {}
+        return users
 
     async def prepare() -> None:
         # A failed attempt raises before `users` is returned, and the next one replaces every entry.
@@ -125,3 +132,16 @@ async def prepare_managed_accounts(
         update_runtime_state=update_runtime_state,
     )
     return users
+
+
+async def prepare_owner_account(config: Config, runtime_paths: constants.RuntimePaths, user: AgentMatrixUser) -> None:
+    """Create or load the optional owner's account in one attempt and give ``user`` its credentials.
+
+    A failure is the owner's start failure, which the fleet reports and retries like any other.
+    """
+    request = _entity_request(config, user.agent_name)
+    preflight_managed_account_provisioning([request], runtime_paths)
+    homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
+    prepared = await create_agent_user(homeserver, user.agent_name, user.display_name, runtime_paths=runtime_paths)
+    validate_entity_accounts(config, runtime_paths)
+    user.password, user.device_id, user.access_token = prepared.password, prepared.device_id, prepared.access_token

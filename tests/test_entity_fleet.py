@@ -81,6 +81,10 @@ class _Bot:
         self.pending_response_owner_count = 0
 
 
+async def _no_preparation(_bot: object) -> None:
+    """Stand in for the hook that prepares the optional owner's account before its start."""
+
+
 @dataclass
 class _Harness:
     order: list[str] = field(default_factory=list)
@@ -113,6 +117,7 @@ class _Harness:
         self.fleet = EntityFleet(
             EntityFleetHooks(
                 create_bots=create_bots,
+                before_start=_no_preparation,
                 start_blocked=lambda names: self.blocked & names,
                 entities_changing=entities_changing,
                 entities_started=entities_started,

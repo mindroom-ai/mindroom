@@ -60,6 +60,8 @@ class EntityFleetHooks:
 
     # Build bots for entities the published config configures, preparing their Matrix accounts first.
     create_bots: Callable[[set[str]], Awaitable[dict[str, AgentBot]]]
+    # Finish what one bot's start needs, the optional owner's account; a failure is that bot's start failure.
+    before_start: Callable[[AgentBot], Awaitable[None]]
     # Entities that must not start yet because a required MCP server is unavailable.
     start_blocked: Callable[[set[str]], set[str]]
     # Withdraw capabilities bound to these entities, and drain work borrowing their clients, before any of them stops.
@@ -148,7 +150,8 @@ class EntityFleet:
         blocked = self._hooks.start_blocked({name for name, _slot in slots})
         results.retryable_entities.extend(sorted(blocked))
         slots = [(name, slot) for name, slot in slots if name not in blocked]
-        outcomes = await asyncio.gather(*(_start_once(name, slot.bot) for name, slot in slots))
+        before_start = self._hooks.before_start
+        outcomes = await asyncio.gather(*(_start_once(name, slot.bot, before_start) for name, slot in slots))
         for (name, slot), outcome in zip(slots, outcomes, strict=True):
             slot.disabled = outcome is None
             if outcome is None:
@@ -422,9 +425,14 @@ class EntityFleet:
         await self._hooks.entities_changing(set(slots))
 
 
-async def _start_once(entity_name: str, bot: AgentBot) -> bool | None:
+async def _start_once(
+    entity_name: str,
+    bot: AgentBot,
+    before_start: Callable[[AgentBot], Awaitable[None]],
+) -> bool | None:
     """Start one bot once: True when started, False when worth retrying, None when it can never start."""
     try:
+        await before_start(bot)
         await bot.start()
     except PermanentStartupError as exc:
         logger.error(  # noqa: TRY400 - a permanent configuration error needs no traceback
