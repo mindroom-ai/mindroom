@@ -386,6 +386,54 @@ async def test_a_primary_shell_token_reaches_private_addresses_but_never_loopbac
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "primary_dials"),
+    [
+        (["192.168.1.20"], True),
+        (["fd00::20"], True),
+        (["127.0.0.1"], False),
+        (["169.254.169.254"], False),
+        (["fe80::1"], False),
+    ],
+)
+@pytest.mark.parametrize("transport", ["connect", "plain"])
+async def test_a_primary_shell_token_resolves_local_lan_names_and_checks_what_they_resolve_to(
+    broker_default_policy: EgressBroker,
+    broker: BrokerFactory,
+    raw_proxy: RawProxy,
+    answer: list[str],
+    transport: str,
+    *,
+    primary_dials: bool,
+) -> None:
+    """`homeassistant.local` resolves for a primary shell, whose dial is checked by address; a worker's is refused."""
+    send = connect_request if transport == "connect" else plain_request
+    primary = proxy_authorization(broker.token(replace(DEFAULT_CLAIMS, primary_shell=True)))
+    worker = proxy_authorization(broker.token())
+    lookups, getaddrinfo = _answers(answer)
+
+    with (
+        patch.object(server_fetch_url.socket, "getaddrinfo", side_effect=getaddrinfo),
+        patch("mindroom.egress_broker.dial._dial", new_callable=AsyncMock, side_effect=OSError("refused")) as dial,
+    ):
+        from_worker = await raw_proxy(broker_default_policy.port, send("homeassistant.local:443", authorization=worker))
+        assert lookups == []
+        from_primary = await raw_proxy(
+            broker_default_policy.port,
+            send("homeassistant.local:443", authorization=primary),
+        )
+
+    assert from_worker.json()["error"] == "destination_blocked"
+    assert lookups == ["homeassistant.local"]
+    if primary_dials:
+        assert from_primary.status == 502
+        assert [call.args[1] for call in dial.call_args_list] == [ipaddress.ip_address(answer[0])]
+    else:
+        assert from_primary.json()["error"] == "destination_blocked"
+        dial.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["connect", "plain"])
 async def test_broker_dials_private_networks_the_config_lists(
     broker: BrokerFactory,

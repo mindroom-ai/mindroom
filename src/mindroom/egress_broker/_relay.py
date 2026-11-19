@@ -536,8 +536,9 @@ class Relay:
         ssl_context: ssl.SSLContext | None,
     ) -> Peer | None:
         """Dial `entry.host` through the guard and the rules' private networks; on failure answer, audit, return None."""
-        private_networks = _EVERY_NETWORK if entry.claims.primary_shell else rules.private_networks
-        policy = replace(self.dial_policy, private_networks=private_networks)
+        primary = entry.claims.primary_shell
+        private_networks = _EVERY_NETWORK if primary else rules.private_networks
+        policy = replace(self.dial_policy, private_networks=private_networks, resolve_lan_names=primary)
         lookup_slots = self._lookup_slots[entry.claims.requester_id or entry.claims.worker_key]
         try:
             reader, writer = await _from_upstream(
