@@ -140,7 +140,8 @@ def load_cached_override_records(
 
 def _copy_override_records(records: dict[str, OverrideRecord], only: str | None) -> dict[str, OverrideRecord]:
     """Return mutable records without exposing the cache's nested dictionaries."""
-    return {record_id: record.copy() for record_id, record in records.items() if only in (None, record_id)}
+    wanted = records if only is None else records.keys() & {only}
+    return {record_id: records[record_id].copy() for record_id in wanted}
 
 
 def write_bounded_override_records(
