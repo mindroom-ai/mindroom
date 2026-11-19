@@ -5958,17 +5958,21 @@ async def test_owner_account_failure_is_only_the_owners_start_failure(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ended_by", ["first_sync", "stop", "shutdown"])
+@pytest.mark.parametrize("ended_by", ["first_sync", "stop", "deadline", "shutdown"])
 async def test_dispatch_waits_for_every_started_bot_first_sync(tmp_path: Path, ended_by: str) -> None:
     """Startup publication waits until every started bot synced once or stopped, then for one grant refresh.
 
-    Shutdown ends the wait unpublished.
+    The first-sync deadline ends the wait for a bot that is still unsynced, and shutdown ends it unpublished.
     """
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
     synced, slow = _startable_bot("synced"), _startable_bot("slow", synced=False)
     shutdown = asyncio.Event()
+    deadline = 0.6 if ended_by == "deadline" else 600.0
 
-    with patch.object(orchestrator, "refresh_agent_reply_memberships", new=AsyncMock()) as refresh:
+    with (
+        patch.object(orchestrator, "refresh_agent_reply_memberships", new=AsyncMock()) as refresh,
+        patch("mindroom.orchestrator.matrix_sync_startup_timeout_seconds", return_value=deadline),
+    ):
         gate = asyncio.create_task(orchestrator._wait_for_first_syncs(shutdown, [synced, slow]))
         await asyncio.sleep(0.2)
         assert not gate.done()
@@ -5977,7 +5981,7 @@ async def test_dispatch_waits_for_every_started_bot_first_sync(tmp_path: Path, e
             slow.first_sync_complete = True
         elif ended_by == "stop":
             slow.running = False
-        else:
+        elif ended_by == "shutdown":
             shutdown.set()
 
         assert await asyncio.wait_for(gate, 5) is (ended_by != "shutdown")
@@ -5986,19 +5990,12 @@ async def test_dispatch_waits_for_every_started_bot_first_sync(tmp_path: Path, e
 
 
 @pytest.mark.asyncio
-async def test_a_bot_that_never_syncs_neither_blocks_replacements_nor_holds_startup(tmp_path: Path) -> None:
-    """Startup's first-sync wait leaves the apply lock free, and ends once the fleet replaced the bot that never syncs."""
+async def test_a_bot_that_never_syncs_holds_startup_only_until_the_first_sync_deadline(tmp_path: Path) -> None:
+    """Startup's wait leaves the apply lock free and ends at its own deadline; the unsynced bot keeps running."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
-    stuck, fresh = _startable_bot("general", synced=False), _startable_bot("general")
-    stuck.ingestion_quiesced = False
-    stuck.prepare_for_sync_shutdown = AsyncMock()
-    stuck.stop = AsyncMock(side_effect=lambda **_kwargs: setattr(stuck, "running", False))
+    stuck = _startable_bot("general", synced=False)
     install_bots(orchestrator, {"general": stuck})
-    gave_up = asyncio.Event()
     replacement = AsyncMock()
-
-    async def receive(bot: AgentBot) -> None:
-        await (gave_up if bot is stuck else asyncio.Event()).wait()
 
     async def apply_while_startup_waits() -> None:
         await asyncio.sleep(0.2)
@@ -6007,23 +6004,117 @@ async def test_a_bot_that_never_syncs_neither_blocks_replacements_nor_holds_star
             operation_name="test",
             request_is_current=lambda: True,
         )
-        gave_up.set()
 
     with (
         _matrix_free_startup(orchestrator),
-        patch("mindroom.orchestration.entity_fleet.sync_forever_with_restart", new=receive),
-        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(return_value={"general": MagicMock()})),
-        patch("mindroom.orchestrator.create_bot_for_entity", return_value=fresh),
+        patch("mindroom.orchestrator.matrix_sync_startup_timeout_seconds", return_value=0.6),
+        patch("mindroom.orchestrator.create_bot_for_entity") as rebuilt,
     ):
         applying = asyncio.create_task(apply_while_startup_waits())
-        try:
-            await _run_orchestrator_start_until_ready(orchestrator)
-        finally:
-            applying.cancel()
+        await _run_orchestrator_start_until_ready(orchestrator)
+        await applying
 
     replacement.assert_awaited_once()
-    stuck.stop.assert_awaited_once()
-    fresh.start.assert_awaited_once()
+    rebuilt.assert_not_called()
+    assert not stuck.first_sync_complete
+    assert not orchestrator.agent_reply_membership_sync.observer_is_open(stuck.matrix_id.full_id)
+
+
+def _startup_waiting_for_first_sync(tmp_path: Path) -> tuple[_MultiAgentOrchestrator, Config, MagicMock]:
+    """Return a runtime whose one bot has not synced, so its startup waits, with the config it starts on."""
+    startup_config = _runtime_bound_config(Config(server_emoji={"enabled": True}), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=startup_config)
+    slow = _startable_bot("general", synced=False)
+    install_bots(orchestrator, {"general": slow})
+    return orchestrator, startup_config, slow
+
+
+@pytest.mark.asyncio
+async def test_a_reload_that_fails_during_startups_first_sync_wait_keeps_the_last_good_config(tmp_path: Path) -> None:
+    """Startup acknowledges under the apply lock: a reload that published its config and then failed is not last-good."""
+    orchestrator, startup_config, slow = _startup_waiting_for_first_sync(tmp_path)
+    failing_config = _runtime_bound_config(
+        Config(
+            server_emoji={"enabled": True},
+            router=RouterConfig(access=ResponderAccessConfig(current_room_members=False)),
+        ),
+        tmp_path,
+    )
+    published, fail = asyncio.Event(), asyncio.Event()
+
+    async def publish_then_fail(_current: Config, _plan: ConfigUpdatePlan) -> bool:
+        orchestrator.config = failing_config
+        published.set()
+        await fail.wait()
+        msg = "room setup failed"
+        raise RuntimeError(msg)
+
+    with (
+        _matrix_free_startup(orchestrator),
+        patch.object(
+            orchestrator.config_reload,
+            "load_config",
+            return_value=published_config_load(failing_config),
+        ),
+        patch.object(orchestrator.config_reload, "apply_update_plan", new=publish_then_fail),
+        patch("mindroom.orchestrator.set_runtime_ready") as ready,
+    ):
+        starting = asyncio.create_task(_run_orchestrator_start_until_ready(orchestrator))
+        while not orchestrator.running:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        reload = asyncio.create_task(orchestrator.config_reload._update_config())
+        await asyncio.wait_for(published.wait(), 5)
+        slow.first_sync_complete = True
+        await asyncio.sleep(0.3)
+        # Startup neither acknowledges nor reports ready while a replacement is mid-apply.
+        ready.assert_not_called()
+        assert orchestrator.config_reload.fully_applied_config is startup_config
+        fail.set()
+        with pytest.raises(RuntimeError, match="room setup failed"):
+            await reload
+        await starting
+
+    assert orchestrator.config_reload.fully_applied_config is startup_config
+
+
+@pytest.mark.asyncio
+async def test_shutdown_while_startup_waits_for_the_apply_lock_reports_no_readiness(tmp_path: Path) -> None:
+    """A shutdown that starts while a replacement holds startup's final step leaves the runtime unacknowledged."""
+    orchestrator, _startup_config, _slow = _startup_waiting_for_first_sync(tmp_path)
+    _slow.first_sync_complete = True
+    applying, finish = asyncio.Event(), asyncio.Event()
+
+    async def replacement() -> None:
+        applying.set()
+        await finish.wait()
+
+    with (
+        _matrix_free_startup(orchestrator),
+        patch.object(orchestrator.agent_reply_memberships, "needs_refresh", return_value=False),
+        patch("mindroom.orchestrator.set_runtime_ready") as ready,
+        patch("mindroom.orchestrator.emit_service_bot_ready", new=AsyncMock()) as service_ready,
+    ):
+        apply = asyncio.create_task(
+            orchestrator.config_reload.apply_with_response_admission(
+                replacement,
+                operation_name="test",
+                request_is_current=lambda: True,
+            ),
+        )
+        await asyncio.wait_for(applying.wait(), 5)
+        starting = asyncio.create_task(orchestrator._start_runtime())
+        while not orchestrator.running:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        orchestrator._runtime_shutdown_event.set()
+        finish.set()
+        await apply
+        await asyncio.wait_for(starting, 5)
+        await orchestrator.stop()
+
+    ready.assert_not_called()
+    service_ready.assert_not_awaited()
+    assert orchestrator.config_reload.fully_applied_config is None
 
 
 @pytest.mark.asyncio

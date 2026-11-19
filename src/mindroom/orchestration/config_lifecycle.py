@@ -212,7 +212,12 @@ class ConfigReloadLifecycle:
         return not self._cancelled and not self.is_running() and self._fully_applied_config is None
 
     def startup_published(self, config: Config) -> None:
-        """Acknowledge startup's config, and reload at once if its files changed since startup loaded them."""
+        """Acknowledge startup's config, and reload at once if its files changed since startup loaded them.
+
+        A reload that ran while startup waited for first syncs already keeps the last-good and incomplete records.
+        """
+        if self._fully_applied_config is not None:
+            return
         self._record_applied(config)
         if self._requested_at is not None or _source_fingerprint_on_disk(config, self.runtime_paths) != (
             config.source_fingerprint
@@ -457,16 +462,17 @@ class ConfigReloadLifecycle:
             self.response_admission_gate.reopen()
 
     @asynccontextmanager
-    async def startup_publication_admission(self) -> AsyncIterator[None]:
+    async def startup_publication_admission(self) -> AsyncIterator[asyncio.Lock]:
         """Hold response admission closed until startup publishes, and reopen it between runtime replacements.
 
         Startup's wait for first syncs does not hold the apply lock, so a reload can replace a bot that never syncs.
+        Startup publishes under the yielded apply lock, so never while a replacement is mid-apply.
         """
         gate = self.response_admission_gate
         gate.startup_hold = True
         gate.close()
         try:
-            yield
+            yield self._response_admission_apply_lock
         finally:
             async with self._response_admission_apply_lock:
                 gate.startup_hold = False
