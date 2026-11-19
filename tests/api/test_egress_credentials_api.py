@@ -29,6 +29,7 @@ from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_P
 from mindroom.config.main import Config
 from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials.policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
 from mindroom.egress_broker import oauth_source, secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.egress_broker.env import egress_agent_scope
@@ -1215,6 +1216,28 @@ def test_listing_finds_logins_without_provisioning_an_oauth_client(
     logins = _listed_agents(portal, "alice")["personal"]["oauth_logins"]
     assert [(login["provider"], login["connected"]) for login in logins] == [("github", False), ("google_drive", False)]
     provision.assert_not_called()
+
+
+def test_listing_offers_a_localhost_only_client_only_on_a_loopback_host(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provisioned client returns only to localhost, so a remote page is offered no login to connect with it."""
+    portal = egress_portal
+    _use_fake_oauth_providers(monkeypatch, portal["paths"])
+    get_runtime_credentials_manager(portal["paths"]).save_credentials(
+        "github_oauth_client",
+        {"client_id": "test-client", "client_secret": "test-secret", RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True},
+    )
+
+    def offered(client: TestClient) -> list[str]:
+        response = client.get("/api/connections/egress", headers=portal["headers"]["alice"])
+        assert response.status_code == 200, response.text
+        agent = next(agent for agent in response.json()["agents"] if agent["agent_name"] == "personal")
+        return [login["provider"] for login in agent["oauth_logins"]]
+
+    assert offered(portal["client"]) == ["google_drive"]
+    assert offered(TestClient(main.app, base_url="http://localhost")) == ["github", "google_drive"]
 
 
 def test_an_inactive_entry_names_its_login(egress_portal: dict[str, Any]) -> None:
