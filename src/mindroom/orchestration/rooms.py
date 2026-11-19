@@ -14,7 +14,7 @@ from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.identity import managed_account_user_id
-from mindroom.matrix.room_accounts import reconcile_room_accounts
+from mindroom.matrix.room_accounts import reconcile_room_accounts, reconcile_room_router_binding
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.rooms import (
@@ -153,7 +153,7 @@ class RoomSetup:
         logger.info("All agents have joined their configured rooms")
 
     async def publish_room_state(self) -> None:
-        """Reconcile the thread mode and MindRoom accounts of all router rooms after reply admission reopens.
+        """Reconcile the thread mode, MindRoom accounts, and router binding of all router rooms after admission reopens.
 
         This includes retained invited rooms.
         """
@@ -163,7 +163,11 @@ class RoomSetup:
                     *(
                         reconcile(client, self.config_provider(), self.runtime_paths, room_id)
                         for room_id in client.rooms
-                        for reconcile in (reconcile_room_thread_mode, reconcile_room_accounts)
+                        for reconcile in (
+                            reconcile_room_thread_mode,
+                            reconcile_room_accounts,
+                            reconcile_room_router_binding,
+                        )
                     ),
                 )
         except Exception:

@@ -143,7 +143,7 @@ Every agent, team, and managed room gets a Matrix avatar by default, chosen from
 To choose a picture, place a PNG at `avatars/<agents|teams|rooms|spaces>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
 Run `mindroom avatars sync --force` to reset every managed room and the root Space to its default avatar: its own file, its single agent's or team's avatar, or its stock pick.
 
-`mindroom avatars generate` creates a custom avatar file for every entity without a workspace or bundled avatar file, using `gpt-6-astra` to write prompts and `gpt-image-2.5-sunburst` to render them; it requires only `OPENAI_API_KEY` or `OPENAI_API_KEY_FILE`.
+`mindroom avatars generate` creates a custom avatar file for every entity without a workspace or bundled avatar file, using `gpt-6.2-astra` to write prompts and `gpt-image-2.6-sunburst` to render them; it requires only `OPENAI_API_KEY` or `OPENAI_API_KEY_FILE`.
 Run `mindroom avatars generate --force` to overwrite existing workspace avatar files after changing prompts or styles.
 Override the generation styles with the root `prompts` block:
 

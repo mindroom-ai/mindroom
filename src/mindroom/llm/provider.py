@@ -14,6 +14,7 @@ from mindroom.llm.usage import add_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from pathlib import Path
 
     from pydantic import BaseModel
 
@@ -48,7 +49,10 @@ class Capabilities:
     """What a provider route supports, so policy code stops probing adapter classes.
 
     ``url_media`` holds the media kinds whose URLs the route sends for the provider to fetch; the pipeline downloads
-    the URLs of every other kind (``providers/pipeline/remote_media.py``).
+    the URLs of every other kind (``providers/pipeline/remote_media.py``). ``system_updates`` is set on a route that
+    sends a system prompt update (``providers/pipeline/prompt_hold.py``) as a system message where it stands in the
+    conversation, which its model follows over the earlier system prompt; it tells whether a request caches its system
+    prompt, without which an update keeps no prefix.
     """
 
     structured_output: StructuredOutput = "json_mode"
@@ -57,6 +61,7 @@ class Capabilities:
     native_tool_search: bool = False
     native_compaction: bool = False
     provider_default_sampling: bool = False
+    system_updates: Callable[[ModelRequest], bool] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -170,6 +175,10 @@ class ModelRequest:
     ``native_compaction`` turns on provider-side compaction for routes that support it.
     The adapter awaits ``on_send`` with the body it hands its SDK just before sending it, without request options such
     as headers, query parameters, or timeouts; the request log sets it.
+    ``prompt_hold`` is the file that holds the system prompt of the request's conversation, which the pipeline sends
+    in place of the request's own while the conversation's prompt cache is warm (``providers/pipeline/prompt_hold.py``);
+    None sends the request's own. A request with a ``prompt_hold_pin``, the list every request of a fork or a resumed
+    run shares, never writes that file: the run's first request puts what it read there, and all send the same prompt.
     """
 
     messages: Sequence[Message]
@@ -181,6 +190,8 @@ class ModelRequest:
     portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None
     on_send: Callable[[Mapping[str, Any]], Awaitable[None]] = _unobserved
+    prompt_hold: Path | None = None
+    prompt_hold_pin: list[dict[str, Any] | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)

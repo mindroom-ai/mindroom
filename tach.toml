@@ -785,6 +785,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.metadata_merge",
     "mindroom.pre_model_preparation",
+    "mindroom.providers.pipeline",
     "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.run_storage",
@@ -1315,6 +1316,7 @@ visibility = [
     "mindroom.scheduling.tasks",
     "mindroom.tool_jobs.approvals",
     "mindroom.scheduling.runtime",
+    "mindroom.custom_tools.matrix_room",
 ]
 
 [[modules]]
@@ -1378,6 +1380,7 @@ depends_on = [
     "mindroom.history.request_messages",
     "mindroom.llm",
     "mindroom.loop_hooks",
+    "mindroom.providers.pipeline",
     "mindroom.response_turn",
     "mindroom.run_storage",
     "mindroom.tool_system.context_bound_streams",
@@ -2674,12 +2677,15 @@ visibility = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"
 depends_on = [
+    "mindroom.approval.manager",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.custom_tools.matrix_helpers",
+    "mindroom.entity_resolution",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.room_history_reads",
     "mindroom.thread_summary",
+    "mindroom.thread_workflow",
     "mindroom.tool_system.authoring",
 ]
 
@@ -4598,6 +4604,7 @@ visibility = [
     "mindroom.room_activity.note",
     "mindroom.routing",
     "mindroom.thread_export.selection",
+    "mindroom.thread_workflow",
     "mindroom.turns.ingress",
 ]
 
@@ -4763,6 +4770,15 @@ depends_on = [
     "mindroom.matrix.room_history_reads",
     "mindroom.matrix.room_power",
     "mindroom.matrix.room_reconciliation",
+]
+
+[[modules]]
+path = "mindroom.thread_workflow"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.scheduling.tasks",
+    "mindroom.thread_tags",
 ]
 
 [[modules]]
@@ -7125,6 +7141,7 @@ from = ["mindroom.matrix.voice_message"]
 [[interfaces]]
 expose = [
     "ResolvedVisibleMessage",
+    "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "is_visible_room_message",
     "message_preview",

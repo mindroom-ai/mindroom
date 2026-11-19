@@ -19,20 +19,21 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str) -> bool:
+async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str, *, strict: bool = False) -> bool:
     """Return whether the requester currently belongs to one requested room.
 
     Responder access answers whether a requester may converse with this agent,
     never whether they belong to one specific room, so any room other than the
-    conversation room additionally requires proven current membership. A
-    membership fetch that fails counts as not joined.
+    conversation room additionally requires proven current membership, and with
+    ``strict`` that room does as well. A membership fetch that
+    fails counts as not joined.
 
     Only a human principal can hold that membership. A managed sender is joined
     to every room its agent serves, so its own membership would prove nothing,
     and an agent relaying another agent's message must stay in their shared
     conversation.
     """
-    if room_id == context.room_id:
+    if room_id == context.room_id and not strict:
         return True
     config = context.current_config
     if not is_human_requester_id(context.requester_id, config, context.runtime_paths):
@@ -43,7 +44,13 @@ async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str
     )
 
 
-async def room_access_allowed(context: ToolRuntimeContext, room_id: str, *, contact_room_ok: bool = False) -> bool:
+async def room_access_allowed(
+    context: ToolRuntimeContext,
+    room_id: str,
+    *,
+    contact_room_ok: bool = False,
+    require_membership: bool = False,
+) -> bool:
     """Return whether the requester may act in the given room.
 
     The agent's own contact room, active or removed and even as the current room, is open only to callers that set
@@ -51,6 +58,7 @@ async def room_access_allowed(context: ToolRuntimeContext, room_id: str, *, cont
     nothing into a removed contact's room, as ``matrix_message`` does.
     From any other room, only the agent's owner, who is only invited to it, may act there, since there the agent
     speaks for its owner.
+    ``require_membership`` (a listing across rooms) also requires the requester to be joined now, in every room.
     """
     if not room_id:
         return False
@@ -59,7 +67,11 @@ async def room_access_allowed(context: ToolRuntimeContext, room_id: str, *, cont
     if contact is not None and not contact_room_ok:
         return False
     if room_id == context.room_id:
-        return True
+        return not require_membership or await requester_joined_target_room(
+            context,
+            room_id,
+            strict=True,
+        )
     if not is_sender_allowed_for_responder(
         context.requester_id,
         context.agent_name,
@@ -73,7 +85,9 @@ async def room_access_allowed(context: ToolRuntimeContext, room_id: str, *, cont
         return await requester_joined_target_room(context, room_id)
     record, side = contact
     owner = record.party(side).owner
-    return resolve_human_requester_alias(context.requester_id, config, context.runtime_paths) == owner
+    return resolve_human_requester_alias(context.requester_id, config, context.runtime_paths) == owner and (
+        not require_membership or await requester_joined_target_room(context, room_id)
+    )
 
 
 async def resolve_requested_room_id(

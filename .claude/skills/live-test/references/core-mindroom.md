@@ -134,7 +134,7 @@ For a real-model exploratory pass using an existing Codex login, replace the mod
 models:
   default:
     provider: codex
-    id: gpt-6-astra
+    id: gpt-6.2-astra
 ```
 
 This route uses the existing login; do not add a Codex token to the run's `.env`.
