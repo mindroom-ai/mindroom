@@ -25,7 +25,6 @@ from .context import (
     CustomEventContext,
     FinalResponseDraft,
     FinalResponseTransformContext,
-    HookBindings,
     HookContext,
     MessageEnrichContext,
     MessageReceivedContext,
@@ -53,11 +52,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
-    from mindroom.bot import AgentBot
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
+    from mindroom.runtime_protocols import OrchestratorRuntime
 
     from .registry import HookRegistry
 
@@ -118,15 +113,14 @@ def _scope_room_ids(context: HookContext) -> tuple[str, ...]:
     return ()
 
 
-async def _emitter_runs_room_hooks(registry: HookRegistry, event_name: str, context: HookContext) -> bool:
+async def _emitter_runs_room_hooks(event_name: str, context: HookContext) -> bool:
     """Return whether this emission runs the event's room-scoped hooks: its bot is the room's steward.
 
     For an event that is one Matrix event the steward holds a claim, so the hooks run once however many bots emit it.
     An emission no bot of a runtime made, as the runtime's own or one in a plugin's tests, has no steward and runs them.
     """
     lifetime = context._hook_registry_state
-    emitter = lifetime.emitter if isinstance(lifetime, HookRegistryLifetime) else None
-    if registry.room_hook_owner is None or emitter is None:
+    if not isinstance(lifetime, HookRegistryLifetime) or lifetime.emitter is None or lifetime.room_hook_owner is None:
         return True
     event_id: str | None = None
     if isinstance(context, MessageReceivedContext):
@@ -134,7 +128,7 @@ async def _emitter_runs_room_hooks(registry: HookRegistry, event_name: str, cont
     elif event_name in ROOM_CLAIM_EVENTS:
         event_id = cast("ReactionReceivedContext", context).event_id
     for room_id in _scope_room_ids(context):
-        if await registry.room_hook_owner(emitter, room_id, event_name, event_id):
+        if await lifetime.room_hook_owner(lifetime.emitter, room_id, event_name, event_id):
             return True
     return False
 
@@ -275,7 +269,7 @@ async def _eligible_hooks(
             continue
         if hook.scope == "room":
             if runs_room_hooks is None:
-                runs_room_hooks = await _emitter_runs_room_hooks(registry, event_name, context)
+                runs_room_hooks = await _emitter_runs_room_hooks(event_name, context)
             if not runs_room_hooks:
                 continue
         if (
@@ -326,31 +320,28 @@ async def emit(
         _EMIT_DEPTH.reset(token)
 
 
-async def emit_service_bot_ready(
-    bindings: HookBindings,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    bots: Iterable[AgentBot],
-) -> None:
+async def emit_service_bot_ready(orchestrator: OrchestratorRuntime) -> None:
     """Emit the runtime's own ``bot:ready``, once per process start, to the service-scoped hooks.
 
     Its context names the router entity with every configured room and every room a bot is in, which is what the
     hooks filtered to the router bot received.
     """
-    if not bindings.registry.has_hooks(EVENT_BOT_READY):
+    if not orchestrator.hook_registry_state.registry.has_hooks(EVENT_BOT_READY):
         return
+    bindings = orchestrator.service_hook_bindings()
+    bots = orchestrator.agent_bots.values()
     room_ids = (room_id for bot in bots for room_id in (*bot.rooms, *(bot.client.rooms if bot.client else ())))
     context = AgentLifecycleContext(
         **bindings.context_kwargs(
             EVENT_BOT_READY,
-            config=config,
-            runtime_paths=runtime_paths,
+            config=orchestrator.config,
+            runtime_paths=orchestrator.runtime_paths,
             correlation_id=f"{EVENT_BOT_READY}:service:{uuid4().hex}",
         ),
         entity_name=ROUTER_AGENT_NAME,
         entity_type="router",
-        rooms=tuple(sorted(config.get_all_configured_rooms())),
-        matrix_user_id=owner_matrix_id(runtime_paths),
+        rooms=tuple(sorted(orchestrator.config.get_all_configured_rooms())),
+        matrix_user_id=owner_matrix_id(orchestrator.runtime_paths),
         joined_room_ids=tuple(dict.fromkeys(room_id for room_id in room_ids if room_id.startswith("!"))),
     )
     await emit(bindings.registry, EVENT_BOT_READY, context, service=True)

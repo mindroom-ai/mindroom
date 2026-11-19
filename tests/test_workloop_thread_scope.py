@@ -7,7 +7,7 @@ import json
 import re
 import shutil
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -440,7 +440,7 @@ async def test_router_filtered_command_runs_once_per_message_in_a_room_with_no_o
         room_steward=lambda room_id: room_steward(bots, room_id),
         event_journal_store=lambda: journal_store,
     )
-    registry = replace(loaded_workloop.registry, room_hook_owner=partial(runs_room_hooks, orchestrator))
+    runtime = HookRegistryState(loaded_workloop.registry, room_hook_owner=partial(runs_room_hooks, orchestrator))
     sender = AsyncMock(return_value="$todo-event")
 
     for agent_name in bots:
@@ -454,9 +454,9 @@ async def test_router_filtered_command_runs_once_per_message_in_a_room_with_no_o
             correlation_id="corr-command",
             message_sender=sender,
             envelope=_message_envelope(body="!todo add Only once", agent_name=agent_name),
-            _hook_registry_state=HookRegistryState(registry).lifetime(agent_name),
+            _hook_registry_state=runtime.lifetime(agent_name),
         )
-        await emit(registry, EVENT_MESSAGE_RECEIVED, command_context)
+        await emit(runtime.registry, EVENT_MESSAGE_RECEIVED, command_context)
 
     assert ROUTER_AGENT_NAME not in bots
     assert sender.await_count == 1

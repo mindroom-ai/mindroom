@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack, suppress
 from contextvars import Context
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
 from uuid import uuid4
@@ -332,6 +332,7 @@ class _MultiAgentOrchestrator:
 
     def __post_init__(self) -> None:
         """Build the runtime's collaborators around its paths and published config."""
+        self.hook_registry_state.room_hook_owner = partial(runs_room_hooks, self)
         self._hook_lifetime = self.hook_registry_state.lifetime()
         self.fleet = EntityFleet(
             EntityFleetHooks(
@@ -839,8 +840,7 @@ class _MultiAgentOrchestrator:
     ) -> PluginReloadResult:
         """Publish ``generation``, make its hooks for ``config`` live, and adopt the watcher baselines taken before it loaded."""
         result = publish_plugins(generation)
-        hooks = config_plugins(config, self.runtime_paths).hooks
-        self.hook_registry_state.registry = replace(hooks, room_hook_owner=partial(runs_room_hooks, self))
+        self.hook_registry_state.registry = config_plugins(config, self.runtime_paths).hooks
         self.plugin_watch.replace_snapshots(*watch)
         reset_worker_launch_config()
         for skipped in result.skipped:
@@ -1178,7 +1178,7 @@ class _MultiAgentOrchestrator:
         # Stay alive until explicit shutdown. Hot reload replaces the fleet's sync
         # tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
-        await emit_service_bot_ready(self.service_hook_bindings(), config, self.runtime_paths, self.agent_bots.values())
+        await emit_service_bot_ready(self)
         await runtime_shutdown_event.wait()
 
     async def _wait_for_initial_membership_sync(

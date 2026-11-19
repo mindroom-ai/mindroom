@@ -779,7 +779,7 @@ def _stewarded_registry(
     callbacks: list[object],
     powers: dict[str, int],
     journal_store: EventJournalStore,
-) -> HookRegistry:
+) -> HookRegistryState:
     """Compile hooks for a runtime whose running bots in the room hold ``powers``, by entity name."""
     levels = SimpleNamespace(get_user_level=lambda user_id: powers[user_id.split(":")[0].removeprefix("@")])
     bots = {
@@ -798,17 +798,17 @@ def _stewarded_registry(
         event_journal_store=lambda: journal_store,
     )
     registry = HookRegistry.from_plugins([_plugin("scoped", callbacks)])
-    return replace(registry, room_hook_owner=partial(runs_room_hooks, orchestrator))
+    return HookRegistryState(registry, room_hook_owner=partial(runs_room_hooks, orchestrator))
 
 
-async def _emit_message_as(registry: HookRegistry, tmp_path: Path, agent_name: str) -> None:
+async def _emit_message_as(runtime: HookRegistryState, tmp_path: Path, agent_name: str) -> None:
     """Emit the one room message as the bot of that name does when its own copy arrives."""
     context = replace(
         _message_received_context(tmp_path),
         envelope=_envelope(agent_name=agent_name),
-        _hook_registry_state=HookRegistryState(registry).lifetime(agent_name),
+        _hook_registry_state=runtime.lifetime(agent_name),
     )
-    await emit(registry, EVENT_MESSAGE_RECEIVED, context)
+    await emit(runtime.registry, EVENT_MESSAGE_RECEIVED, context)
 
 
 def _recording_hook(scope: str, calls: list[str]) -> object:
@@ -900,9 +900,8 @@ async def test_room_scope_on_an_event_without_a_matrix_event_runs_for_the_stewar
     registry = _stewarded_registry([enrich], {"research": 0, "code": 0}, journal_store)
 
     async def items_as(agent_name: str) -> list[str]:
-        lifetime = HookRegistryState(registry).lifetime(agent_name)
-        context = replace(_message_enrich_context(tmp_path), _hook_registry_state=lifetime)
-        return [item.key for item in await emit_collect(registry, EVENT_MESSAGE_ENRICH, context)]
+        context = replace(_message_enrich_context(tmp_path), _hook_registry_state=registry.lifetime(agent_name))
+        return [item.key for item in await emit_collect(registry.registry, EVENT_MESSAGE_ENRICH, context)]
 
     assert (await items_as("research"), await items_as("code")) == ([], ["steward"])
     assert await journal_store.room_event_owner(_STEWARD_ROOM, "$event", "hook:message:enrich") is None

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import EventJournalStore
-    from mindroom.hooks import HookRegistryState
+    from mindroom.hooks import HookBindings, HookRegistryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
@@ -107,6 +107,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     def observe_room_activity(self, room_id: str) -> None:
         """Note that a bot admitted a conversation event in one room."""
+        ...
+
+    def service_hook_bindings(self) -> HookBindings:
+        """Return the hook bindings of the runtime's own emissions, which each room's poster and steward back."""
         ...
 
     def room_steward(self, room_id: str) -> AgentBot | None:

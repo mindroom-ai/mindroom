@@ -1542,12 +1542,7 @@ async def test_service_bot_ready_fires_once_per_start(tmp_path: Path) -> None:
     )
 
     await code._emit_agent_lifecycle_event(EVENT_BOT_READY)
-    await emit_service_bot_ready(
-        orchestrator.service_hook_bindings(),
-        orchestrator.config,
-        orchestrator.runtime_paths,
-        orchestrator.agent_bots.values(),
-    )
+    await emit_service_bot_ready(orchestrator)
     await general._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
     assert calls == [("agent", "code"), ("service", ROUTER_AGENT_NAME), ("agent", "general")]
@@ -1565,12 +1560,7 @@ async def test_service_context_lists_union_of_joined_rooms(tmp_path: Path) -> No
 
     orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
-    await emit_service_bot_ready(
-        orchestrator.service_hook_bindings(),
-        orchestrator.config,
-        orchestrator.runtime_paths,
-        orchestrator.agent_bots.values(),
-    )
+    await emit_service_bot_ready(orchestrator)
 
     [ctx] = captured
     assert (ctx.entity_name, ctx.entity_type) == (ROUTER_AGENT_NAME, "router")

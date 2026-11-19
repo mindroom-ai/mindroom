@@ -44,9 +44,6 @@ class HookRegistry:
 
     _hooks_by_event: dict[str, tuple[RegisteredHook, ...]]
     automations: AutomationCatalog = field(default_factory=AutomationCatalog)
-    # Set by the runtime that emits to this snapshot: whether the bot of a name runs a room's room-scoped hooks,
-    # given ``(agent_name, room_id, event_name, event_id)`` with the Matrix event the emission is for, if it is one.
-    room_hook_owner: Callable[[str, str, str, str | None], Awaitable[bool]] | None = None
 
     @classmethod
     def empty(cls) -> HookRegistry:
@@ -168,6 +165,9 @@ class HookRegistryState:
     """
 
     registry: HookRegistry
+    # Set by the runtime: whether the bot of a name runs a room's room-scoped hooks, given
+    # ``(agent_name, room_id, event_name, event_id)`` with the Matrix event the emission is for, if it is one.
+    room_hook_owner: Callable[[str, str, str, str | None], Awaitable[bool]] | None = None
 
     def lifetime(self, emitter: str | None = None) -> HookRegistryLifetime:
         """Return a view of this holder for one lifetime that can end on its own: a bot generation's names that bot."""
@@ -192,6 +192,11 @@ class HookRegistryLifetime:
     def registry(self) -> HookRegistry:
         """Return the runtime's current snapshot, or this lifetime's own empty registry once it ended."""
         return self._source.registry
+
+    @property
+    def room_hook_owner(self) -> Callable[[str, str, str, str | None], Awaitable[bool]] | None:
+        """Return the runtime's answer to which bot runs a room's room-scoped hooks, None once this lifetime ended."""
+        return self._source.room_hook_owner
 
     def end(self) -> None:
         """End this lifetime; its view holds no hooks from now on."""
