@@ -159,7 +159,8 @@ class IngressValidator:
             source_kind=content_source_kind,
         )
         lane_requester_id = self._resolve_alias(promoted_requester or sender)
-        acting_requester_id = self._acting_requester_id(sender_entity_name, trusted_content, content_source_kind)
+        sender_replies = self._sender_replies(sender)
+        acting_requester_id = self._acting_requester_id(sender_replies, trusted_content, content_source_kind)
         # The agent's own messages never start a contact turn, so its replies written for the owner stay its echo.
         contact = (
             None
@@ -212,7 +213,7 @@ class IngressValidator:
             routed_event_ids=routed_event_ids,
             discovery_event_id=(routed_event_ids[-1] if routed_event_ids else None)
             or visible_relay_original_event_id
-            or _final_reply_original_event_id(sender_entity_name, source_dict),
+            or _final_reply_original_event_id(sender_replies, source_dict),
             sender_entity_name=sender_entity_name,
             requester_entity_name=self.managed_entity_name_for_sender(acting_requester_id or lane_requester_id),
             mention_names=mention_names,
@@ -239,7 +240,7 @@ class IngressValidator:
 
     def _acting_requester_id(
         self,
-        sender_entity_name: str | None,
+        sender_replies: bool,
         trusted_content: Mapping[str, Any],
         content_source_kind: str | None,
     ) -> str | None:
@@ -252,7 +253,7 @@ class IngressValidator:
         acting_requester = trusted_content.get(ACTING_REQUESTER_KEY)
         if (
             not isinstance(acting_requester, str)
-            or sender_entity_name in {None, ROUTER_AGENT_NAME}
+            or not sender_replies
             or content_source_kind not in {None, MESSAGE_SOURCE_KIND}
             or not self._is_access_checked(acting_requester)
         ):
@@ -262,7 +263,7 @@ class IngressValidator:
     def entity_final_reply_original_event_id(self, event: DispatchEvent | MatrixMediaEvent) -> str | None:
         """Return the reply a managed entity's completed edit finalizes, or None for any other event."""
         source = event.source if isinstance(event.source, dict) else {}
-        return _final_reply_original_event_id(self.managed_entity_name_for_sender(event.sender), source)
+        return _final_reply_original_event_id(self._sender_replies(event.sender), source)
 
     def entity_final_reply(self, event: nio.RoomMessageFormatted) -> nio.RoomMessageFormatted | None:
         """Return a managed entity's completed edit as the reply message it finalizes.
@@ -282,6 +283,11 @@ class IngressValidator:
     def sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata: the entity registry manages it."""
         return self.managed_entity_name_for_sender(sender_id) is not None
+
+    def _sender_replies(self, sender_id: str) -> bool:
+        """Return whether one sender is an agent or a team: the owner account is managed yet writes no reply."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return registry.is_managed_user_id(sender_id, include_router=False)
 
     def managed_entity_name_for_sender(self, sender_id: str) -> str | None:
         """Return the configured entity alias for an exact current Matrix user ID."""
@@ -388,14 +394,10 @@ def _is_falling_back_reply(content: Mapping[str, Any]) -> bool:
     return isinstance(relates_to, dict) and relates_to.get("is_falling_back") is True
 
 
-def _final_reply_original_event_id(sender_entity_name: str | None, source: dict[str, Any]) -> str | None:
-    """Return the reply a managed non-router entity's completed edit finalizes."""
+def _final_reply_original_event_id(sender_replies: bool, source: dict[str, Any]) -> str | None:
+    """Return the reply an agent's or a team's completed edit finalizes."""
     content = source.get("content")
-    if (
-        not isinstance(content, dict)
-        or content.get(STREAM_STATUS_KEY) != STREAM_STATUS_COMPLETED
-        or sender_entity_name in {None, ROUTER_AGENT_NAME}
-    ):
+    if not isinstance(content, dict) or content.get(STREAM_STATUS_KEY) != STREAM_STATUS_COMPLETED or not sender_replies:
         return None
     return EventInfo.from_event(source).original_event_id
 

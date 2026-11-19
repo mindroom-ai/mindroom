@@ -13,7 +13,6 @@ from mindroom.background_tasks import create_background_task, run_blocking_until
 from mindroom.constants import (
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     resolve_config_relative_path,
 )
@@ -586,7 +585,8 @@ class PersonalRoomService:
         }
         removed = sorted(names.values())
         # Nobody talks to the owner account, so a new room with it helps nobody.
-        agents = sorted(name for user_id, name in names.items() if prepared.get(user_id) != ROUTER_AGENT_NAME)
+        owner_id = persisted_owner_matrix_id(self.runtime_paths)
+        agents = sorted(name for user_id, name in names.items() if user_id != owner_id)
         notice = _AGENT_REMOVAL_NOTICE.format(agents=join_names(removed, "and"), pronoun=_pronoun(removed))
         if agents:
             notice += _AGENT_REMOVAL_ADVICE.format(agents=join_names(agents, "and"), pronoun=_pronoun(agents))

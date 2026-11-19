@@ -116,7 +116,7 @@ from mindroom.streaming import (
     UnfinishedStreamedReply,
 )
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
-from mindroom.teams.members import allow_direct_private_team_agents, requested_team_agent_names
+from mindroom.teams.members import allow_direct_private_team_agents
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
 from mindroom.timing import bind_reply_pipeline_timing, timed
@@ -1578,7 +1578,7 @@ class ResponseRunner:
                         thread_id=resolved_target.resolved_thread_id,
                         explicit=request.scheduled_model,
                     ),
-                    requested_team_agent_names(team.member_names),
+                    list(team.member_names),
                     self._turn_budget(request),
                 )
             )
@@ -1701,7 +1701,7 @@ class ResponseRunner:
         execution_identity = tool_context.execution_identity
         configured_team_name = self.deps.runtime.config.configured_team_name(self.deps.agent_name)
         self.deps.runtime.config.assert_team_agents_supported(
-            requested_team_agent_names(agent_names),
+            agent_names,
             allow_direct_private_agents=allow_direct_private_team_agents(
                 execution_identity,
                 configured_team_name=configured_team_name,

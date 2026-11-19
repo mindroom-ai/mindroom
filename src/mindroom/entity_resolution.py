@@ -108,12 +108,7 @@ def configured_bot_user_ids_for_room(
     if not configured_names:
         return set()
     config_ids = entity_identity_registry(config, runtime_paths).current_ids
-    configured_bots = {config_ids[entity_name].full_id for entity_name in configured_names}
-
-    if configured_bots:
-        configured_bots.add(config_ids[ROUTER_AGENT_NAME].full_id)
-
-    return configured_bots
+    return {config_ids[entity_name].full_id for entity_name in (*configured_names, ROUTER_AGENT_NAME)}
 
 
 def is_configured_room(
@@ -139,8 +134,6 @@ def configured_routable_entity_names_for_room(
     configured_names: list[str] = []
 
     for agent_name, agent_config in config.agents.items():
-        if agent_name == ROUTER_AGENT_NAME:
-            continue
         if not room_refs.isdisjoint(agent_config.rooms):
             configured_names.append(agent_name)
 

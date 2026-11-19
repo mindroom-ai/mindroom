@@ -9,6 +9,7 @@ from mindroom.tool_system.authoring import Toolkit
 # Last legacy release: every release before the router-free change ships, v2026.11.411 the newest when written,
 #   offers the working tool; replacement: unreleased, rooms need no router account, so nothing replaces the call.
 # Handling: the name stays registered so such configs load; the call invites nobody and says it is not needed.
+#   Remove the stub after the first router-free release.
 # Coverage: tests/test_invite_router_tool.py::test_invite_router_answers_no_longer_needed
 
 

@@ -1937,7 +1937,6 @@ depends_on = ["mindroom.llm", "mindroom.tool_system.events"]
 path = "mindroom.api.openai_request_parsing"
 depends_on = [
     "mindroom.api.openai_streaming_protocol",
-    "mindroom.constants",
     "mindroom.matrix.client_visible_messages",
     "mindroom.config.resolution",
 ]
@@ -2500,7 +2499,6 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
-    "mindroom.matrix.state",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary.notices",
 ]
@@ -6246,7 +6244,6 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.coalescing.ingress_ticket",
     "mindroom.commands.parsing",
-    "mindroom.constants",
     "mindroom.dispatch_callback_outcome",
     "mindroom.dispatch_recovery_context",
     "mindroom.event_journal",
@@ -6738,7 +6735,6 @@ expose = [
     "members.ResolvedExactTeamMembers",
     "members.allow_direct_private_team_agents",
     "members.build_team_spec",
-    "members.requested_team_agent_names",
     "members.resolve_exact_team_members",
     "presentation.strip_team_display",
     "resume.continue_paused_team_run",
