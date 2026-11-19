@@ -317,9 +317,8 @@ function AgentSection({
   const [editorDirty, setEditorDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [signInNext, setSignInNext] = useState<ServiceEditing["signInNext"]>(
-    null,
-  );
+  const [signInNext, setSignInNext] =
+    useState<ServiceEditing["signInNext"]>(null);
   const operation = useRef<AbortController | null>(null);
 
   useEffect(() => () => operation.current?.abort(), []);

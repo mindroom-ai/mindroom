@@ -55,7 +55,11 @@ export interface ServiceEditing {
    * listing shows it with that login, not while the row it replaces still shows. With `toolsAccount`, a service
    * just added to use the tools' account asks to let commands use it, or to connect it first.
    */
-  signInNext?: { name: string; provider: string; toolsAccount?: boolean } | null;
+  signInNext?: {
+    name: string;
+    provider: string;
+    toolsAccount?: boolean;
+  } | null;
   /** Called once that row has asked, so it asks only once. */
   onSignInOpened?: () => void;
 }
