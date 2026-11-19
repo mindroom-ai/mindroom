@@ -3202,7 +3202,7 @@ def test_get_tool_by_name_loads_persisted_non_secret_file_config(tmp_path: Path)
     workspace.mkdir(parents=True, exist_ok=True)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     save_scoped_credentials(
-        "file",
+        "filesystem",
         {
             "base_dir": str(workspace),
             "enable_delete_file": True,
@@ -6869,7 +6869,7 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
 
         try:
             progress_event = await asyncio.wait_for(progress_queue.get(), timeout=5.0)
-            assert progress_event.tool_name == "file"
+            assert progress_event.tool_name == "filesystem"
             assert progress_event.function_name == "read_file"
             assert progress_event.progress.phase == "cold_start"
             assert call_task.done() is False

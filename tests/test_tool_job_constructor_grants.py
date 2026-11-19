@@ -45,13 +45,8 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize(
     ("toolkit_name", "function_name", "flag", "arguments"),
     [
-        ("file", "save_file", "enable_save_file", {"file_name": "nested.txt", "contents": "accepted"}),
-        (
-            "shell",
-            "run_shell_command",
-            "enable_run_shell_command",
-            {"args": ["sh", "-c", "printf accepted > nested.txt"]},
-        ),
+        ("filesystem", "delete_file", "enable_delete_file", {"path": "doomed.txt"}),
+        ("shell", "run_shell_command", "enable_run_shell_command", {"args": ["rm", "doomed.txt"]}),
     ],
 )
 async def test_retained_tool_constructor_grants_gate_nested_execution_and_results(  # noqa: PLR0915
@@ -67,6 +62,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
 
     The refused nested call fails as that call, so the outer work reports it.
     """
+    (tmp_path / "doomed.txt").write_text("kept")
     config = managed_team_config(tmp_path)
     config.defaults.tools = []
     entry = ToolConfigEntry(name=toolkit_name, defer=deferred, overrides={flag: True})
@@ -98,7 +94,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
         started.set()
         await release.wait()
         try:
-            record = await run_job_turn(actor, model, "Write the marker", session_id=owner.session_id or "session")
+            record = await run_job_turn(actor, model, "Delete the marker", session_id=owner.session_id or "session")
             [nested] = record.tools or []
             return BackgroundOutcome("failed" if nested.is_error else "completed", str(nested.result))
         finally:
@@ -136,14 +132,14 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                 release.set()
                 await asyncio.wait_for(finished.wait(), JOB_TEST_TIMEOUT)
                 if revoked:
-                    assert not (tmp_path / "nested.txt").exists()
+                    assert (tmp_path / "doomed.txt").exists()
                     assert await runtime.list_jobs(owner=owner, depth=0) == []
                     assert pending_outcome(runtime, job.job_id) is None
                     with pytest.raises(JobAccessError):
                         await lookup(runtime, job.job_id, owner=owner, depth=0)
                     entry.overrides[flag] = True
                 else:
-                    assert (tmp_path / "nested.txt").read_text() == "accepted"
+                    assert not (tmp_path / "doomed.txt").exists()
                 waited = await runtime.wait(job.job_id, owner=owner, depth=0, claim=claim)
                 if revoked:
                     assert waited.job.status == "failed"
