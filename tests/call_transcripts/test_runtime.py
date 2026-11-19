@@ -42,10 +42,15 @@ def _config(*, enabled: bool) -> Config:
     return Config(calls=CallsConfig(transcripts=CallTranscriptsConfig(enabled=enabled)))
 
 
-def _router(*, running: bool = True, synced: bool = True) -> MagicMock:
-    """A router bot, answering no calls, whose client is in ``ROOM`` and finds Ann joined to it."""
+def _router(
+    *,
+    running: bool = True,
+    synced: bool = True,
+    user_id: str = "@mindroom_router:example.org",
+) -> MagicMock:
+    """A bot, the owner account's unless named, answering no calls, whose client is in ``ROOM`` and finds Ann joined."""
     client = MagicMock(spec=nio.AsyncClient)
-    client.user_id = "@mindroom_router:example.org"
+    client.user_id = user_id
     client.rooms = {ROOM: nio.MatrixRoom(ROOM, client.user_id)}
 
     async def state(room_id: str) -> nio.RoomGetStateResponse:
@@ -117,6 +122,12 @@ def _bots(router: MagicMock) -> dict[str, AgentBot]:
     return {ROUTER_AGENT_NAME: router}
 
 
+def _bind(coordinator: CallTranscriptsRuntimeCoordinator, config: Config, bots: Mapping[str, AgentBot]) -> None:
+    """Make ``bots`` the runtime's live bots and bind, as the orchestrator does once they run."""
+    coordinator.bots = lambda: bots
+    coordinator.bind_if_ready(config, bots)
+
+
 async def _room_cannot_be_checked(service: CallTranscriptService) -> bool:
     """Return whether the service answers that the room cannot be checked, as it does without a ready router."""
     try:
@@ -166,7 +177,7 @@ async def test_the_service_reads_rooms_through_the_router_only_while_it_is_bound
 
     assert await _room_cannot_be_checked(service)
 
-    coordinator.bind_if_ready(config, _bots(router))
+    _bind(coordinator, config, _bots(router))
     assert await _room_cannot_be_checked(service)
 
     router.first_sync_complete = True
@@ -200,7 +211,7 @@ async def test_a_calls_thread_is_titled_again_by_the_bound_router_only(tmp_path:
     )
 
     service._room.title_thread(message, "$notes")
-    coordinator.bind_if_ready(config, _bots(router))
+    _bind(coordinator, config, _bots(router))
     service._room.title_thread(message, "$notes")
     coordinator.unbind()
     service._room.title_thread(message, "$notes")
@@ -215,22 +226,48 @@ async def test_a_calls_thread_is_titled_again_by_the_bound_router_only(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_binding_waits_for_a_running_router_and_for_call_transcripts_to_be_on(tmp_path: Path) -> None:
-    """Nothing binds without a running router, or while off; a later bind replaces a stopped router."""
+async def test_a_room_without_the_owner_account_is_read_and_posted_to_by_its_agent(tmp_path: Path) -> None:
+    """With one person, one agent and no owner account in the room, the agent posts the row and titles its thread."""
+    config = _config(enabled=True)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), lambda: config, _Sleeps())
+    service = coordinator.service()
+    assert service is not None
+    agent = _router(user_id="@mindroom_code:example.org")
+    elsewhere = _router()
+    elsewhere.client.rooms = {}
+    agent.client.room_send.return_value = nio.RoomSendResponse("$row", ROOM)
+    _bind(coordinator, config, {ROUTER_AGENT_NAME: elsewhere, "code": agent})
+
+    assert service._room.poster_joined(ROOM) is True
+    assert (await service.live(ROOM, ANN)).call is None
+    assert await service._room.post_row(ROOM, "call1") == "$row"
+    service._room.retitle(ROOM, "$row", "$notes", "We planned the launch.")
+    assert service._room.poster_joined("!nobody:example.org") is False
+    await coordinator.stop()
+
+    agent.client.room_send.assert_awaited_once()
+    agent.post_response_effects.retitle_thread.assert_called_once()
+    elsewhere.client.room_send.assert_not_awaited()
+    elsewhere.client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_binding_waits_for_a_running_bot_and_for_call_transcripts_to_be_on(tmp_path: Path) -> None:
+    """Nothing binds without a running bot, or while off; a later bind replaces a stopped bot."""
     paths = test_runtime_paths(tmp_path)
     config = _config(enabled=True)
     coordinator = _coordinator(paths, lambda: config, _Sleeps())
     service = coordinator.service()
     assert service is not None
 
-    coordinator.bind_if_ready(config, {})
-    coordinator.bind_if_ready(config, _bots(_router(running=False)))
-    coordinator.bind_if_ready(_config(enabled=False), _bots(_router()))
+    _bind(coordinator, config, {})
+    _bind(coordinator, config, _bots(_router(running=False)))
+    _bind(coordinator, _config(enabled=False), _bots(_router()))
     assert await _room_cannot_be_checked(service)
 
-    coordinator.bind_if_ready(config, _bots(_router()))
+    _bind(coordinator, config, _bots(_router()))
     assert (await service.live(ROOM, ANN)).call is None
-    coordinator.bind_if_ready(_config(enabled=False), _bots(_router()))
+    _bind(coordinator, _config(enabled=False), _bots(_router()))
     assert await _room_cannot_be_checked(service)
     await coordinator.stop()
 
@@ -261,7 +298,7 @@ async def test_turning_call_transcripts_off_stops_the_writes_under_way_and_sends
         return nio.RoomSendResponse("$sent", ROOM)
 
     router.client.room_send.side_effect = room_send
-    coordinator.bind_if_ready(config, _bots(router))
+    _bind(coordinator, config, _bots(router))
     service = coordinator.service()
     assert service is not None
     call = await service.join(ROOM, ANN)
@@ -271,7 +308,7 @@ async def test_turning_call_transcripts_off_stops_the_writes_under_way_and_sends
 
     config = _config(enabled=False)
     assert await service._room.post_row(ROOM, call.id) is None
-    coordinator.bind_if_ready(config, _bots(router))
+    _bind(coordinator, config, _bots(router))
     await asyncio.wait([write], timeout=5)
 
     assert write.cancelled()
@@ -300,7 +337,7 @@ async def test_the_loop_ticks_while_on_idles_while_off_and_reads_the_config_each
     sleeps = _Sleeps()
     coordinator = _coordinator(paths, lambda: config, sleeps)
 
-    coordinator.bind_if_ready(config, _bots(_router()))
+    _bind(coordinator, config, _bots(_router()))
     await sleeps.until(lambda: len(ticks) >= 2)
     assert sleeps.delays[:2] == [4.0, 4.0]
 
@@ -327,7 +364,7 @@ async def test_while_off_the_loop_holds_the_store_to_a_day_and_reads_and_writes_
     sleeps = _Sleeps()
     coordinator = _coordinator(paths, lambda: config, sleeps)
     router = _router()
-    coordinator.bind_if_ready(config, _bots(router))
+    _bind(coordinator, config, _bots(router))
     await sleeps.until(lambda: len(sleeps.delays) >= 2)
     assert not (paths.storage_root / "call_transcripts").exists()
 
@@ -386,14 +423,14 @@ async def test_off_and_back_on_between_two_passes_ends_nothing(tmp_path: Path) -
         return call.id
 
     before = start_call(ROOM)
-    coordinator.bind_if_ready(config, {})
+    _bind(coordinator, config, {})
     async with asyncio.timeout(5):
         await slept.wait()
 
     config = _config(enabled=False)
-    coordinator.bind_if_ready(config, {})
+    _bind(coordinator, config, {})
     config = _config(enabled=True)
-    coordinator.bind_if_ready(config, {})
+    _bind(coordinator, config, {})
     after = start_call(OTHER_ROOM)
     slept.clear()
     woken.set()
@@ -426,7 +463,7 @@ async def test_a_failing_pass_never_stops_the_loop(tmp_path: Path, monkeypatch: 
     sleeps = _Sleeps()
     coordinator = _coordinator(paths, lambda: config, sleeps)
 
-    coordinator.bind_if_ready(config, _bots(_router()))
+    _bind(coordinator, config, _bots(_router()))
     await sleeps.until(lambda: len(ticks) >= 3)
 
     assert sleeps.delays[:2] == [15.0, 2.0]
@@ -467,7 +504,7 @@ async def test_stopping_ends_the_loop_and_unbinds_the_router(tmp_path: Path, mon
     config = _config(enabled=True)
     sleeps = _Sleeps()
     coordinator = _coordinator(paths, lambda: config, sleeps)
-    coordinator.bind_if_ready(config, _bots(_router()))
+    _bind(coordinator, config, _bots(_router()))
     await sleeps.until(lambda: len(ticks) >= 1)
 
     await coordinator.stop()
@@ -534,20 +571,18 @@ async def test_an_agent_call_cannot_be_read_while_its_agent_is_not_ready(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("entities", "unbound"), [({ROUTER_AGENT_NAME, "general"}, True), ({"general"}, False)])
-async def test_the_orchestrator_unbinds_call_transcripts_only_when_the_router_changes(
+@pytest.mark.parametrize("entities", [{ROUTER_AGENT_NAME, "general"}, {"general"}])
+async def test_the_orchestrator_unbinds_call_transcripts_when_any_entity_changes(
     tmp_path: Path,
     entities: set[str],
-    *,
-    unbound: bool,
 ) -> None:
-    """A router replacement unbinds before the router stops; another entity's restart leaves calls be."""
+    """Any bot may be a room's steward or poster, so calls stop reading and posting before any of them stops."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path), config=Config())
 
     with patch.object(orchestrator._call_transcripts_runtime, "unbind") as unbind:
         await orchestrator._entities_changing(entities)
 
-    assert unbind.called is unbound
+    unbind.assert_called_once_with()
 
 
 def test_the_orchestrator_binds_call_transcripts_with_the_other_router_runtimes(tmp_path: Path) -> None:

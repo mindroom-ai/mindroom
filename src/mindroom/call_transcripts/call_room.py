@@ -1,6 +1,6 @@
-"""What the router knows and does in a call's room: its members, who may post there, and the router's call messages.
+"""What MindRoom knows and does in a call's room: its members, who may post there, and the call's messages.
 
-All of it goes through the router's own Matrix client, so nothing is read or sent while the router is not ready.
+The room is read through its steward's Matrix client and posted to through its poster's, both picked by the runtime.
 Each room's state is read once and reused for a few seconds, however many heartbeats ask about the room meanwhile.
 """
 
@@ -78,41 +78,44 @@ class _StateRead:
 
 
 @dataclass(frozen=True, slots=True)
-class RouterCallRoom:
-    """The rooms calls are in, as the router sees them; while it is not ready nothing can be told or posted."""
+class CallRoom:
+    """The rooms calls are in, as their MindRoom accounts see them; while not ready nothing can be told or posted."""
 
-    client: Callable[[], nio.AsyncClient | None]
-    """The router's client while it runs and has synced, else None."""
+    ready: Callable[[], bool]
+    """Whether the runtime's accounts can read and post now."""
+    reader: Callable[[str], nio.AsyncClient | None]
+    """The client that reads a room, its steward's; None for a room no account is in."""
+    poster: Callable[[str], nio.AsyncClient | None]
+    """The client that posts a room's call messages, its poster's; None for a room no account is in."""
     retitle: Callable[[str, str, str, str], None]
-    """Have the router title a thread again now, nothing while it is away.
+    """Have the room's poster title a thread again now.
 
-    Given the room, the thread's root, and the event ID and body of the message the router just posted there.
+    Given the room, the thread's root, and the event ID and body of the message the poster just sent there.
     """
     monotonic: Callable[[], float] = time.monotonic
     """A clock that never jumps, which times how long one read of a room's state is reused."""
     _reads: dict[str, _StateRead] = field(default_factory=dict, init=False, repr=False, compare=False)
 
-    def router_joined(self, room_id: str) -> bool | None:
-        """Return whether the router is joined to the room, as of its last sync; None while it is not ready."""
-        client = self.client()
-        return None if client is None else room_id in client.rooms
+    def poster_joined(self, room_id: str) -> bool | None:
+        """Return whether an account that posts call messages is joined to the room; None while not ready."""
+        return self.poster(room_id) is not None if self.ready() else None
 
     async def is_member(self, room_id: str, user_id: str) -> bool | None:
-        """Return whether the person is joined to the room; nobody is a member of a room the router is not in."""
-        client = self.client()
-        if client is None:
+        """Return whether the person is joined to the room; nobody is a member of a room no account is in."""
+        if not self.ready():
             return None
-        if room_id not in client.rooms:
+        client = self.reader(room_id)
+        if client is None:
             return False
         state = await self._state(client, room_id)
         return None if state is None else state.content("m.room.member", user_id).get("membership") == "join"
 
     async def may_post(self, room_id: str, user_id: str) -> bool | None:
         """Return whether the room's power levels let the person send messages, as the room's message event type."""
-        client = self.client()
-        if client is None:
+        if not self.ready():
             return None
-        if room_id not in client.rooms:
+        client = self.reader(room_id)
+        if client is None:
             return False
         state = await self._state(client, room_id)
         if state is None:
@@ -122,18 +125,20 @@ class RouterCallRoom:
         required = send_power_level(power_levels, state.message_type())
         return user_power_level(power_levels, user_id, state.creators()) >= required
 
-    async def router_may_post(self, room_id: str) -> bool | None:
-        """Return whether the room's power levels let the router send messages, as the room's message event type."""
-        client = self.client()
-        return None if client is None else await self.may_post(room_id, client.user_id)
+    async def poster_may_post(self, room_id: str) -> bool | None:
+        """Return whether the room's power levels let its poster send messages; no poster may not."""
+        if not self.ready():
+            return None
+        client = self.poster(room_id)
+        return False if client is None else await self.may_post(room_id, client.user_id)
 
     async def display_names(self, room_id: str, user_ids: Collection[str]) -> Mapping[str, str | None] | None:
         """Return each person's display name from their membership in the room, None for someone without one.
 
-        None when the room cannot be read, such as while the router is not ready or not in the room.
+        None when the room cannot be read, such as while not ready or in a room no account is in.
         """
-        client = self.client()
-        if client is None or room_id not in client.rooms:
+        client = self.reader(room_id) if self.ready() else None
+        if client is None:
             return None
         state = await self._state(client, room_id)
         if state is None:
@@ -197,9 +202,9 @@ class RouterCallRoom:
         )
 
     def title_thread(self, message: TranscriptMessage, event_id: str) -> None:
-        """Have the router retitle the row's thread from the message ``event_id`` it just posted there.
+        """Have the poster retitle the row's thread from the message ``event_id`` it just posted there.
 
-        This runs in the background, as after the router's replies, and leaves a title someone pinned in place.
+        This runs in the background, as after an agent's replies, and leaves a title someone pinned in place.
         """
         self.retitle(message.room_id, message.row_event_id, event_id, _without_mentions(message.body))
 
@@ -229,13 +234,13 @@ class RouterCallRoom:
         operation: str,
         sidecar_required: bool = False,
     ) -> str | None:
-        """Send one message through the router's client while it is ready; return its event ID, None if not sent.
+        """Send one message through the room poster's client while ready; return its event ID, None if not sent.
 
-        It is a transaction derived from its call, so sending it again never posts a second one. It goes out only if
-        that client is still the router's, checked last before the send, after any upload: once call transcripts are
-        off or the router stopped, a message being prepared is not sent.
+        It is a transaction derived from its call, so the same poster sending it again never posts a second one.
+        It goes out only if that client is still the room's poster's, checked last before the send, after any upload:
+        once call transcripts are off or the poster stopped, a message being prepared is not sent.
         """
-        client = self.client()
+        client = self.poster(room_id) if self.ready() else None
         if client is None:
             return None
         try:
@@ -245,7 +250,7 @@ class RouterCallRoom:
                 content,
                 operation=operation,
                 transaction_id=transaction_id,
-                write_allowed=lambda: self.client() is client,
+                write_allowed=lambda: self.ready() and self.poster(room_id) is client,
                 sidecar_required=sidecar_required,
             )
         except _MATRIX_ERRORS as error:

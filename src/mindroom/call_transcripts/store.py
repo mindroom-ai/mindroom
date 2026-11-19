@@ -79,7 +79,7 @@ class StoredCall:
     ended_at: float | None
     """None while the call is live."""
     row_event_id: str | None
-    """The event ID of the notice the router posts for the call; None until it is up."""
+    """The event ID of the notice the room's poster posts for the call; None until it is up."""
     retry_at: float | None
     """When the call's Matrix writes may be tried again after one failed; None until one fails."""
     notes_failures: int

@@ -793,8 +793,7 @@ class _MultiAgentOrchestrator:
         """Withdraw capabilities bound to these entities before any of them stops."""
         self._external_trigger_runtime.unbind()
         self._computer_runtime.unbind()
-        if ROUTER_AGENT_NAME in entity_names:
-            self._call_transcripts_runtime.unbind()
+        self._call_transcripts_runtime.unbind()
         await self.scheduled_tasks.release(entity_names)
 
     async def _reconcile_removed_entities(self, entity_names: set[str]) -> set[str]:

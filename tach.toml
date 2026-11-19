@@ -3215,7 +3215,6 @@ depends_on = [
 path = "mindroom.orchestration.external_trigger_runtime"
 depends_on = [
     "mindroom.api.main",
-    "mindroom.constants",
     "mindroom.matrix.client_room_admin",
 ]
 
@@ -4079,7 +4078,7 @@ path = "mindroom.matrix.client_delivery"
 depends_on = ["mindroom.llm", "mindroom.matrix.guarded_rooms"]
 visibility = [
     "mindroom.bot_room_lifecycle",
-    "mindroom.call_transcripts.router_room",
+    "mindroom.call_transcripts.call_room",
     "mindroom.custom_tools.thread_move",
     "mindroom.matrix.personal_rooms",
     "mindroom.custom_tools.matrix_message_idempotency",
@@ -4137,7 +4136,7 @@ visibility = [
 path = "mindroom.matrix.room_power"
 depends_on = []
 visibility = [
-    "mindroom.call_transcripts.router_room",
+    "mindroom.call_transcripts.call_room",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.personal_rooms",
     "mindroom.matrix.room_reconciliation",
@@ -10302,7 +10301,7 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.call_transcripts.router_room"
+path = "mindroom.call_transcripts.call_room"
 depends_on = [
     "mindroom.call_transcripts",
     "mindroom.constants",
@@ -10314,6 +10313,6 @@ depends_on = [
 path = "mindroom.orchestration.call_transcripts_runtime"
 depends_on = [
     "mindroom.call_transcripts",
-    "mindroom.call_transcripts.router_room",
-    "mindroom.constants",
+    "mindroom.call_transcripts.call_room",
+    "mindroom.room_steward",
 ]
