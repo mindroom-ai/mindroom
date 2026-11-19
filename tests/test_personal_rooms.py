@@ -3021,30 +3021,6 @@ async def test_imported_policy_does_not_change_new_room_defaults(
 
 
 @pytest.mark.asyncio
-async def test_extra_router_member_does_not_grant_cleanup_retention(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only the separate router field lets cleanup keep a departed router room."""
-    server = MatrixServer()
-    router, _ = bots(tmp_path, server, monkeypatch)
-    await router._personal_room_lifecycle._onboard("@alice:localhost", "!lobby:localhost")
-    room_id = "!personal1:localhost"
-    path = personal_room_record_path(router.runtime_paths, "helper", "@alice:localhost")
-    record = read_personal_room(path)
-    record.adoption = PersonalRoomAdoption(
-        creator_user_id=server.user_id,
-        agent_user_id=server.user_id,
-        additional_user_ids=["@mindroom_router:localhost"],
-    )
-    write_personal_room(path, record)
-    router.config.personal_rooms = None
-    router.client = SimpleNamespace(user_id="@mindroom_router:localhost")
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[room_id]))
-    assert await router._room_lifecycle._rooms_to_leave() == [room_id]
-
-
-@pytest.mark.asyncio
 async def test_self_command_accepts_human_bridge_alias_without_trusting_forged_requester(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

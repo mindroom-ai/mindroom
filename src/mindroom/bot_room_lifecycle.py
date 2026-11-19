@@ -39,7 +39,6 @@ from mindroom.matrix.invited_rooms_store import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.rooms import leave_non_dm_rooms
-from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.thread_summary.notices import send_welcome_thread_summary
@@ -420,6 +419,9 @@ class BotRoomLifecycle:
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or ())
+        if not self._should_accept_invite():
+            # A room saved for an account that accepts no invite is one it keeps, never one to join.
+            invited_rooms &= current_rooms
         desired_rooms = set(self.deps.get_configured_rooms())
         desired_rooms.update(self.deps.get_retained_room_ids())
         desired_rooms.update(invited_rooms)
@@ -535,6 +537,9 @@ class BotRoomLifecycle:
         A room that one of the rooms this bot stays in lists, as this bot would follow it, is not returned but kept as
         followed from then on.
         """
+        if self.deps.agent_name == ROUTER_AGENT_NAME:
+            # The owner account stays in every room it joined: it administers rooms no configuration lists.
+            return []
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         if joined_rooms is None:
@@ -550,10 +555,6 @@ class BotRoomLifecycle:
             configured_rooms.update(
                 await asyncio.to_thread(contact_room_ids, config, self.deps.runtime_paths, self.deps.agent_name),
             )
-        if self.deps.agent_name == ROUTER_AGENT_NAME:
-            # The router maintains the root Space and the server emoji room outside the configured rooms.
-            state = matrix_state_for_runtime(self.deps.runtime_paths)
-            configured_rooms.update(room_id for room_id in (state.space_room_id, state.server_emoji_room_id) if room_id)
 
         leaving, parent_ids = current_rooms - configured_rooms, current_rooms & configured_rooms
         # A room kept this way can list others in turn, so the rooms it lists are checked against it next.
