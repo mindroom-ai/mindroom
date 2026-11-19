@@ -319,7 +319,7 @@ class AgentBot:
         )
         self._ingestion_session = None
         # This generation's view of the runtime's hook registry; its stop ends it, so hooks it bound turn inactive.
-        self._hook_registry_state = orchestrator.hook_registry_state.lifetime()
+        self._hook_registry_state = orchestrator.hook_registry_state.lifetime(self.agent_name)
         self._runtime_view = BotRuntimeState(orchestrator=orchestrator)
         self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
         self._call_manager: CallManager | None = None

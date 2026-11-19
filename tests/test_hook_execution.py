@@ -806,7 +806,7 @@ async def _emit_message_as(registry: HookRegistry, tmp_path: Path, agent_name: s
     context = replace(
         _message_received_context(tmp_path),
         envelope=_envelope(agent_name=agent_name),
-        _emitter=agent_name,
+        _hook_registry_state=HookRegistryState(registry).lifetime(agent_name),
     )
     await emit(registry, EVENT_MESSAGE_RECEIVED, context)
 
@@ -884,6 +884,28 @@ async def test_room_scope_runs_once_when_steward_changes_between_emissions(
     await _emit_message_as(registry, tmp_path, "research")
 
     assert calls == ["code"]
+
+
+@pytest.mark.asyncio
+async def test_room_scope_on_an_event_without_a_matrix_event_runs_for_the_steward_only(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """An event one bot emits for itself runs its room-scoped hooks only when that bot is the room's steward."""
+
+    @hook(EVENT_MESSAGE_ENRICH, scope="room")
+    async def enrich(ctx: MessageEnrichContext) -> None:
+        ctx.add_metadata("steward", "ran")
+
+    registry = _stewarded_registry([enrich], {"research": 0, "code": 0}, journal_store)
+
+    async def items_as(agent_name: str) -> list[str]:
+        lifetime = HookRegistryState(registry).lifetime(agent_name)
+        context = replace(_message_enrich_context(tmp_path), _hook_registry_state=lifetime)
+        return [item.key for item in await emit_collect(registry, EVENT_MESSAGE_ENRICH, context)]
+
+    assert (await items_as("research"), await items_as("code")) == ([], ["steward"])
+    assert await journal_store.room_event_owner(_STEWARD_ROOM, "$event", "hook:message:enrich") is None
 
 
 @pytest.mark.asyncio

@@ -169,9 +169,9 @@ class HookRegistryState:
 
     registry: HookRegistry
 
-    def lifetime(self) -> HookRegistryLifetime:
-        """Return a view of this holder for one lifetime, such as a bot generation, that can end on its own."""
-        return HookRegistryLifetime(self)
+    def lifetime(self, emitter: str | None = None) -> HookRegistryLifetime:
+        """Return a view of this holder for one lifetime that can end on its own: a bot generation's names that bot."""
+        return HookRegistryLifetime(self, emitter)
 
 
 class HookRegistryLifetime:
@@ -181,10 +181,12 @@ class HookRegistryLifetime:
     view holds no hooks, so hooks it emitted report inactive and a stopped bot generation emits nothing more.
     """
 
-    __slots__ = ("_source",)
+    __slots__ = ("_source", "emitter")
 
-    def __init__(self, runtime: HookRegistryState) -> None:
+    def __init__(self, runtime: HookRegistryState, emitter: str | None = None) -> None:
         self._source = runtime
+        # The bot whose hooks this lifetime binds, which runs room-scoped hooks only as the room's steward.
+        self.emitter = emitter
 
     @property
     def registry(self) -> HookRegistry:

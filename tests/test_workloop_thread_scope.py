@@ -37,6 +37,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.context import CancelledResponseInfo
 from mindroom.hooks.execution import emit, emit_collect
+from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.room_steward import room_steward
@@ -453,7 +454,7 @@ async def test_router_filtered_command_runs_once_per_message_in_a_room_with_no_o
             correlation_id="corr-command",
             message_sender=sender,
             envelope=_message_envelope(body="!todo add Only once", agent_name=agent_name),
-            _emitter=agent_name,
+            _hook_registry_state=HookRegistryState(registry).lifetime(agent_name),
         )
         await emit(registry, EVENT_MESSAGE_RECEIVED, command_context)
 

@@ -41,6 +41,7 @@ from .context import (
     ToolEnvironmentContext,
     message_envelope_for_hook_context,
 )
+from .registry import HookRegistryLifetime
 from .types import (
     EVENT_BOT_READY,
     EVENT_MESSAGE_RECEIVED,
@@ -121,9 +122,10 @@ async def _emitter_runs_room_hooks(registry: HookRegistry, event_name: str, cont
     """Return whether this emission runs the event's room-scoped hooks: its bot is the room's steward.
 
     For an event that is one Matrix event the steward holds a claim, so the hooks run once however many bots emit it.
-    An emission no bot of a runtime made, as in a plugin's own tests, has no steward to wait for and runs them.
+    An emission no bot of a runtime made, as the runtime's own or one in a plugin's tests, has no steward and runs them.
     """
-    emitter = context._emitter
+    lifetime = context._hook_registry_state
+    emitter = lifetime.emitter if isinstance(lifetime, HookRegistryLifetime) else None
     if registry.room_hook_owner is None or emitter is None:
         return True
     event_id: str | None = None

@@ -122,7 +122,7 @@ class HookBindings:
 
 @dataclass
 class HookContextSupport:
-    """Own a bot's hook capabilities: its own live client first, and the router's for what that client cannot do."""
+    """Own a bot's hook capabilities: its own live client first, and each room's poster or steward for what that cannot do."""
 
     runtime: SupportsClientConfigOrchestrator
     runtime_paths: RuntimePaths
@@ -236,13 +236,13 @@ class HookContextSupport:
         )
 
     def base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
-        """Return the base fields of a hook context the bot emits now, which names it as the emitter."""
+        """Return the base fields of a hook context the bot emits now."""
         return self.bindings().context_kwargs(
             event_name,
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
             correlation_id=correlation_id,
-        ) | {"_emitter": self.agent_name}
+        )
 
 
 def _as_room_bot[T](
@@ -396,8 +396,6 @@ class HookContext:
 
     _hook_registry_state: HookRegistrySource | None = field(default=None, kw_only=True, repr=False, compare=False)
     _hook_registry_snapshot: HookRegistry | None = field(default=None, kw_only=True, repr=False, compare=False)
-    # The bot that emits an event every bot in a room emits, which runs room-scoped hooks only as the room's steward.
-    _emitter: str | None = field(default=None, kw_only=True, repr=False, compare=False)
     event_name: str
     config: Config
     runtime_paths: RuntimePaths
