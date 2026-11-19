@@ -773,6 +773,7 @@ depends_on = [
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.state",
     "mindroom.execution_preparation",
+    "mindroom.failure_text",
     "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",

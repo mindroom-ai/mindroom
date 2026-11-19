@@ -73,18 +73,22 @@ def bind_response_owner(
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     failure_message: Callable[[str], str],
-    rebuilds_on_reload: bool = False,
+    reload_gate: Callable[[], object] | None = None,
 ) -> LiveTurnTools:
     """Register the response's owner and grant on its first attempt, or rebind its catalog after a rebuild.
 
-    The owner runs as the catalog's tool runtime, for the catalog's run. With ``rebuilds_on_reload``, the response's
+    The owner runs as the catalog's tool runtime, for the catalog's run. With a ``reload_gate``, the response's
     next attempt builds its catalog from the current config, so a call a config reload refuses stops the run for that
-    attempt instead of leaving every later call refused.
+    attempt instead of leaving every later call refused. The gate raises when the current config no longer gives
+    the grant what it has.
     """
     runtime = catalog.runtime_context
     assert runtime.orchestrator is not None
     owner = lifetime.owner
     if owner is not None:
+        if reload_gate is not None:
+            # Preparing the attempt awaited, so the grant is checked again before it reads the attempt's documents.
+            reload_gate()
         owner.bind_catalog(catalog, context=context_documents)
         return owner
     # Check that Bash can reach MindRoom before any grant exists.
@@ -100,7 +104,7 @@ def bind_response_owner(
             try:
                 check_prepared_catalog_authority(current.runtime_context)
             except PermissionError as exc:
-                if rebuilds_on_reload and new_owner.stop_for_rebuild():
+                if reload_gate is not None and new_owner.stop_for_rebuild():
                     raise CliCatalogReloadedError(_RELOADED) from exc
                 raise PermissionError(failure_message(str(exc))) from exc
 

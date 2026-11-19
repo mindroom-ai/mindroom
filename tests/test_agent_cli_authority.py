@@ -197,7 +197,7 @@ async def test_a_reload_that_lands_while_a_cli_call_binds_stops_the_run_like_one
             delegation_depth=0,
             refresh_scheduler=None,
             failure_message=str,
-            rebuilds_on_reload=rebuilds_on_reload,
+            reload_gate=(lambda: None) if rebuilds_on_reload else None,
         )
         async with owner._window("bash"):
             receipt = await owner.operation(

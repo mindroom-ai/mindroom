@@ -48,6 +48,7 @@ from mindroom.error_handling import (
     minimal_mode_failure_message,
 )
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
+from mindroom.failure_text import failure_text
 from mindroom.history.interrupted_replay import TurnInput, stored_turn_input
 from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.native import with_native_history
@@ -574,11 +575,14 @@ async def _start_agent_run(
                 delegation_depth=run_context.turn.delegation_depth,
                 refresh_scheduler=run_context.turn.refresh_scheduler,
                 # Neither an approval overlay nor a narrowed turn's tool names can be carried over to a reloaded
-                # config, so their turns keep refusing instead.
-                rebuilds_on_reload=(
-                    tool_context is not None
+                # config, and a child's child has callers the gate does not check, so their turns keep refusing.
+                reload_gate=(
+                    partial(_tool_context_on_reloaded_config, tool_context, run_context.runtime_paths)
+                    if tool_context is not None
                     and tool_context.config is run_context.config
                     and run_context.turn.tool_names is None
+                    and run_context.turn.delegation_depth <= 1
+                    else None
                 ),
             )
     elif build.surface.cli_shell:
@@ -1026,7 +1030,6 @@ async def _prepare_agent_and_prompt(
 
 
 def _tool_context_on_reloaded_config(
-    ctx: ResponseTurnContext,
     tool_context: ToolRuntimeContext,
     runtime_paths: RuntimePaths,
 ) -> ToolRuntimeContext:
@@ -1034,7 +1037,8 @@ def _tool_context_on_reloaded_config(
 
     Nothing of the reloaded config reaches the turn's prompt, knowledge, or CLI grant before this check: the grant
     must reach what it did (``minimal_grant_survives_reload``), and a delegated child's caller must still be allowed
-    to delegate to it.
+    to delegate to it. It awaits nothing and changes nothing, and runs again right before the grant is rebound
+    (``bind_response_owner``), since the config can reload once more while the rebuild is prepared.
     """
     current = tool_context.on_current_config()
     observation = running_child_run()
@@ -1053,9 +1057,8 @@ def _tool_context_on_reloaded_config(
         str,
     )
     if not delegated or not minimal_grant_survives_reload(tool_context, current):
-        reason = "Current configuration no longer permits this prepared CLI call"
-        message = minimal_mode_failure_message(reason, ctx.entity_label, subagent=ctx.delegation_depth > 0)
-        raise MinimalModeUnavailableError(message)
+        msg = "Current configuration no longer permits this prepared CLI call"
+        raise PermissionError(msg)
     return current
 
 
@@ -1085,35 +1088,45 @@ async def _prepare_agent_run_context(
         # Only a top-level standard reply can collect jobs, so only it hears which ended.
         ctx = replace(ctx, transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items))
     tool_context = get_tool_runtime_context()
-    if (
-        ctx.agent_mode == "minimal"
-        and tool_context is not None
-        and tool_context.config is config
-        and ctx.tool_names is None
-        and tool_context.current_config is not config
-    ):
-        # A reload replaced the turn's config, and a minimal turn's tools refuse calls under any but the current one
-        # (``check_prepared_catalog_authority``): this attempt builds its agent as a turn starting now would.
-        tool_context = _tool_context_on_reloaded_config(ctx, tool_context, runtime_paths)
-        config = tool_context.config
-        knowledge = await resolve_agent_knowledge_access_async(
-            ctx.entity_label,
-            config,
-            runtime_paths,
-            refresh_scheduler=ctx.refresh_scheduler,
-            execution_identity=ctx.execution_identity,
-            only=ctx.persona.kept_knowledge if ctx.persona is not None else None,
-        )
-        # A build handed to the turn was made from the config the reload replaced.
-        ctx = replace(ctx, knowledge=knowledge.knowledge, reusable_build=None)
-    with tool_runtime_context(tool_context):
-        prepared_run = await _prepare_agent_and_prompt(
-            ctx,
-            runtime_paths=runtime_paths,
-            config=config,
-            scope_context=scope_context,
-            current_event_id=continuation.active_current_event_id,
-        )
+    reloaded = False
+    try:
+        if (
+            ctx.agent_mode == "minimal"
+            and tool_context is not None
+            and tool_context.config is config
+            and ctx.tool_names is None
+            and ctx.delegation_depth <= 1
+            and tool_context.current_config is not config
+        ):
+            # A reload replaced the turn's config, and a minimal turn's tools refuse calls under any but the current
+            # one (``check_prepared_catalog_authority``): this attempt builds its agent as a turn starting now would.
+            reloaded = True
+            tool_context = _tool_context_on_reloaded_config(tool_context, runtime_paths)
+            config = tool_context.config
+            knowledge = await resolve_agent_knowledge_access_async(
+                ctx.entity_label,
+                config,
+                runtime_paths,
+                refresh_scheduler=ctx.refresh_scheduler,
+                execution_identity=ctx.execution_identity,
+                only=ctx.persona.kept_knowledge if ctx.persona is not None else None,
+            )
+            # A build handed to the turn was made from the config the reload replaced.
+            ctx = replace(ctx, knowledge=knowledge.knowledge, reusable_build=None)
+        with tool_runtime_context(tool_context):
+            prepared_run = await _prepare_agent_and_prompt(
+                ctx,
+                runtime_paths=runtime_paths,
+                config=config,
+                scope_context=scope_context,
+                current_event_id=continuation.active_current_event_id,
+            )
+    except Exception as exc:
+        if not reloaded or isinstance(exc, MinimalModeUnavailableError):
+            raise
+        # Whatever stops a rebuild ends the turn as minimal mode being unavailable does: with no run of its own.
+        message = minimal_mode_failure_message(failure_text(exc), ctx.entity_label, subagent=ctx.delegation_depth > 0)
+        raise MinimalModeUnavailableError(message) from exc
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready", overwrite=True)
         note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
@@ -1506,12 +1519,12 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
                 yield AttemptResolved(skipped)
             else:
-                failure_text = error_text(state.error)
+                error_shown = error_text(state.error)
                 # Below the text this attempt already streamed, the error starts a paragraph of its own.
                 shown = state.assistant_text
                 yield AttemptResolved(
                     HandledAttempt(
-                        FailedReply(append_stream_text(shown, failure_text, separate=True)[len(shown) :], state.error),
+                        FailedReply(append_stream_text(shown, error_shown, separate=True)[len(shown) :], state.error),
                         build_run_metadata=_attempt_run_metadata_builder(
                             run_context,
                             record,

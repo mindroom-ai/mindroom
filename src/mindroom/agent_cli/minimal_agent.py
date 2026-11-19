@@ -23,17 +23,19 @@ from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_fa
 from mindroom.failure_text import failure_text
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message, system_text
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
+from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.spec import AgentSpec, RunContext
+    from mindroom.config.main import Config
     from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRecord
@@ -146,6 +148,18 @@ def presented_build(build: AgentBuild) -> AgentBuild:
     return replace(build, spec=replace(build.spec, toolkits=(minimal_bash_toolkit(),)))
 
 
+def _storage(runtime: ToolRuntimeContext, config: Config) -> object:
+    """Return where ``config`` keeps the agent's state and workspace, creating and reconciling nothing there."""
+    storage = resolve_agent_storage(runtime.agent_name, config, runtime.runtime_paths, runtime.execution_identity)
+    return storage, resolve_agent_workspace_from_state_path(
+        runtime.agent_name,
+        config,
+        runtime_paths=runtime.runtime_paths,
+        state_storage_path=storage.state_root,
+        use_state_storage_path=storage.execution.policy.private_workspace_enabled,
+    )
+
+
 def minimal_grant_survives_reload(runtime: ToolRuntimeContext, current: ToolRuntimeContext) -> bool:
     """Return whether a minimal turn's CLI grant, issued under ``runtime``'s config, reaches the same under ``current``'s.
 
@@ -154,7 +168,7 @@ def minimal_grant_survives_reload(runtime: ToolRuntimeContext, current: ToolRunt
     the agent's workspace. So the turn may rebuild only while its requester is still allowed the agent's replies and
     the agent's worker, storage, shell placement, and saved-output threshold are what they were.
     """
-    name, paths, identity = runtime.agent_name, runtime.runtime_paths, runtime.execution_identity
+    name, paths = runtime.agent_name, runtime.runtime_paths
     old, new = runtime.config, current.config
     return (
         name in new.agents
@@ -168,7 +182,7 @@ def minimal_grant_survives_reload(runtime: ToolRuntimeContext, current: ToolRunt
             require_resolved_membership=True,
         )
         and current.resolve_worker_target() == runtime.resolve_worker_target()
-        and resolve_agent_runtime(name, new, paths, identity) == resolve_agent_runtime(name, old, paths, identity)
+        and _storage(runtime, new) == _storage(runtime, old)
         and new.defaults.tool_output_auto_save_threshold_bytes == old.defaults.tool_output_auto_save_threshold_bytes
         and not minimal_shell_problems(new, paths, name)
         and not minimal_shell_problems(old, paths, name)
@@ -231,7 +245,7 @@ def bind_minimal_owner(
     context_documents: Mapping[str, str],
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    rebuilds_on_reload: bool = False,
+    reload_gate: Callable[[], object] | None = None,
 ) -> LiveTurnTools:
     """Bind the real managed turn to ``catalog``: its owner and grant on the first attempt, its catalog afterwards."""
     lifetime = current_cli_lifetime()
@@ -248,7 +262,7 @@ def bind_minimal_owner(
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         failure_message=partial(_failure, build, delegation_depth),
-        rebuilds_on_reload=rebuilds_on_reload,
+        reload_gate=reload_gate,
     )
 
 
@@ -263,12 +277,12 @@ async def minimal_attempt(
     context_documents: Mapping[str, str],
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    rebuilds_on_reload: bool = False,
+    reload_gate: Callable[[], object] | None = None,
 ) -> tuple[AgentSpec, LoopHooks]:
     """Bind the attempt's CLI owner, then return the spec and hooks of a run that offers only its Bash facade.
 
     Each provider batch is checkpointed before its Bash calls run. The build's tool policy runs around the calls
-    Bash makes through the CLI, not around Bash itself. ``rebuilds_on_reload`` says the caller's next attempt builds
+    Bash makes through the CLI, not around Bash itself. A ``reload_gate`` says the caller's next attempt builds
     from the current config (``bind_response_owner``).
     """
     lifetime = current_cli_lifetime()
@@ -291,7 +305,7 @@ async def minimal_attempt(
             context_documents=context_documents,
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
-            rebuilds_on_reload=rebuilds_on_reload,
+            reload_gate=reload_gate,
         )
     except BaseException as exc:
         await catalog.close()
