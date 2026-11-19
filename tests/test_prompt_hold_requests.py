@@ -1188,7 +1188,7 @@ async def test_updates_alone_never_trim_history_the_current_prompt_replays_whole
         return sse_response([_chunk({"role": "assistant", "content": "ok"}), {**_chunk({}, "stop"), "usage": usage}])
 
     conversation.wire.replies = [reported]
-    conversation.respond = conversation.wire.respond  # ty: ignore[invalid-assignment]
+    conversation.respond = conversation.wire.respond
     await conversation.turn("First question")
     bodies = []
     for revision in range(12):
