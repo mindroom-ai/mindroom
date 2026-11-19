@@ -450,7 +450,7 @@ class _MultiAgentOrchestrator:
         self._rooms = RoomSetup(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
-            router_client=self._router_client,
+            owner_client=lambda: self.running_entity_client(ROUTER_AGENT_NAME),
             refresh_agent_reply_memberships=lambda: self.refresh_agent_reply_memberships(),
             reconcile_room_states=lambda: reconcile_held_room_states(self),
             publication_allowed=lambda: not self.response_admission_gate.closed,
@@ -1354,14 +1354,6 @@ class _MultiAgentOrchestrator:
                 return bool(changed_entities)
         finally:
             await self._script_runtime.reopen_script_calls()
-
-    def _router_client(self) -> nio.AsyncClient | None:
-        """Return the router's Matrix client when the router runs one."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        client = None if router_bot is None else router_bot.client
-        if client is None:
-            logger.warning("Router client not available")
-        return client
 
     async def _bind_event_journal(self) -> None:
         """Refuse startup unless the configured database is this install's journal.

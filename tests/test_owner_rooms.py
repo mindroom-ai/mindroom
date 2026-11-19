@@ -1,11 +1,12 @@
-"""Test that the router agent joins all configured rooms."""
+"""The owner account joins every configured room, and room setup without it administers nothing."""
 
 from __future__ import annotations
 
 from pathlib import Path  # noqa: TC003
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -13,6 +14,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.turn_policy import ResponseAction
 from tests.authorization_helpers import (
@@ -299,3 +301,31 @@ async def test_router_updates_rooms_on_config_change(
         setup_rooms.assert_awaited_once()
     finally:
         await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_room_setup_without_owner_creates_nothing_and_says_so_once(tmp_path: Path) -> None:
+    """Without a running owner account, room setup creates and administers no room, and agents still join theirs."""
+    config = _bind_runtime_paths(
+        Config(agents={"agent1": AgentConfig(display_name="Agent 1", rooms=["room1"])}), tmp_path
+    )
+    agent = MagicMock(agent_name="agent1", ensure_rooms=AsyncMock())
+    refresh = AsyncMock()
+    setup = RoomSetup(
+        runtime_paths_for(config),
+        lambda: config,
+        owner_client=lambda: None,
+        refresh_agent_reply_memberships=refresh,
+        reconcile_room_states=AsyncMock(),
+    )
+
+    with (
+        capture_logs() as logs,
+        patch("mindroom.orchestration.rooms.ensure_all_rooms_exist", new=AsyncMock()) as create,
+    ):
+        await setup.setup([agent])
+
+    create.assert_not_awaited()
+    agent.ensure_rooms.assert_awaited_once_with()
+    refresh.assert_awaited_once_with()
+    assert [log["event"] for log in logs].count("room_setup_without_owner_account") == 1

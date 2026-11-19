@@ -104,12 +104,12 @@ def warn_about_foreign_homeserver_authorities(config: Config, runtime_paths: Run
 
 @dataclass
 class RoomSetup:
-    """Create managed rooms, reconcile their policy, and bring bots into their rooms through the router."""
+    """Create managed rooms and reconcile their policy through the owner account, and bring bots into their rooms."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config]
-    # The router's client when it runs; managed room work runs through its account.
-    router_client: Callable[[], nio.AsyncClient | None]
+    # The owner account's client when it runs; without one no room is created or administered.
+    owner_client: Callable[[], nio.AsyncClient | None]
     refresh_agent_reply_memberships: Callable[[], Awaitable[object]]
     reconcile_room_states: Callable[[], Awaitable[None]]
     publication_allowed: Callable[[], bool] = field(default=lambda: True)
@@ -119,6 +119,8 @@ class RoomSetup:
 
         This shared flow is used during both initial startup and config updates.
         """
+        if self.owner_client() is None:
+            logger.info("room_setup_without_owner_account")
         # Ensure all configured rooms exist before reconciling memberships.
         room_ids = await self.ensure_rooms_exist()
         await self.link_root_space(room_ids)
@@ -128,7 +130,7 @@ class RoomSetup:
         config = self.config_provider()
         self.resolve_aliases(bots, config)
 
-        # Join the router before policy and invitations, including existing private rooms.
+        # Join the owner before policy and invitations, including existing private rooms.
         for bot in bots:
             if bot.agent_name == ROUTER_AGENT_NAME:
                 await bot.ensure_rooms()
@@ -165,9 +167,9 @@ class RoomSetup:
     async def ensure_rooms_exist(self) -> dict[str, str]:
         """Ensure all configured rooms exist, creating them if necessary.
 
-        The router bot performs room creation because it holds the required permissions.
+        The owner account performs room creation because it holds the required permissions.
         """
-        client = self.router_client()
+        client = self.owner_client()
         if client is None:
             return {}
         room_ids = await ensure_all_rooms_exist(client, self.config_provider(), self.runtime_paths)
@@ -175,15 +177,15 @@ class RoomSetup:
         return room_ids
 
     async def _reconcile_room_policies(self, room_ids: dict[str, str]) -> dict[str, RoomStateSnapshot]:
-        """Wire the router's fresh policy reconciliation into startup and reload."""
-        client = self.router_client()
+        """Wire the owner's fresh policy reconciliation into startup and reload."""
+        client = self.owner_client()
         if client is None:
             return {}
         return await reconcile_managed_rooms(client, self.config_provider(), self.runtime_paths, room_ids)
 
     async def link_root_space(self, room_ids: dict[str, str]) -> None:
         """Ensure the optional root Matrix Space exists and link the current managed rooms."""
-        client = self.router_client()
+        client = self.owner_client()
         config = self.config_provider()
         if client is None or not config.matrix_space.enabled:
             return
@@ -200,18 +202,18 @@ class RoomSetup:
         await _invite_missing(client, root_space_id, invite_user_ids, snapshot.present_user_ids())
 
     async def ensure_server_emoji_room(self) -> None:
-        """Create and maintain the optional server custom emoji room through the router."""
-        client = self.router_client()
+        """Create and maintain the optional server custom emoji room through the owner account."""
+        client = self.owner_client()
         if client is not None:
             await ensure_server_emoji_room(client, self.config_provider(), self.runtime_paths)
 
     async def _ensure_room_invitations(self, snapshots: dict[str, RoomStateSnapshot]) -> None:
         """Ensure all agents and the internal user are invited to their configured rooms.
 
-        The router client performs these invitations because it has admin privileges
+        The owner's client performs these invitations because it has admin privileges
         across the managed rooms.
         """
-        client = self.router_client()
+        client = self.owner_client()
         if client is None:
             return
         config = self.config_provider()
