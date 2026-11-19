@@ -358,6 +358,85 @@ async def test_a_changed_turn_system_message_is_told_like_the_first_and_a_change
     assert conversation.state()["updates"] == []
 
 
+@pytest.mark.asyncio
+async def test_a_change_that_moves_text_between_system_messages_is_told_message_by_message(
+    conversation: _Conversation,
+) -> None:
+    """Each system message is diffed on its own, so moving text across their boundary is a change to both."""
+    held, fresh = ["A\n\nB", "C"], ["A", "B\n\nC"]
+    first = [*_system(*held), _user("one")]
+    await conversation.send(first)
+    sent = await conversation.send([*_system(*fresh), *first[2:], _answer(), _user("two")])
+    assert [message.content for message in sent[:2]] == held
+    [update] = _updates(sent)
+    assert _applied("\n".join(held), update) == "\n".join(fresh)
+
+
+@pytest.mark.asyncio
+async def test_no_hunk_spans_two_system_messages_or_quotes_a_line_between_them(conversation: _Conversation) -> None:
+    """A change at the end of one message and the start of the next is two hunks of lines each message holds."""
+    first = [*_system(_A), _user("one")]
+    await conversation.send(first)
+    edited = [*_system(f"{_A}\n- Extra.", "Today is Thursday."), *first[2:], _answer(), _user("two")]
+    [update] = _updates(await conversation.send(edited))
+    assert update.splitlines()[3:-1] == [
+        " ## Tools",
+        " - Prefer the calculator.",
+        "+- Extra.",
+        "@@",
+        f"-{_TURN}",
+        "+Today is Thursday.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_change_whose_lines_another_system_message_repeats_restarts_the_hold(
+    conversation: _Conversation,
+) -> None:
+    """A message that ends with the next one's text, blank line included, leaves its change no place it names once."""
+    first = [*_system(f"{_A}\n\n{_TURN}"), _user("one")]
+    await conversation.send(first)
+    edited = [*_system(f"{_A}\n\n{_TURN}", "Today is Thursday."), *first[2:], _answer(), _user("two")]
+    assert await conversation.send(edited) == edited
+    assert conversation.state()["updates"] == []
+
+
+def _as_main_wrote(conversation: _Conversation) -> None:
+    """Rewrite the conversation's hold as main writes it: ``current`` holds only the first system message."""
+    state = conversation.state()
+    state["current"] = state["current"][0]
+    conversation.path.write_text(json.dumps(state), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_hold_main_wrote_replays_its_stored_update_on_a_turn_and_a_read_only_run(
+    conversation: _Conversation,
+) -> None:
+    """Main kept the other system messages as held, so an unchanged prompt adds nothing to the update it stored."""
+    second, sent = await conversation.told()
+    _as_main_wrote(conversation)
+    before = conversation.path.read_bytes()
+    answered = conversation.answer()
+    resumed = [*_system(_B), *_replayed([*second[2:], answered]), _user("Review this conversation.")]
+    assert _updates(await conversation.send(resumed, read_only=True)) == _updates(sent)
+    third = [*_system(_B), *second[2:], answered, _user("three")]
+    assert _updates(await conversation.send(third)) == _updates(sent)
+    assert conversation.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_a_hold_main_wrote_without_an_update_adds_none_to_an_unchanged_prompt(
+    conversation: _Conversation,
+) -> None:
+    """Nor does a hold main wrote take its unchanged other system messages for a change."""
+    first = [*_system(_A), _user("one")]
+    await conversation.send(first)
+    _as_main_wrote(conversation)
+    second = [*_system(_A), *first[2:], _answer(), _user("two")]
+    assert await conversation.send(second) == second
+    assert conversation.state()["updates"] == []
+
+
 def _applied(held: str, update: str) -> str:
     """Return the text ``update`` turns ``held`` into, read as a model may: hunk by hunk, top to bottom.
 
@@ -399,7 +478,7 @@ def _applied(held: str, update: str) -> str:
 def test_an_update_and_the_held_prompt_give_the_current_prompt_and_no_other(fresh: str) -> None:
     """Two different edits never read the same: a blank line, a line's place, and a final newline all show."""
     held = "Print these lines in order:\nred\nblue\n\nThen stop."
-    update = prompt_hold._update_text(held, fresh)
+    update = prompt_hold._update_text((held,), (fresh,))
     assert update is not None
     assert _applied(held, update) == fresh
 
@@ -409,7 +488,7 @@ def test_an_update_whose_later_hunk_restores_an_earlier_passage_reads_the_same_t
     tail = [f"n{i}" for i in range(8)]
     held = "\n".join(["old", *tail, "last"])
     fresh = "\n".join(["new", *tail, "last", "old", "n0", "n1"])
-    update = prompt_hold._update_text(held, fresh)
+    update = prompt_hold._update_text((held,), (fresh,))
     assert update is not None
     assert update.count("\n@@\n") == 1
     assert _applied(held, update) == fresh
@@ -423,7 +502,7 @@ def test_a_hunk_that_an_earlier_hunk_makes_stand_twice_is_not_told() -> None:
     fresh = "\n".join(
         ["# Helper", *tools, "- Ask first.", "", "## End", *rules, *tools, "- Never ask.", "", "## End", "- Sign off."],
     )
-    assert prompt_hold._update_text(held, fresh) is None
+    assert prompt_hold._update_text((held,), (fresh,)) is None
 
 
 def test_an_update_splits_its_hunks_by_a_bare_at_line_and_fences_them_past_any_backticks() -> None:
@@ -432,7 +511,7 @@ def test_an_update_splits_its_hunks_by_a_bare_at_line_and_fences_them_past_any_b
         ["## Reply rules", "Be terse.", "End with AMBER.", "", *[f"n{i}" for i in range(10)], "Last AMBER."],
     )
     fresh = held.replace("AMBER", "VIOLET")
-    update = prompt_hold._update_text(held, fresh)
+    update = prompt_hold._update_text((held,), (fresh,))
     assert update is not None
     assert update.split("\n")[2:] == [
         "```diff",
@@ -450,12 +529,12 @@ def test_an_update_splits_its_hunks_by_a_bare_at_line_and_fences_them_past_any_b
         "```",
     ]
     assert _applied(held, update) == fresh
-    fenced = prompt_hold._update_text("a\n```\nb", "a\n```\nc")
+    fenced = prompt_hold._update_text(("a\n```\nb",), ("a\n```\nc",))
     assert fenced is not None
     assert "\n````diff\n" in fenced
     assert fenced.endswith("\n````")
     assert _applied("a\n```\nb", fenced) == "a\n```\nc"
-    assert prompt_hold._update_text("a\nb", "a\n" + "c" * 9000) is None
+    assert prompt_hold._update_text(("a\nb",), ("a\n" + "c" * 9000,)) is None
 
 
 def test_a_change_among_repeated_lines_that_no_passage_names_once_is_not_told() -> None:
@@ -463,7 +542,7 @@ def test_a_change_among_repeated_lines_that_no_passage_names_once_is_not_told() 
     held = "\n".join(["- Check the build.", "- Run the tests.", "- Report."] * 4)
     fresh = held.replace("- Run the tests.", "- Run the linter.", 2).replace("- Run the linter.", "- Run the tests.", 1)
     assert fresh != held
-    assert prompt_hold._update_text(held, fresh) is None
+    assert prompt_hold._update_text((held,), (fresh,)) is None
 
 
 @pytest.mark.asyncio
@@ -700,7 +779,7 @@ async def test_a_conversation_tells_every_edit_as_an_update_however_many_it_had(
             (message.role, message.content) for message in before
         ]
         assert (sent[0].content, len(_updates(sent))) == (_A, turn)
-        assert _applied(f"{_A}\n\n{_TURN}", _updates(sent)[-1]) == f"{fresh}\n\n{_TURN}"
+        assert _applied(f"{_A}\n{_TURN}", _updates(sent)[-1]) == f"{fresh}\n{_TURN}"
     # A turn that changes nothing adds none.
     messages = [*messages, _answer(), _user("turn 13")]
     assert len(_updates(await conversation.send(messages))) == 12

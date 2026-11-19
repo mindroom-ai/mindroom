@@ -94,30 +94,36 @@ def prompt_hold_path(database: Path, session_id: str) -> Path:
 
 # Each sizing and send of a request recomputes its update until the hold stores it.
 @lru_cache(maxsize=8)
-def _update_text(held: str, fresh: str) -> str | None:
-    """Return the update that tells a model sent the ``held`` text that ``fresh`` is in force, or None when none may.
+def _update_text(held: tuple[str, ...], fresh: tuple[str, ...]) -> str | None:
+    """Return the update that tells a model sent the ``held`` system texts that ``fresh`` are in force, or None.
 
     It states the whole difference, so the newest update alone says what is in force: a unified diff without line
-    numbers, whose hunks quote each change with the lines around it and are split by a bare ``@@`` line. Every
-    hunk's old side stands exactly once in ``held``, and in the text the hunks above it made of ``held``, so the
-    update and ``held`` give ``fresh`` and no other text, read either way; a change that cannot be told so is not told.
+    numbers, whose hunks quote each change with the lines around it and are split by a bare ``@@`` line. Each text
+    is diffed on its own, so no hunk spans two. Every hunk's old side stands exactly once in the lines of ``held``,
+    and in the lines the hunks above it made of them, so the update and ``held`` give ``fresh`` and no other text,
+    read either way; a change that cannot be told so is not told.
     """
     if held == fresh:
         return _UPDATE_WITHDRAWN
-    old, new = held.split("\n"), fresh.split("\n")
+    texts = [(old.split("\n"), new.split("\n")) for old, new in zip(held, fresh, strict=True)]
+    whole = [line for old, _ in texts for line in old]
     body: list[str] = []
-    for group in SequenceMatcher(None, old, new, autojunk=False).get_grouped_opcodes(_CONTEXT_LINES):
-        before = old[group[0][1] : group[-1][2]]
-        # Read in ``held``, and in what the hunks above it made of ``held``.
-        for lines in (old, new[: group[0][3]] + old[group[0][1] :]):
-            if sum(lines[start : start + len(before)] == before for start in range(len(lines) - len(before) + 1)) != 1:
-                return None
-        body += ["@@"] if body else []
-        for tag, i1, i2, j1, j2 in group:
-            if tag == "equal":
-                body += [f" {line}" for line in old[i1:i2]]
-            else:
-                body += [f"-{line}" for line in old[i1:i2]] + [f"+{line}" for line in new[j1:j2]]
+    for at, (old, new) in enumerate(texts):
+        # The lines before this text, as the hunks above it made them, and the held lines after it.
+        above = [line for _, done in texts[:at] for line in done]
+        below = whole[sum(len(lines) for lines, _ in texts[: at + 1]) :]
+        for group in SequenceMatcher(None, old, new, autojunk=False).get_grouped_opcodes(_CONTEXT_LINES):
+            before = old[group[0][1] : group[-1][2]]
+            # Read in ``held``, and in what the hunks above it made of ``held``.
+            for lines in (whole, [*above, *new[: group[0][3]], *old[group[0][1] :], *below]):
+                if sum(lines[i : i + len(before)] == before for i in range(len(lines) - len(before) + 1)) != 1:
+                    return None
+            body += ["@@"] if body else []
+            for tag, i1, i2, j1, j2 in group:
+                if tag == "equal":
+                    body += [f" {line}" for line in old[i1:i2]]
+                else:
+                    body += [f"-{line}" for line in old[i1:i2]] + [f"+{line}" for line in new[j1:j2]]
     fence = "`" * max([3, *(len(run) + 1 for line in body for run in re.findall(r"`+", line))])
     text = "\n".join([_UPDATE_HEADER, "Change the system prompt as this diff shows:", f"{fence}diff", *body, fence])
     return text if len(text) <= _MAX_UPDATE_CHARS else None
@@ -167,8 +173,10 @@ def _read(path: Path, now: float) -> _State | None:
 
 def _continued(state: _State, route: object, system: Sequence[Message], rest: Sequence[Message]) -> _Plan | None:
     """Return the plan of a request that continues the hold ``state``, or None when the hold must start over."""
-    held, updates = state["system"], state["updates"]
-    fresh = "\n\n".join(message.content for message in system)
+    held, updates, current = state["system"], state["updates"], state["current"]
+    fresh = [message.content for message in system]
+    # A hold main wrote kept only the first text it was last told, and held the others as they were.
+    current = [current, *held[1:]] if isinstance(current, str) else current
     lengths = [length for length, _, _ in updates]
     first, *anchors = _anchors(rest, [1, *lengths])
     if (
@@ -182,9 +190,9 @@ def _continued(state: _State, route: object, system: Sequence[Message], rest: Se
         )
     ):
         return None
-    if fresh != state["current"]:
+    if fresh != current:
         # It is told after the newest user message, which no earlier update follows, or not at all.
-        text = _update_text("\n\n".join(held), fresh)
+        text = _update_text(tuple(held), tuple(fresh))
         anchor = _anchors(rest, [len(rest)])[0]
         if text is None or anchor is None or not _may_stand(rest, len(rest)) or len(rest) <= max(lengths, default=0):
             return None
@@ -244,7 +252,7 @@ def _plan(inner: ModelProvider, request: ModelRequest, state: _State | None) -> 
     if request.prompt_hold_pin is not None:
         return None
     first = _anchors(rest, [1])[0]
-    return messages, {"route": route, "system": texts, "current": "\n\n".join(texts), "first": first, "updates": []}
+    return messages, {"route": route, "system": texts, "current": texts, "first": first, "updates": []}
 
 
 def _identities(inner: ModelProvider, request: ModelRequest, sent: ModelRequest) -> list[str | None]:
