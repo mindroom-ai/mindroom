@@ -1350,12 +1350,13 @@ class AgentBot:
     async def _run_sync_response_side_effects(
         self,
         *,
+        receipt_new: bool,
         first_sync_response: bool,
     ) -> None:
-        """Run side effects that do not own raw sync checkpoint safety."""
+        """Run side effects that do not own raw sync checkpoint safety; only a new frame opens the observer."""
         orchestrator = self.orchestrator
         membership_sync = orchestrator.agent_reply_membership_sync
-        opened = self._first_sync_done and membership_sync.observer_frame_settled(self.matrix_id.full_id)
+        opened = receipt_new and membership_sync.observer_frame_settled(self.matrix_id.full_id)
         membership_sync.request_refresh(
             orchestrator.config,
             orchestrator.refresh_agent_reply_memberships,
@@ -1512,6 +1513,7 @@ class AgentBot:
             await self._room_lifecycle.observe_trusted_sync_rooms(client.rooms)
         self._first_sync_done = self._first_sync_done or receipt_new
         await self._run_sync_response_side_effects(
+            receipt_new=receipt_new,
             first_sync_response=first_sync_response,
         )
         call_manager = self._call_manager

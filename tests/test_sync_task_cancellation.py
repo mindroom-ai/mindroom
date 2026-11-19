@@ -1781,11 +1781,11 @@ async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
     ):
         # A pass that raises or reports an incomplete recovery retries through
         # the durable outbox before releasing the owner task.
-        await bot._run_sync_response_side_effects(first_sync_response=True)
+        await bot._run_sync_response_side_effects(receipt_new=True, first_sync_response=True)
         assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         # And a delivery refused after every earlier pass completed is still
         # found, because the outbox is asked rather than a flag.
-        await bot._run_sync_response_side_effects(first_sync_response=False)
+        await bot._run_sync_response_side_effects(receipt_new=True, first_sync_response=False)
         assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert recover.await_count == len(outcomes)

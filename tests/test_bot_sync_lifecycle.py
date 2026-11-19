@@ -277,7 +277,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         await bot._turn_store.record_turn(TurnRecord.create(["$recent:localhost"]), room_id="!test:localhost")
 
         async def publish_frame() -> None:
-            await bot._run_sync_response_side_effects(first_sync_response=False)
+            await bot._run_sync_response_side_effects(receipt_new=True, first_sync_response=False)
             await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
         with (
@@ -313,7 +313,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             patch.object(bot.orchestrator.agent_reply_membership_sync, "request_refresh"),
         ):
             bot._next_handled_turn_cleanup_at = 0.0
-            await bot._run_sync_response_side_effects(first_sync_response=False)
+            await bot._run_sync_response_side_effects(receipt_new=True, first_sync_response=False)
             await asyncio.wait_for(started.wait(), timeout=1.0)
 
             bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
@@ -321,7 +321,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             assert cancelled.is_set()
 
             bot._next_handled_turn_cleanup_at = 0.0
-            await bot._run_sync_response_side_effects(first_sync_response=False)
+            await bot._run_sync_response_side_effects(receipt_new=True, first_sync_response=False)
             assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
         assert cleanup.await_count == 1

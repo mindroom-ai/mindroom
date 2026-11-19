@@ -299,7 +299,10 @@ async def _consume_repaired_frame(
 
 @pytest.mark.asyncio
 async def test_replayed_completion_does_not_complete_the_first_sync(tmp_path: Path) -> None:
-    """A restart replays a completion the stopped process admitted; only a new response proves the bot caught up."""
+    """A restart replays a completion the stopped process admitted; only a new response proves the bot caught up.
+
+    The same holds for a receive loop that restarts on a bot that already synced: its replay opens no observer.
+    """
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     handle_bot_ready = AsyncMock()
@@ -337,6 +340,17 @@ async def test_replayed_completion_does_not_complete_the_first_sync(tmp_path: Pa
         assert bot.first_sync_complete
         assert membership_sync.observer_is_open(bot.matrix_id.full_id)
         handle_bot_ready.assert_awaited_once_with(bot)
+
+        # The receive loop admitted one more completion and ended before acknowledging it; its successor replays it.
+        unacknowledged = SyncBatch(marker.stream_id, 3, (), completes_sync=True)
+        await consume_one_ingestion_batch(Session(unacknowledged), principal, account_id=account)
+        membership_sync.observer_loop_started(bot.config, bot.matrix_id.full_id)
+        await consume(Session(unacknowledged))
+        assert bot.first_sync_complete
+        assert not membership_sync.observer_is_open(bot.matrix_id.full_id)
+
+        await consume(Session(SyncBatch(marker.stream_id, 4, (), completes_sync=True)))
+        assert membership_sync.observer_is_open(bot.matrix_id.full_id)
     finally:
         bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
         await bot.prepare_for_sync_shutdown()
