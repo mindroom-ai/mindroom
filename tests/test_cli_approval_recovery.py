@@ -27,7 +27,7 @@ from mindroom.agent_cli.delegation import approval_calls_for_cli_pause
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
-from mindroom.agent_cli.session import RELOAD_STOPPED, CliAuthenticationError, TurnToolRegistry
+from mindroom.agent_cli.session import CONFIG_RELOAD_CALL, RELOAD_STOPPED, CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import PlannedCall
@@ -1072,7 +1072,7 @@ async def _checkpointed_batch(
     ("shell", "missing_shell_function", "nested", "preset"),
     [(shell, missing, None, False) for shell in (False, True) for missing in (None, "run_shell_command")]
     + [(True, None, "media", False), (True, None, "approval", False), (True, None, "suspend", False)]
-    + [(True, None, "reload", False)]
+    + [(True, None, "reload", False), (True, None, "saved_stop", False)]
     + [(True, None, None, True)],
 )
 async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # noqa: C901 - checkpoint through real resumed provider
@@ -1168,6 +1168,9 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         runtime.execution_identity,
     )
     persisted, session = await _checkpointed_batch(runtime, store, sibling_image)
+    if nested == "saved_stop":
+        # A reload refused a sibling call of the paused command before the restart, which the saved run records.
+        persisted.metadata = {**(persisted.metadata or {}), CONFIG_RELOAD_CALL: RELOAD_STOPPED}
     continuation = approval_continuation(
         approval_id="approved",
         run_id="saved-run",
@@ -1356,12 +1359,13 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         assert saved is not None
         assert any(item.get("id") == "old-bash" for message in saved.messages for item in message.tool_calls or ())
         return
-    if nested == "reload":
-        # The refused call ends the recovered turn with the reason: the model is not asked again on the stale tools.
+    if nested in {"reload", "saved_stop"}:
+        # A call the reload refused, now or before the restart, ends the recovered turn with the reason: the model is
+        # not asked again.
         assert RELOAD_STOPPED in result.response_text
         assert provider.requests == []
         assert responses == []
-        assert effects == ["exact approved shell"]
+        assert effects == ["exact approved shell", *(["nested media"] if nested == "saved_stop" else [])]
         return
     assert "finished" in result.response_text
     # Like a standard recovery, the hidden call and the fresh model text stream into the continued reply.

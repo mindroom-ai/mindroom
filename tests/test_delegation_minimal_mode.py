@@ -30,7 +30,7 @@ from mindroom.delegation.lifecycle import prepare_child_turn, reload_stopped_chi
 from mindroom.delegation.recovery import settled_subagent
 from mindroom.delegation.state import SubagentPersona
 from mindroom.llm.events import ReportedCall
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_jobs.runtime import JobSpec
@@ -54,9 +54,10 @@ from tests.test_mode_commands import _CLI_DEPLOYMENT_ENV
 from tests.tool_job_helpers import JOB_TEST_TIMEOUT, admit_delegation_spec, tool_job_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, PersonaSourceKind
@@ -515,7 +516,7 @@ async def _run_minimal_turn_through_a_reload(
     via: str = "direct",
     reload_at: str = "between_bash_calls",
     resume: bool = False,
-    switch: bool = False,
+    after_cli_call: Callable[[LiveTurnTools], Awaitable[object]] | None = None,
 ) -> _ReloadedRun:
     """Run a minimal `helper` turn of three Bash calls whose config reloads once while it runs.
 
@@ -523,7 +524,7 @@ async def _run_minimal_turn_through_a_reload(
     while the first command runs before its CLI call (``before_cli_call``), or while that call's toolkit is bound
     (``during_bind``). ``via`` is how the turn runs: `leader`'s ``direct`` subagent call, a call in its own ``reply``,
     a subagent ``job``, or ``top_level`` as `helper`'s own turn. With ``resume``, `leader` then continues the subagent.
-    With ``switch``, a model switch that asks for another attempt completes in each command after its CLI call.
+    Each command awaits ``after_cli_call`` with the turn's CLI owner once its CLI call settled.
     Alice administers the deployment, so real authorization admits her.
     """
     config = _config(helper_tools=["shell", "calculator"])
@@ -567,8 +568,8 @@ async def _run_minimal_turn_through_a_reload(
             ),
         )
         receipt = await settled_receipt(owner, str(call_id))
-        if switch:
-            owner.control_calls.append(_SWITCH_CALL)
+        if after_cli_call is not None:
+            await after_cli_call(owner)
         reload_once("between_bash_calls")
         return f"{receipt['status']}: {receipt['outcome']}"
 
@@ -742,12 +743,16 @@ async def test_a_reload_stop_wins_over_a_model_switch_in_the_same_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A switch that asks for another attempt does not continue a turn whose reload stop said it ended."""
+
+    async def complete_a_model_switch(owner: LiveTurnTools) -> None:
+        owner.control_calls.append(_SWITCH_CALL)
+
     run = await _run_minimal_turn_through_a_reload(
         tmp_path,
         monkeypatch,
         _add_reranker,
         reload_at="before_cli_call",
-        switch=True,
+        after_cli_call=complete_a_model_switch,
     )
 
     assert len(run.ran_under) == 1
@@ -755,6 +760,39 @@ async def test_a_reload_stop_wins_over_a_model_switch_in_the_same_batch(
     receipt = run.receipt()
     assert receipt["status"] == "failed", receipt
     assert _RELOAD_STOPPED in str(receipt["result"]), receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
+async def test_a_minimal_subagent_cancelled_after_a_reload_refused_its_call_settles_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command that outlives its refused call is cancelled as any child is: the reload stop names completed runs."""
+    refused = asyncio.Event()
+
+    async def keep_running(_owner: LiveTurnTools) -> None:
+        refused.set()
+        await asyncio.Event().wait()
+
+    turn = asyncio.create_task(
+        _run_minimal_turn_through_a_reload(
+            tmp_path,
+            monkeypatch,
+            _add_reranker,
+            reload_at="before_cli_call",
+            after_cli_call=keep_running,
+        ),
+    )
+    await asyncio.wait_for(refused.wait(), JOB_TEST_TIMEOUT)
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(turn, JOB_TEST_TIMEOUT)
+
+    (handle,) = (_paths(tmp_path, _CLI_DEPLOYMENT_ENV).storage_root / "subagent_sessions").glob("*.json")
+    receipt = json.loads(handle.read_text())["child"]
+    assert receipt["status"] == "cancelled", receipt
+    assert "continue_subagent" not in str(receipt["result"]), receipt
 
 
 @pytest.mark.asyncio
@@ -783,11 +821,18 @@ async def test_a_reload_stopped_minimal_subagent_recovers_as_failed_after_a_rest
     assert f'continue_subagent(subagent_id="{recovered.subagent_id}"' in str(recovered.result)
 
 
-def test_a_reload_stopped_workflow_participant_is_not_told_to_continue_it(tmp_path: Path) -> None:
-    """A workflow participant cannot be continued outside its workflow, so its failure names only the reason."""
+def test_only_a_completed_run_is_reload_stopped_and_a_workflow_participant_is_not_told_to_continue(
+    tmp_path: Path,
+) -> None:
+    """A workflow participant cannot be continued outside its workflow; a run that ended another way settles as that."""
     config = _config(helper_tools=["shell"])
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
-    stopped = RunRecord(run_id="run", session_id="session", metadata={CONFIG_RELOAD_CALL: RELOAD_STOPPED})
+
+    def stopped_run(status: RunStatus) -> RunRecord:
+        marker = {CONFIG_RELOAD_CALL: RELOAD_STOPPED}
+        return RunRecord(run_id="run", session_id="session", status=status, metadata=marker)
+
+    stopped = stopped_run(RunStatus.completed)
 
     def own_copy(source_kind: PersonaSourceKind) -> DelegationChild:
         return prepare_child_turn(
@@ -810,6 +855,9 @@ def test_a_reload_stopped_workflow_participant_is_not_told_to_continue_it(tmp_pa
     assert reload_stopped_child_result(inline, stopped) == f"{RELOAD_STOPPED} {resume}"
     assert reload_stopped_child_result(own_copy("workflow"), stopped) == RELOAD_STOPPED
     assert reload_stopped_child_result(inline, RunRecord(run_id="run", session_id="session")) is None
+    # A refused call marks the run, which may still be cancelled, fail, or pause before its batch ends.
+    for status in (RunStatus.cancelled, RunStatus.error, RunStatus.paused):
+        assert reload_stopped_child_result(inline, stopped_run(status)) is None
 
 
 @pytest.mark.asyncio

@@ -329,8 +329,10 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         original_prompt=continuation.request_body,
         continuation_count=continuation.continuation_count,
     )
-    # A config reload that refused a call of the recovered command ends the turn, as it ends a live minimal turn.
-    ending = next((call.result for call in controls if call.tool_name == CONFIG_RELOAD_CALL), decision.limit_message)
+    # A config reload that refused a call of the command, in this recovery or before the restart as the saved run
+    # records, ends the turn, as it ends a live minimal turn.
+    stopped = next((call.result for call in controls if call.tool_name == CONFIG_RELOAD_CALL), None)
+    ending = stopped or (persisted.metadata or {}).get(CONFIG_RELOAD_CALL) or decision.limit_message
     if ending is not None:
         presentation.append_text(ending)
         if continuation.show_tool_calls:

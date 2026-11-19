@@ -540,8 +540,9 @@ def reload_stopped_child_result(child: DelegationChild, response: RunRecord) -> 
     """Return what a child hands its caller when a config reload stopped its run ``response``, else None.
 
     The stopped run is stored completed, so a follow-up turn replays it, and names how its caller resumes the child.
+    A run a refused call marked that ended another way, as one cancelled while its command still ran, was not stopped.
     """
-    reason = (response.metadata or {}).get(CONFIG_RELOAD_CALL)
+    reason = (response.metadata or {}).get(CONFIG_RELOAD_CALL) if response.status == RunStatus.completed else None
     if reason is None or delegation_grant(child) == "dynamic_workflow":
         # A workflow participant cannot be continued outside its workflow.
         return reason
