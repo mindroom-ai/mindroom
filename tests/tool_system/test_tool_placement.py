@@ -165,3 +165,17 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as config_dir:
         _GOLDEN_PATH.write_text("\n".join(placement_table(Path(config_dir))) + "\n")
     sys.stdout.write(f"wrote {_GOLDEN_PATH}\n")
+
+
+@pytest.mark.parametrize("listed", ["file", "coding", "filesystem"])
+def test_a_selective_env_list_naming_filesystem_by_an_alias_still_routes_it(tmp_path: Path, listed: str) -> None:
+    """A deployment's ``shell,file,python,coding`` list keeps the filesystem toolkit in the worker."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env=_env(
+            "selective", f"shell,{listed}", "http://sandbox-runner:8765", "static_runner", unsafe=False, runner=False
+        ),
+    )
+    assert _placement(runtime_paths, "filesystem", None) == "1"
+    assert _placement(runtime_paths, "python", None) == "0"

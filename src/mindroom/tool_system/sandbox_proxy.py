@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 
 from mindroom.browser.call_limit import browser_request_budget_seconds
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -240,7 +241,7 @@ def _read_proxy_tools(
         return None
     if not raw_value:
         return set()
-    return {part.strip() for part in raw_value.split(",") if part.strip()}
+    return {canonical_tool_name(part.strip()) for part in raw_value.split(",") if part.strip()}
 
 
 def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:
