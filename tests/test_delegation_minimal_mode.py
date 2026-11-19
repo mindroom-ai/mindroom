@@ -15,12 +15,13 @@ from pydantic import TypeAdapter
 import mindroom.memory._file_backend as file_backend_module
 import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom import ai
+from mindroom.agent_cli.minimal_agent import minimal_grant_survives_reload
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
-from mindroom.config.knowledge import RerankerConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, RerankerConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -489,11 +490,31 @@ class _ReloadedRun:
     paths: RuntimePaths
     # What a later `continue_subagent` turn answered, when one was asked for.
     follow_up: str | None = None
+    # The turn's CLI owner, once a shell command reached it.
+    owner: LiveTurnTools | None = None
 
     def receipt(self) -> dict[str, object]:
         """Return the child as its delegation settled it."""
         (handle,) = (self.paths.storage_root / "subagent_sessions").glob("*.json")
         return json.loads(handle.read_text())["child"]
+
+
+def _reload_while_rebuilding(
+    monkeypatch: pytest.MonkeyPatch,
+    reloaded: list[Config],
+    reload_config: Callable[[Callable[[Config], object]], object],
+    edit: Callable[[Config], object] | None,
+) -> None:
+    """Reload the config with ``edit`` once, while a turn prepares its rebuild after the first reload."""
+    resolve_knowledge = ai.resolve_agent_knowledge_access_async
+
+    async def resolve_knowledge_through_a_reload(*args: object, **kwargs: object) -> object:
+        resolved = await resolve_knowledge(*args, **kwargs)
+        if edit is not None and len(reloaded) == 1:
+            reload_config(edit)
+        return resolved
+
+    monkeypatch.setattr(ai, "resolve_agent_knowledge_access_async", resolve_knowledge_through_a_reload)
 
 
 async def _run_minimal_turn_through_reloads(
@@ -509,13 +530,16 @@ async def _run_minimal_turn_through_reloads(
     native: bool = False,
     narrowed_to: tuple[str, ...] | None = None,
     follow_up: bool = False,
+    reload_during_rebuild: Callable[[Config], object] | None = None,
+    caller_depth: int = 0,
 ) -> _ReloadedRun:
     """Run a minimal `helper` turn whose config reloads after its first shell command, or after every one.
 
     Each command lists the turn's tools, or makes ``cli_call``, which the first reload precedes with
     ``reload_before_cli_call``. The turn is a child `leader` delegates, directly or with ``native`` through its own
     reply, or with ``narrowed_to`` a turn of `helper`'s own that offers only those toolkits, as a contact's does.
-    ``prepare`` edits the config the turn starts under. Alice administers the deployment, so real authorization
+    ``prepare`` edits the config the turn starts under. ``reload_during_rebuild`` is a second reload, which lands
+    while the turn prepares its rebuild after the first. `leader` is itself ``caller_depth`` delegations deep. Alice administers the deployment, so real authorization
     admits her until a reload says otherwise.
     """
     config = _config(helper_tools=["shell", "calculator"])
@@ -529,14 +553,17 @@ async def _run_minimal_turn_through_reloads(
     live = replace(_live_context(config, paths), config_provider=lambda: current[0])
     ran_under: list[Config] = []
 
-    def reload_config() -> None:
+    def reload_config(edit: Callable[[Config], object] = reload) -> None:
         reloaded.append(current[0].model_copy(deep=True))
-        reload(reloaded[-1])
+        edit(reloaded[-1])
         current[0] = reloaded[-1]
+
+    _reload_while_rebuilding(monkeypatch, reloaded, reload_config, reload_during_rebuild)
 
     async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
         owner = shell_cli_owner(live.orchestrator.agent_cli_registry)
         ran_under.append(owner.catalog.runtime_context.config)
+        run.owner = owner
         if reload_before_cli_call and not reloaded:
             # The reload lands while this command runs, before its CLI call.
             reload_config()
@@ -567,7 +594,14 @@ async def _run_minimal_turn_through_reloads(
         with tool_runtime_context(replace(live, agent_name="helper")):
             run.result = (await ai.ai_response(turn, paths, config)).text
         return run
-    toolkit = DelegateTools("leader", paths, config, _workspace(tmp_path, "leader"), execution_identity=_identity())
+    toolkit = DelegateTools(
+        "leader",
+        paths,
+        config,
+        _workspace(tmp_path, "leader"),
+        execution_identity=_identity(),
+        delegation_depth=caller_depth,
+    )
     with tool_runtime_context(live):
         run.result = await _delegate(
             toolkit,
@@ -884,6 +918,144 @@ async def test_repeated_reloads_end_a_minimal_subagents_turn_at_the_continuation
     # Each attempt ran one command under the config of its own rebuild, and its next was refused.
     assert run.ran_under[1:] == run.reloaded[:TURN_CONTINUATION_LIMIT]
     assert len(run.child.requests) == 2 * (TURN_CONTINUATION_LIMIT + 1)
+
+
+_NEW_ROLE = "ROLE-OF-THE-RELOADED-CONFIG"
+
+
+def _reload_role(config: Config) -> None:
+    # The reranker is what stops the turn for a rebuild, and the role is what the rebuild would show its grant.
+    _add_reranker(config)
+    config.agents["helper"].role = _NEW_ROLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
+async def test_a_requester_revoked_while_a_minimal_turn_rebuilds_keeps_its_grant_on_the_old_documents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second reload that lands while the rebuild prepares is checked again before the grant gets new documents."""
+    run = await _run_minimal_turn_through_reloads(
+        tmp_path,
+        monkeypatch,
+        _reload_role,
+        bash_calls=3,
+        reload_during_rebuild=_revoke_requester,
+    )
+
+    assert len(run.reloaded) == 2
+    assert _REFUSED in run.result, run.result
+    # The grant still reads the documents of the config it was issued under, and the model is sent nothing more.
+    assert run.owner is not None
+    assert run.owner.catalog.runtime_context.config is run.ran_under[0]
+    assert "optional long role" in run.owner._context["role"]
+    assert _NEW_ROLE not in str(run.owner._context)
+    assert len(run.child.requests) == 2
+    assert run.receipt()["status"] == "failed", run.receipt()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
+async def test_a_harmless_reload_while_a_minimal_turn_rebuilds_does_not_end_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second save during the rebuild's preparation that takes nothing from the turn leaves it running."""
+    run = await _run_minimal_turn_through_reloads(
+        tmp_path,
+        monkeypatch,
+        _reload_role,
+        bash_calls=3,
+        reload_during_rebuild=lambda config: setattr(config.agents["plain"], "role", "Another agent's new role"),
+    )
+
+    assert "Child answer" in run.result, run.result
+    assert run.owner is not None
+    assert _NEW_ROLE in run.owner._context["role"]
+
+
+def _withdraw_the_callers_own_delegation(config: Config) -> None:
+    config.agents["root"].delegate_to = []
+    # The reranker is what refuses the turn's calls, and the prompt is what a rebuild would send its model.
+    _add_reranker(config)
+    _reload_prompt(config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
+async def test_a_reload_refuses_a_nested_minimal_subagents_calls_without_rebuilding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child of a child keeps refusing: only its own caller's permission to delegate could be checked again.
+
+    The reload withdraws `root`'s permission to delegate to `leader`, and leaves `leader`'s to `helper` as it was.
+    """
+    run = await _run_minimal_turn_through_reloads(
+        tmp_path,
+        monkeypatch,
+        _withdraw_the_callers_own_delegation,
+        bash_calls=2,
+        prepare=lambda config: config.agents.update(root=AgentConfig(display_name="Root", delegate_to=["leader"])),
+        caller_depth=1,
+    )
+
+    assert "Child answer" in run.result, run.result
+    assert len(run.ran_under) == 1
+    assert len(run.child.requests) == 3
+    assert "no longer permits this prepared CLI call" in str(run.child.requests[-1].messages)
+    assert _NEW_PROMPT not in str([request.messages for request in run.child.requests])
+
+
+def test_checking_a_minimal_grant_against_a_reload_leaves_the_workspaces_knowledge_links_alone(tmp_path: Path) -> None:
+    """The check before a rebuild only compares: it reconciles the workspace's knowledge links for neither config."""
+    config = _config(helper_tools=["shell", "calculator"])
+    paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
+    entity_ids(config, paths)
+    knowledge = _workspace(tmp_path, "helper") / "knowledge"
+    knowledge.mkdir(parents=True)
+    (knowledge / "retired").symlink_to("../notes")
+    reloaded = config.model_copy(deep=True)
+    reloaded.defaults.tool_output_auto_save_threshold_bytes = 12345
+    runtime = replace(_live_context(config, paths), agent_name="helper", config_provider=lambda: reloaded)
+
+    assert not minimal_grant_survives_reload(runtime, runtime.on_current_config())
+    assert [(link.name, link.readlink()) for link in knowledge.iterdir()] == [("retired", Path("../notes"))]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize("native", [False, True], ids=["direct", "native"])
+async def test_a_rebuild_that_fails_to_prepare_fails_the_minimal_subagent_with_its_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    native: bool,
+) -> None:
+    """An error while the rebuilt agent prepares ends the turn failed: the run the reload stopped is not its outcome."""
+    workspace = _workspace(tmp_path, "helper")
+    (workspace / "research").mkdir(parents=True)
+    (workspace / "knowledge").mkdir()
+    (workspace / "knowledge" / "research").write_text("A file where the reload's knowledge base is linked.")
+
+    def bind_knowledge_over_the_file(config: Config) -> None:
+        config.knowledge_bases["research"] = KnowledgeBaseConfig(path=str(workspace / "research"))
+        config.agents["helper"].knowledge_bases = ["research"]
+
+    run = await _run_minimal_turn_through_reloads(
+        tmp_path,
+        monkeypatch,
+        bind_knowledge_over_the_file,
+        bash_calls=3,
+        native=native,
+    )
+
+    error = "Workspace knowledge link path already exists and is not a symlink"
+    assert error in run.result, run.result
+    assert len(run.child.requests) == 2
+    receipt = run.receipt()
+    assert receipt["status"] == "failed", receipt
+    assert error in str(receipt["result"]), receipt
 
 
 @pytest.mark.asyncio
