@@ -102,9 +102,8 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.running = False
         self.stopped = 0
-        self.grants: list[int] = []
+        self.grants: list[object] = []
         self.revoked = 0
-        self.reset = 0
         self.shell_calls: list[tuple[str, dict[str, object]]] = []
 
     async def start(self) -> None:
@@ -120,20 +119,22 @@ class FakeRuntime:
             "control_available": False,
             "lease_remaining_seconds": 0,
             "lease_expires_at_ms": None,
-            "emergency_stop_latched": False,
             "active_action": None,
         }
 
-    def grant_control(self, duration_seconds: int) -> dict[str, object]:
-        self.grants.append(duration_seconds)
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        computer: bool = False,
+    ) -> dict[str, object]:
+        grant = (duration_seconds, until_revoked, computer)
+        self.grants.append(duration_seconds if grant[1:] == (False, False) else grant)
         return self.status()
 
     def revoke_control(self) -> dict[str, object]:
         self.revoked += 1
-        return self.status()
-
-    def reset_emergency_stop(self) -> dict[str, object]:
-        self.reset += 1
         return self.status()
 
     def decide_shell(
@@ -308,13 +309,44 @@ def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
     asyncio.run(host.handle(_request("start")))
     asyncio.run(host.handle(_request("grant_control", duration_seconds=600)))
     asyncio.run(host.handle(_request("revoke_control")))
-    asyncio.run(host.handle(_request("reset_emergency_stop")))
     asyncio.run(host.shutdown())
 
     assert runtime.grants == [600]
     assert runtime.revoked == 1
-    assert runtime.reset == 1
     assert runtime.stopped == 1
+
+
+def test_host_grants_control_until_revoked_and_over_the_computer_only_as_asked(tmp_path: Path) -> None:
+    """Control lasts a duration or until revoked, over the saved apps unless the local app names the computer."""
+    runtime = FakeRuntime()
+    host = _host(tmp_path, runtime)
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    asyncio.run(host.handle(_request("start")))
+
+    asyncio.run(host.handle(_request("grant_control", until_revoked=True)))
+    asyncio.run(host.handle(_request("grant_control", until_revoked=True, scope="computer")))
+    asyncio.run(host.handle(_request("grant_control", duration_seconds=60, scope="computer")))
+    for parameters in (
+        {},
+        {"scope": "computer"},
+        {"until_revoked": False},
+        {"until_revoked": 1},
+        {"until_revoked": True, "duration_seconds": 60},
+        {"until_revoked": True, "scope": "apps"},
+        {"until_revoked": True, "scope": None},
+        {"duration_seconds": 60, "full_control": True},
+    ):
+        with pytest.raises(NativeProtocolError, match="exactly duration_seconds or until_revoked") as refused:
+            asyncio.run(host.handle(_request("grant_control", **parameters)))
+        assert refused.value.code == "invalid_request"
+    with pytest.raises(NativeProtocolError, match="range"):
+        asyncio.run(host.handle(_request("grant_control", duration_seconds=3601, scope="computer")))
+
+    assert runtime.grants == [(None, True, False), (None, True, True), (60, False, True)]
+    assert host.status()["authority"]["control_scope"] == "saved_apps"
+    removed = {"v": 1, "request_id": str(uuid4()), "action": "reset_emergency_stop", "parameters": {}}
+    with pytest.raises(NativeProtocolError, match="action is unsupported"):
+        parse_native_request(json.dumps(removed).encode())
 
 
 @pytest.mark.parametrize(

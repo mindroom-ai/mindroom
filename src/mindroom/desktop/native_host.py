@@ -66,7 +66,13 @@ class _NativeBridgeRuntimeProtocol(Protocol):
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
     def status(self) -> dict[str, object]: ...
-    def grant_control(self, duration_seconds: int) -> dict[str, object]: ...
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        computer: bool = False,
+    ) -> dict[str, object]: ...
     def revoke_control(self) -> dict[str, object]: ...
     def decide_shell(
         self,
@@ -456,10 +462,22 @@ class NativeDesktopHost:
                 self._helper_state = "running"
             return {"status": self.status()}
         if action == "grant_control":
-            _expect_keys(parameters, {"duration_seconds"})
+            lasting = set(parameters) - {"scope"}
+            until_revoked = lasting == {"until_revoked"} and parameters["until_revoked"] is True
+            if (
+                not (until_revoked or lasting == {"duration_seconds"})
+                or parameters.get("scope", "computer") != "computer"
+            ):
+                raise NativeProtocolError(
+                    "invalid_request",
+                    "Native desktop grant_control needs exactly duration_seconds or until_revoked: true, "
+                    'and may add scope: "computer".',
+                )
             try:
                 self._require_runtime().grant_control(
-                    _required_int(parameters, "duration_seconds", minimum=60, maximum=3600),
+                    None if until_revoked else _required_int(parameters, "duration_seconds", minimum=60, maximum=3600),
+                    until_revoked=until_revoked,
+                    computer="scope" in parameters,
                 )
             except ValueError as exc:
                 raise NativeProtocolError("control_denied", str(exc)) from exc
@@ -676,9 +694,19 @@ class NativeBridgeRuntime:
             }
         return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
 
-    def grant_control(self, duration_seconds: int) -> dict[str, object]:
-        """Grant a bounded local control lease."""
-        return self._required_bridge().grant_local_control(duration_seconds)
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        computer: bool = False,
+    ) -> dict[str, object]:
+        """Grant local control for a bounded duration or until revoked or stopped, over the saved apps or every app."""
+        return self._required_bridge().grant_local_control(
+            duration_seconds,
+            until_revoked=until_revoked,
+            computer=computer,
+        )
 
     def revoke_control(self) -> dict[str, object]:
         """Revoke new local control actions."""

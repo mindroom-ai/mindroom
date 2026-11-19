@@ -745,6 +745,59 @@ def test_mac_launch_invalidates_all_retained_app_observations() -> None:
     assert services.performed_actions == []
 
 
+class NamedRunningApplication(FakeRunningApplication):
+    """A running app with its own bundle identifier."""
+
+    def __init__(self, bundle_id: str) -> None:
+        super().__init__()
+        self.bundle_id = bundle_id
+
+    def bundleIdentifier(self) -> str:
+        return self.bundle_id
+
+    def localizedName(self) -> str:
+        return self.bundle_id
+
+
+def test_all_apps_backend_lists_and_admits_every_running_app_but_mindroom() -> None:
+    """Computer scope reaches any app and the primary screen, never MindRoom's own windows, and ends with the flag."""
+    backend, _, workspace = _fake_mac_backend()
+    workspace.applications = [NamedRunningApplication(app) for app in ("com.example.Terminal", "chat.mindroom.menubar")]
+
+    assert [app.app_id for app in backend.list_apps()] == ["com.example.Editor"]  # Saved apps only.
+    with pytest.raises(AccessibilityError, match="allowlist"):
+        backend.get_app_state(PRIMARY_SCREEN_APP_ID)
+    backend.all_apps = True
+
+    assert [app.to_result() for app in backend.list_apps()] == [
+        {"id": "com.example.Editor", "name": "com.example.Editor", "running": False},
+        {"id": "com.example.Terminal", "name": "com.example.Terminal", "running": True},
+        {"id": PRIMARY_SCREEN_APP_ID, "name": "Primary Screen", "running": True},
+    ]
+    state = backend.get_app_state(PRIMARY_SCREEN_APP_ID)
+    backend._require_allowed("com.example.NotRunning")
+    with pytest.raises(AccessibilityError, match="allowlist"):
+        backend._require_allowed("chat.mindroom.menubar")
+    backend.all_apps = False
+
+    with pytest.raises(AccessibilityError, match="allowlist"):
+        backend.prepare_capture(PRIMARY_SCREEN_APP_ID, state.state_id)
+
+
+def test_screenshot_only_backend_reaches_the_primary_screen_only_while_all_apps_is_set() -> None:
+    """Portable pixel mode gains the primary screen, and no semantic app, from computer scope."""
+    backend = ScreenshotOnlyAccessibilityBackend(frozenset({"com.example.Editor"}), lambda: (1920, 1080))
+
+    with pytest.raises(AccessibilityError, match="allowlist"):
+        backend.get_app_state(PRIMARY_SCREEN_APP_ID)
+    backend.all_apps = True
+
+    assert [app.app_id for app in backend.list_apps()] == ["com.example.Editor", PRIMARY_SCREEN_APP_ID]
+    assert backend.get_app_state(PRIMARY_SCREEN_APP_ID).app_id == PRIMARY_SCREEN_APP_ID
+    with pytest.raises(AccessibilityError, match="only on macOS"):
+        backend.get_app_state("com.example.Terminal")
+
+
 def test_screenshot_only_backend_requires_explicit_primary_screen_allowlist() -> None:
     """Portable pixel mode cannot pretend to provide semantic access to an arbitrary app."""
     backend = ScreenshotOnlyAccessibilityBackend(

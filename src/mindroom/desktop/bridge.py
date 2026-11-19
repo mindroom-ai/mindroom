@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import sys
 import threading
 import time
@@ -13,8 +14,10 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.desktop.accessibility import (
+    PRIMARY_SCREEN_APP_ID,
     AccessibilityActionOutcomeUnknownError,
     AccessibilityError,
+    app_targetable,
 )
 from mindroom.desktop.command_journal import DesktopCommandJournal, controller_journal_key
 from mindroom.desktop.command_parameters import (
@@ -120,7 +123,7 @@ class DesktopBridgePolicy:
     shell_enabled: bool = False
 
     def __post_init__(self) -> None:
-        """Require explicit caller and agent allowlists and a lease expiry exactly when control is allowed."""
+        """Require explicit caller and agent allowlists, and a lease expiry only with control."""
         if not self.allowed_requester_ids:
             msg = "Desktop bridge requires at least one allowed requester Matrix ID."
             raise ValueError(msg)
@@ -135,9 +138,6 @@ class DesktopBridgePolicy:
             raise ValueError(msg)
         if any(not value.strip() for value in self.allowed_app_ids):
             msg = "Desktop bridge application IDs must not be empty."
-            raise ValueError(msg)
-        if self.allow_control and self.control_lease_expires_at_ms is None:
-            msg = "Control-enabled desktop bridge requires a lease expiry."
             raise ValueError(msg)
         if not self.allow_control and self.control_lease_expires_at_ms is not None:
             msg = "Observe-only desktop bridge cannot carry a control lease expiry."
@@ -185,6 +185,7 @@ class DesktopBridge:
     _accepting: bool = field(default=True, init=False)
     _active_action: str | None = field(default=None, init=False)
     _control_lease_deadline: float | None = field(default=None, init=False)
+    _computer_control: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         """Pair each enabled capability with its provider and convert the lease label to a local deadline."""
@@ -407,13 +408,15 @@ class DesktopBridge:
         ``file_roots`` is reported in full here: the native NDJSON channel the Mac app reads over
         has no to-device size limit, unlike the remote ``status`` action reply.
         """
+        control = self._control_available()
+        deadline = self._control_lease_deadline
         remaining = 0.0
-        if self._control_available() and self._control_lease_deadline is not None:
-            remaining = max(0.0, self._control_lease_deadline - self.monotonic_clock())
+        if control and deadline is not None and deadline != math.inf:
+            remaining = max(0.0, deadline - self.monotonic_clock())
         return {
             **self._bridge_status(),
             "file_roots": self.filesystem.list_folders()["folders"] if self.filesystem is not None else [],
-            "gui_mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
+            "gui_mode": "stopped" if not self._accepting else ("control" if control else "observe_only"),
             "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
             "lease_remaining_seconds": remaining,
             "active_action": self._active_action,
@@ -470,10 +473,21 @@ class DesktopBridge:
             raise ValueError(msg)
         return shell
 
-    def grant_local_control(self, duration_seconds: int) -> dict[str, object]:
-        """Grant control only through the local helper's private management channel."""
-        if type(duration_seconds) is not int or not 60 <= duration_seconds <= 3600:
-            msg = "Local control duration must be between 60 and 3600 seconds."
+    def grant_local_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        computer: bool = False,
+    ) -> dict[str, object]:
+        """Grant control only through the local helper's private management channel.
+
+        It lasts a bounded duration or until revoked or stopped, and is never saved.
+        ``computer`` extends it from the saved apps to every app but MindRoom's own and the primary screen.
+        """
+        timed = until_revoked is False and type(duration_seconds) is int and 60 <= duration_seconds <= 3600
+        if not timed and not (until_revoked is True and duration_seconds is None):
+            msg = "Local control must last 60 to 3600 seconds or until revoked."
             raise ValueError(msg)
         if not self._accepting:
             msg = "Restart the stopped bridge before granting control."
@@ -484,15 +498,21 @@ class DesktopBridge:
         self.policy = replace(
             self.policy,
             allow_control=True,
-            control_lease_expires_at_ms=round((self.clock() + duration_seconds) * 1000),
+            control_lease_expires_at_ms=(
+                None if duration_seconds is None else round((self.clock() + duration_seconds) * 1000)
+            ),
         )
-        self._control_lease_deadline = self.monotonic_clock() + duration_seconds
+        self._control_lease_deadline = (
+            math.inf if duration_seconds is None else self.monotonic_clock() + duration_seconds
+        )
+        self._computer_control = computer is True
         return self.local_status()
 
     def revoke_local_control(self) -> dict[str, object]:
-        """Revoke new input immediately without repeating or interrupting active actions."""
+        """Revoke new input and its computer scope immediately without repeating or interrupting active actions."""
         self.policy = replace(self.policy, allow_control=False, control_lease_expires_at_ms=None)
         self._control_lease_deadline = None
+        self._computer_control = False
         return self.local_status()
 
     async def stop(self) -> None:
@@ -711,8 +731,9 @@ class DesktopBridge:
             error = self._local_capability_error(command.action)
         elif command.action in DESKTOP_BROWSER_ACTIONS:
             error = self._browser_policy_error(command)
-        elif command.action in DESKTOP_APP_ACTIONS and (
-            not isinstance(app_id, str) or app_id not in self.policy.allowed_app_ids
+        elif command.action in DESKTOP_APP_ACTIONS and not (
+            isinstance(app_id, str)
+            and app_targetable(app_id, self.policy.allowed_app_ids, all_apps=self._computer_scope())
         ):
             error = "Desktop command must target an application in the local allowlist."
         elif command.action in DESKTOP_CONTROL_ACTIONS:
@@ -759,6 +780,9 @@ class DesktopBridge:
             return _Execution(await execute_file(self.filesystem, command))
         if command.action in DESKTOP_SHELL_ACTIONS:
             return _Execution(await execute_shell(self.client, self.shell, command))
+        if self.provider is not None:
+            # The provider checks every target itself, so it follows the scope live control has right now.
+            self.provider.set_all_apps(self._computer_scope())
         return await self._execute_desktop(command)
 
     async def _execute_desktop(self, command: DesktopCommand) -> _Execution:
@@ -790,7 +814,13 @@ class DesktopBridge:
         if command.action == "list_apps":
             reject_unexpected_parameters(parameters, allowed=frozenset())
             apps = await asyncio.to_thread(self.provider.list_apps) if self.provider is not None else []
-            return _Execution({"apps": [app.to_result() for app in apps]})
+            # Computer scope lists every running app, so the reply keeps the prefix that fits, primary screen first.
+            listed = sorted((app.to_result() for app in apps), key=lambda app: app["id"] != PRIMARY_SCREEN_APP_ID)
+
+            def reply(dropped: int) -> dict[str, object]:
+                return {"apps": listed[: len(listed) - dropped], "apps_truncated": dropped > 0}
+
+            return _Execution(reply(leftmost_fitting(command, 0, len(listed), reply)))
         provider = self._required_gui_provider()
         if command.action == "launch_app":
             reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
@@ -871,6 +901,7 @@ class DesktopBridge:
         status: dict[str, object] = {
             "gui_mode": "control" if control_available else "observe_only",
             "control_available": control_available,
+            "control_scope": "computer" if self._computer_scope() else "saved_apps",
             "allowed_app_count": len(self.policy.allowed_app_ids),
             "browser_enabled": self.policy.browser_enabled,
             "gui_available": self.provider is not None,
@@ -882,14 +913,18 @@ class DesktopBridge:
         return status
 
     def _control_available(self) -> bool:
+        """Report live control; only a local grant sets the deadline of control that has no expiry."""
         lease_expires_at_ms = self.policy.control_lease_expires_at_ms
         return (
             self.policy.allow_control
-            and lease_expires_at_ms is not None
-            and self.clock() * 1000 < lease_expires_at_ms
+            and (lease_expires_at_ms is None or self.clock() * 1000 < lease_expires_at_ms)
             and self._control_lease_deadline is not None
             and self.monotonic_clock() < self._control_lease_deadline
         )
+
+    def _computer_scope(self) -> bool:
+        """Report whether live control reaches every app; expiry, Revoke, and stop all return to the saved apps."""
+        return self._computer_control and self._control_available()
 
     def _capture_error_response(
         self,

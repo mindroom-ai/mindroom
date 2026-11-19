@@ -183,6 +183,8 @@ class FakeProvider:
     """Record the local operations requested of the GUI provider."""
 
     calls: list[tuple[str, object]] = field(default_factory=list)
+    all_apps: bool = False
+    running_apps: list[DesktopApp] = field(default_factory=list)
     screenshot_error: bool = False
     click_error: bool = False
     stale_state: bool = False
@@ -197,10 +199,14 @@ class FakeProvider:
             "accessibility": {"available": True, "backend": "fake"},
         }
 
+    def set_all_apps(self, enabled: bool) -> None:
+        """Remember the scope the bridge last gave the provider's own target checks."""
+        self.all_apps = enabled
+
     def list_apps(self) -> list[DesktopApp]:
-        """Return only the configured fake application."""
+        """Return the configured fake application, and with every app in scope the other running ones."""
         self.calls.append(("list_apps", None))
-        return [DesktopApp(APP_ID, "Editor", True)]
+        return [DesktopApp(APP_ID, "Editor", True), *(self.running_apps if self.all_apps else [])]
 
     def launch_app(self, app_id: str) -> None:
         """Record one exact allowlisted application launch."""
@@ -213,7 +219,7 @@ class FakeProvider:
             msg = "App state failed."
             raise AccessibilityError(msg)
         self.state_count += 1
-        return replace(STATE, state_id=f"state-{self.state_count}")
+        return replace(STATE, app_id=app_id, state_id=f"state-{self.state_count}")
 
     def screenshot(self, *, app_id: str, state_id: str) -> ScreenCapture:
         """Record the exact window crop."""

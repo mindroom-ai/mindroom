@@ -14,6 +14,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
 
+from mindroom.desktop.input import MINDROOM_APP_IDS
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -190,15 +192,23 @@ class DesktopApp:
         return {"id": self.app_id, "name": self.name, "running": self.running}
 
 
+def app_targetable(app_id: str, allowed_app_ids: frozenset[str], *, all_apps: bool) -> bool:
+    """Return whether an app may be targeted: a saved one, or with ``all_apps`` any but MindRoom's own."""
+    return app_id in allowed_app_ids or (all_apps and app_id not in MINDROOM_APP_IDS)
+
+
 class AccessibilityBackend(Protocol):
     """Platform accessibility operations used by the hybrid provider."""
+
+    # Set while a live computer-scope grant extends the saved apps to every app and the primary screen.
+    all_apps: bool
 
     def availability(self) -> dict[str, object]:
         """Describe the active semantic backend."""
         ...
 
     def list_apps(self) -> list[DesktopApp]:
-        """List only applications named in the local allowlist."""
+        """List the applications named in the local allowlist, and with ``all_apps`` every running one."""
         ...
 
     def launch_app(self, app_id: str) -> None:
@@ -267,6 +277,8 @@ class _StoredMacState:
 class MacAccessibilityBackend:
     """macOS AXUIElement backend with exact app allowlisting and stale-state checks."""
 
+    all_apps = False
+
     def __init__(self, allowed_app_ids: frozenset[str], screen_size: Callable[[], tuple[int, int]]) -> None:
         import AppKit  # noqa: PLC0415
         import ApplicationServices  # noqa: PLC0415
@@ -285,14 +297,17 @@ class MacAccessibilityBackend:
         }
 
     def list_apps(self) -> list[DesktopApp]:
-        """List configured bundle identifiers without revealing other running apps."""
+        """List configured bundle identifiers, revealing other running apps only with ``all_apps``."""
         running = {
             str(application.bundleIdentifier()): str(application.localizedName() or application.bundleIdentifier())
             for application in self._workspace.runningApplications()
             if application.bundleIdentifier() is not None
         }
         apps: list[DesktopApp] = []
-        for app_id in sorted(self._allowed_app_ids):
+        listed = self._allowed_app_ids
+        if self.all_apps:
+            listed = listed | (running.keys() - MINDROOM_APP_IDS) | {PRIMARY_SCREEN_APP_ID}
+        for app_id in sorted(listed):
             if app_id == PRIMARY_SCREEN_APP_ID:
                 apps.append(DesktopApp(app_id, "Primary Screen", True))
                 continue
@@ -956,13 +971,15 @@ class MacAccessibilityBackend:
         raise AccessibilityActionOutcomeUnknownError(msg)
 
     def _require_allowed(self, app_id: str) -> None:
-        if app_id not in self._allowed_app_ids:
+        if not app_targetable(app_id, self._allowed_app_ids, all_apps=self.all_apps):
             msg = f"Application {app_id!r} is not in the local desktop allowlist."
             raise AccessibilityError(msg)
 
 
 class ScreenshotOnlyAccessibilityBackend:
     """Portable state binding for explicit primary-screen coordinate fallback."""
+
+    all_apps = False
 
     def __init__(self, allowed_app_ids: frozenset[str], screen_size: Callable[[], tuple[int, int]]) -> None:
         self._allowed_app_ids = allowed_app_ids
@@ -981,7 +998,7 @@ class ScreenshotOnlyAccessibilityBackend:
                 "Primary Screen" if app_id == PRIMARY_SCREEN_APP_ID else app_id,
                 app_id == PRIMARY_SCREEN_APP_ID,
             )
-            for app_id in sorted(self._allowed_app_ids)
+            for app_id in sorted(self._allowed_app_ids | ({PRIMARY_SCREEN_APP_ID} if self.all_apps else frozenset()))
         ]
 
     def launch_app(self, app_id: str) -> None:
@@ -1050,7 +1067,7 @@ class ScreenshotOnlyAccessibilityBackend:
         self.element_for_action(app_id, state_id, element_index)
 
     def _require_primary(self, app_id: str) -> None:
-        if app_id not in self._allowed_app_ids:
+        if not app_targetable(app_id, self._allowed_app_ids, all_apps=self.all_apps):
             msg = f"Application {app_id!r} is not in the local desktop allowlist."
             raise AccessibilityError(msg)
         if app_id != PRIMARY_SCREEN_APP_ID:
@@ -1207,5 +1224,6 @@ __all__ = [
     "DesktopRect",
     "MacAccessibilityBackend",
     "ScreenshotOnlyAccessibilityBackend",
+    "app_targetable",
     "create_accessibility_backend",
 ]

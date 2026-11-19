@@ -86,6 +86,10 @@ class DesktopProvider(Protocol):
         """Return coarse screen, cursor, and accessibility status."""
         ...
 
+    def set_all_apps(self, enabled: bool) -> None:
+        """Extend app targeting from the saved apps to every app but MindRoom's own, or end that."""
+        ...
+
     def list_apps(self) -> list[DesktopApp]:
         """List only applications explicitly allowed by local policy."""
         ...
@@ -238,6 +242,10 @@ class PyAutoGuiDesktopProvider:
             "accessibility": self._accessibility.availability(),
             "displays": displays,
         }
+
+    def set_all_apps(self, enabled: bool) -> None:
+        """Follow the bridge's live control scope: every app but MindRoom's own, or only the saved ones."""
+        self._accessibility.all_apps = enabled
 
     def list_apps(self) -> list[DesktopApp]:
         """List only applications explicitly allowed on this machine."""
