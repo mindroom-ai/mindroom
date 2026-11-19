@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from weakref import WeakValueDictionary
 
 from mindroom.approval.events import card_approvable
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.event_journal import (
     SCHEDULED_APPROVAL_WINDOW_NS,
     TIMEOUT_REASON,
@@ -29,6 +31,7 @@ from mindroom.event_journal import (
     ScheduledCallOutcome,
     ScheduledCallRefusal,
 )
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.logging_config import get_logger
 from mindroom.redaction import nests_beyond_redaction_depth, redact_sensitive_data, truncate_review_text
@@ -49,10 +52,12 @@ if TYPE_CHECKING:
     from mindroom.approval.recovery import ApprovalRecovery
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.approval.transport import ApprovalMatrixTransport
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import (
         ApprovalDeliveryView,
         DecisionStatus,
+        EventJournalStore,
         RecordedApprovalDecision,
         ScheduledApprovalArmState,
     )
@@ -962,10 +967,7 @@ class ApprovalManager:
         *,
         edit_optional: bool = False,
     ) -> bool:
-        """Enqueue and flush expiry for every card owned by one failed continuation, with its failure's reason.
-
-        ``edit_optional`` ends without an edit a card whose sender no longer runs in its room, as a removed entity's.
-        """
+        """Expire every card of one failed continuation with its failure's reason; see ``_expire_card``."""
         if self.cards is None:
             return False
         complete = True
@@ -1268,6 +1270,23 @@ class ApprovalManager:
         return status, reason, False
 
 
+def approval_card_store(
+    journal: Callable[[], EventJournalStore],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ApprovalDeliveryView | None:
+    """Return the one principal that keeps every approval's calls, cards and grants, whichever account sends a card.
+
+    It is the principal the router account had when it sent every card, so grants and decided calls stay where they
+    are; None before the Matrix accounts are prepared, when no card is recoverable yet.
+    """
+    try:
+        router_id = entity_identity_registry(config, runtime_paths).current_ids[ROUTER_AGENT_NAME]
+    except MissingManagedEntityAccountError:
+        return None
+    return journal().principal(journal_principal_id(ROUTER_AGENT_NAME, router_id.full_id))
+
+
 def get_approval_store() -> ApprovalManager | None:
     """Return the configured approval domain, if the runtime is ready."""
     return _MANAGER
@@ -1282,7 +1301,7 @@ def initialize_approval_store(
 ) -> ApprovalManager:
     """Initialize the module-level approval domain for one runtime context, or rebind it after a reload.
 
-    A rebind keeps the bound card store and recovery when it is given none, as before the router bot is built.
+    A rebind keeps the bound card store and recovery when it is given none, as before the Matrix accounts are prepared.
     """
     global _MANAGER
     if _MANAGER is not None and _MANAGER.runtime_paths.storage_root == runtime_paths.storage_root:

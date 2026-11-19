@@ -10,7 +10,7 @@ One database holds every bot in a runtime, and its content rows are owned by a p
 The Matrix account alone is not a sufficient owner, because two agents can be configured onto one account and neither should read the other's conversations.
 Room membership is not the boundary either, because two bots joined to the same room can hold different encryption keys and therefore decrypt different subsets of it.
 
-Approval coordination is the one place that deliberately crosses principals, because the router owns approval cards while the responding entity owns the paused continuation.
+Approval coordination is the one place that deliberately crosses principals, because one principal keeps every approval card and grant while the responding entity owns the paused continuation.
 It does so only by validating persisted card-to-continuation relationships inside the runtime, and it is not a way for ordinary conversation readers to select another principal.
 Turn rows and redactions are scoped to the agent name alone, so a re-login under a new Matrix ID neither answers every outstanding message again nor forgets a deletion, and turn rows still hold conversation-derived text.
 A redaction one login observes is applied to the projection, pending journal rows, and replies of every login of that agent, and never to another agent's rows; the logins share the deletion fact, not content.

@@ -109,7 +109,7 @@ A team's `access` covers requests to the team as a whole, so someone the team ad
 Only joined members count: a pending invitation does not, and leaving, being kicked, or being banned removes the grant.
 When MindRoom cannot confirm membership of a referenced room, the grant does not apply.
 The router tracks membership, so it must be joined to a room before `current_room_members` can allow anyone there.
-In an ad-hoc room an agent joined first, have the agent use its `invite_router` tool (see [When the Router Is Missing](tool-approval.md#when-the-router-is-missing)) and retry after the router joins.
+In an ad-hoc room an agent joined first, have the agent use its `invite_router` tool and retry after the router joins.
 
 ### Invitations
 

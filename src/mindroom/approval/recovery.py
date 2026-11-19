@@ -173,12 +173,7 @@ class ApprovalRecovery:
         The paused turn of such a card resumes with the expiry, as it does when a card times out.
         A later call ends nothing: every card sent since records its sender.
         """
-        # LEGACY_COMPAT: Approval cards the router sent, pending at upgrade.
-        # Legacy format: a live approval_cards row whose sender_entity is NULL.
-        # Last legacy release: v2026.11.385; replacement: the next release sends each card from the entity that asks.
-        # Handling: the first startup expires each one, editing the card where the router account still runs in its
-        # room and retiring it unedited elsewhere.
-        # Coverage: tests/test_legacy_approval_records.py::test_pending_router_card_is_ended_once_at_upgrade.
+        # The legacy rule is documented in ``event_journal/legacy_approval_senders.py``.
         if self.manager is None:
             return 0
         ended = await self.manager.expire_cards_without_sender(_UPGRADE_REASON)

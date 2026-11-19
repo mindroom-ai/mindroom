@@ -97,11 +97,6 @@ The [OpenAI-compatible API](openai-api.md) has no approval cards, so it hides ev
 Skill and knowledge-search functions such as `get_skill_script` and `search_knowledge_base` cannot pause for approval on any channel, so they are hidden when a required-approval rule or `default: require_approval` applies to them.
 Add an `auto_approve` rule for such a function to keep it available.
 
-## When the Router Is Missing
+## Who Posts the Card
 
-Approval cards need the router in the room, so a gated call in a room without the router is denied with `Tool approval needs the router in this room.`
-The agent gets that denial as the call's result and can recover on its own: every agent in a room has a built-in `invite_router` tool that invites the router into the current room, waits briefly for it to join, and reports when the invite is still pending.
-Once the router has joined, the agent retries the call, and the card appears as usual.
-The router accepts that invite only when its [`router.accept_invites`](configuration/router.md) allows the inviting agent's Matrix account; for a team, that is the team's account rather than the member agent's.
-Otherwise enable that setting or add the router to the room manually, then retry.
-An [adopted personal room](personal-rooms.md#adopting-an-existing-room) keeps the router out unless its record lists it in `router_user_id` or `additional_user_ids`, so `invite_router` refuses there instead of inviting a router the room would remove again.
+The agent or team whose turn asks for approval posts the card and edits it when the call is decided.

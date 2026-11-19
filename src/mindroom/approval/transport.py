@@ -321,11 +321,7 @@ class ApprovalMatrixTransport:
 
     def _entity_bot(self, entity_name: str | None) -> _ApprovalTransportBot | None:
         """Return the bot of the entity a card row names as its sender."""
-        # LEGACY_COMPAT: Approval cards the router sent, stored without a sender.
-        # Legacy format: an approval_cards row whose sender_entity is NULL; the router account sent the card.
-        # Last legacy release: v2026.11.385; replacement: the next release records each card's sending entity.
-        # Handling: a card without a sender is sent, edited and verified through the router account where it runs.
-        # Coverage: tests/test_legacy_approval_records.py::test_pending_router_card_is_ended_once_at_upgrade.
+        # A card without a sender is one the router sent; see ``event_journal/legacy_approval_senders.py``.
         return self.bot_provider(entity_name or ROUTER_AGENT_NAME)
 
     async def _card_sender(self, delivery_id: str) -> str | None:

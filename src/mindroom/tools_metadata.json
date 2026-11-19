@@ -238,7 +238,7 @@
       "dependencies": null,
       "description": "Invite the MindRoom router to the current Matrix room",
       "display_name": "Invite Router",
-      "docs_url": "https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing",
+      "docs_url": "https://docs.mindroom.chat/authorization/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [

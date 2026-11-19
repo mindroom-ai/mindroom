@@ -21,7 +21,7 @@ from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.api.app_state import EmbeddedRuntime
 from mindroom.api.startup_probes import serve_startup_probes
-from mindroom.approval.manager import initialize_approval_store
+from mindroom.approval.manager import approval_card_store, initialize_approval_store
 from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.approval.transport import ApprovalMatrixTransport
@@ -106,8 +106,6 @@ from mindroom.workers.runtime import (
 
 from . import file_watcher
 from .bot import AgentBot, create_bot_for_entity
-from .entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
-from .event_journal.identity import journal_principal_id
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.accounts import prepare_managed_accounts, validate_entity_accounts
@@ -626,15 +624,8 @@ class _MultiAgentOrchestrator:
             self.response_admission_gate.release()
 
     def _approval_cards(self) -> ApprovalDeliveryView | None:
-        """Return the one principal that keeps every approval's calls, cards and grants, whichever account sends a card.
-
-        None before the Matrix accounts are prepared, when no card is recoverable yet.
-        """
-        try:
-            router_id = entity_identity_registry(self.config, self.runtime_paths).current_ids[ROUTER_AGENT_NAME]
-        except MissingManagedEntityAccountError:
-            return None
-        return self.event_journal_store().principal(journal_principal_id(ROUTER_AGENT_NAME, router_id.full_id))
+        """Return the one principal that keeps every approval's books; None before the Matrix accounts are prepared."""
+        return approval_card_store(self.event_journal_store, self.config, self.runtime_paths)
 
     def _bind_started_runtime_support_services(self) -> None:
         """Bind current runtime support objects needed by live callbacks."""
@@ -1374,7 +1365,7 @@ class _MultiAgentOrchestrator:
             async with self._paused_startup_maintenance():
                 staged = self._stage_plugins(plan)
                 try:
-                    # Removal first, while the current router still delivers its approval notices
+                    # Removal first, while the removed entities' bots still edit their approval cards
                     # and before a replacement router's orphan cleanup could kick the removed accounts.
                     unsettled_removals = await self.fleet.remove(plan.remove)
                     await self.fleet.stop(plan.restart)
@@ -1470,10 +1461,8 @@ class _MultiAgentOrchestrator:
 
     def _end_paused_turn(self, ended: EndedApproval) -> None:
         """End a paused turn through the bot of its entity, or through any running bot for an entity now gone."""
-        bot = self.agent_bots.get(ended.continuation.entity_name) or next(
-            (bot for bot in self.agent_bots.values() if bot.running),
-            None,
-        )
+        running = self._running_startup_maintenance_bots()
+        bot = self.agent_bots.get(ended.continuation.entity_name) or (running[0] if running else None)
         if bot is not None:
             bot.end_paused_turn(ended)
 

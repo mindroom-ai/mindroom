@@ -698,7 +698,6 @@ Which functions an agent gets depends on what it is:
 
 Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
 `create_agent`, `update_agent`, `set_avatar`, and `delete_agent` always show an [approval card](../tool-approval.md#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](../tool-approval.md#auto-approve-everything) window skips it.
-In a room without the router the call is denied, and the agent recovers with `invite_router` as described in [When the Router Is Missing](../tool-approval.md#when-the-router-is-missing).
 Scripts and workflow participants cannot call it, and it cannot be deferred.
 
 ```python

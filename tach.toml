@@ -1287,6 +1287,8 @@ depends_on = ["mindroom.tool_system.worker_routing"]
 path = "mindroom.approval.manager"
 depends_on = [
     "mindroom.approval.events",
+    "mindroom.entity_resolution",
+    "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.event_journal.matrix_delivery",
     "mindroom.tool_system.tool_calls",
@@ -1519,7 +1521,6 @@ depends_on = [
     "mindroom.approval.auto_approve_windows",
     "mindroom.approval.manager",
     "mindroom.constants",
-    "mindroom.event_journal",
     "mindroom.tool_system.approval_exemptions",
 ]
 visibility = [
