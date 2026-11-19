@@ -7,7 +7,7 @@ import asyncio
 import nio
 
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, owner_matrix_id
 from mindroom.matrix.invited_rooms_store import is_inviter_allowed
 from mindroom.matrix.personal_room_store import personal_room_excludes_router
 from mindroom.tool_system.authoring import Toolkit
@@ -58,7 +58,7 @@ class InviteRouterTools(Toolkit):
 
         config = context.current_config
         identities = entity_identity_registry(config, context.runtime_paths)
-        router_id = identities.current_id(ROUTER_AGENT_NAME).full_id
+        router_id = owner_matrix_id(context.runtime_paths)
         membership_response = await context.client.room_get_state_event(
             context.room_id,
             "m.room.member",

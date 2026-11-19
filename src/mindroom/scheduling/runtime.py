@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.approval import manager as approval_manager
-from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
+from mindroom.entity_resolution import entity_identity_registry, owner_matrix_id
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.mentions import parse_mentions_in_text
@@ -152,7 +152,7 @@ class ScheduledTaskRuntime:
             return 0
         config = self.config_provider()
         registry = entity_identity_registry(config, self.runtime_paths)
-        router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
+        router_id = owner_matrix_id(self.runtime_paths)
         agent_ids = sorted(matrix_id.full_id for matrix_id in registry.current_ids.values())
         room = room_from_state(room_id, client.user_id, response.events)
         restored = 0

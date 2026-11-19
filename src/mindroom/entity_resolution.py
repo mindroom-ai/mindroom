@@ -337,9 +337,11 @@ def prepared_entity_names_by_user_id(config: Config, runtime_paths: RuntimePaths
 
 
 def _persisted_entity_id_map(config: Config, domain: str, state: MatrixState) -> dict[str, MatrixID]:
+    # The owner account is registered only for a config that needs it, and one registered earlier stays known.
+    owner_known = config.needs_owner_account() or state.get_account(managed_account_key(ROUTER_AGENT_NAME)) is not None
     return {
         entity_name: _persisted_entity_matrix_id(entity_name, domain, state)
-        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]
+        for entity_name in [*([ROUTER_AGENT_NAME] if owner_known else ()), *config.agents, *config.teams]
     }
 
 

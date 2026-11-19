@@ -165,8 +165,8 @@ class ConfigUpdatePlan:
 
 
 def configured_entity_names(config: Config) -> list[str]:
-    """Return configured entity names with the router first."""
-    return [ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys()]
+    """Return configured entity names, the owner account first when the config needs one."""
+    return [*([ROUTER_AGENT_NAME] if config.needs_owner_account() else ()), *config.agents, *config.teams]
 
 
 def plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str, ...]:

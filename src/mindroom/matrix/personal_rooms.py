@@ -18,7 +18,12 @@ from mindroom.constants import (
     resolve_config_relative_path,
 )
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
-from mindroom.entity_resolution import current_entity_id, entity_identity_registry, prepared_entity_names_by_user_id
+from mindroom.entity_resolution import (
+    MissingManagedEntityAccountError,
+    current_entity_id,
+    owner_matrix_id,
+    prepared_entity_names_by_user_id,
+)
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.managed_room_notice import join_names
@@ -347,11 +352,14 @@ class PersonalRoomService:
             raise RuntimeError(msg)
 
     def _admitted_router_ids(self, record: PersonalRoomRecord) -> tuple[str, ...]:
-        """Return the router a personal room admits: an imported room's listed router, else this installation's."""
+        """Return the router a personal room admits: an imported room's listed one, else this installation's if any."""
         if record.adoption is not None:
             router_id = record.adoption.router_user_id
             return () if router_id is None else (router_id,)
-        return (current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id,)
+        try:
+            return (current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id,)
+        except MissingManagedEntityAccountError:
+            return ()
 
     async def _invite_router_if_never_member(self, record: PersonalRoomRecord) -> None:
         """Invite the router, which posts approval cards, into a created room it was never in; one that left stays out.
@@ -361,13 +369,13 @@ class PersonalRoomService:
         retries without end, from holding the owner's lock. Adopted rooms keep the participants their record lists, and a
         router whose `accept_invites` leaves out this agent never joins, so neither gets an invite.
         """
-        if record.adoption is not None:
+        if record.adoption is not None or not (admitted := self._admitted_router_ids(record)):
             return
         client = self._client()
         if not is_inviter_allowed(self.runtime.config, self.runtime_paths, ROUTER_AGENT_NAME, client.user_id):
             return
         assert record.room_id is not None
-        router_id = current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id
+        router_id = admitted[0]
         async with asyncio.timeout(_ROUTER_INVITE_TIMEOUT_SECONDS):
             response = await client.room_get_state_event(record.room_id, "m.room.member", router_id)
             # The client parses an error other than 404 as this response, with the error as its content.
@@ -534,11 +542,7 @@ class PersonalRoomService:
             permitted_members.update(record.adoption.additional_user_ids)
             router_id = record.adoption.router_user_id
             if record.adoption.agent_user_id != agent_id or (
-                router_id is not None
-                and router_id
-                != entity_identity_registry(self.runtime.config, self.runtime_paths)
-                .current_id(ROUTER_AGENT_NAME)
-                .full_id
+                router_id is not None and router_id != owner_matrix_id(self.runtime_paths)
             ):
                 msg = "Personal-room adopted ownership identity does not match"
                 raise PersonalRoomValidationError(msg)

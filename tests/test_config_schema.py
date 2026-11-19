@@ -8,6 +8,7 @@ import typing
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import pytest
 from pydantic import BaseModel
 
 from mindroom.config.main import Config, dashboard_config_schema
@@ -237,3 +238,18 @@ def test_the_automation_union_is_chosen_by_name_with_plugin_automations_as_the_f
     names = [defs[branch["$ref"].removeprefix("#/$defs/")]["properties"]["name"] for branch in union["oneOf"]]
     assert [name.get("const") for name in names] == ["prompt_curation", "dreaming", "exploration", None]
     assert names[3]["not"] == {"enum": ["prompt_curation", "dreaming", "exploration"]}
+
+
+@pytest.mark.parametrize(
+    ("sections", "needed"),
+    [
+        ({"agents": {"general": {"display_name": "General", "model": "default", "rooms": ["lobby"]}}}, True),
+        ({"matrix_space": {"enabled": True}}, True),
+        ({"server_emoji": {"enabled": True}}, True),
+        ({}, False),
+    ],
+)
+def test_needs_owner_account(sections: dict[str, object], needed: bool) -> None:
+    """The owner account is needed for a configured room, the root Space, or the emoji room, and for nothing else."""
+    base = {"models": {"default": {"provider": "openai", "id": "test-model"}}, "matrix_space": {"enabled": False}}
+    assert Config.model_validate({**base, **sections}).needs_owner_account() is needed

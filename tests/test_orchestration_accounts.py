@@ -12,10 +12,12 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.orchestration.accounts import prepare_managed_accounts
+from mindroom.orchestration.config_updates import configured_entity_names
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.requester_identity import mindroom_user_id
 from mindroom.startup_errors import PermanentStartupError
@@ -481,3 +483,47 @@ async def test_internal_user_preparation_keeps_a_persisted_account_without_a_mat
     assert (account.username, account.password, account.domain) == (localpart, "existing_password", domain)
     assert mindroom_user_id(config, paths) == f"@{localpart}:{domain}"
     matrix_client.assert_not_called()
+
+
+def _roomless_config(paths: RuntimePaths, rooms: list[str]) -> Config:
+    """Return a config whose only agent lists ``rooms``, with no root Space or emoji room, and no account persisted."""
+    return Config.validate_with_runtime(
+        {
+            "agents": {"general": {"display_name": "GeneralAgent", "model": "default", "rooms": rooms}},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "matrix_space": {"enabled": False},
+        },
+        paths,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rooms", [[], ["lobby"]])
+async def test_owner_account_created_only_when_needed(tmp_path: Path, rooms: list[str]) -> None:
+    """Only a config with a room, the root Space, or the emoji room prepares and lists the owner account."""
+    paths = test_runtime_paths(tmp_path)
+    config = _roomless_config(paths, rooms)
+    requested: dict[str, str | None] = {}
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
+        await _prepare(config, configured_entity_names(config), paths)
+
+    owner = [ROUTER_AGENT_NAME] if rooms else []
+    assert list(requested) == [*owner, "general"]
+    assert list(entity_identity_registry(config, paths).current_ids) == [*owner, "general"]
+
+
+@pytest.mark.asyncio
+async def test_existing_owner_account_kept_when_not_needed(tmp_path: Path) -> None:
+    """A config that stops needing the owner account keeps its persisted account and identity, and asks for no new one."""
+    paths = test_runtime_paths(tmp_path)
+    _persist_account(paths, ROUTER_AGENT_NAME, "mindroom_router")
+    config = _roomless_config(paths, [])
+    requested: dict[str, str | None] = {}
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
+        await _prepare(config, configured_entity_names(config), paths)
+
+    assert list(requested) == ["general"]
+    assert MatrixState.load(runtime_paths=paths).get_account(f"agent_{ROUTER_AGENT_NAME}") is not None
+    assert entity_identity_registry(config, paths).current_id(ROUTER_AGENT_NAME).full_id == "@mindroom_router:localhost"
