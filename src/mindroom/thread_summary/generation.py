@@ -33,8 +33,9 @@ _MAX_INITIAL_TAGS = 3
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
 _TRUNCATION_SAMPLE_SIZE = 3
 _ROOM_INSTRUCTIONS_MAX_LENGTH = 2000
-# Generated titles only; a person's pin may still use the whole ``THREAD_SUMMARY_MAX_LENGTH``.
+# New generated titles are cut to these after normalization; a person's pin may use ``THREAD_SUMMARY_MAX_LENGTH``.
 GENERATED_TITLE_MAX_LENGTH = 80
+GENERATED_TITLE_MAX_WORDS = 6
 
 logger = get_logger(__name__)
 
@@ -42,9 +43,10 @@ logger = get_logger(__name__)
 class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
-    summary: str = Field(
-        max_length=GENERATED_TITLE_MAX_LENGTH,
-        description="Short one-line title of the thread conversation",
+    summary: str = Field(description="Short one-line title of the thread conversation")
+    keep_current: bool = Field(
+        default=False,
+        description="True to keep the thread's current title, when one is shown",
     )
 
 
@@ -64,6 +66,21 @@ class GeneratedSummary:
 
     summary: str
     tags: tuple[str, ...] = ()
+    keep_current: bool = False
+
+
+def clamp_generated_title(title: str) -> str:
+    """Cut a normalized title to 6 words and 80 characters at a word boundary; emoji and dashes are not words."""
+    tokens: list[str] = []
+    words = 0
+    for token in title.split():
+        tokens.append(token)
+        words += any(char.isalnum() for char in token)
+        if words == GENERATED_TITLE_MAX_WORDS:
+            break
+    while len(tokens) > 2 and len(" ".join(tokens)) > GENERATED_TITLE_MAX_LENGTH:
+        tokens.pop()
+    return " ".join(tokens)[:GENERATED_TITLE_MAX_LENGTH].rstrip()
 
 
 def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
@@ -155,7 +172,7 @@ async def generate_summary(
     """Summarize a thread's ordinary messages with ``model_name``, plus one-shot tags from ``tag_vocabulary`` when given.
 
     ``room_instructions`` are the room admins' extra title rules, appended to the summary instructions.
-    ``current_title`` is shown after the thread with the rule to repeat it unless the topic changed.
+    ``current_title`` is shown after the thread, and the system rules let the model keep it unless the topic changed.
     """
     provider = _summary_provider(config, runtime_paths, model_name)
     prompt = config.render_prompt(
@@ -167,29 +184,33 @@ async def generate_summary(
             else "(tags are not requested for this summary refresh)"
         ),
     )
+    instructions = [
+        config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS")
+        if room_instructions is None
+        else config.render_prompt(
+            "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
+            instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS"),
+            room_instructions=room_instructions,
+        ),
+    ]
     if current_title is not None:
         # Appended in code, so a user prompt override without the placeholder keeps working.
         current = config.render_prompt("THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE", current_title=escape(current_title))
         prompt = f"{prompt}\n\n{current}"
+        instructions.append(config.get_prompt("THREAD_SUMMARY_KEEP_INSTRUCTIONS"))
     response = await complete_prompt(
         provider,
         prompt,
-        instructions=[
-            config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS")
-            if room_instructions is None
-            else config.render_prompt(
-                "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
-                instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS"),
-                room_instructions=room_instructions,
-            ),
-        ],
+        instructions=instructions,
         schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
         overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
     )
     await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="thread_summary")
     content = response.content
     if tag_vocabulary is None:
-        return GeneratedSummary(summary=content.summary) if isinstance(content, _ThreadSummary) else None
+        if not isinstance(content, _ThreadSummary):
+            return None
+        return GeneratedSummary(summary=content.summary, keep_current=content.keep_current)
     if not isinstance(content, _ThreadEnrichment):
         return None
     tags: list[str] = []
@@ -197,4 +218,4 @@ async def generate_summary(
         tag = coerce_tag_name(raw_tag)
         if tag is not None and tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS and tag not in tags:
             tags.append(tag)
-    return GeneratedSummary(summary=content.summary, tags=tuple(tags))
+    return GeneratedSummary(summary=content.summary, tags=tuple(tags), keep_current=content.keep_current)

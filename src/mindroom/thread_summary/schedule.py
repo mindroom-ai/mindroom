@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from mindroom.constants import tracking_dir
+from mindroom.durable_write import write_json_file_durable
 from mindroom.thread_summary.state import trusted_summary_metadata
 from mindroom.thread_tag_vocabulary import claim_vocabulary_check
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
+    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -75,6 +80,40 @@ class _ThreadSummaryBaselines:
 
 
 THREAD_SUMMARY_BASELINES = _ThreadSummaryBaselines()
+
+
+def _kept_title_path(runtime_paths: RuntimePaths, room_id: str, thread_id: str) -> Path:
+    digest = hashlib.sha256(f"{room_id}\0{thread_id}".encode()).hexdigest()
+    return tracking_dir(runtime_paths) / "kept_thread_titles" / f"{digest}.json"
+
+
+def record_kept_title(
+    runtime_paths: RuntimePaths,
+    room_id: str,
+    thread_id: str,
+    message_count: int,
+    *,
+    initial_enrichment_complete: bool,
+) -> None:
+    """Save what a refresh that kept its title would have written in a notice, without posting one."""
+    previous_count, previously_enriched = kept_title_record(runtime_paths, room_id, thread_id)
+    payload = {
+        "message_count": max(previous_count, message_count),
+        "initial_enrichment_complete": previously_enriched or initial_enrichment_complete,
+    }
+    write_json_file_durable(_kept_title_path(runtime_paths, room_id, thread_id), payload)
+
+
+def kept_title_record(runtime_paths: RuntimePaths, room_id: str, thread_id: str) -> tuple[int, bool]:
+    """Return the message count and enrichment outcome of the thread's kept refreshes, or ``(0, False)``."""
+    try:
+        payload = json.loads(_kept_title_path(runtime_paths, room_id, thread_id).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return 0, False
+    count = payload.get("message_count") if isinstance(payload, dict) else None
+    if not isinstance(count, int) or isinstance(count, bool):
+        return 0, False
+    return count, payload.get("initial_enrichment_complete") is True
 
 
 def thread_summary_message_count_hint(

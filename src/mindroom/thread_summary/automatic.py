@@ -15,8 +15,8 @@ from mindroom.matrix.thread_forks import fork_parent_thread_id
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import (
-    GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
+    clamp_generated_title,
     generate_summary,
     resolve_thread_summary_model_name,
     room_summary_instructions,
@@ -28,7 +28,6 @@ from mindroom.thread_summary.notices import (
     summary_generated_at,
 )
 from mindroom.thread_summary.state import (
-    THREAD_SUMMARY_MAX_LENGTH,
     SummaryState,
     TruncatedThreadHistoryError,
     current_thread_summary,
@@ -67,31 +66,62 @@ logger = get_logger(__name__)
 _rooms_refusing_automatic_tags: set[str] = set()
 # Ends every automatic title of a forked thread.
 _FORKED_TITLE_SUFFIX = " (forked)"
-# The title rule's word limit after the emoji; a longer title is never offered to keep.
-_KEEPABLE_TITLE_MAX_WORDS = 6
 
 
 def _keepable_title(title: str) -> bool:
     """Return whether a title already obeys the short-title rule, so a refresh may keep it instead of rewriting it."""
     base = title.removesuffix(_FORKED_TITLE_SUFFIX)
-    words = [word for word in base.split() if any(char.isalnum() for char in word)]
-    return len(base) <= GENERATED_TITLE_MAX_LENGTH and len(words) <= _KEEPABLE_TITLE_MAX_WORDS
+    return clamp_generated_title(base) == base
 
 
-def _same_title(generated: str, current: str) -> bool:
-    """Return whether a generated title repeats the current one; the model read it HTML-escaped."""
-    return normalize_thread_summary_text(unescape(generated)).casefold() == current.casefold()
+def _title_key(title: str) -> str:
+    """Return a title without the differences a reader would not call a new title: case, spacing, emoji style, end."""
+    return " ".join(title.replace("\ufe0f", "").casefold().split()).rstrip(".!?…。\uff01\uff1f ")
 
 
-def _with_fork_marker(title: str, history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str:
-    """Return ``title`` marked once as a fork's when ``history`` roots a fork, so a fork of a fork stays "X (forked)"."""
+def _repeats_title(
+    generated: GeneratedSummary,
+    current: str,
+    history: Sequence[ResolvedVisibleMessage],
+    thread_id: str,
+) -> bool:
+    """Return whether the model kept the current title, by its answer or by an echo that differs only cosmetically."""
+    # The model read the title HTML-escaped, so an echo may come back either way.
+    echoes = {
+        _title_key(_publishable_title(text, history, thread_id))
+        for text in (generated.summary, unescape(generated.summary))
+    }
+    return generated.keep_current or _title_key(current) in echoes
+
+
+def _record_kept_title(
+    runtime_paths: RuntimePaths,
+    room_id: str,
+    thread_id: str,
+    message_count: int,
+    initial_enrichment_complete: bool,
+) -> None:
+    """Keep the current title: post nothing, but write down the pass as its notice would have."""
+    logger.debug("Keeping the current thread title", room_id=room_id, thread_id=thread_id)
+    try:
+        schedule.record_kept_title(
+            runtime_paths,
+            room_id,
+            thread_id,
+            message_count,
+            initial_enrichment_complete=initial_enrichment_complete,
+        )
+    except Exception:
+        logger.exception("Kept thread title record failed", room_id=room_id, thread_id=thread_id)
+
+
+def _publishable_title(title: str, history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str:
+    """Return a new title normalized and cut to the short-title limits, marked once as a fork's when it is one."""
+    base = normalize_thread_summary_text(title)
     if fork_parent_thread_id(history, thread_id) is None:
-        return title
-    base = normalize_thread_summary_text(title).removesuffix(_FORKED_TITLE_SUFFIX)
-    # Truncate here, not in the notice writer, so a long title keeps its marker.
-    if len(base) + len(_FORKED_TITLE_SUFFIX) > THREAD_SUMMARY_MAX_LENGTH:
-        base = base[: THREAD_SUMMARY_MAX_LENGTH - len(_FORKED_TITLE_SUFFIX) - 3].rstrip() + "..."
-    return f"{base}{_FORKED_TITLE_SUFFIX}"
+        return clamp_generated_title(base)
+    # The marker is outside the limits, and a fork of a fork stays "X (forked)".
+    return f"{clamp_generated_title(base.removesuffix(_FORKED_TITLE_SUFFIX))}{_FORKED_TITLE_SUFFIX}"
 
 
 async def _provisional_title(
@@ -123,7 +153,7 @@ async def _provisional_title(
         if generated is None:
             return None
         title = generated.summary
-    return _with_fork_marker(title, history, thread_id)
+    return _publishable_title(title, history, thread_id) or None
 
 
 async def _thread_is_resolved(
@@ -316,15 +346,16 @@ async def _deliver_generated_summary(
     trusted_sender_ids: Collection[str],
     authorize_human: Callable[[str], bool],
     projected_state: SummaryState,
-    keep_title: bool = False,
+    kept: Callable[[bool], None] | None = None,
 ) -> None:
-    """Apply initial tags, then independently deliver the generated summary, unless ``keep_title`` keeps the current one.
+    """Apply initial tags, then independently deliver the generated summary.
 
     Re-reads pin state first (``_summary_delivery_timestamp``): a superseded
-    summary should apply neither its tags nor its title.
+    summary should apply neither its tags nor its title. ``kept`` keeps the
+    current title instead: it records the pass, and whether the tags are done, in place of a notice.
     """
-    if keep_title and not generated.tags:
-        logger.debug("Keeping the current thread title", room_id=room_id, thread_id=thread_id)
+    if kept is not None and not generated.tags:
+        kept(False)
         return
     try:
         generated_at = await _summary_delivery_timestamp(
@@ -350,7 +381,8 @@ async def _deliver_generated_summary(
     initial_enrichment_complete: bool | None = None
     if generated.tags:
         initial_enrichment_complete = await _apply_initial_tags(client, room_id, thread_id, generated.tags)
-    if keep_title:
+    if kept is not None:
+        kept(initial_enrichment_complete is True)
         return
 
     try:
@@ -620,7 +652,9 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             # Unknown authority defers without advancing the baseline, so a
             # pin is never overwritten before membership recovers.
             return
-        baselines.record(room_id, thread_id, state.last_summary_count)
+        # A refresh that kept its title wrote these down in place of a notice.
+        kept_count, kept_enriched = schedule.kept_title_record(runtime_paths, room_id, thread_id)
+        baselines.record(room_id, thread_id, max(state.last_summary_count, kept_count))
         message_count = state.message_count
         if state.pinned:
             logger.debug(
@@ -645,11 +679,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             return
 
         tag_vocabulary = None
-        # A kept title sends no notice, so only this process's baseline shows that a refresh already ran.
-        refreshed = state.last_summary_count > 0 or (
-            state.summary is not None and baselines.count(room_id, thread_id) > 0
-        )
-        if refreshed and not state.initial_enrichment_complete:
+        if max(state.last_summary_count, kept_count) > 0 and not (state.initial_enrichment_complete or kept_enriched):
             tag_vocabulary = refreshed_tag_vocabulary or format_tag_vocabulary_with_counts(
                 load_tag_vocabulary_snapshot(runtime_paths, room_id),
             )
@@ -683,8 +713,8 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             baselines.record(room_id, thread_id, message_count)
             return
 
-        normalized_summary = normalize_thread_summary_text(generated.summary)
-        if not normalized_summary:
+        keep = current_title is not None and _repeats_title(generated, current_title, thread_history, thread_id)
+        if not keep and not normalize_thread_summary_text(generated.summary):
             logger.warning(
                 "Thread summary generation returned no plain-text content",
                 room_id=room_id,
@@ -692,7 +722,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             )
             baselines.record(room_id, thread_id, message_count)
             return
-        normalized_summary = _with_fork_marker(normalized_summary, thread_history, thread_id)
+        normalized_summary = _publishable_title(generated.summary, thread_history, thread_id)
 
         await _deliver_generated_summary(
             client,
@@ -705,7 +735,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             trusted_sender_ids=trusted_sender_ids,
             authorize_human=authorize_human,
             projected_state=state,
-            keep_title=current_title is not None and _same_title(normalized_summary, current_title),
+            kept=partial(_record_kept_title, runtime_paths, room_id, thread_id, message_count) if keep else None,
         )
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.
