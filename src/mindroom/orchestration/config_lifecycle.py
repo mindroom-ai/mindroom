@@ -212,11 +212,9 @@ class ConfigReloadLifecycle:
         return not self._cancelled and not self.is_running() and self._fully_applied_config is None
 
     def startup_published(self, config: Config) -> None:
-        """Acknowledge startup's config, and reload at once if its files changed since startup loaded them.
-
-        A reload that ran while startup waited for first syncs already keeps the last-good and incomplete records.
-        """
+        """Acknowledge startup's config, and reload at once if its files changed since startup loaded them."""
         if self._fully_applied_config is not None:
+            # A reload that ran while startup waited for first syncs keeps the last-good and incomplete records.
             return
         self._record_applied(config)
         if self._requested_at is not None or _source_fingerprint_on_disk(config, self.runtime_paths) != (

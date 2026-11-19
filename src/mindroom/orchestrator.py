@@ -1158,8 +1158,8 @@ class _MultiAgentOrchestrator:
     async def _wait_for_first_syncs(self, runtime_shutdown_event: asyncio.Event, started_bots: list[AgentBot]) -> bool:
         """Keep semantic dispatch parked until every started bot synced once or stopped; False when shutdown wins.
 
-        A bot still unsynced at the first-sync deadline, however often its receive loop restarted, is left behind:
-        it observes nothing yet, so its rooms' grants stay closed until its own loop syncs.
+        A bot still unsynced at the first-sync deadline, however often its receive loop restarted, is left behind,
+        not observing: its rooms' grants stay closed until its own loop syncs.
         """
         deadline = time.monotonic() + matrix_sync_startup_timeout_seconds(self.runtime_paths)
 
