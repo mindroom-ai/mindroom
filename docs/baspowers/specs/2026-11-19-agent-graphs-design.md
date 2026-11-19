@@ -528,7 +528,7 @@ When several are queued at once, the first starts and the others are held until 
 
 ### Pauses for people
 
-- **`ask_user`** creates an `ask` node in state `waiting` and posts an agent message with `io.mindroom.workflow_question` (`{run, node, text, options, free_text}`) and a plain-text fallback body.
+- **`ask_user`** creates an `ask` node in state `waiting` and posts an agent message with `io.mindroom.workflow_question` (`{run, node, requester, text, options, free_text, status, answer}`, status `open`, `answered` or `cancelled`) and a plain-text fallback body.
   The answer is the event `io.mindroom.workflow_answer` (`{run, node, option | text}`, related to the card) or `!answer`, accepted only from the run's requester, the rule approvals already follow.
   The card is edited to show the answer, and the node completes with it, so a resumed run does not ask twice.
 - **Approvals.** The node's delegation job goes to `awaiting_approval` and shows the existing card; the node is `waiting` on `approval`.
@@ -575,14 +575,14 @@ Its structure is what the engine does know: phase, lane (which `foreach` or `par
 - **Live frames** (`io.mindroom.workflow`, ephemeral, encrypted in encrypted rooms, same transport as `io.mindroom.subagents`): a full snapshot every 10 seconds while the run is active and deltas in between.
 
 ```json
-{"v": 1, "run": "wf-...", "seq": 12,
+{"v": 1, "run": "wf-...", "sid": "<stream id>", "seq": 12,
  "meta": {"agent": "dev", "thread_id": "$...", "title": "Audit auth module", "status": "running", "attempt": 1,
           "started_at": 1795000000, "ended_at": null, "max_concurrent": 16, "max_cost_usd": null, "large": false,
           "counts": {"queued": 4, "running": 12, "waiting": 1, "completed": 30, "failed": 1, "cached": 0},
           "usage": {"input_tokens": 0, "output_tokens": 0, "tool_calls": 0, "cost_usd": 3.41, "projected_cost_usd": 9.8}},
  "snapshot": {
    "phases": ["Audit", "Verify"],
-   "groups": [{"id": "n3", "kind": "foreach", "phase": 0, "parent": null, "total": 40}],
+   "groups": [{"id": "n3", "kind": "foreach", "phase": 0, "parent": null, "total": 40, "done": 28, "failed": 1}],
    "nodes": [{"id": "n17", "kind": "agent", "label": "Audit auth/session.py", "name": "agent-17", "phase": 0,
               "group": "n3", "status": "running", "waiting_on": null, "agent": "dev", "model": "opus",
               "run": "<delegation id>", "subagent": "<subagent id>", "job": "<job id>", "session": null, "turns": 1,
@@ -596,7 +596,8 @@ Its structure is what the engine does know: phase, lane (which `foreach` or `par
 - A frame is at most 60,000 bytes, about 300 node rows.
   A larger graph sends every group with its counts, all nodes that are not completed, and the newest completed ones that fit; the client shows "and N more done".
 - A node's live text and tool calls are not in this frame: `run` and `subagent` join it to the existing `io.mindroom.subagents` feed.
-- **The card message** carries `io.mindroom.workflow_run` (`{run, title, status, counts, usage, phases, attempt, ended_at}`) and is edited when the run starts waiting, at most once a minute while it runs, and when it ends.
+- `sid` and `seq` order frames as they do for subagent frames: a restarted MindRoom starts a new `sid`, and a delta applies only to the frame right before it.
+- **The card message** carries `io.mindroom.workflow_run` (`{run, job_id, requester, title, status, counts, usage, phases, attempt, started_at, ended_at}`) and is edited when the run starts waiting, at most once a minute while it runs, and when it ends.
   The final edit includes the last snapshot (cut to 40 KB the same way), so a finished run's graph opens from history.
 - **Control.** Stop reuses `io.mindroom.background_job_cancel` with the run's or a node's job ID, and Resume is the new event `io.mindroom.workflow_control` (`{run, action: "resume"}`), accepted from the requester.
 
