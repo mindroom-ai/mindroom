@@ -13365,7 +13365,8 @@ Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped
 For threads with more than 50 messages, the summary model sees only the first three and last three.
 A new automatic title is one emoji and at most six words, such as `🧪 Attachment cache live test`: MindRoom cuts a longer answer to six words and 80 characters at a word boundary. The emoji and dashes are not words but count toward the 80 characters; only the ` (forked)` marker is outside both limits.
 Text without spaces, such as Chinese or Japanese, is bounded only by the 80 characters.
-A check shows the model the current title, and the model keeps it unless the thread's main topic has clearly changed: a kept title posts no notice, and the next check is a full interval later.
+A check shows the model the current title, and the model keeps it unless the thread's main topic has clearly changed: a kept title usually posts nothing, and the next check is a full interval later.
+Two checks re-post the unchanged title once: the first check after the first reply, and the check that adds tags. After a restart, the next check may come early.
 A title longer than six words, such as one from an older version, is not offered to keep, so the next check asks for a new title; a retitle, such as after a call's notes, always does too.
 
 The summary uses the first match of:
