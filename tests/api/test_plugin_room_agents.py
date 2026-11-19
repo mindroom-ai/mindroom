@@ -7,6 +7,7 @@ agent for that caller resolves.
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
@@ -570,6 +571,28 @@ async def test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_worksp
     with pytest.raises(ToolConfigOverrideError, match=message):
         await room.agent(ALICE, room.ids["helper"])
     with pytest.raises(ToolConfigOverrideError, match=message):
+        get_tool_by_name("filesystem", room.paths, tools=builtin_tool_registry(), worker_target=None)
+
+
+@pytest.mark.parametrize(
+    ("stored", "replacement"),
+    [
+        ({"enable_save_file": False}, "exclude_tools: [write_file]"),
+        ({"exclude_tools": ["save_file", "replace_file_chunk"]}, "exclude_tools: [write_file]"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_old_settings_copied_under_filesystem_stop_the_toolkit_and_its_workspace_grant(
+    tmp_path: Path,
+    stored: dict[str, object],
+    replacement: str,
+) -> None:
+    """An old document saved again as it was would be ignored, so it fails like the same settings in the config."""
+    room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"users": [ALICE]})})
+    get_runtime_credentials_manager(room.paths).save_credentials("filesystem", {"_source": "ui", **stored})
+
+    assert _access(await room.agents(ALICE)) == []
+    with pytest.raises(ToolConfigOverrideError, match=re.escape(replacement)):
         get_tool_by_name("filesystem", room.paths, tools=builtin_tool_registry(), worker_target=None)
 
 

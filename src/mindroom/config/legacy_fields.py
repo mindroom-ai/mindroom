@@ -203,10 +203,11 @@ _REJECTED_TOOL_OVERRIDES_BY_TOOL = {
 #   exclude_tools naming save_file, read_file_chunk, replace_file_chunk, list_files, search_files, or search_content.
 # Last legacy release: v2026.11.447; replacement: unreleased; file and coding both name the filesystem toolkit.
 # Handling: Reject each one, whatever its value, on a filesystem entry authored under any of its names in defaults or
-#   on an agent, naming the filesystem setting to write instead. None is translated, so a function that was switched
-#   off never comes back on.
+#   on an agent, and in settings stored for filesystem, naming the filesystem setting to write instead. None is
+#   translated, so a function that was switched off never comes back on.
 # Coverage:
-#   tests/test_filesystem_tool_config.py::test_an_old_agno_setting_on_a_file_entry_fails_config_load_naming_its_replacement.
+#   tests/test_filesystem_tool_config.py::test_an_old_agno_setting_on_a_file_entry_fails_config_load_naming_its_replacement,
+#   tests/api/test_plugin_room_agents.py::test_old_settings_copied_under_filesystem_stop_the_toolkit_and_its_workspace_grant.
 RETIRED_FILE_FUNCTIONS = {
     "save_file": "write_file",
     "replace_file_chunk": "edit_file",
@@ -247,23 +248,22 @@ def renamed_file_functions_a_glob_misses(match: str, offered_elsewhere: Collecti
     )
 
 
-def _retired_file_filter(overrides: Mapping[str, object]) -> tuple[str, str] | None:
+def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first Agno FileTools setting or retired function filter in ``settings``, and what replaces it."""
     for key in ("include_tools", "exclude_tools"):
-        value = overrides.get(key)
+        value = settings.get(key)
         names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
         for name in names if isinstance(names, list) else ():
             if isinstance(name, str) and (new := RETIRED_FILE_FUNCTIONS.get(name.strip())):
                 return f"{key}: {name.strip()}", f"use `filesystem: {{{key}: [{new}]}}`"
-    return None
+    return next(((field, guidance) for field, guidance in _RETIRED_FILE_SETTINGS.items() if field in settings), None)
 
 
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
+    if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
+        return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
-    if tool_name == "filesystem":
-        rejected |= _RETIRED_FILE_SETTINGS
-        if (retired := _retired_file_filter(overrides)) is not None:
-            return retired
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)
 
 

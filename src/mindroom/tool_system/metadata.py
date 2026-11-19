@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.config.legacy_fields import retired_tool_override
+from mindroom.config.legacy_fields import retired_file_setting, retired_tool_override
 from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
@@ -749,6 +749,9 @@ def resolve_tool_settings(
                 f"save them again under '{tool_name}' or delete them."
             )
             raise ToolConfigOverrideError(msg)
+    if tool_name == "filesystem" and (retired := retired_file_setting(stored_credentials or {})) is not None:
+        msg = f"{tool_name}: stored setting {retired[0]} was removed; {retired[1]}."
+        raise ToolConfigOverrideError(msg)
     credentials = {**(stored_credentials or {}), **(credential_overrides or {})}
     safe_tool_init_overrides = sanitize_tool_init_overrides(
         tool_name,
