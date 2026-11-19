@@ -3589,6 +3589,22 @@ def test_runtime_chart_egress_broker_disabled_by_default() -> None:
     }
 
 
+@pytest.mark.parametrize("backend", ["static_runner", "kubernetes"])
+def test_runtime_chart_turns_the_default_broker_off_for_every_worker_backend(backend: str) -> None:
+    """`egressBroker.enabled: false` means off on every backend, including the chart's default static runner."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        f"workers.backend={backend}",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+    )
+    _, env = _broker_primary_env(docs)
+
+    assert {name: value for name, value in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")} == {
+        "MINDROOM_EGRESS_BROKER_PORT": "off",
+    }
+
 
 def test_runtime_chart_egress_broker_direct_mode_without_worker_egress_policy() -> None:
     """Workers without an egress policy need no worker rule, and the primary admits only worker pods."""

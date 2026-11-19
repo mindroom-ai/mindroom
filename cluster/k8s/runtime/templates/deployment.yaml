@@ -369,10 +369,6 @@ spec:
             - name: MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS
               value: {{ .Values.egressBroker.tokenTtlSeconds | quote }}
             {{- end }}
-            {{- else }}
-            # MindRoom runs a loopback broker unless told otherwise.
-            - name: MINDROOM_EGRESS_BROKER_PORT
-              value: "off"
             {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
@@ -390,6 +386,11 @@ spec:
             - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
               value: {{ default $fullname .Values.workers.kubernetes.ownerDeploymentName | quote }}
             {{- end }}
+            {{- end }}
+            {{- if not .Values.egressBroker.enabled }}
+            # MindRoom runs a loopback broker unless told otherwise, on every worker backend.
+            - name: MINDROOM_EGRESS_BROKER_PORT
+              value: "off"
             {{- end }}
             {{- if .Values.matrix.homeserverUrl }}
             - name: MATRIX_HOMESERVER
