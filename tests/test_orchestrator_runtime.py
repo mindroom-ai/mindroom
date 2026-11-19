@@ -6144,6 +6144,42 @@ async def test_shutdown_while_startup_waits_for_the_apply_lock_reports_no_readin
 
 
 @pytest.mark.asyncio
+async def test_startup_never_retries_a_bot_a_reload_started_during_the_first_sync_wait(tmp_path: Path) -> None:
+    """Initial retries are scheduled before the unlocked wait, so a reload's replacement ends its predecessor's retry."""
+    orchestrator, _startup_config, slow = _startup_waiting_for_first_sync(tmp_path)
+    failed = _startable_bot("helper", start=AsyncMock(side_effect=RuntimeError("login failed")))
+    failed.running = False
+    failed.prepare_for_sync_shutdown = AsyncMock()
+    successor = _startable_bot("helper")
+    install_bots(orchestrator, {"helper": failed})
+    ready = asyncio.Event()
+
+    with (
+        _matrix_free_startup(orchestrator),
+        patch("mindroom.orchestration.entity_fleet.retry_delay_seconds", return_value=0.05),
+        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(return_value={"helper": MagicMock()})),
+        patch("mindroom.orchestrator.create_bot_for_entity", return_value=successor),
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=ready.set),
+    ):
+        runtime = asyncio.create_task(orchestrator.start())
+        while not orchestrator.running:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        await orchestrator.config_reload.apply_with_response_admission(
+            lambda: orchestrator.fleet.replace(["helper"]),
+            operation_name="test",
+            request_is_current=lambda: True,
+        )
+        assert orchestrator.agent_bots["helper"] is successor
+        slow.first_sync_complete = True
+        await asyncio.wait_for(ready.wait(), SETTLE_TIMEOUT_SECONDS)
+        await asyncio.sleep(0.3)
+        await orchestrator.stop()
+        await asyncio.wait_for(runtime, SETTLE_TIMEOUT_SECONDS)
+
+    successor.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_stopped_bot_releases_startup_gate(tmp_path: Path) -> None:
     """A runtime whose only started bot stops before its first sync still gets ready."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
