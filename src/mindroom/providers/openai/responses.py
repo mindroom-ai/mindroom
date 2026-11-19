@@ -14,7 +14,7 @@ from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
-from mindroom.providers.openai.adapter_common import SDKClients, request_settings
+from mindroom.providers.openai.adapter_common import SDKClients, request_settings, untyped_sdk_call
 from mindroom.providers.openai.chat_wire import SDK_OPTION_KEYS
 from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
 from mindroom.providers.openai.replay_estimate import (
@@ -160,7 +160,7 @@ class ResponsesAdapter:
         accumulator: ResponsesStream,
         timer: TurnTimer,
     ) -> AsyncIterator[StreamEvent]:
-        sdk_stream = await client.responses.create(**kwargs)
+        sdk_stream = await client.responses.create(**untyped_sdk_call(kwargs, SDK_OPTION_KEYS, stream=True))
         try:
             async for event in sdk_stream:
                 if (usage := usage_report(event)) is not None:
