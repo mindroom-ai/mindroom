@@ -55,10 +55,12 @@ Sign in once in the app: existing browser cookies are not imported.
 Use **Open in Browser** when you prefer your browser or a sign-in provider requires it.
 
 Overview and the menu bar offer **Install MindRoom Chat**, the separate Mac Catalyst chat app (`chat.mindroom.app`).
-An existing copy from any source is found by bundle identifier through Launch Services and only opened.
-Otherwise the app takes the newest published `mindroom-ai/mindroom-chat` release that has `MindRoom-Chat.dmg` (older releases: `MindRoom.dmg`), mounts it read-only, and copies the app to a hidden staging name in `/Applications`, or `~/Applications` when that is not writable.
-The staged copy must satisfy `ChatAppSignature.requirement` (Developer ID, team `DNA6966LGZ`, identifier `chat.mindroom.app`, notarized, revocation checked) before it is renamed to `MindRoom Chat.app`; an existing bundle is never replaced.
-The image is detached and temporary files are removed on every path, and MindRoom never updates the chat app, which updates itself.
+An existing copy from any source is found by bundle identifier through Launch Services, or as `MindRoom Chat.app` or the old name `MindRoom.app` with that identifier in `/Applications` and `~/Applications`.
+It is opened only when that bundle satisfies `ChatAppSignature.installedRequirement` (the app's designated requirement: the Mac App Store build, or the Developer ID build of team `DNA6966LGZ`); otherwise Overview says why it was not opened.
+Without a copy, the app takes the newest published `mindroom-ai/mindroom-chat` release that has `MindRoom-Chat.dmg` (older releases: `MindRoom.dmg`), following redirects only to GitHub's hosts, and mounts it read-only.
+The image's app must be a real folder, not a link; it is copied into a staging folder of this install's own (mode `0700`, hidden) in `/Applications`, or `~/Applications` when that is not writable.
+The staged copy must satisfy `ChatAppSignature.requirement` (Developer ID, team `DNA6966LGZ`, identifier `chat.mindroom.app`, notarized, no links out of the bundle, revocation check requested) before one exclusive rename makes it `MindRoom Chat.app`; an existing bundle is never replaced, and a copy that appeared during the download stops the install.
+The image is detached by device and temporary files are removed on every path, and MindRoom never updates the chat app, which updates itself.
 Set `MINDROOM_CHAT_INSTALL_E2E_DIR` to an empty folder to run the opt-in test that installs the real release there.
 
 With the local-agent service running, **Open Dashboard** opens its dashboard inside the app.

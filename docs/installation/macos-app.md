@@ -42,6 +42,7 @@ On **Overview**, select **Install MindRoom Chat**, or choose **Install MindRoom 
 MindRoom downloads the newest release from GitHub, checks that it is the notarized MindRoom Chat signed by MindRoom, and copies it to `/Applications/MindRoom Chat.app`, or to `~/Applications` when you cannot write to `/Applications`.
 It then opens the app, and the button and menu item change to **Open MindRoom Chat**.
 If MindRoom Chat is already on this Mac, from the Mac App Store, Homebrew, or a disk image, MindRoom opens that copy and installs nothing.
+MindRoom checks the copy's signature first; if **Overview** says a copy was not opened because it is not the MindRoom Chat that MindRoom publishes, remove the app at the path it names and install again.
 MindRoom never replaces or updates MindRoom Chat; the app updates itself.
 The **Chat** section keeps working with or without it.
 
