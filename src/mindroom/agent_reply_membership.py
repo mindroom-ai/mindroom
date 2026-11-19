@@ -43,19 +43,9 @@ def _agent_reply_membership_policy_signature(
 ) -> _AgentReplyMembershipPolicySignature:
     """Return the configured room grants that determine membership snapshots.
 
-    TODO(Task 12, owner demotion): include the ``router`` entry only when ``config.router.access is not None``.
+    The owner account's entry is always present. Unset, `router.access` means the members of the room asked in, so
+    every room an observer has joined gets a row, which the plugin room API and computer checks read for any room.
     """
-    # LEGACY_COMPAT: the owner account's reply access when `router.access` is unset.
-    # Legacy format: a config without `router.access`, which `resolve_responder_access` reads as the members of the
-    #   room the owner is asked in, so the owner's own ingress precheck waits for a row of every room.
-    # Last legacy release: every release before the router-free change ships, v2026.11.411 the newest when written,
-    #   runs the owner in every room; replacement: unreleased, Task 12 of the router-free plan removes the owner's
-    #   reply precheck and with it this unconditional entry.
-    # Handling: the `router` entry stays in the signature whether or not `router.access` is set, so every room an
-    #   observer has joined gets a row, as before; the cost is one members read per room in deployments that grant
-    #   by explicit users only.
-    # Coverage: tests/api/test_plugin_room_agents.py, tests/test_computer_authorization.py,
-    #   tests/test_bot_ready_hook.py (the owner's precheck settles in a room that is nobody's grant room).
     entity_names = (*config.agents, *config.teams, ROUTER_AGENT_NAME)
     return tuple(
         sorted(

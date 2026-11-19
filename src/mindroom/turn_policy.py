@@ -153,7 +153,10 @@ class TurnPolicy:
         """Decide durable turn access, retrying unresolved membership before settlement.
 
         ``observed_room`` is this bot's own view of the room; it only lets a denial wait for the router's join.
+        The owner account answers nobody, so `router.access` alone decides whose messages it works on.
         """
+        if self.deps.agent_name == ROUTER_AGENT_NAME:
+            return self._routing_admits(sender_id, room_id)
         return is_sender_allowed_for_agent_reply_in_room(
             sender_id,
             self.deps.agent_name,

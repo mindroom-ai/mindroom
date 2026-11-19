@@ -749,12 +749,35 @@ async def test_a_mention_of_only_the_owner_account_gets_no_answer(config: Config
     """The owner account answers nobody, so a message that mentions only it is neither answered nor routed."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
-    context = _context(mentioned=[_entity_id(config, ROUTER_AGENT_NAME)])
+    # A tag of the owner account is a tag of someone who is no agent.
+    context = replace(_context(), has_non_agent_mentions=True)
 
     plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
 
     assert plan.kind == "ignore"
     assert plan.response_action is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("members", [(), ("general",), ("general", "research")], ids=["alone", "one", "several"])
+@pytest.mark.parametrize("is_dm", [False, True])
+async def test_owner_never_enqueues_a_turn(config: Config, members: tuple[str, ...], is_dm: bool) -> None:
+    """The owner account plans no answer of its own, whoever shares the room: it routes as steward or stops."""
+    policy = _policy_for(config, ROUTER_AGENT_NAME)
+    room = _room_with_members(_SENDER, *(_entity_id(config, name).full_id for name in members))
+
+    with patch("mindroom.turn_policy.is_dm_room", AsyncMock(return_value=is_dm)):
+        plan = await _plan(policy, room, _dispatch(_context(), agent_name=ROUTER_AGENT_NAME))
+
+    assert plan.kind in {"ignore", "route"}
+    assert plan.response_action is None
+
+
+def test_owner_reply_access_reads_no_membership_without_router_access(config: Config) -> None:
+    """Without `router.access` the owner works on anyone's message and waits for no room's membership row."""
+    policy = _policy_for(config, ROUTER_AGENT_NAME)
+
+    assert policy.can_reply_to_sender_in_room(_SENDER, "!never-observed:localhost")
 
 
 @pytest.mark.asyncio

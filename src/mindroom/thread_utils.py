@@ -140,7 +140,7 @@ def check_agent_mentioned(
     Returns (mentioned_agents, am_i_mentioned, has_non_agent_mentions).
     ``has_non_agent_mentions`` is True when the message explicitly tags a
     joined participant who is *not* a configured agent and not in
-    ``config.bot_accounts``. While the member cache is unsynced (the
+    ``config.bot_accounts``; the owner account answers nobody, so a tag of it counts. While the member cache is unsynced (the
     authoritative refresh failed) every such mention counts, so a lost
     membership fetch degrades to silence rather than an interjection.
     """
@@ -151,7 +151,9 @@ def check_agent_mentioned(
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, registry)
     am_i_mentioned = agent_id in mentioned_agents
     non_agent_mentions = [
-        uid for uid in all_mentioned_ids if not registry.is_managed_user_id(uid) and uid not in config.bot_accounts
+        uid
+        for uid in all_mentioned_ids
+        if not registry.is_managed_user_id(uid, include_router=False) and uid not in config.bot_accounts
     ]
     has_non_agent_mentions = bool(non_agent_mentions) and (
         not room_membership_is_complete(room)
@@ -217,7 +219,7 @@ def _agents_from_user_ids(user_ids: list[str], registry: EntityIdentityRegistry)
     """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
     agents: list[MatrixID] = []
     for user_id in user_ids:
-        agent_name = registry.current_entity_name_for_user_id(user_id)
+        agent_name = registry.current_entity_name_for_user_id(user_id, include_router=False)
         if agent_name is not None:
             agents.append(registry.current_id(agent_name))
     return agents
