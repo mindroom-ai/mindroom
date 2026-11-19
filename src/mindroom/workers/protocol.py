@@ -118,7 +118,7 @@ class LeaseRequest(_WireModel):
     """Credentials for one upcoming tool call, held by the worker until the call consumes them."""
 
     protocol: int
-    tool_name: str
+    tool_name: Annotated[str, AfterValidator(canonical_tool_name)]
     function_name: str
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     ttl_seconds: int

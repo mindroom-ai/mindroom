@@ -19,7 +19,7 @@ from mindroom.contacts.store import ContactSide
 from mindroom.custom_tools.script import ScriptTools
 from mindroom.delegation.personas import inline_persona
 from mindroom.dynamic_workflows.spec import SubagentParticipant
-from mindroom.workers.protocol import ExecuteRequest
+from mindroom.workers.protocol import ExecuteRequest, LeaseRequest
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -215,7 +215,9 @@ def test_workflow_script_and_worker_tool_names_take_every_spelling() -> None:
         "filesystem.read_file",
     )
     request = ExecuteRequest(protocol=1, tool_name="coding", function_name="read_file")
-    assert request.tool_name == "filesystem"
+    lease = LeaseRequest(protocol=1, tool_name="file", function_name="read_file", ttl_seconds=30)
+    # A lease is consumed under the name of the call it serves, so both read an old primary's name alike.
+    assert (request.tool_name, lease.tool_name) == ("filesystem", "filesystem")
 
 
 def test_openclaw_compat_brings_filesystem() -> None:
