@@ -222,6 +222,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
+    from _pytest.capture import CaptureResult
     from _typeshed import DataclassInstance
     from xdist.workermanage import WorkerController
 
@@ -3753,6 +3754,48 @@ def loop_runs_while_blocked(loop: asyncio.AbstractEventLoop) -> bool:
     return loop_ran.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
 
+def _flush_queued_stderr_records() -> None:
+    """Write the records `setup_logging` still holds for stderr, whose writer thread would add them later."""
+    for handler in logging.getLogger().handlers:
+        # The log file's handler is left alone, so a test can stall it while reading stderr.
+        if handler.name == "console":
+            handler.flush()
+
+
+def _flush_stderr_before_reads(
+    capture: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    read = capture.readouterr
+
+    def readouterr() -> "CaptureResult[str]":
+        _flush_queued_stderr_records()
+        return read()
+
+    monkeypatch.setattr(capture, "readouterr", readouterr)
+    yield capture
+    # Before the capture closes, so the writer thread never writes into its closed buffer.
+    _flush_queued_stderr_records()
+
+
+@pytest.fixture
+def capsys(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    """Capture stderr with every record logged before a read in that read."""
+    yield from _flush_stderr_before_reads(capsys, monkeypatch)
+
+
+@pytest.fixture
+def capfd(
+    capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    """Capture file descriptors with every record logged before a read in that read."""
+    yield from _flush_stderr_before_reads(capfd, monkeypatch)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_structlog_configuration(
     monkeypatch: pytest.MonkeyPatch,
@@ -3774,6 +3817,10 @@ def _isolate_structlog_configuration(
     root_logger = logging.getLogger()
     root_handlers, root_level = root_logger.handlers[:], root_logger.level
     yield
+    for handler in set(root_logger.handlers).difference(root_handlers):
+        # Stops the writer threads of the handlers `setup_logging` added.
+        if handler.name in {"console", "file"}:
+            handler.close()
     root_logger.handlers[:] = root_handlers
     root_logger.setLevel(root_level)
     _configure_quiet_structlog()
