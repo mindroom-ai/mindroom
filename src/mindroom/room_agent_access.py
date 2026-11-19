@@ -418,25 +418,22 @@ async def room_agent_workspaces(  # noqa: C901 - one ordered access check
                 admitted = [(name, agent_user_id)]
     except TimeoutError:
         raise HTTPException(503, _ACCESS_UNAVAILABLE) from None
-    opened: list[tuple[str, str]] = []
+    # Read last, so the bots checked below are the ones bound when the workspaces return: no await follows.
+    may_send = (await power()).may_send(user_id, "m.room.message")
+    live = {name: bot for name, bot in (state.room_bots or {}).items() if bot.running and bot.client is not None}
+    workspaces: list[AgentWorkspace] = []
+    contact_only = bool(admitted)
     for name, agent_id in admitted:
         with _leaving_out(name, room_id, leave_out=listing):
             # The agent's own bot admits its turns by the config it runs, so nothing opens before or without that bot.
-            bot = bots.get(name)
+            bot = live.get(name)
             memberships = runtime.agent_reply_memberships
             if bot is None or not _may_converse(user_id, name, room_id, bot.config, runtime_paths, memberships):
                 raise HTTPException(503, _ACCESS_UNAVAILABLE)
             # Every turn in a contact room runs as its agent's owner, whom the other side must never reach through it.
-            if room_id not in contact_room_ids(config, runtime_paths, name, any_status=True):
-                opened.append((name, agent_id))
-    if not opened:
-        if not listing:
-            raise HTTPException(403, "No workspace opens through a contact room.")
-        return []
-    may_send = (await power()).may_send(user_id, "m.room.message")
-    workspaces: list[AgentWorkspace] = []
-    for name, agent_id in opened:
-        with _leaving_out(name, room_id, leave_out=listing):
+            if room_id in contact_room_ids(config, runtime_paths, name, any_status=True):
+                continue
+            contact_only = False
             workspaces.append(
                 _workspace(
                     name,
@@ -448,4 +445,6 @@ async def room_agent_workspaces(  # noqa: C901 - one ordered access check
                     runtime_paths=runtime_paths,
                 ),
             )
+    if contact_only and not listing:
+        raise HTTPException(403, "No workspace opens through a contact room.")
     return workspaces

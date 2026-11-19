@@ -912,3 +912,24 @@ async def test_a_refresh_a_request_starts_while_the_router_backs_off_runs_the_ru
     assert room.refreshes() == 2
     assert not room.runtime.agent_reply_memberships.needs_refresh(room.config)
     assert sorted(room.router.follow_ups) == ["invites", "reconcile_calls", "revoke_calls", "turns"]
+
+
+@pytest.mark.asyncio
+async def test_a_bot_replaced_while_power_is_read_decides_by_its_replacement(tmp_path: Path) -> None:
+    """A replacement bot that denies the requester while the room's power is read opens no workspace."""
+    agents = _agents()
+    agents["coder"].access = ResponderAccessConfig(users=[ALICE, BOB, CAROL])
+    room = _room(tmp_path, agents)
+    denying = _agents()
+    denying["coder"].access = ResponderAccessConfig(users=[ALICE, BOB])
+    read_power = room.client.room_get_state.side_effect
+
+    async def power_while_replaced(*args: object, **kwargs: object) -> object:
+        room.bots["coder"] = SimpleNamespace(client=room.client, running=True, config=Config(agents=denying))
+        return room.client.room_get_state.return_value if read_power is None else await read_power(*args, **kwargs)
+
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["coder", "notes"]
+    room.client.room_get_state.side_effect = power_while_replaced
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["notes"]
+    room.bots["coder"].config = room.config
+    assert await _status(room.agent(CAROL, room.ids["coder"])) == (503, "Agent access is unavailable; try again.")
