@@ -3774,6 +3774,7 @@ depends_on = [
     "mindroom.config.schema_hints",
     "mindroom.config.knowledge_graph",
     "mindroom.config.egress_broker",
+    "mindroom.config.email_invites",
     "mindroom.providers.registry",
     "mindroom.config.resolution",
     "mindroom.tool_system.plugins",
@@ -4422,6 +4423,14 @@ depends_on = []
 [[modules]]
 path = "mindroom.email_invites.store"
 depends_on = []
+
+[[modules]]
+path = "mindroom.email_invites.mail"
+depends_on = []
+
+[[modules]]
+path = "mindroom.config.email_invites"
+depends_on = ["mindroom.origins"]
 
 [[modules]]
 path = "mindroom.desktop.pairing"
