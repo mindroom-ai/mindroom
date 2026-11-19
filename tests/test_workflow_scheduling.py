@@ -984,6 +984,7 @@ class TestIntegrationWithScheduling:
             task_id="task123",
             room_id="!room:server",
             status="pending",
+            owner_id=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
             created_at=datetime.now(UTC),
             workflow=ScheduledWorkflow(
                 schedule_type="once",

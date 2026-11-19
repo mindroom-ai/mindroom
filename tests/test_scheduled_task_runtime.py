@@ -586,7 +586,7 @@ class _SharedRoom:
         client.room_get_state.side_effect = get_state
         client.room_get_state_event.side_effect = get_state_event
         client.room_put_state.side_effect = put_state
-        serve_task_state_events(client, sender=user_id)
+        serve_task_state_events(client, sender=lambda _task_id: self.task()["sender"])
         return client
 
 
@@ -817,10 +817,10 @@ async def test_restore_keeps_the_stored_owner_when_the_room_would_now_pick_anoth
 
 
 @pytest.mark.asyncio
-async def test_task_saved_without_an_owner_restores_under_its_writer(tmp_path: Path) -> None:
-    """A task saved before owners were stored runs under the agent that last wrote it, whatever the owner account may do."""
+async def test_task_saved_without_an_owner_keeps_its_writer_as_owner_through_a_rewrite(tmp_path: Path) -> None:
+    """A task saved before owners were stored runs under the agent that last wrote it, also after the steward rewrites it."""
     config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
-    room = _SharedRoom({ids["router"]: 100, ids["general"]: 100})
+    room = _SharedRoom({ids["router"]: 100, ids["general"]: 50, ids["helper"]: 100})
     workflow = _workflow(due=False)
     room._put(
         "com.mindroom.scheduled.task",
@@ -828,26 +828,36 @@ async def test_task_saved_without_an_owner_restores_under_its_writer(tmp_path: P
         {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"},
         ids["general"],
     )
-    router = scheduling_bot(room.client(ids["router"]))
-    agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
-    runtime = _runtime(runtime_paths, config, {"router": router, "general": agent})
 
-    with patch.object(runtime, "_start_runner", return_value=True) as start:
-        restored = {bot.agent_name: await runtime.restore_room(bot, ROOM_ID) for bot in (router, agent)}
-        existing = await get_scheduled_task(agent.client, ROOM_ID, TASK_ID, runtime_paths)
-        assert existing is not None
-        await save_edited_scheduled_task(
-            agent.client,
-            workflow,
-            existing,
-            runtime_paths,
-            config=config,
-        )
+    def bots() -> dict[str, AgentBot]:
+        names = {"router": "router", "general": "general", "helper": "helper"}
+        return {name: scheduling_bot(room.client(ids[name]), agent_name=name) for name in names}
 
-    assert restored == {"router": 0, "general": 1}
-    start.assert_called_once_with("general", TASK_ID, workflow)
-    # The owner is never written back to a task saved without one.
-    assert "owner" not in room.task()["content"]
+    async def restore(fleet: dict[str, AgentBot]) -> list[str]:
+        runtime = _runtime(runtime_paths, config, fleet)
+        with patch.object(runtime, "_start_runner", return_value=True) as start:
+            restored = [name for name, bot in fleet.items() if await runtime.restore_room(bot, ROOM_ID)]
+        assert [call.args[0] for call in start.call_args_list] == restored
+        return restored
+
+    fleet = bots()
+    assert await restore(fleet) == ["general"]
+    existing = await get_scheduled_task(fleet["general"].client, ROOM_ID, TASK_ID, runtime_paths)
+    assert existing is not None
+    edited = workflow.model_copy(update={"message": "Water the plants twice"})
+    await save_edited_scheduled_task(
+        fleet["general"].client,
+        edited,
+        existing,
+        runtime_paths,
+        config=config,
+        writers=_runtime(runtime_paths, config, fleet),
+    )
+
+    # The steward wrote the edit, and the agent that wrote the task before it stays its owner.
+    assert room.task()["sender"] == ids["helper"]
+    assert room.task()["content"]["owner"] == ids["general"]
+    assert await restore(bots()) == ["general"]
 
 
 def _delivered() -> AsyncMock:
@@ -879,8 +889,8 @@ async def test_restore_reowns_router_task_and_fires_through_new_owner(tmp_path: 
     execute.assert_awaited_once()
     assert execute.await_args.args[0] is helper.client
     assert room.task()["content"]["status"] == "completed"
-    # The new owner is never written back.
-    assert room.task()["content"].get("owner") == (ids["router"] if owner_stored else None)
+    # The new owner is never written back: a rewrite keeps the router as the task's stored owner.
+    assert room.task()["content"]["owner"] == ids["router"]
 
 
 @pytest.mark.asyncio

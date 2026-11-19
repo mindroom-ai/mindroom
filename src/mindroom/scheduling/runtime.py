@@ -42,7 +42,7 @@ from mindroom.scheduling.tasks import (
     persist_scheduled_task_state,
     scheduled_call_workflow_digest,
     scheduled_task_state_lock,
-    task_records_with_writers,
+    task_records,
     withdraw_scheduled_call,
 )
 
@@ -145,7 +145,7 @@ class ScheduledTaskRuntime:
         if not isinstance(response, nio.RoomGetStateResponse):
             logger.warning("scheduled_task_room_state_unread", room_id=room_id, error=str(response))
             return 0
-        tasks = task_records_with_writers(room_id, response, self.runtime_paths)
+        tasks = task_records(room_id, response, self.runtime_paths)
         if not tasks:
             return 0
         config = self.config_provider()
@@ -154,16 +154,9 @@ class ScheduledTaskRuntime:
         agent_ids = sorted(matrix_id.full_id for matrix_id in registry.current_ids.values())
         room = room_from_state(room_id, client.user_id, response.events)
         restored = 0
-        for task, writer_id in tasks:
-            # LEGACY_COMPAT: Scheduled tasks without a stored owner.
-            # Legacy format: Scheduled-task state content without an "owner" field; every task saved before owners
-            #   were stored.
-            # Last legacy release: v2026.10.675 wrote scheduled-task state without an owner; replacement: the next
-            #   release stores the owner's Matrix ID in the task's state content when the task is saved.
-            # Handling: The task's latest state writer stands in for the bot that saved it. The field is never
-            #   written back, so a rewrite keeps the task on this rule.
-            # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_restores_under_its_writer.
-            owner_id: str | None = task.owner_id or writer_id
+        for task in tasks:
+            # Every task read from a room has an owner; one whose stored owner is no Matrix ID fails as ownerless.
+            owner_id: str | None = task.owner_id or ""
             if owner_id == router_id:
                 # LEGACY_COMPAT: Scheduled tasks the router owned.
                 # Legacy format: Scheduled-task state whose "owner" is the router's Matrix ID, or that has no owner

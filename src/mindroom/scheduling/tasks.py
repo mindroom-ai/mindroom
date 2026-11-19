@@ -106,7 +106,15 @@ def _runtime_authored_task_content(
     if not isinstance(content, dict) or not isinstance(sender, str):
         return None
     if sender in runtime_account_ids:
-        return content
+        # LEGACY_COMPAT: Scheduled tasks without a stored owner.
+        # Legacy format: Scheduled-task state content without an "owner" field; every task saved before owners
+        #   were stored.
+        # Last legacy release: v2026.10.675 wrote scheduled-task state without an owner; replacement: the next
+        #   release stores the owner's Matrix ID in the task's state content when the task is saved.
+        # Handling: The account that last wrote the task reads as its owner, and every rewrite stores that owner,
+        #   so a write by the room's steward never moves the task; the router's ID marks a task the router owned.
+        # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_keeps_its_writer_as_owner_through_a_rewrite.
+        return {"owner": sender, **content}
     logger.warning(
         "scheduled_task_state_ignored_unmanaged_author",
         room_id=room_id,
@@ -530,15 +538,15 @@ def _validate_conditional_workflow(workflow: ScheduledWorkflow) -> None:
         )
 
 
-def task_records_with_writers(
+def task_records(
     room_id: str,
     state_response: nio.RoomGetStateResponse,
     runtime_paths: RuntimePaths,
     include_non_pending: bool = False,
-) -> list[tuple[ScheduledTaskRecord, str]]:
-    """Parse runtime-authored scheduled task records from a room state response, each with the account that wrote it."""
+) -> list[ScheduledTaskRecord]:
+    """Parse runtime-authored scheduled task records from a room state response."""
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
-    tasks: list[tuple[ScheduledTaskRecord, str]] = []
+    tasks: list[ScheduledTaskRecord] = []
     for event in state_response.events:
         if event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
             continue
@@ -553,7 +561,7 @@ def task_records_with_writers(
             continue
         if not include_non_pending and task.status != "pending":
             continue
-        tasks.append((task, event["sender"]))
+        tasks.append(task)
 
     return tasks
 
@@ -585,9 +593,7 @@ async def get_scheduled_tasks_for_room(
 
     """
     response = await _room_state_for_tasks(client, room_id)
-    return [
-        task for task, _writer_id in task_records_with_writers(room_id, response, runtime_paths, include_non_pending)
-    ]
+    return task_records(room_id, response, runtime_paths, include_non_pending)
 
 
 async def get_pending_schedule_thread_ids_for_room(
@@ -755,8 +761,7 @@ async def persist_scheduled_task_state(
 
     The stored `cron_description` is written for clients in the task's own timezone, which `config` supplies for a
     task that has none.
-    `owner_id` is the task's stored owner, which every rewrite keeps; a task saved before owners were stored keeps
-    none.
+    `owner_id` is the task's owner, which every rewrite keeps.
     """
     revision = str(uuid.uuid4())
     content = {

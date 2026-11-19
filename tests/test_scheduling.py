@@ -2020,6 +2020,7 @@ async def test_save_edited_scheduled_task_preserves_created_at(tmp_path: Path) -
         status="pending",
         created_at=created_at,
         workflow=existing_workflow,
+        owner_id=SCHEDULE_WRITER_ID,
     )
 
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(

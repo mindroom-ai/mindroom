@@ -134,11 +134,15 @@ def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> n
     return nio.RoomGetStateEventResponse({"membership": "join"}, event_type, state_key, room_id)
 
 
-def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) -> AsyncMock:  # noqa: ANN401
+def serve_task_state_events(
+    client: Any,  # noqa: ANN401
+    *,
+    sender: str | Callable[[str], str] = SCHEDULE_WRITER_ID,
+) -> AsyncMock:
     """Answer the scheduler's ``format=event`` task reads from the client's ``room_get_state_event`` mock.
 
     Homeservers return the whole state event for ``format=event``.
-    This wraps each mocked state content in that envelope with ``sender``, so the existing
+    This wraps each mocked state content in that envelope with ``sender``, or what it returns for the task ID, so the existing
     ``room_get_state_event`` mock stays the single source of room state and its call count
     still measures state-event requests.
     The scheduler's check of the room's create event is answered as a homeserver honouring ``format=event``.
@@ -161,7 +165,8 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
         response = await client.room_get_state_event(room_id=room_id, event_type=event_type, state_key=state_key)
         if not isinstance(response, nio.RoomGetStateEventResponse):
             return response
-        event = scheduled_task_state_event(state_key, response.content, room_id=room_id, sender=sender)
+        writer = sender(state_key) if callable(sender) else sender
+        event = scheduled_task_state_event(state_key, response.content, room_id=room_id, sender=writer)
         return nio.RoomGetStateEventResponse(event, event_type, state_key, room_id)
 
     client._send = AsyncMock(side_effect=send)
