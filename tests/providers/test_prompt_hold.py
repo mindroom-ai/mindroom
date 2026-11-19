@@ -688,20 +688,22 @@ async def test_every_request_of_a_run_that_only_reads_the_hold_is_sent_the_promp
 
 
 @pytest.mark.asyncio
-async def test_a_conversation_tells_eight_updates_and_starts_over_at_the_ninth(conversation: _Conversation) -> None:
-    """Every request sends each update again, so a prompt edited over and over is sent as it is, as without a hold."""
+async def test_a_conversation_tells_every_edit_as_an_update_however_many_it_had(conversation: _Conversation) -> None:
+    """No count caps the updates: each request extends the one before it, and its newest update is in force."""
     messages = [*_system(_A), _user("turn 0")]
-    await conversation.send(messages)
-    for turn in range(1, 9):
-        messages = [*_system(f"{_A}\n- Revision {turn}."), *messages[2:], _answer(), _user(f"turn {turn}")]
-        sent = await conversation.send(messages)
+    sent = await conversation.send(messages)
+    for turn in range(1, 13):
+        fresh = f"{_A}\n- Revision {turn}."
+        messages = [*_system(fresh), *messages[2:], _answer(), _user(f"turn {turn}")]
+        before, sent = sent, await conversation.send(messages)
+        assert [(message.role, message.content) for message in sent[: len(before)]] == [
+            (message.role, message.content) for message in before
+        ]
         assert (sent[0].content, len(_updates(sent))) == (_A, turn)
-    # A turn that changes nothing adds none, so the eight stay; the next change starts the hold over.
-    messages = [*messages, _answer(), _user("turn 9")]
-    assert len(_updates(await conversation.send(messages))) == 8
-    ninth = [*_system(f"{_A}\n- Revision 9."), *messages[2:], _answer(), _user("turn 10")]
-    assert await conversation.send(ninth) == ninth
-    assert conversation.state()["updates"] == []
+        assert _applied(f"{_A}\n\n{_TURN}", _updates(sent)[-1]) == f"{fresh}\n\n{_TURN}"
+    # A turn that changes nothing adds none.
+    messages = [*messages, _answer(), _user("turn 13")]
+    assert len(_updates(await conversation.send(messages))) == 12
 
 
 @pytest.mark.asyncio

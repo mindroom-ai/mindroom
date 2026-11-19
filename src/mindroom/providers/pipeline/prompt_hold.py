@@ -69,9 +69,8 @@ type _Plan = tuple[Sequence[Message], _State]
 
 # A hold no request continues any more is deleted once it has been idle this long.
 _PRUNE_IDLE_SECONDS = 24 * 3600
-# A longer update reads better as a new prompt, and so do more updates: every request sends each of them again.
+# An update longer than this reads better as a new prompt.
 _MAX_UPDATE_CHARS = 8000
-_MAX_UPDATES = 8
 # The unchanged lines an update quotes around each change.
 _CONTEXT_LINES = 2
 _UPDATE_HEADER = (
@@ -185,7 +184,7 @@ def _continued(state: _State, route: object, system: Sequence[Message], rest: Se
         return None
     if fresh != state["current"]:
         # It is told after the newest user message, which no earlier update follows, or not at all.
-        text = _update_text("\n\n".join(held), fresh) if len(updates) < _MAX_UPDATES else None
+        text = _update_text("\n\n".join(held), fresh)
         anchor = _anchors(rest, [len(rest)])[0]
         if text is None or anchor is None or not _may_stand(rest, len(rest)) or len(rest) <= max(lengths, default=0):
             return None

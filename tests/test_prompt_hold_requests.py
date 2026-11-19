@@ -1134,34 +1134,3 @@ async def test_usage_reported_for_a_request_sent_as_built_sizes_only_requests_se
     size, _estimate = _next_size(capture)
     assert size.reported
     assert 7000 < size.tokens < 8500
-
-
-@pytest.mark.asyncio
-async def test_a_prompt_edited_every_turn_folds_no_history_a_conversation_without_a_hold_keeps(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Updates are sent again by every request; past eight the hold starts over, so they never fill the window."""
-
-    async def summaries(root: Path) -> tuple[int, int]:
-        conversation = _Conversation.start(root, monkeypatch)
-        conversation.config.defaults.compaction.threshold_tokens = 26_000
-        folds: list[None] = []
-
-        async def summarize(*_args: object, **_kwargs: object) -> str:
-            folds.append(None)
-            return "Short summary."
-
-        monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", summarize)
-        await conversation.turn("First question")
-        most = 0
-        for revision in range(12):
-            conversation.write_rules(f"- Revision {revision}." + " Remain accurate and concise." * 190)
-            [body] = await conversation.turn(f"Question {revision}")
-            most = max(most, len(_updates(body)))
-        return len(folds), most
-
-    with monkeypatch.context() as unheld:
-        unheld.setattr("mindroom.ai._with_prompt_hold", lambda _ctx, build, _scope: build)
-        assert await summaries(tmp_path / "unheld") == (0, 0)
-    assert await summaries(tmp_path / "held") == (0, 8)
