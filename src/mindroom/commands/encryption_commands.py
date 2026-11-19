@@ -36,7 +36,8 @@ async def _confirm_encrypt(
         return "🔐 End-to-end encryption is now enabled for this room. This cannot be undone."
     return (
         f"❌ Failed to enable encryption: {failure[:_FAILURE_REASON_MAX_CHARS]}\n\n"
-        "If this is a permission error, ask a room admin to enable it from their client."
+        # The requester already passed the room-admin check, so only my own power can be missing.
+        "If this is a permission error, enable it from your own client or give me the power to change room state."
     )
 
 

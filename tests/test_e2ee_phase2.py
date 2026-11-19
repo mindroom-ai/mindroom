@@ -357,7 +357,7 @@ class TestEncryptCommand:
             )
 
         assert response.startswith(f"❌ Failed to enable encryption: M_FORBIDDEN: {reason}\n\n")
-        assert "ask a room admin" in response
+        assert "enable it from your own client" in response
 
 
 class TestE2EECommand:
