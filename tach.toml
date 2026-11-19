@@ -8587,6 +8587,7 @@ depends_on = [
     "mindroom.origins",
     "mindroom.plugin_context",
     "mindroom.plugin_worker_relay",
+    "mindroom.response_admission",
     "mindroom.room_agent_access",
     "mindroom.room_modes",
     "mindroom.room_reply_modes",
