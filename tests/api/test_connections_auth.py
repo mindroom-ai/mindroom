@@ -221,16 +221,16 @@ def test_connections_static_routes_use_only_dedicated_bundle(
 
 
 @pytest.mark.parametrize("path", ["/connections/egress", "/connections/egress/", "/connections/egress/agents"])
-@pytest.mark.parametrize(("broker_port", "status_code"), [(None, 404), ("8768", 200)])
+@pytest.mark.parametrize(("broker_port", "status_code"), [("off", 404), ("8768", 200)])
 def test_portal_serves_the_agent_keys_page_only_while_the_broker_is_on(
     path: str,
-    broker_port: str | None,
+    broker_port: str,
     status_code: int,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
 ) -> None:
-    """Without a broker port the portal's Agent Keys page is a 404, while the rest of the portal stays served."""
+    """With the broker off the portal's Agent Keys page is a 404, while the rest of the portal stays served."""
     portal = tmp_path / "connections"
     portal.mkdir()
     (portal / "index.html").write_text("connections")

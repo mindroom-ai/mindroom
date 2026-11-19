@@ -64,6 +64,9 @@ _GIT_ERROR_LIMIT = 4096
 _GIT_DISCOVERY_SERVICES = frozenset({"git-upload-pack", "git-receive-pack"})
 # Methods that ask a server to echo the request back, which would return an injected credential.
 _ECHO_METHODS = frozenset({"TRACE", "TRACK"})
+# A primary shell's private networks: every address, which the dial guard still never opens for loopback,
+# link-local, or cloud metadata.
+_EVERY_NETWORK = (ipaddress.ip_network("0.0.0.0/0"), ipaddress.ip_network("::/0"))
 # Names a broker refusal's code; h11 lowercases header names, so upstream copies compare equal.
 _ERROR_HEADER = b"x-mindroom-error"
 # One requester cannot hold more of the broker's destination lookups than this, even when its names never resolve.
@@ -533,7 +536,8 @@ class Relay:
         ssl_context: ssl.SSLContext | None,
     ) -> Peer | None:
         """Dial `entry.host` through the guard and the rules' private networks; on failure answer, audit, return None."""
-        policy = replace(self.dial_policy, private_networks=rules.private_networks)
+        private_networks = _EVERY_NETWORK if entry.claims.primary_shell else rules.private_networks
+        policy = replace(self.dial_policy, private_networks=private_networks)
         lookup_slots = self._lookup_slots[entry.claims.requester_id or entry.claims.worker_key]
         try:
             reader, writer = await _from_upstream(

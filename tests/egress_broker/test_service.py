@@ -1022,8 +1022,16 @@ async def test_bind_error_propagates(
     [
         ({}, None),
         ({"MINDROOM_PUBLIC_URL": "  "}, None),
-        ({"MINDROOM_PUBLIC_URL": "https://chat.example.org"}, "https://chat.example.org/"),
-        ({"MINDROOM_PUBLIC_URL": "https://chat.example.org/"}, "https://chat.example.org/"),
+        (
+            {"MINDROOM_PUBLIC_URL": "https://chat.example.org", "MINDROOM_EGRESS_BROKER_PORT": "off"},
+            "https://chat.example.org/",
+        ),
+        (
+            {"MINDROOM_PUBLIC_URL": "https://chat.example.org/", "MINDROOM_EGRESS_BROKER_PORT": "off"},
+            "https://chat.example.org/",
+        ),
+        # The default broker serves the personal page too.
+        ({"MINDROOM_PUBLIC_URL": "https://chat.example.org"}, "https://chat.example.org/connections/egress"),
         (
             {
                 **_broker_env(8768),

@@ -34,6 +34,9 @@ class WorkerClaims:
     channel: Literal["matrix", "openai_compat", "headless", "mcp"]
     agent_name: str
     requester_id: str | None
+    # Minted for a shell call in the primary, which can dial around the broker anyway, so its private-address guard
+    # protects nothing and the broker opens private networks for it. Tokens without the claim are worker tokens.
+    primary_shell: bool = False
 
     @staticmethod
     def from_worker_target(target: ResolvedWorkerTarget) -> WorkerClaims | None:
@@ -240,7 +243,8 @@ def _unexpired_claims(payload_bytes: bytes, *, now: float) -> dict[str, Any] | N
 
 def _claims_from_dict(claims_dict: dict[str, Any]) -> WorkerClaims | None:
     """Return the claims when exactly the expected keys are present, each with its expected type, or None."""
-    if set(claims_dict) != _CLAIM_KEYS:
+    claims_dict = {"primary_shell": False, **claims_dict}
+    if set(claims_dict) != _CLAIM_KEYS or not isinstance(claims_dict["primary_shell"], bool):
         return None
     if not isinstance(claims_dict["worker_key"], str) or not isinstance(claims_dict["agent_name"], str):
         return None

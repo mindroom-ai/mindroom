@@ -572,7 +572,7 @@ def test_every_route_is_a_404_while_the_broker_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a broker port every personal route is a 404 before it authenticates the caller or reads any store."""
-    _restart_with_env(egress_portal, MINDROOM_EGRESS_BROKER_PORT="")
+    _restart_with_env(egress_portal, MINDROOM_EGRESS_BROKER_PORT="off")
     stores_opened: list[object] = []
     monkeypatch.setattr(egress_credentials, "get_runtime_credentials_manager", stores_opened.append)
     routes = sorted(
@@ -902,7 +902,7 @@ def test_portal_state_reads_no_egress_state_while_the_broker_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a broker port the portal sends no egress rows and reads no egress store or scope directory."""
-    _restart_with_env(egress_portal, MINDROOM_EGRESS_BROKER_PORT="")
+    _restart_with_env(egress_portal, MINDROOM_EGRESS_BROKER_PORT="off")
     services_read: list[object] = []
     read_services = egress_status.effective_config
     monkeypatch.setattr(
@@ -956,7 +956,7 @@ def test_portal_catalog_lists_the_egress_tool_only_while_the_broker_is_on(egress
 
     listed = personal_tools()
     assert "egress_credentials" in listed
-    _restart_with_env(portal, MINDROOM_EGRESS_BROKER_PORT="")
+    _restart_with_env(portal, MINDROOM_EGRESS_BROKER_PORT="off")
     assert personal_tools() == [name for name in listed if name != "egress_credentials"]
 
 

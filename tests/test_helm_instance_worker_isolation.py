@@ -3589,15 +3589,6 @@ def test_runtime_chart_egress_broker_disabled_by_default() -> None:
     }
 
 
-def test_instance_chart_turns_the_egress_broker_off_unless_enabled() -> None:
-    """MindRoom runs a loopback broker by default, so the chart's `egressBroker.enabled: false` must say off."""
-    container = _container(_resource(_render_instance_chart(), "Deployment", "mindroom-demo"), "mindroom")
-    env = {name: entry.get("value", "") for name, entry in _env_by_name(container).items()}
-
-    assert {name: value for name, value in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")} == {
-        "MINDROOM_EGRESS_BROKER_PORT": "off",
-    }
-
 
 def test_runtime_chart_egress_broker_direct_mode_without_worker_egress_policy() -> None:
     """Workers without an egress policy need no worker rule, and the primary admits only worker pods."""
@@ -3850,7 +3841,9 @@ def test_runtime_chart_chain_requires_both_features() -> None:
     broker_only = _render_runtime_chart("egressBroker.enabled=true")
 
     assert not any(doc["metadata"]["name"] == _EGRESS_SQUID_CONFIG_NAME for doc in approved_only)
-    assert not [name for name in _broker_primary_env(approved_only)[1] if name.startswith("MINDROOM_EGRESS_BROKER_")]
+    assert {
+        name: value for name, value in _broker_primary_env(approved_only)[1].items() if "EGRESS_BROKER" in name
+    } == {"MINDROOM_EGRESS_BROKER_PORT": "off"}
     assert "checksum/squid-config" not in _resource(approved_only, "Deployment", _EGRESS_PROXY_NAME)["spec"][
         "template"
     ]["metadata"].get("annotations", {})
@@ -3957,9 +3950,11 @@ def test_instance_chart_egress_broker_env_on_primary_only() -> None:
 
 
 def test_instance_chart_egress_broker_disabled_by_default() -> None:
-    """Hosted tenants get no broker env unless the release opts in."""
+    """Hosted tenants get no broker unless the release opts in: MindRoom's default loopback broker is turned off."""
     deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
 
-    for container in ("mindroom", "sandbox-runner"):
+    for container, expected in (("mindroom", {"MINDROOM_EGRESS_BROKER_PORT": "off"}), ("sandbox-runner", {})):
         env = _env_by_name(_container(deployment, container))
-        assert not [name for name in env if name.startswith("MINDROOM_EGRESS_BROKER_")]
+        assert {
+            name: entry.get("value") for name, entry in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")
+        } == expected

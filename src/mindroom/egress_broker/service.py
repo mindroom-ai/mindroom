@@ -98,7 +98,8 @@ _OAUTH_LOOKUP_WORKERS = 4
 class _BrokerSettings:
     host: str
     port: int
-    url: str
+    # None when no worker-facing URL is set: the default broker serves only the primary's shell calls.
+    url: str | None
     token_ttl_seconds: int
 
     @property
@@ -115,7 +116,7 @@ class _BrokerRuntime:
     `primary_url` and `primary_ca_env` are the broker URL and CA file variables of shell commands run in the primary.
     """
 
-    url: str
+    url: str | None
     signer: TokenSigner
     ca_pem: str
     audit: AuditLog
@@ -154,20 +155,31 @@ def _require_proxy_url(name: str, url: str) -> None:
 
 
 def _broker_settings(runtime_paths: RuntimePaths) -> _BrokerSettings | None:
-    """Read and validate the broker env; None when no port is set, so the broker stays off."""
+    """Read and validate the broker env; None when the port setting turns the broker off.
+
+    Without a port the broker listens on a loopback port the system picks, for the primary's shell calls only: a
+    fixed default could collide with another MindRoom on the machine, and nothing outside the process needs to know it.
+    """
 
     def env(key: str) -> str:
         return (runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY[key]) or "").strip()
 
     if not egress_broker_enabled(runtime_paths):
         return None
+    raw_ttl = env("token_ttl_seconds")
+    ttl = _positive_int(EGRESS_BROKER_ENV_BY_KEY["token_ttl_seconds"], raw_ttl) if raw_ttl else None
+    if not env("port"):
+        return _BrokerSettings(
+            host="127.0.0.1",
+            port=0,
+            url=None,
+            token_ttl_seconds=ttl or _DEFAULT_TOKEN_TTL_SECONDS,
+        )
     port = _positive_int(EGRESS_BROKER_ENV_BY_KEY["port"], env("port"), maximum=65535)
     if not (url := env("url")):
         msg = f"{EGRESS_BROKER_ENV_BY_KEY['url']} is required when {EGRESS_BROKER_ENV_BY_KEY['port']} is set"
         raise ValueError(msg)
     _require_proxy_url(EGRESS_BROKER_ENV_BY_KEY["url"], url)
-    raw_ttl = env("token_ttl_seconds")
-    ttl = _positive_int(EGRESS_BROKER_ENV_BY_KEY["token_ttl_seconds"], raw_ttl) if raw_ttl else None
     return _BrokerSettings(
         host=env("host") or _DEFAULT_HOST,
         port=port,
@@ -453,7 +465,8 @@ class _BrokerService:
             ca_pem=ca.cert_pem,
             audit=audit,
             credentials_manager=credentials_manager,
-            primary_url=self._settings.primary_url,
+            # The bound port, which the system picks for the default broker.
+            primary_url=replace(self._settings, port=broker.port).primary_url,
             primary_ca_env=primary_ca_env,
         )
 
@@ -529,7 +542,7 @@ async def serve_egress_broker(
         # Startup finishes even if the owner is cancelled meanwhile, so the finally below can stop it.
         await run_blocking_until_complete(service.start)
         _active.runtime = service.runtime
-        logger.info("egress_broker_started", host=settings.host, port=settings.port)
+        logger.info("egress_broker_started", host=settings.host, url=service.runtime and service.runtime.primary_url)
         yield
     finally:
         _active.runtime = None
@@ -560,7 +573,7 @@ def execution_env_for_worker(
     `call_env` is the env the call already carries; overlaying the result on it keeps its Git config entries.
     """
     runtime = _active.runtime
-    if runtime is None or config is None or worker_target is None:
+    if runtime is None or runtime.url is None or config is None or worker_target is None:
         return {}
     return _execution_env(runtime, runtime_paths, config, worker_target, call_env=call_env, broker_url=runtime.url)
 
@@ -598,6 +611,7 @@ def execution_env_for_primary_shell(
             worker_target,
             call_env=None,
             broker_url=runtime.primary_url,
+            primary_shell=True,
         )
     except Exception as exc:
         # Config, credential-store, and identity resolution can raise anything; the shell command still runs.
@@ -621,11 +635,13 @@ def _execution_env(
     *,
     call_env: Mapping[str, str] | None,
     broker_url: str,
+    primary_shell: bool = False,
 ) -> dict[str, str]:
     """Return the broker env of one call for `worker_target` through `broker_url`; empty without a signable target."""
     claims = WorkerClaims.from_worker_target(_signable_target(worker_target))
     if claims is None:
         return {}
+    claims = replace(claims, primary_shell=primary_shell)
     # Check status for the target the broker will rebuild from the token, so both agree on the scope.
     scope_target = claims.to_worker_target()
     try:

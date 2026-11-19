@@ -72,6 +72,7 @@ from mindroom.plugin_lifecycle import PluginLifespans
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
 from mindroom.runtime_shutdown import (
     CONFIG_RELOAD_SHUTDOWN,
     ORDERLY_SHUTDOWN,
@@ -2068,7 +2069,8 @@ async def _run_runtime(  # noqa: PLR0915
                 _run_api_server(api_host, api_port, log_level, orchestrator, shutdown_requested),
                 name="api_server",
             )
-        elif egress_broker_enabled(runtime_paths):
+        # Only a broker the operator set a port for; the default one is for primary shells and needs no warning.
+        elif egress_broker_enabled(runtime_paths) and runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]):
             logger.warning(
                 "egress_broker_not_started",
                 reason="the egress broker runs with the embedded API server, which is disabled",

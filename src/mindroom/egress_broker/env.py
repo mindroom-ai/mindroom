@@ -44,12 +44,14 @@ _EGRESS_TOOL_NAME = "egress_credentials"
 
 
 def egress_broker_enabled(runtime_paths: RuntimePaths) -> bool:
-    """Return whether this deployment runs the egress broker, which its port setting decides.
+    """Return whether this deployment runs the egress broker: unless its port setting is `off` or `0`.
 
-    Every Agent Keys surface (its API routes, pages, catalog fields, and tool) follows this, so with the port unset
-    nothing of the feature shows or runs. A set but invalid port counts as enabled, so startup refuses it loudly.
+    Every Agent Keys surface (its API routes, pages, catalog fields, and tool) follows this, so with the broker off
+    nothing of the feature shows or runs. Unset, the broker serves the primary's shell calls on a loopback port. A set
+    but invalid port counts as enabled, so startup refuses it loudly.
     """
-    return runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]) is not None
+    port = (runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]) or "").strip().lower()
+    return port not in {"off", "0"}
 
 
 def personal_page_served(runtime_paths: RuntimePaths) -> bool:

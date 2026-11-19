@@ -263,7 +263,7 @@ def test_personal_page_served_needs_a_sign_in(
         return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
 
     assert personal_page_served(paths({"MINDROOM_EGRESS_BROKER_PORT": "8768", **process_env})) is served
-    assert personal_page_served(paths(process_env)) is False
+    assert personal_page_served(paths({"MINDROOM_EGRESS_BROKER_PORT": "off", **process_env})) is False
 
 
 def _agent(*tools: str, **extra: object) -> dict[str, object]:
@@ -271,7 +271,7 @@ def _agent(*tools: str, **extra: object) -> dict[str, object]:
 
 
 # A sandbox runner, so shell and python calls run in a worker unless an agent's `worker_tools` keeps them local.
-_RUNNER_WITHOUT_BROKER = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}
+_RUNNER_WITHOUT_BROKER = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test", "MINDROOM_EGRESS_BROKER_PORT": "off"}
 _RUNNER = {**_RUNNER_WITHOUT_BROKER, "MINDROOM_EGRESS_BROKER_PORT": "8768"}
 # The broker without a worker backend, so every tool runs in the primary.
 _BROKER = {"MINDROOM_EGRESS_BROKER_PORT": "8768"}
