@@ -2308,6 +2308,42 @@ async def test_not_ready_notice_and_the_running_bot_give_a_command_one_outcome(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["general", "research"])
+async def test_a_model_selection_gets_no_notice_from_a_bot_its_device_does_not_name(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    journal_store: EventJournalStore,
+    first: str,
+) -> None:
+    """A selection names one device: that bot runs it, and a bot that cannot place its thread stays silent."""
+    room = _room_with_members(config, "general", "research")
+    event = _text_event("!model reset", thread_id="$thread:localhost")
+    event.source["content"]["io.mindroom.model_selection"] = {
+        "version": 1,
+        "runtime_user_id": _entity_user_id(config, "research"),
+        "runtime_device_id": "RESEARCH",
+        "operation": "reset",
+    }
+    outcomes = []
+    for agent_name in sorted(("general", "research"), key=lambda name: name != first):
+        harness = _build_harness(config, tmp_path / agent_name, agent_name=agent_name)
+        harness.runtime.orchestrator.journal_store = journal_store
+        harness.runtime.client.device_id = agent_name.upper()
+        if agent_name == "general":
+
+            async def unresolved(*_args: object) -> str | None:
+                raise ThreadMembershipLookupError
+
+            monkeypatch.setattr(harness.ingress.deps.resolver, "coalescing_thread_id", unresolved)
+        with patch.object(harness.dispatcher.deps.command_executor, "execute", new=AsyncMock()) as execute:
+            await harness.ingress.handle_text_event(room, event)
+        outcomes += [agent_name] * (len(harness.gateway.sent) + execute.await_count)
+
+    assert outcomes == ["research"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("denied_at", ["message_received", "plan"])
 async def test_a_turn_whose_requester_lost_access_in_the_queue_settles_its_sources_inside_the_fence(
     config: Config,

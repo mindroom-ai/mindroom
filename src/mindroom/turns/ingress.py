@@ -58,7 +58,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.matrix.transport_progress import is_unfinished_reply
 from mindroom.mid_turn import mid_turn_mode
-from mindroom.model_selection import model_selection_names_runtime
+from mindroom.model_selection import model_selection_names_runtime, model_selection_targets_other_runtime
 from mindroom.thread_utils import (
     check_agent_mentioned,
     mentions_another_participant,
@@ -536,12 +536,16 @@ class TurnIngress:
             self.deps.runtime_paths,
             room=room,
         )
-        if await self.deps.turn_policy.aims_command_at_me(
+        content, client = event.source.get("content", {}), self._client()
+        # A model selection names one device: no other bot answers for it, and that bot shares the command's claim.
+        addressed_elsewhere = model_selection_targets_other_runtime(content, client.user_id, client.device_id)
+        if not addressed_elsewhere and await self.deps.turn_policy.aims_command_at_me(
             room,
             requester_user_id,
             command,
             mentioned_agents,
             source_event_id=event.event_id,
+            names_me=model_selection_names_runtime(content, client.user_id),
         ):
             async with self.deps.ingress.admitted_reply_decision(
                 requester_user_id,

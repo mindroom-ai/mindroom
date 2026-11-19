@@ -311,13 +311,13 @@ class CommandTurnExecutor:
         is_model = command.type is CommandType.MODEL
         if is_model and model_selection_targets_other_runtime(content, client.user_id, client.device_id):
             return False
-        # A model selection names the device that answered its discovery: that bot runs it.
-        names_me = is_model and model_selection_names_runtime(content, client.user_id)
-        if not names_me and not await self.deps.turn_policy.owns_command(
+        # A model selection names the device that answered its discovery: that bot runs it, under the command's claim.
+        if not await self.deps.turn_policy.owns_command(
             room,
             dispatch,
             command,
             source_event_id=event.event_id,
+            names_me=model_selection_names_runtime(content, client.user_id),
         ):
             return False
         await self.execute(

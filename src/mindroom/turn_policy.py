@@ -558,10 +558,11 @@ class TurnPolicy:
         thread_history: Sequence[ResolvedVisibleMessage] = (),
         *,
         source_event_id: str,
+        names_me: bool = False,
     ) -> bool:
         """Return whether this bot is the saved owner of one command, the bot it is aimed at.
 
-        A Desktop agent alone with the requester runs `/desktop`.
+        A model selection that names this account, and `/desktop` for a Desktop agent alone with the requester, are its own.
         A command that mentions agents or teams is for the lowest Matrix ID among them, and one in a thread with a
         single agent the requester may address is for that agent.
         Any other command addresses MindRoom itself: the joined candidate with the lowest Matrix ID runs it, whatever
@@ -579,7 +580,9 @@ class TurnPolicy:
             if candidate.full_id in joined
         ]
         desktop_agent = desktop_room_agent(config, self.deps.runtime_paths, room, requester_user_id)
-        if command.type is CommandType.DESKTOP and desktop_agent == self.deps.agent_name:
+        if (names_me and command.type is CommandType.MODEL) or (
+            command.type is CommandType.DESKTOP and desktop_agent == self.deps.agent_name
+        ):
             aimed_at = [me]
         elif mentioned_agents:
             aimed_at = [candidate for candidate in candidates if candidate in mentioned_agents]
@@ -604,6 +607,7 @@ class TurnPolicy:
         command: Command,
         *,
         source_event_id: str,
+        names_me: bool = False,
     ) -> bool:
         """Return whether this bot runs one command: it is the command's saved owner."""
         return await self.aims_command_at_me(
@@ -613,6 +617,7 @@ class TurnPolicy:
             dispatch.context.mentioned_agents,
             dispatch.context.planning_thread_history,
             source_event_id=source_event_id,
+            names_me=names_me,
         )
 
     def is_room_steward(self, room_id: str) -> bool:
