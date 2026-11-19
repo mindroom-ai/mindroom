@@ -44,8 +44,9 @@ class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
     summary: str = Field(description="Short one-line title of the thread conversation")
+    # ``default_factory``: strict OpenAI schemas refuse a ``default`` keyword.
     keep_current: bool = Field(
-        default=False,
+        default_factory=bool,
         description="True to keep the thread's current title, when one is shown",
     )
 
@@ -78,7 +79,7 @@ def clamp_generated_title(title: str) -> str:
         words += any(char.isalnum() for char in token)
         if words == GENERATED_TITLE_MAX_WORDS:
             break
-    while len(tokens) > 2 and len(" ".join(tokens)) > GENERATED_TITLE_MAX_LENGTH:
+    while len(" ".join(tokens)) > GENERATED_TITLE_MAX_LENGTH and any(c.isalnum() for t in tokens[:-1] for c in t):
         tokens.pop()
     return " ".join(tokens)[:GENERATED_TITLE_MAX_LENGTH].rstrip()
 
