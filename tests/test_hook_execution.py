@@ -17,7 +17,7 @@ from structlog.testing import capture_logs
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.hooks import (
     EVENT_BOT_READY,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -841,6 +841,26 @@ async def test_room_scope_runs_on_agent_steward_without_owner(tmp_path: Path, jo
     """A room with no owner account runs room-scoped hooks on its agent steward."""
     calls: list[str] = []
     registry = _stewarded_registry([_recording_hook("room", calls)], {"research": 0, "code": 0}, journal_store)
+
+    for agent_name in ("research", "code"):
+        await _emit_message_as(registry, tmp_path, agent_name)
+
+    assert calls == ["code"]
+
+
+@pytest.mark.asyncio
+async def test_router_alias_runs_once_per_message_in_a_room_without_owner(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """A hook still filtered to the router runs once per message where no owner account is, on the agent steward."""
+    calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED, agents=(ROUTER_AGENT_NAME,))
+    async def aliased(ctx: MessageReceivedContext) -> None:
+        calls.append(ctx.envelope.agent_name)
+
+    registry = _stewarded_registry([aliased], {"research": 0, "code": 0}, journal_store)
 
     for agent_name in ("research", "code"):
         await _emit_message_as(registry, tmp_path, agent_name)

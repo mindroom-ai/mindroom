@@ -7,9 +7,11 @@ import json
 import re
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -37,8 +39,10 @@ from mindroom.hooks.context import CancelledResponseInfo
 from mindroom.hooks.execution import emit, emit_collect
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.room_steward import room_steward
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.session_ids import create_session_id
+from mindroom.steward_duties import runs_room_hooks
 from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -59,6 +63,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import EventJournalStore
     from mindroom.tool_system.registry import ToolRegistry
 
 
@@ -413,6 +418,49 @@ async def test_room_level_todo_command_stays_in_main_scope(loaded_workloop: _Loa
     state = _todo_state(loaded_workloop, room_id="!room:localhost", thread_id="main")
     assert state["thread_id"] == "main"
     assert sender.await_args.args[2] is None
+
+
+@pytest.mark.asyncio
+async def test_router_filtered_command_runs_once_per_message_in_a_room_with_no_owner_account(
+    loaded_workloop: _LoadedWorkloop,
+    journal_store: EventJournalStore,
+) -> None:
+    """The fixture's `agents=(ROUTER_AGENT_NAME,)` command hook runs once for a message two agents' bots both emit."""
+    room = SimpleNamespace(power_levels=SimpleNamespace(get_user_level=lambda _user_id: 0))
+    bots = {
+        name: SimpleNamespace(
+            agent_name=name,
+            running=True,
+            client=SimpleNamespace(user_id=f"@mindroom_{name}:localhost", rooms={"!room:localhost": room}),
+        )
+        for name in ("general", "code")
+    }
+    orchestrator = SimpleNamespace(
+        room_steward=lambda room_id: room_steward(bots, room_id),
+        event_journal_store=lambda: journal_store,
+    )
+    registry = replace(loaded_workloop.registry, room_hook_owner=partial(runs_room_hooks, orchestrator))
+    sender = AsyncMock(return_value="$todo-event")
+
+    for agent_name in bots:
+        command_context = MessageReceivedContext(
+            event_name=EVENT_MESSAGE_RECEIVED,
+            plugin_name="",
+            settings={},
+            config=loaded_workloop.config,
+            runtime_paths=loaded_workloop.runtime_paths,
+            logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_RECEIVED),
+            correlation_id="corr-command",
+            message_sender=sender,
+            envelope=_message_envelope(body="!todo add Only once", agent_name=agent_name),
+            _emitter=agent_name,
+        )
+        await emit(registry, EVENT_MESSAGE_RECEIVED, command_context)
+
+    assert ROUTER_AGENT_NAME not in bots
+    assert sender.await_count == 1
+    state = _todo_state(loaded_workloop, room_id="!room:localhost", thread_id="main")
+    assert _todo_titles(state) == ["Only once"]
 
 
 @pytest.mark.asyncio
