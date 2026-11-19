@@ -2153,6 +2153,7 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.api.config_lifecycle",
     "mindroom.plugin_http",
+    "mindroom.room_agent_access",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
     "mindroom.turn_model",

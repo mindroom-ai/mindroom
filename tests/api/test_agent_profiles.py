@@ -16,9 +16,14 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.mcp.config import MCPServerConfig
+from mindroom.room_agent_access import room_execution_identity
+from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from tests.api.test_plugin_room_agents import ALICE, BOB, CAROL, READ_ONLY_FILE, ROOM, _paths, _Room
+from tests.test_generated_agents import _load, _personal, _with_template
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,7 +44,8 @@ def _config(**changes: object) -> Config:
                 display_name="Coder",
                 role="  Writes and reviews code.  ",
                 model="luna",
-                tools=[READ_ONLY_FILE, "shell", "mcp_notes"],
+                # A calculator whose settings switch off every function offers nothing.
+                tools=[READ_ONLY_FILE, "shell", "mcp_notes", {"calculator": {"include_tools": []}}],
                 access=ResponderAccessConfig(users=[ALICE, BOB]),
             ),
             "helper": AgentConfig(display_name="Helper", access=ResponderAccessConfig(users=[ALICE])),
@@ -63,10 +69,10 @@ def _config(**changes: object) -> Config:
 
 
 class _Client:
-    def __init__(self, tmp_path: Path, config: Config, joined: tuple[str, ...] = ("coder", "helper")) -> None:
-        self.room = _Room(config, _paths(tmp_path), joined)
-        self.room.app.include_router(agent_profiles.router)
-        self.http = TestClient(self.room.app)
+    def __init__(self, room: _Room) -> None:
+        self.room = room
+        room.app.include_router(agent_profiles.router)
+        self.http = TestClient(room.app)
 
     def profile(self, user_id: str | None, agent_user_id: str) -> Response:
         headers = {}
@@ -88,7 +94,7 @@ def _registry_tool(name: str) -> dict[str, object]:
 
 def test_a_member_reads_the_role_model_and_toolkits_and_no_tool_settings(tmp_path: Path) -> None:
     """The toolkits come in build order with their registry text; an MCP server shows its ID, never its address."""
-    client = _Client(tmp_path, _config())
+    client = _Client(_Room(_config(), _paths(tmp_path), ("coder", "helper")))
 
     response = client.profile(ALICE, client.room.ids["coder"])
 
@@ -107,8 +113,18 @@ def test_a_member_reads_the_role_model_and_toolkits_and_no_tool_settings(tmp_pat
                 "mcp_server": "notes",
             },
             _registry_tool("scheduler"),  # Every agent gets it by default.
+            _registry_tool("invite_router"),  # Every Matrix room turn gets it.
         ],
     }
+    # The toolkits a Matrix room turn of the agent may build, as its turn picks them, less the switched-off calculator.
+    config, paths = client.room.config, client.room.paths
+    flags = turn_room_flags(room_execution_identity("coder", ALICE, ROOM, config, paths))
+    candidates = resolve_agent_tools(config, "coder", config_plugins(config, paths).tools).candidates(
+        room_tools=flags[0],
+        matrix_room_tools=flags[1],
+    )
+    turn_toolkits = [entry.name for entry in candidates if entry.name != "calculator"]
+    assert [tool["name"] for tool in response.json()["tools"]] == turn_toolkits
     for secret in (MCP_URL, "mcp-secret-token", "enable_save_file"):
         assert secret not in response.text
     assert client.profile(BOB, client.room.ids["coder"]).json() == response.json()
@@ -116,7 +132,7 @@ def test_a_member_reads_the_role_model_and_toolkits_and_no_tool_settings(tmp_pat
 
 def test_the_model_is_the_one_the_room_runs_and_a_role_left_blank_is_null(tmp_path: Path) -> None:
     """A room's ``room_models`` entry wins over the agent's own model, as its turns there resolve it."""
-    client = _Client(tmp_path, _config(room_models={ROOM: "sol"}))
+    client = _Client(_Room(_config(room_models={ROOM: "sol"}), _paths(tmp_path), ("coder", "helper")))
 
     profile = client.profile(ALICE, client.room.ids["helper"]).json()
 
@@ -127,7 +143,7 @@ def test_the_model_is_the_one_the_room_runs_and_a_role_left_blank_is_null(tmp_pa
 
 def test_only_a_member_who_may_use_an_agent_joined_to_the_room_reads_it(tmp_path: Path) -> None:
     """No session answers 401; a non-member, a refused member, an unknown ID and an agent not joined answer 403."""
-    client = _Client(tmp_path, _config(), joined=("coder",))
+    client = _Client(_Room(_config(), _paths(tmp_path), ("coder",)))
     coder, helper = client.room.ids["coder"], client.room.ids["helper"]
 
     assert client.profile(None, coder).status_code == 401
@@ -137,3 +153,28 @@ def test_only_a_member_who_may_use_an_agent_joined_to_the_room_reads_it(tmp_path
     assert client.profile(ALICE, ALICE).status_code == 403
     assert client.profile(ALICE, helper).status_code == 403
     assert client.profile(ALICE, coder).status_code == 200
+
+
+def test_a_contact_room_opens_no_profile(tmp_path: Path) -> None:
+    """A contact room runs its agent's turns as the agent's owner, so nobody reads that agent through it."""
+    data = _with_template()
+    data["personal_agents"]["mind"]["agent"] |= {"contacts": {}}
+    client = _Client(_Room(_load(tmp_path, data, entries=[_personal(ALICE)]), _paths(tmp_path), ("mind_alice",)))
+    agent_id = client.room.ids["mind_alice"]
+    assert client.profile(ALICE, agent_id).status_code == 200
+
+    record = ContactRecord(
+        id="c1",
+        status="active",
+        requester=ContactParty(kind="agent", id="mind_alice", owner=ALICE),
+        target=ContactParty(kind="person", id=BOB, owner=BOB),
+        reason="Plan the dinner",
+        requester_side=ContactSide(),
+        target_side=ContactSide(),
+        origin_room_id="!origin:localhost",
+        origin_thread_id=None,
+        room_id=ROOM,
+    )
+    update_contacts(client.room.paths, lambda book: book.contacts.append(record))
+
+    assert client.profile(ALICE, agent_id).status_code == 403
