@@ -314,6 +314,12 @@ class TestEditFile:
             "Merge them into one edit, or make old_text more specific.\nNo changes written."
         )
 
+    def test_overlap_line_is_numbered_as_read_file_numbers_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A file whose lines end in a lone CR names the overlap's line as read_file would."""
+        (tmp_base / "cr.txt").write_bytes(b"one\rtwo three\rfour\r")
+        result = tools.edit_file("cr.txt", [*_one("two three", "x"), *_one("three", "y")])
+        assert result.startswith("Error: edits[0] and edits[1] overlap at line 2.")
+
     def test_replace_all_of_self_overlapping_text_goes_left_to_right(self, tools: CodingTools, tmp_base: Path) -> None:
         """replace_all replaces non-overlapping matches from left to right, as str.replace does."""
         (tmp_base / "a.txt").write_text("aaa\n")
@@ -374,21 +380,6 @@ class TestEditFile:
         (tmp_base / "flag.py").write_text("flag = enabled\n")
         result = tools.edit_file("flag.py", _one("flag = enabled  # stale comment", "enabled"))
         assert result == "Error: old_text not found in the file.\nClosest line 1: flag = enabled\nNo changes written."
-
-    def test_not_found_but_new_text_present(self, tools: CodingTools, tmp_base: Path) -> None:
-        """An edit whose new_text is already in the file is named as maybe applied."""
-        (tmp_base / "app.ini").write_text("[server]\nhost = 0.0.0.0\nport = 9090\n")
-        result = tools.edit_file("app.ini", _one("port = 8080", "port = 9090"))
-        assert result == (
-            "Error: old_text not found in the file.\nClosest line 3: port = 9090\n"
-            "new_text already appears at line 3; this edit may already be applied.\nNo changes written."
-        )
-
-    def test_new_text_found_twice_is_not_called_applied(self, tools: CodingTools, tmp_base: Path) -> None:
-        """A new_text that occurs more than once, overlapping occurrences included, adds no note."""
-        (tmp_base / "a.txt").write_text("aaa\n")
-        result = tools.edit_file("a.txt", _one("bbb", "aa"))
-        assert result == "Error: old_text not found in the file.\nNo changes written."
 
     def test_not_found_without_a_close_line(self, tools: CodingTools) -> None:
         """No hint when nothing in the file resembles old_text."""

@@ -445,20 +445,14 @@ def _line_ranges(text: str, spans: list[tuple[int, int]]) -> str:
 
 
 def _not_found_hint(content: str, edit: _Edit) -> str:
-    """Name the lines most like old_text's first non-blank line, and where its new_text already is, if only once."""
+    """Name the lines most like old_text's first non-blank line."""
     first = next((line.strip() for line in edit.old_text.splitlines() if line.strip()), "")
     lines = content.splitlines()
     stripped = [line.strip() for line in lines]
     close = difflib.get_close_matches(first, list(dict.fromkeys(stripped)), n=3, cutoff=0.6) if first else []
     cut = _MAX_HINT_CHARS if len(close) == 1 else _MAX_HINT_CHARS // 2
     hits = [f"{index + 1}: {lines[index].rstrip()[:cut]}" for index in sorted(map(stripped.index, close))]
-    hint = f"\nClosest lines: {' | '.join(hits)}" if len(hits) > 1 else f"\nClosest line {hits[0]}" if hits else ""
-    at = content.find(edit.new_text) if edit.new_text.strip() and edit.new_text.strip() not in edit.old_text else -1
-    if at >= 0 and content.find(edit.new_text, at + 1) == -1:
-        hint += (
-            f"\nnew_text already appears at line {content.count('\n', 0, at) + 1}; this edit may already be applied."
-        )
-    return hint
+    return f"\nClosest lines: {' | '.join(hits)}" if len(hits) > 1 else f"\nClosest line {hits[0]}" if hits else ""
 
 
 def _edits_argument(edits: object, legacy: dict[str, object]) -> list[_Edit] | str:
@@ -512,7 +506,7 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
                 edits[low].replace_all or edits[high].replace_all
             )
             return (
-                f"edits[{low}] and edits[{high}] overlap at line {content.count('\n', 0, second.start) + 1}{covers}. "
+                f"edits[{low}] and edits[{high}] overlap at {_line_ranges(content, [(second.start, min(first.end, second.end))])}{covers}. "
                 "Merge them into one edit, or make old_text more specific."
             )
     return spans
