@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from . import interactive_questions, journal, matrix_delivery_rows, membership_hooks, outbox, projection, reads
 from .approval_store import ApprovalStore
 from .matrix_delivery_rows import ReplyRowRefusedError
+from .membership_state import projection_generation
 from .principal_rows import PrincipalRows
 from .replies import ReplyStore
 
@@ -301,6 +302,10 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
 
     __slots__ = ()
 
+    async def projection_generation(self, room_id: str) -> int:
+        """Return the generation of what this principal projects of one room, which a history walk starts under."""
+        return await self._read(projection_generation, room_id)
+
     async def room_history_recovery(self, room_id: str) -> RoomHistoryRecovery | None:
         """Return one room's current history-recovery obligation, if any."""
         return await self._read(journal.room_history_recovery, room_id)
@@ -368,6 +373,7 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
         complete: bool,
         attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
+        expected_projection_generation: int | None = None,
     ) -> bool:
         """Install a hydration in bounded writes, then publish it once complete.
 
@@ -389,12 +395,16 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
         for, and the direction that costs a redundant walk rather than a short
         answer.
         """
+        # A walk names the generation it read before it fetched; a caller that already holds its events names none.
+        if expected_projection_generation is None:
+            expected_projection_generation = await self.projection_generation(room_id)
         for chunk in batched(events, _HYDRATION_INSTALL_CHUNK_SIZE, strict=False):
             if not await self._write(
                 journal.install_hydration_chunk,
                 room_id=room_id,
                 events=chunk,
                 expected_membership_epoch=expected_membership_epoch,
+                expected_projection_generation=expected_projection_generation,
             ):
                 return False
         return await self._write(
@@ -404,6 +414,7 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
             complete=complete,
             attempted_policy_rank=attempted_policy_rank,
             expected_membership_epoch=expected_membership_epoch,
+            expected_projection_generation=expected_projection_generation,
         )
 
     async def install_refetched_revision(

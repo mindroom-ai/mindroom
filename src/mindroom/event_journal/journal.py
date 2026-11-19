@@ -585,13 +585,15 @@ def install_hydration_chunk(
     room_id: str,
     events: tuple[ProjectedEvent, ...],
     expected_membership_epoch: int,
+    expected_projection_generation: int,
 ) -> bool:
-    """Project one chunk only while its membership epoch is current."""
+    """Project one chunk only while its membership epoch and projection generation are current."""
     if not claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        expected_projection_generation=expected_projection_generation,
     ):
         return False
     _project_walked(transaction, principal_id, events, membership_epoch=expected_membership_epoch)

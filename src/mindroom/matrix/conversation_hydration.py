@@ -804,6 +804,7 @@ class ConversationHydrator:
     ) -> _Walk | None:
         """Walk one conversation and install it, returning the walk, or None if the current membership refused it."""
         epoch = await self.store.membership_epoch(room_id)
+        generation = await self.store.projection_generation(room_id)
         walk = (
             await self._fetch_thread(room_id, thread_id, edits_of=edits_of)
             if thread_id is not None
@@ -822,6 +823,7 @@ class ConversationHydrator:
             complete=walk.complete,
             attempted_policy_rank=self.policy,
             expected_membership_epoch=epoch,
+            expected_projection_generation=generation,
         )
         if not installed:
             # Membership moved while the fetch was in flight, so this view is of

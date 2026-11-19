@@ -775,6 +775,7 @@ def mark_conversation_hydrated(
     complete: bool,
     attempted_policy_rank: int,
     expected_membership_epoch: int,
+    expected_projection_generation: int,
 ) -> bool:
     """Publish a completed hydration, unless membership moved under it.
 
@@ -795,6 +796,7 @@ def mark_conversation_hydrated(
         principal_id,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        expected_projection_generation=expected_projection_generation,
     ):
         return False
     publish_conversation_hydration(
