@@ -1853,16 +1853,19 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(tmp_path: Path) -> None:
-    """hook_dispatch should enforce room authorization against the preserved requester."""
-    bot = _hook_bot(tmp_path)
+    """A responder enforces room authorization against a hook dispatch's preserved requester.
+
+    The room's steward takes such a message only to route it, and each candidate applies its own access.
+    """
+    bot = _wired_bot(_config(tmp_path), "code")
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
-    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
     room.canonical_alias = None
     bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     bot.client.joined_members.return_value = nio.JoinedMembersResponse(
-        members=[nio.RoomMember("@mindroom_router:localhost", None, None)],
+        members=[nio.RoomMember("@mindroom_code:localhost", None, None)],
         room_id=room.room_id,
     )
     await refresh_memberships(bot._runtime_view.agent_reply_memberships, bot.config, bot.runtime_paths, bot.client)

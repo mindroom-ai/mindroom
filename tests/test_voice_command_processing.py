@@ -17,6 +17,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTE_EVENT_TYPE,
+    ROUTE_VOICE_TRANSCRIPTS_KEY,
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
@@ -972,6 +973,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
         VOICE_TRANSCRIPT_KEY: True,
+        # The responder posts the transcript before its answer, so the route carries it.
+        ROUTE_VOICE_TRANSCRIPTS_KEY: {"$voice_event": f"{VOICE_PREFIX}summarize this audio"},
     }
     turn_store.record_responded_turn.assert_called_once()
     record = await turn_store.get_turn_record("$voice_event")

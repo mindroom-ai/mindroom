@@ -417,20 +417,19 @@ async def test_untagged_follow_up_after_a_skip_marked_notice_stays_with_the_thre
 
 @pytest.mark.asyncio
 async def test_untagged_follow_up_in_a_moved_team_thread_still_gets_the_team(config: Config) -> None:
-    """A thread moved after a person tagged two agents keeps their team, though only its owner posted there."""
+    """A thread moved after a person tagged two agents keeps their team, though only its mover posted there."""
     general_id = _entity_id(config, "general").full_id
     research_id = _entity_id(config, "research").full_id
     room = _room_with_members(_SENDER, general_id, research_id)
     tagged = {"msgtype": "m.text", "body": "@general @research compare notes"}
-    posters = {"general": general_id, ROUTER_AGENT_NAME: _entity_id(config, ROUTER_AGENT_NAME).full_id}
     copies = _plan_thread_copy(
         [make_visible_message(sender=_SENDER, content=tagged), make_visible_message(sender=general_id, body="agreed")],
         entity_name_for_sender={general_id: "general"}.get,
-        target_posters=frozenset(posters),
+        mover_id=general_id,
         display_names={},
         mentioned_user_ids=lambda content: history_mentioned_user_ids(content, config, runtime_paths_for(config)),
     )
-    history = [make_visible_message(sender=posters[copy.poster], content=copy.content) for copy in copies]
+    history = [make_visible_message(sender=general_id, content=copy.content) for copy in copies]
     context = _context(thread_id="$moved:localhost", thread_history=history)
 
     general_plan = await _plan(_policy_for(config, "general"), room, _dispatch(context, agent_name="general"))

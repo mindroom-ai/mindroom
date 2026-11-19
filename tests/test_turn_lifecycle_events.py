@@ -15,7 +15,6 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DepartureSource
 from mindroom.event_journal.approval_signals import EndedApproval
 from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome, Owed
@@ -669,22 +668,22 @@ async def test_a_paused_reply_whose_requester_lost_access_ends_its_turn_failed(t
     assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None), (EVENT_TURN_ENDED, "failed")]
 
 
-async def test_a_paused_turn_ends_through_its_entity_s_bot_or_the_router_s_once_the_entity_is_gone(
+async def test_a_paused_turn_ends_through_its_entity_s_bot_or_a_running_bot_s_once_the_entity_is_gone(
     tmp_path: Path,
 ) -> None:
-    """A removed agent has no bot, so the router ends its paused turns."""
+    """A removed agent has no bot, so a running bot ends its paused turns, with no owner account."""
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
-    general, router = MagicMock(), MagicMock()
+    stopped, general = MagicMock(running=False), MagicMock(running=True)
+    orchestrator.fleet.add("code", stopped)
     orchestrator.fleet.add("general", general)
-    orchestrator.fleet.add(ROUTER_AGENT_NAME, router)
 
     for entity_name in ("general", "removed"):
         orchestrator._end_paused_turn(EndedApproval(approval_continuation(entity_name=entity_name), None))
 
-    general.end_paused_turn.assert_called_once()
-    router.end_paused_turn.assert_called_once()
-    assert router.end_paused_turn.call_args.args[0].continuation.entity_name == "removed"
+    stopped.end_paused_turn.assert_not_called()
+    ended = [call.args[0].continuation.entity_name for call in general.end_paused_turn.call_args_list]
+    assert ended == ["general", "removed"]
 
 
 async def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events() -> None:
