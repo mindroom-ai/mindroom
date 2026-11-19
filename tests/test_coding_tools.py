@@ -31,9 +31,10 @@ from mindroom.path_safety import (
     resolve_base_dir_path,
     split_search_pattern,
 )
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_schema import tool_parameters, validated_entrypoint
 from mindroom.tools.file import file_tools
 
@@ -295,6 +296,21 @@ class TestEditFile:
             "Drop edits[0], or merge them into one edit.\nNo changes written."
         )
 
+    def test_partial_overlap_with_replace_all_is_not_called_covered(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An edit with matches outside a replace_all edit's matches is not told to be dropped."""
+        (tmp_base / "abc.txt").write_text("alpha beta gamma\nalpha beta\nbeta gamma\n")
+        result = tools.edit_file(
+            "abc.txt",
+            [
+                {"old_text": "alpha beta", "new_text": "X", "replace_all": True},
+                {"old_text": "beta gamma", "new_text": "Y", "replace_all": True},
+            ],
+        )
+        assert result == (
+            "Error: edits[0] and edits[1] overlap at line 1. Merge them into one edit, or make old_text more specific."
+            "\nNo changes written."
+        )
+
     def test_replace_all_of_self_overlapping_text_goes_left_to_right(self, tools: CodingTools, tmp_base: Path) -> None:
         """replace_all replaces non-overlapping matches from left to right, as str.replace does."""
         (tmp_base / "a.txt").write_text("aaa\n")
@@ -340,6 +356,28 @@ class TestEditFile:
             "Error: old_text not found in the file.\nClosest lines: 18: def fetch(url, timeout=30, headers=None):"
             " | 24: def fetch_json(url, timeout=30):\nNo changes written."
         )
+
+    def test_not_found_names_distinct_close_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Repeated lines count once, so they don't crowd out other candidates."""
+        (tmp_base / "f.py").write_text("f(x=2)\nf(x=2)\nf(x=2)\nf(y=3)\n")
+        result = tools.edit_file("f.py", _one("f(x=1)", "z"))
+        assert (
+            result
+            == "Error: old_text not found in the file.\nClosest lines: 1: f(x=2) | 4: f(y=3)\nNo changes written."
+        )
+
+    def test_incidental_new_text_is_not_called_applied(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A new_text found only inside a line, or inside old_text, still gets the closest line."""
+        (tmp_base / "flag.py").write_text("flag = enabled\n")
+        result = tools.edit_file("flag.py", _one("flag = enabled  # stale comment", "enabled"))
+        assert result == "Error: old_text not found in the file.\nClosest line 1: flag = enabled\nNo changes written."
+
+    def test_uneven_indent_is_not_called_a_gutter(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Only a numbered gutter or one space on every line counts as copied from read_file."""
+        (tmp_base / "k.txt").write_text("start\nvalue = keep\n")
+        result = tools.edit_file("k.txt", _one("start\n value = keep", "z"))
+        assert "line-number prefix" not in result
+        assert result.endswith("No changes written.")
 
     def test_not_found_but_new_text_present(self, tools: CodingTools, tmp_base: Path) -> None:
         """An edit whose new_text is already in the file is named as maybe applied."""
@@ -417,6 +455,11 @@ class TestEditFile:
         assert result == "Applied 1 edit to hello.py: line 1."
         assert (tmp_base / "hello.py").read_text() == "print('hi')\nprint('world')\n"
 
+    def test_legacy_flat_call_passes_the_argument_gate(self, tools: CodingTools) -> None:
+        """The CLI and MCP gates check the offered schema, which must still admit the old flat call."""
+        offered = next(f for f in adapt_toolkit(tools).functions if f.name == "edit_file")
+        validate_tool_arguments(dict(offered.parameters), {"path": "hello.py", "old_text": "a", "new_text": "b"})
+
     def test_unknown_arguments_show_the_shape(self, tools: CodingTools, tmp_base: Path) -> None:
         """A call without edits gets an error that shows how to call it."""
         result = validated_entrypoint(tools.edit_file)(path="hello.py", old_str="print('hello')", new_str="x")
@@ -431,19 +474,6 @@ class TestEditFile:
         items = parameters["properties"]["edits"]["items"]
         assert list(items["properties"]) == ["old_text", "new_text", "replace_all"]
         assert items["required"] == ["old_text", "new_text"]
-
-    def test_offered_schema_requires_edits(self, tools: CodingTools) -> None:
-        """The model is told edits is required and non-empty, though the old flat call still runs."""
-        derived = ToolFunction(
-            name="edit_file",
-            description="",
-            parameters=tool_parameters(tools.edit_file),
-            entrypoint=tools.edit_file,
-        )
-        parameters = tools.offered_function(derived).parameters
-        assert parameters["required"] == ["path", "edits"]
-        assert parameters["properties"]["edits"]["minItems"] == 1
-        assert "minItems" not in derived.parameters["properties"]["edits"]
 
     def test_crlf_and_bom_survive(self, tools: CodingTools, tmp_base: Path) -> None:
         """Line endings and a byte order mark stay as they were."""
