@@ -272,7 +272,7 @@ def caller_toolkit_names(
         # A reload can remove the caller mid-response; its copies then have no tools to inherit.
         return {}
     agent_tools = resolve_agent_tools(config, agent_name, tools)
-    names = agent_tools.toolkit_names(agent_tools.candidates(depth=delegation_depth, matrix_room_tools=True))
+    names = agent_tools.toolkit_names(agent_tools.candidates(depth=delegation_depth))
     return {name: declared_function_names(name, tools) for name in names}
 
 

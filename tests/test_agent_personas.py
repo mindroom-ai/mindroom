@@ -812,27 +812,6 @@ def test_persona_loads_named_member_of_a_deferred_tool(tmp_path: Path) -> None:
     assert "list_attachments" in _function_names(build)
 
 
-def test_persona_may_name_the_matrix_room_runtime_tool(tmp_path: Path) -> None:
-    """A Matrix caller's injected room tool can be named, and the child refuses to start where it is absent."""
-    runtime = _runtime(tmp_path, tools=["file"])
-
-    build = _child(
-        runtime,
-        ["invite_router"],
-        execution_identity=runtime.execution_identity,
-    )
-
-    assert "invite_router" in caller_toolkit_names(
-        "helper",
-        runtime.config,
-        builtin_tool_registry(),
-        delegation_depth=0,
-    )
-    assert _function_names(build) == ["invite_router"]
-    with pytest.raises(PersonaError, match="'invite_router' is not available to you"):
-        _child(runtime, ["invite_router"])
-
-
 @pytest.mark.asyncio
 async def test_persona_delegate_tool_keeps_its_cap_without_runtime_context(tmp_path: Path) -> None:
     """An authored child's delegate tool enforces its own tools even without a Matrix tool context."""

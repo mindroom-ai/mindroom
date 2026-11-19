@@ -8,8 +8,7 @@ build offers as a raw livekit function tool that runs under the build's
 tool-call policy. Tool calls run inside the standard MindRoom tool runtime
 context for the call's room and sole Matrix requester. Tools needing
 confirmation, external execution, or approval are omitted because voice has
-no approval UI. Exact built-in room-recovery functions remain available so an
-agent can restore the router needed by approval policy.
+no approval UI.
 
 The cascaded backend delegates each transcript to the normal ``ai_response``
 path instead. LiveKit receives no tools there; MindRoom's agent loop remains
@@ -54,7 +53,6 @@ from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import room_turn_offers
-from mindroom.tool_system.declarations import is_matrix_room_runtime_function
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate, close_toolkits, connect_toolkits
@@ -883,11 +881,10 @@ def _normalize_tool_result(result: object) -> str:
 
 def _function_requires_text_chat(function: ToolFunction, config: Config) -> bool:
     """Return whether a function needs text-chat UI that a voice call lacks."""
-    room_runtime = is_matrix_room_runtime_function(function.registered_toolkit, function.name)
     return (
         function.gate is not None
         or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
-        or (not room_runtime and tool_may_require_approval(config, function.name))
+        or tool_may_require_approval(config, function.name)
     )
 
 

@@ -33,7 +33,7 @@ from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
-from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_room_flags
+from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_keeps_room_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, offered_refusal
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
@@ -155,10 +155,8 @@ def test_openai_compatible_context_hides_desktop(tmp_path: Path) -> None:
     raw["agents"]["code"]["tools"] = ["calculator", "desktop"]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    room_tools, matrix_room_tools = turn_room_flags(identity)
     candidates = resolve_agent_tools(config, "code", builtin_tool_registry()).candidates(
-        room_tools=room_tools,
-        matrix_room_tools=matrix_room_tools,
+        room_tools=turn_keeps_room_tools(identity),
     )
 
     assert [entry.name for entry in candidates] == ["calculator"]

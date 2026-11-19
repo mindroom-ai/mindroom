@@ -2330,26 +2330,6 @@ async def test_build_call_tools_hides_offered_functions_needing_text_chat(
 
 
 @pytest.mark.asyncio
-async def test_build_call_tools_keeps_builtin_invite_router_under_approval_policy(tmp_path: Path) -> None:
-    """Voice recovery must stay callable when global policy requires approval for everything else."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _ollama_config(runtime_paths, tools=["calculator"])
-    config.tool_approval = ToolApprovalConfig(default="require_approval")
-
-    tooling = await build_call_tools(
-        agent_name=AGENT,
-        config=config,
-        runtime_paths=runtime_paths,
-        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
-        room_id="!room:example.org",
-        requester_id=REQUESTER,
-        authorize_operation=_authorized_call_operation,
-    )
-
-    assert _tool_names(tooling.tools) == ["invite_router"]
-
-
-@pytest.mark.asyncio
 async def test_build_call_tools_requires_runtime_context(tmp_path: Path) -> None:
     """Voice cannot silently downgrade when same-agent tool context is unavailable."""
     tool_support = SimpleNamespace(build_context=lambda *_a, **_k: None)

@@ -52,12 +52,11 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, turn_room_flags
+from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, turn_keeps_room_tools
 from mindroom.tool_system.agno_toolkits import (
     adapt_toolkit,
     configure_toolkit_functions,
     offered_refusal,
-    toolkit_function_names,
     with_offered_instructions,
 )
 from mindroom.tool_system.catalog import get_tool_by_name
@@ -67,11 +66,7 @@ from mindroom.tool_system.construction import (
     get_toolkit_construction,
     tool_config_signature,
 )
-from mindroom.tool_system.declarations import (
-    MATRIX_ROOM_RUNTIME_TOOL_NAMES,
-    ToolFileAccess,
-    is_matrix_room_runtime_function,
-)
+from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
@@ -579,9 +574,9 @@ def _offered_entries(
 ) -> tuple[tuple[_ToolkitEntry, ...], dict[str, set[str]]]:
     """Return ``entries``, each holding only the functions a run offers of it, and by tool the functions left out.
 
-    A run offers one function per name. An MCP function leaves whenever another toolkit offers its name, or the name
-    is reserved for Matrix room recovery, because its server's catalog chooses that name and can change it without
-    anyone editing the config, so a new remote tool never shadows a local function or another server's; every other
+    A run offers one function per name. An MCP function leaves whenever another toolkit offers its name, because its
+    server's catalog chooses that name and can change it without anyone editing the config, so a new remote tool
+    never shadows a local function or another server's; every other
     name keeps its first function (``offered_toolkits``). A configured toolkit whose every function another took is
     reported. A ``file`` read that cannot decode an image names ``view_file`` when the run offers it and it finds the file.
     """
@@ -610,11 +605,7 @@ def _offered_entries(
 
 def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_name: str) -> list[AdaptedToolkit]:
     """Return the toolkits of ``entries``, each MCP one without the functions whose name another toolkit offers."""
-    # Each owner is an entry, named by its toolkit; a reserved room-recovery function is its registered tool's,
-    # offered or not.
-    owners: dict[str, list[tuple[_ToolkitEntry | None, str]]] = {
-        name: [(None, name)] for name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
-    }
+    owners: dict[str, list[tuple[_ToolkitEntry, str]]] = {}
     for entry in entries:
         for function in entry.adapted.functions:
             owners.setdefault(function.name, []).append((entry, entry.adapted.name))
@@ -638,25 +629,6 @@ def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_
             toolkit = replace(toolkit, functions=tuple(kept))
         toolkits.append(toolkit)
     return toolkits
-
-
-class _MatrixRoomRuntimeToolCollisionError(ValueError):
-    """Raised when another registered tool claims a reserved runtime function."""
-
-
-def _reject_matrix_room_runtime_tool_function_collisions(registered_tool_name: str, toolkit: AnyToolkit) -> None:
-    """Keep reserved room-runtime functions owned by their registered built-in tool, whatever else the toolkit holds.
-
-    An MCP server's catalog chooses its names, so its function of a reserved name leaves at offer time instead.
-    """
-    if isinstance(toolkit, MindRoomMCPToolkit):
-        return
-    reserved_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
-    function_names = set(toolkit_function_names(toolkit))
-    collisions = sorted(name for name in function_names & reserved_names if registered_tool_name != name)
-    if collisions:
-        msg = f"Tool function name(s) {', '.join(collisions)} are reserved for Matrix room recovery tools."
-        raise _MatrixRoomRuntimeToolCollisionError(msg)
 
 
 def _agent_tool_output_file_policy(
@@ -1012,14 +984,10 @@ def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, 
     """Return whether a config approval rule may gate one function of the tool registered as this name in ``tools``."""
     # A scheduled call runs only with the approval its requester gave when it was scheduled.
     is_scheduled_call_runner = registered_tool_name == "scheduler" and function_name == "run_scheduled_call"
-    return (
-        not is_matrix_room_runtime_function(registered_tool_name, function_name)
-        and not is_scheduled_call_runner
-        and tool_may_require_approval(
-            config,
-            function_name,
-            toolkit_approval_alias(config, tools, registered_tool_name, function_name),
-        )
+    return not is_scheduled_call_runner and tool_may_require_approval(
+        config,
+        function_name,
+        toolkit_approval_alias(config, tools, registered_tool_name, function_name),
     )
 
 
@@ -1173,7 +1141,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     persona_tools = persona.tools if persona is not None else None
     hook_middleware = build_tool_hook_middleware(HookBindings(registry=plugins.hooks), config, runtime_paths)
-    room_tools, matrix_room_tools = turn_room_flags(execution_identity)
+    room_tools = turn_keeps_room_tools(execution_identity)
     # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
     # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
     # deferred, portable tool search keeps them off the wire, and builds narrowed to an explicit tool list, plus voice
@@ -1181,7 +1149,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     selected = agent_tools.candidates(
         depth=delegation_depth,
         room_tools=room_tools,
-        matrix_room_tools=matrix_room_tools,
         deferred=required_tool_names if minimal_mode and not eager_deferred_tools else None,
         portable_search=portable_deferred_tools,
     )
@@ -1192,11 +1159,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     deferred_configs = {}
     if minimal_mode:
-        complete = agent_tools.candidates(
-            depth=delegation_depth,
-            room_tools=room_tools,
-            matrix_room_tools=matrix_room_tools,
-        )
+        complete = agent_tools.candidates(depth=delegation_depth, room_tools=room_tools)
         deferred_configs = {
             entry.name: entry
             for entry in complete
@@ -1240,7 +1203,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             )
         if toolkit is None:
             return None
-        _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
         # Adapted once, right after it is built; every step below works on the functions it offers.
         adapted = adapt_toolkit(toolkit, key=authored_name, registered=tool_name)
         if not room_tools:
@@ -1346,8 +1308,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     for tool_name, tool_entry in tool_entries():
         try:
             entry = build_entry(tool_entry)
-        except _MatrixRoomRuntimeToolCollisionError:
-            raise
         except Exception as exc:
             # One toolkit's construction or adaptation failure must never stop the agent.
             if minimal_mode:

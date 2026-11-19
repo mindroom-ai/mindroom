@@ -9,7 +9,7 @@ from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
+from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -130,11 +130,9 @@ async def required_approval_tool_names(
         msg = "Saved approval has unknown toolkit ownership; retry the request"
         raise RuntimeError(msg)
     agent_tools = resolve_agent_tools(config, agent_name, tools)
-    room_tools, matrix_room_tools = turn_room_flags(execution_identity)
     offered = agent_tools.candidates(
         depth=delegation_depth,
-        room_tools=room_tools,
-        matrix_room_tools=matrix_room_tools,
+        room_tools=turn_keeps_room_tools(execution_identity),
         portable_search=True,
     )
     required = sorted({call.toolkit_name for call in calls if call.toolkit_name is not None})
@@ -142,7 +140,7 @@ async def required_approval_tool_names(
         # A call names its authored entry; the toolkits a preset or an implied tool brings in share that name.
         owned = [entry for entry in offered if (entry.authored_name or entry.name) == name]
         if not owned:
-            in_room = agent_tools.candidates(depth=delegation_depth, matrix_room_tools=True, portable_search=True)
+            in_room = agent_tools.candidates(depth=delegation_depth, portable_search=True)
             needs_room = any((entry.authored_name or entry.name) == name for entry in in_room)
             reason = "requires room context" if needs_room else "is no longer permitted"
             msg = f"Saved approval toolkit {name!r} {reason}; retry the request"

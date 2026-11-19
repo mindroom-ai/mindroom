@@ -314,7 +314,7 @@ def _workspace(
     # Each toolkit's settings, as the agent's turn builds it, decide which of its functions it offers, and its
     # declarations whether one of them writes files or runs code.
     path_toolkits: dict[str, bool] = {}
-    for entry in agent_tools.candidates(matrix_room_tools=True):
+    for entry in agent_tools.candidates():
         # It acts only through the shell, whose own entry counts what that shell may change.
         if entry.name == "terminal":
             continue

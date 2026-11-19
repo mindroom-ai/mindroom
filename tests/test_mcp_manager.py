@@ -4839,48 +4839,6 @@ async def test_a_local_collision_keeps_the_server_and_leaves_out_only_its_mcp_fu
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_reserves_matrix_runtime_invite_router_function(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An MCP function named like the router recovery call leaves the agent's tools; its server stays connected."""
-    _patch_manager(monkeypatch)
-    _FakeClientSession.tool_list = [_tool("router")]
-    runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
-        {
-            "defaults": {"tools": []},
-            "mcp_servers": {
-                "demo": {
-                    "transport": "stdio",
-                    "command": "npx",
-                    "tool_prefix": "invite",
-                },
-            },
-            "models": {"default": {"provider": "openai", "id": "test-model"}},
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                    "tools": ["mcp_demo"],
-                },
-            },
-        },
-        runtime_paths,
-    )
-    manager = MCPServerManager(runtime_paths)
-    persist_entity_accounts(config, runtime_paths)
-    bind_mcp_server_manager(manager)
-    try:
-        assert await manager.sync_servers(config) == {"demo"}
-        assert manager.failed_server_ids() == set()
-        agent = _code_agent(config, runtime_paths)
-    finally:
-        await manager.shutdown()
-    assert "invite_router" not in _function_names(agent)
-
-
-@pytest.mark.asyncio
 async def test_mcp_manager_allows_memory_mcp_function_when_memory_backend_none(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -63,7 +63,6 @@ _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
         "delegate",
         "dynamic_tools",
         "external_trigger_manager",
-        "invite_router",
         "self_config",
         "skill_manage",
     },
