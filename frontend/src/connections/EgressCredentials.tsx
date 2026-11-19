@@ -420,22 +420,24 @@ function AgentSection({
       ...agent.inactive_services.map((service) => service.name),
     ]);
   // The caller's own logins connected for the tools that no service of this
-  // personal agent has yet, an ignored one of the preset's names included.
+  // personal agent has yet, an ignored one included. Only accounts that belong
+  // to each user (GitHub, Atlassian); the others have their account choice.
   const logins =
     agent.can_manage && !agent.shared ? (agent.oauth_logins ?? []) : [];
   const suggestions = logins.flatMap((login) => {
     const preset = catalog?.presets.find(
       (option) => option.oauth_provider === login.provider,
     );
-    if (!preset || !login.connected) return [];
-    const taken =
-      agent.services.some(
-        (service) => service.oauth?.provider === login.provider,
-      ) ||
-      agent.inactive_services.some((service) =>
-        new RegExp(`^${preset.id}(-\\d+)?$`).test(service.name),
-      );
-    return taken ? [] : [{ login, preset }];
+    const own = catalog?.oauth_providers.some(
+      (option) => option.id === login.provider && option.requester_scoped,
+    );
+    const taken = [
+      ...agent.services.map((service) => service.oauth?.provider),
+      ...agent.inactive_services.map((service) => service.oauth_provider),
+    ].includes(login.provider);
+    return preset && own && login.connected && !taken
+      ? [{ login, preset }]
+      : [];
   });
   // Use it adds the preset's service, whose row then asks to let commands use the account.
   const addLogin = (presetId: string, provider: string) => {

@@ -200,6 +200,8 @@ export type EgressInactiveReason = "shadowed" | "invalid";
 export interface EgressInactiveService {
   name: string;
   reason: EgressInactiveReason;
+  /** The login the entry names, its own or its preset's; absent from older servers. */
+  oauth_provider?: string | null;
 }
 
 /**

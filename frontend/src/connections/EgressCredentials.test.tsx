@@ -3449,8 +3449,25 @@ describe("using the connected account", () => {
   it.each<[string, Partial<EgressCredentialAgent>]>([
     ["has a GitHub service", { services: [added({})] }],
     [
-      "has an ignored GitHub service",
-      { inactive_services: [{ name: "github", reason: "invalid" }] },
+      "has an ignored GitHub service of another name",
+      {
+        inactive_services: [
+          { name: "work", reason: "invalid", oauth_provider: "github" },
+        ],
+      },
+    ],
+    [
+      "has only a Google login, which has its own account choice",
+      {
+        oauth_logins: [
+          {
+            provider: "google_drive",
+            display_name: "Google Drive",
+            connected: true,
+            account_label: "user@example.org",
+          },
+        ],
+      },
     ],
     ["is shared", { shared: true, scope: "shared" }],
     [
@@ -3469,9 +3486,7 @@ describe("using the connected account", () => {
       }),
     ).toBeVisible();
     expect(
-      screen.queryByRole("button", {
-        name: "Use your GitHub account for Bare Agent",
-      }),
+      screen.queryByRole("button", { name: /^Use your .* for Bare Agent$/ }),
     ).toBeNull();
   });
 });
