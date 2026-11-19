@@ -716,6 +716,8 @@ class AttachmentTools(Toolkit):
         """Upload an image so it can appear inline; unencrypted rooms only.
 
         Paste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.
+        In an encrypted room, or when this refuses, send the file with ``matrix_message(attachments=[...])`` instead.
+        Never link an image to a placeholder or made-up address.
         """
         context = get_tool_runtime_context()
         if context is None:
