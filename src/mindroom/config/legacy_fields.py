@@ -239,7 +239,9 @@ def _renamed_functions(value: object) -> object:
     names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
     if not isinstance(names, list):
         return value
-    renamed = [RETIRED_FILE_FUNCTIONS.get(name.strip(), name.strip()) if isinstance(name, str) else name for name in names]
+    renamed = [
+        RETIRED_FILE_FUNCTIONS.get(name.strip(), name.strip()) if isinstance(name, str) else name for name in names
+    ]
     return [name for name in renamed if name != ""]
 
 

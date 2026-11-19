@@ -335,7 +335,11 @@ class TestEditFile:
         result = tools.edit_file("cr.txt", [*_one("two three", "x"), *_one("three", "y")])
         assert result.startswith("Error: edits[0] and edits[1] overlap at line 2.")
 
-    def test_replace_all_of_self_overlapping_text_goes_left_to_right(self, tools: FilesystemTools, tmp_base: Path) -> None:
+    def test_replace_all_of_self_overlapping_text_goes_left_to_right(
+        self,
+        tools: FilesystemTools,
+        tmp_base: Path,
+    ) -> None:
         """replace_all replaces non-overlapping matches from left to right, as str.replace does."""
         (tmp_base / "a.txt").write_text("aaa\n")
         result = tools.edit_file("a.txt", [{"old_text": "aa", "new_text": "b", "replace_all": True}])
@@ -895,7 +899,10 @@ class TestEditFileConcurrency:
         def second_edit() -> None:
             assert first_read.wait(timeout=30)
             results.append(
-                FilesystemTools(base_dir=str(base_dir), file_access=file_access).edit_file(str(target), _one("BBBB", "b")),
+                FilesystemTools(base_dir=str(base_dir), file_access=file_access).edit_file(
+                    str(target),
+                    _one("BBBB", "b"),
+                ),
             )
 
         monkeypatch.setattr(filesystem_module, "read_resolved_file", read_then_wait)

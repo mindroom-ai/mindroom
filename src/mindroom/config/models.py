@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePath, PureWindowsPath
-from typing import Annotated, Any, Literal, Self, cast
+from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
@@ -16,6 +16,7 @@ from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import migrate_legacy_file_overrides, reject_legacy_defaults_fields
 from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.tool_aliases import ToolNames, canonical_tool_name
 from mindroom.config.validation import (
     CredentialServiceName,
     OptionalNonBlankStr,
@@ -55,22 +56,6 @@ _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 TOOL_PRESETS: dict[str, tuple[str, ...]] = {
     "openclaw_compat": ("shell", "filesystem", "duckduckgo", "website", "browser", "scheduler", "matrix_message"),
 }
-# Other names of one registered toolkit, accepted wherever a tool name is authored, stored, or asked for.
-TOOL_ALIASES: dict[str, str] = {"file": "filesystem", "coding": "filesystem"}
-
-
-def canonical_tool_name(name: str) -> str:
-    """Return ``name``, a toolkit or ``toolkit.function``, with an aliased toolkit spelled by its registered name."""
-    toolkit, separator, function = name.partition(".")
-    return TOOL_ALIASES.get(toolkit, toolkit) + separator + function
-
-
-def canonical_tool_names[T: (list[str], tuple[str, ...])](names: T) -> T:
-    """Return ``names`` canonical, each once, in their first order."""
-    return type(names)(dict.fromkeys(canonical_tool_name(name) for name in names))
-
-
-ToolNames = Annotated[list[str], AfterValidator(canonical_tool_names)]
 # Tools that runtime policy injects, so they are never lazy-loading units.
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
     {
@@ -333,7 +318,9 @@ def validate_unique_tool_entries(
         overrides = dict(kept.overrides)
         for key, value in entry.overrides.items():
             if overrides.setdefault(key, value) != value:
-                msg = f"{scope_name} tools '{kept_name}' and '{entry.name}' both select {name} but set {key} differently"
+                msg = (
+                    f"{scope_name} tools '{kept_name}' and '{entry.name}' both select {name} but set {key} differently"
+                )
                 raise ValueError(msg)
         update: dict[str, object] = {"overrides": overrides}
         if (kept.model_fields_set | entry.model_fields_set) & _TOOL_CONFIG_CONTROL_KEYS:

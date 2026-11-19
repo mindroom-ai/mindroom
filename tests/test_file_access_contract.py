@@ -21,8 +21,8 @@ import mindroom.custom_tools.agno_compat_moviepy as moviepy_module
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
 import mindroom.custom_tools.chat_ui as chat_ui_module
-import mindroom.custom_tools.filesystem as filesystem_module
 import mindroom.custom_tools.e2b as e2b_module
+import mindroom.custom_tools.filesystem as filesystem_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
 import mindroom.file_access as file_access_module
@@ -36,8 +36,8 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.chat_ui import ChatUITools
-from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
+from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
 from mindroom.custom_tools.outlook_mail import OutlookMailTools

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.legacy_fields import retired_tool_override
-from mindroom.config.models import TOOL_ALIASES, canonical_tool_name
+from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from mindroom.config.models import ToolNames  # noqa: TC001 - pydantic resolves the field type at runtime
+from mindroom.config.tool_aliases import ToolNames  # noqa: TC001 - pydantic resolves the field type at runtime
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock

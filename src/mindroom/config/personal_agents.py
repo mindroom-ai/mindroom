@@ -13,8 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
-from mindroom.config.models import ToolNames
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.tool_aliases import ToolNames  # noqa: TC001
 from mindroom.config.validation import validate_matrix_localpart
 from mindroom.constants import AGENT_NAME_PATTERN, config_relative_path, tracking_dir
 from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, validate_workspace_template_dir

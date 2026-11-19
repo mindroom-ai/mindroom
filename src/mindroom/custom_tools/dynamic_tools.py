@@ -6,7 +6,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
-from mindroom.config.models import canonical_tool_name
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool, tool
 from mindroom.tool_system.tool_access import tool_definition

@@ -3,8 +3,8 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.judgment import JudgmentConfig
-from mindroom.config.models import ToolNames
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.tool_aliases import ToolNames
 from mindroom.config.validation import validate_unique_entries
 
 # Tools that act with the owner's authority beyond the conversation, so a contact turn never offers them.

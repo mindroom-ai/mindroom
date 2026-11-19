@@ -462,7 +462,13 @@ async def test_saved_output_is_read_back_through_file(
     provider = _reads_saved_output()
     provider.install(monkeypatch)
     storage = tmp_path / "storage"
-    await run_turn(_saving_config(file_access=file_access), agent="coder", prompt="go", storage=storage, workdir=workdir)
+    await run_turn(
+        _saving_config(file_access=file_access),
+        agent="coder",
+        prompt="go",
+        storage=storage,
+        workdir=workdir,
+    )
 
     assert _last_tool_result(provider.requests[3]).splitlines()[:2] == ["1|    1| 1", "2|    2| 2"]
     assert _files(workdir) == ["big.txt"]

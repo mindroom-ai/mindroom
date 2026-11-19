@@ -13,7 +13,6 @@ from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_u
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import config_validation_summary
-from mindroom.config.models import canonical_tool_name
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
     GeneratedAgentEdits,
@@ -28,6 +27,7 @@ from mindroom.config.personal_agents import (
     read_personal_agent_roster_file,
 )
 from mindroom.config.resolution import authored_tool_entries
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import RESERVED_ENTITY_NAMES, runtime_matrix_homeserver
 from mindroom.durable_write import write_json_file_durable

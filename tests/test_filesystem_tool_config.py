@@ -80,7 +80,9 @@ def test_defaults_tools_and_agent_tools_layer_across_spellings() -> None:
             "agents": {"a": {"display_name": "A", "tools": ["coding"]}},
         },
     )
-    assert [entry.model_dump() for entry in config.defaults.tools] == [{"filesystem": {"exclude_tools": ["write_file"]}}]
+    assert [entry.model_dump() for entry in config.defaults.tools] == [
+        {"filesystem": {"exclude_tools": ["write_file"]}},
+    ]
     assert [entry.name for entry in config.agents["a"].tools] == ["filesystem"]
 
 
@@ -123,7 +125,9 @@ def test_legacy_file_filters_are_renamed_and_unmatched_settings_dropped() -> Non
             "enable_delete_file": True,
         },
     }
-    assert _entries([entry]) == [{"filesystem": {"exclude_tools": ["write_file", "grep", "ls"], "enable_delete_file": True}}]
+    assert _entries([entry]) == [
+        {"filesystem": {"exclude_tools": ["write_file", "grep", "ls"], "enable_delete_file": True}},
+    ]
     assert _entries([{"file": {"include_tools": ["read_file_chunk", "list_files"]}}]) == [
         {"filesystem": {"include_tools": ["read_file", "ls"]}},
     ]
@@ -153,7 +157,10 @@ def test_tool_name_lists_take_every_spelling() -> None:
     assert config.agents["a"].worker_tools == ["shell", "filesystem", "python"]
     assert DefaultsConfig(worker_tools=["file", "coding"]).worker_tools == ["filesystem"]
     assert ContactsConfig(tools=["coding"]).tools == ["filesystem"]
-    assert ListenConfig(rooms=["lobby"], tools=["memory", "coding.read_file"]).tools == ["memory", "filesystem.read_file"]
+    assert ListenConfig(rooms=["lobby"], tools=["memory", "coding.read_file"]).tools == [
+        "memory",
+        "filesystem.read_file",
+    ]
     assert BackgroundToolJobsConfig(exclude_toolkits=["file"]).exclude_toolkits == ["filesystem"]
     assert GeneratedAgentEdits(tools=["file", "shell"]).tools == ["filesystem", "shell"]
     assert ContactSide.model_validate({"tools": ["coding", "file"]}).tools == ["filesystem"]
@@ -173,7 +180,7 @@ def test_openclaw_compat_brings_filesystem() -> None:
 @pytest.mark.parametrize("match", ["save_file", "search_*", "replace_file_chunk", "list_files"])
 def test_approval_rules_naming_only_retired_file_functions_fail(match: str) -> None:
     """A rule that would gate nothing after the rename fails, naming the replacement."""
-    with pytest.raises(ValidationError, match="retired file tool functions .* is now "):
+    with pytest.raises(ValidationError, match=r"retired file tool functions .* is now "):
         ApprovalRuleConfig(match=match, action="require_approval")
 
 

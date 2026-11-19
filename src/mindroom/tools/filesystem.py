@@ -87,7 +87,7 @@ def with_view_file_hint(
 
     async def name_view_file(call: ToolCall, call_next: ToolNext) -> object:
         # why-lazy: the toolkit module loads only when the tool is built, not when the registry is.
-        from mindroom.custom_tools.filesystem import image_read_error  # noqa: PLC0415
+        from mindroom.custom_tools.filesystem import image_read_error
 
         result = await call_next(call.arguments)
         path = call.arguments.get("path")

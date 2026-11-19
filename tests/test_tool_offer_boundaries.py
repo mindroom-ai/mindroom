@@ -133,7 +133,14 @@ def test_a_persona_tool_list_builds_exactly_the_named_toolkits_eagerly(
     ("tools", "identity", "options", "attached", "deferred"),
     [
         pytest.param(_CALC_TOOLS, "room", {}, "filesystem invite_router shell", "calculator", id="initial"),
-        pytest.param(_CALC_TOOLS, "room", _REQUIRE_CALC, "calculator filesystem invite_router shell", "", id="required"),
+        pytest.param(
+            _CALC_TOOLS,
+            "room",
+            _REQUIRE_CALC,
+            "calculator filesystem invite_router shell",
+            "",
+            id="required",
+        ),
         pytest.param(_CALC_TOOLS, "room", _EAGER, "calculator filesystem invite_router shell", "", id="eager"),
         pytest.param(_MESSAGE_TOOLS, "room", {}, "invite_router shell", _TRIO, id="implied"),
         pytest.param(

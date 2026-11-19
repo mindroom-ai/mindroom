@@ -3744,6 +3744,7 @@ depends_on = [
     "mindroom.providers.names",
     "mindroom.tool_system.worker_routing",
     "mindroom.config.schema_hints",
+    "mindroom.config.tool_aliases",
 ]
 
 [[modules]]
@@ -5641,6 +5642,7 @@ depends_on = [
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.agent_tools",
+    "mindroom.config.tool_aliases",
 ]
 
 [[modules]]
@@ -8044,6 +8046,10 @@ path = "mindroom.config.schema_hints"
 depends_on = []
 
 [[modules]]
+path = "mindroom.config.tool_aliases"
+depends_on = []
+
+[[modules]]
 path = "mindroom.api.config_reload"
 depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.config.reload_status"]
 
@@ -8166,6 +8172,7 @@ depends_on = [
     "mindroom.tool_system.skills",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
+    "mindroom.config.tool_aliases",
 ]
 
 [[modules]]
@@ -8442,7 +8449,7 @@ visibility = []
 
 [[modules]]
 path = "mindroom.config.listening"
-depends_on = ["mindroom.config.schema_hints"]
+depends_on = ["mindroom.config.schema_hints", "mindroom.config.tool_aliases"]
 visibility = []
 
 [[modules]]
@@ -10405,11 +10412,11 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.config.contacts"
-depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
+depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints", "mindroom.config.tool_aliases"]
 
 [[modules]]
 path = "mindroom.contacts.store"
-depends_on = ["mindroom.constants"]
+depends_on = ["mindroom.constants", "mindroom.config.tool_aliases"]
 
 [[modules]]
 path = "mindroom.contacts.parties"

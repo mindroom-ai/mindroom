@@ -2,8 +2,8 @@
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mindroom.config.models import ToolNames
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.tool_aliases import ToolNames
 
 
 class ListenConfig(BaseModel):

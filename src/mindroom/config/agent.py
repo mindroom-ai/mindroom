@@ -34,13 +34,13 @@ from mindroom.config.models import (
     CompactionOverrideConfig,
     FileAccess,
     ToolConfigEntry,
-    ToolNames,
     validate_unique_tool_entries,
 )
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
 from mindroom.config.room_activity import AgentRoomActivityConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
+from mindroom.config.tool_aliases import ToolNames  # noqa: TC001
 from mindroom.config.validation import (
     OptionalNonBlankStr,
     TimezoneName,
