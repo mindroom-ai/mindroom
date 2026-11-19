@@ -84,8 +84,8 @@
     },
     {
       "name": "allowed inline tag unchanged",
-      "md": "H<sub>2</sub>O and x<sup>2</sup> with <foo> kept escaped",
-      "html": "<p>H<sub>2</sub>O and x<sup>2</sup> with &lt;foo&gt; kept escaped</p>\n"
+      "md": "H<sub>2</sub>O and x<sup>2</sup> stay",
+      "html": "<p>H<sub>2</sub>O and x<sup>2</sup> stay</p>\n"
     },
     {
       "name": "list item opening with title tag",
@@ -96,6 +96,21 @@
       "name": "quote opening with title tag",
       "md": "> <title> names the page\n\n*After* the `quote`",
       "html": "<blockquote>\n&lt;title&gt; names the page\n</blockquote>\n<p><em>After</em> the <code>quote</code></p>\n"
+    },
+    {
+      "name": "quote with extra space before title tag",
+      "md": ">  <title> labels the tab\n\n**After**",
+      "html": "<blockquote>\n &lt;title&gt; labels the tab\n</blockquote>\n<p><strong>After</strong></p>\n"
+    },
+    {
+      "name": "quote with title tags then allowed tag",
+      "md": "> <title></title> <strong>kept</strong>",
+      "html": "<blockquote>\n&lt;title&gt;&lt;/title&gt; <strong>kept</strong></blockquote>\n"
+    },
+    {
+      "name": "title tag inside block html",
+      "md": "<p>a <title> b</p>",
+      "html": "<p>a &lt;title&gt; b</p>"
     }
   ]
 }

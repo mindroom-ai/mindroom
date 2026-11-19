@@ -138,7 +138,11 @@ _SUPPORTED_BLOCK_END_TAG_PATTERN = re.compile(
 )
 _HR_BLOCK_TAG_PATTERN = re.compile(r"^[ ]{0,3}<hr\b[^<>]*/?>\s*$", re.IGNORECASE)
 _FENCE_OPEN_PATTERN = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
-_RAW_HTML_TAG_START_PATTERN = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)")
+# The sanitizer's HTML parser reads all text after one of these raw tags as raw text.
+_RAW_TEXT_TAG_PATTERN = re.compile(
+    r"</?(?:script|style|title|textarea|xmp|iframe|noembed|noframes|noscript|plaintext)(?=[\s/>])[^>]*>",
+    re.IGNORECASE,
+)
 
 
 def _count_repeated_characters(text: str, start_index: int, character: str) -> int:
@@ -450,42 +454,6 @@ def _render_preserved_math_block(
     return f"<div>{escape(content)}</div>\n"
 
 
-def _disallowed_raw_tag_name(raw_html: str) -> str | None:
-    """Return the tag ``raw_html`` opens with when the sanitizer escapes it, whose parser reads all text after a raw ``<title>`` as text."""
-    tag = _RAW_HTML_TAG_START_PATTERN.match(raw_html)
-    if tag is None or tag.group(1).lower() in _ALLOWED_FORMATTED_BODY_TAGS:
-        return None
-    return tag.group(1).lower()
-
-
-def _render_html_inline(
-    _self: object,
-    tokens: list[Token],
-    idx: int,
-    _options: object,
-    _env: object,
-) -> str:
-    """Escape a disallowed inline tag before the sanitizer reads it; comments and the like only hide text and pass."""
-    content = tokens[idx].content
-    name = _disallowed_raw_tag_name(content)
-    if name is None:
-        return content
-    # The sanitizer writes a disallowed end tag lowercased and without attributes.
-    return escape(f"</{name}>" if content.startswith("</") else content)
-
-
-def _render_html_block(
-    _self: object,
-    tokens: list[Token],
-    idx: int,
-    _options: object,
-    _env: object,
-) -> str:
-    """Escape block HTML opening with a disallowed tag, as a ``<title>`` in a list item or quote opens one."""
-    content = tokens[idx].content
-    return content if _disallowed_raw_tag_name(content) is None else escape(content)
-
-
 def _decline_line_at_end_of_input(rule: Callable[[StateBlock, int, int, bool], bool]) -> Callable[..., bool]:
     """Return the block rule declining a line that starts at the end of the input instead of indexing past it."""
 
@@ -521,8 +489,6 @@ def _build_markdown_renderer() -> MarkdownIt:
     )
     renderer.add_render_rule("math_inline", _render_preserved_math_inline)
     renderer.add_render_rule("math_block", _render_preserved_math_block)
-    renderer.add_render_rule("html_inline", _render_html_inline)
-    renderer.add_render_rule("html_block", _render_html_block)
     return renderer
 
 
@@ -541,7 +507,7 @@ def markdown_to_html(text: str) -> str:
     escaped_text = _escape_html_block_openers(normalized_input)
     normalized_text = _normalize_supported_block_html_boundaries(escaped_text)
     html_text: str = _MARKDOWN_RENDERER.render(normalized_text)
-    return _sanitize_formatted_body_html(html_text)
+    return _sanitize_formatted_body_html(_RAW_TEXT_TAG_PATTERN.sub(lambda tag: escape(tag.group()), html_text))
 
 
 def opens_with_markdown_block(text: str) -> bool:
