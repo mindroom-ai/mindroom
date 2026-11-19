@@ -24,7 +24,7 @@ def _room_turn_toolkit_names(tmp_path: Path, tools: list[str]) -> set[str]:
     config = bind_runtime_paths(
         Config(
             agents={
-                "code": AgentConfig(display_name="Code", role="Write code", include_default_tools=False, tools=tools)
+                "code": AgentConfig(display_name="Code", role="Write code", include_default_tools=False, tools=tools),
             },
             models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),

@@ -4822,7 +4822,6 @@ depends_on = [
     "mindroom.llm",
     "mindroom.providers.names",
     "mindroom.approval.tool_approval",
-    "mindroom.tool_system.declarations",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
@@ -5975,7 +5974,6 @@ depends_on = [
     "mindroom.config.models",
     "mindroom.config.resolution",
     "mindroom.delegation.lifecycle",
-    "mindroom.tool_system.declarations",
     "mindroom.tool_system.registry",
     "mindroom.tool_system.metadata",
 ]
