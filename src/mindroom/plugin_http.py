@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, cast, overload
 
+import nio
 from fastapi import HTTPException, Path, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
 
@@ -46,6 +47,7 @@ from mindroom.origins import allowed_client_origins
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
 from mindroom.requester_identity import is_access_checked_requester_id, resolve_human_requester_alias
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces, room_execution_identity
 from mindroom.room_modes import change_room_thread_mode
 from mindroom.room_reply_modes import (
@@ -53,7 +55,7 @@ from mindroom.room_reply_modes import (
     resolve_room_reply_mode_override,
     set_room_reply_mode_override,
 )
-from mindroom.room_steward import room_poster, room_steward
+from mindroom.room_steward import joined_bot, room_poster, room_steward
 from mindroom.room_thread_modes import (
     RoomThreadMode,
     resolve_room_thread_mode_override,
@@ -70,7 +72,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
     from types import EllipsisType
 
-    import nio
     from fastapi import FastAPI
 
     from mindroom.api.client_sessions import ClientSession
@@ -530,7 +531,7 @@ class RoomMessenger:
             entity = directory.get(mentioned)
             if entity is None or entity.kind == "router" or mentioned not in room.members:
                 raise HTTPException(400, f"A relay mentions only agents and teams in this room, not {mentioned}.")
-        poster = _room_bot(self._request.app, room_poster, self._room_id, only=directory[mentions[0]].name)
+        poster = _room_bot(self._request.app, partial(joined_bot, user_id=mentions[0]), self._room_id)
         extra[ORIGINAL_SENDER_KEY] = room.user.user_id
         return await self._send(poster, f"Sent for {room.user.user_id}:\n\n{text}", thread_id, extra, mentions)
 
@@ -569,14 +570,19 @@ class RoomMessenger:
     ) -> str:
         # One hop into the synthetic chain, as a hook's own send outside a message is, so hooks reacting to it cannot loop.
         extra[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = 1
-        event_id = await poster.hook_context.send_message(
-            self._room_id,
-            text,
-            thread_id,
-            format_hook_source(self._plugin_name, "http"),
-            extra,
-            mentions=list(dict.fromkeys(mentions)),
-        )
+        try:
+            # The poster is held from the thread lookup to the send, so a reload waits instead of closing its client.
+            async with poster.admission_fence():
+                event_id = await poster.hook_context.send_message(
+                    self._room_id,
+                    text,
+                    thread_id,
+                    format_hook_source(self._plugin_name, "http"),
+                    extra,
+                    mentions=list(dict.fromkeys(mentions)),
+                )
+        except (ResponseAdmissionRefusedError, nio.LocalProtocolError):
+            event_id = None  # The poster is stopping, or stopped and closed its client.
         if event_id is None:
             raise HTTPException(503, "The message could not be sent; try again.")
         return event_id
@@ -614,17 +620,15 @@ def _room_bot(
     app: FastAPI,
     pick: Callable[[Mapping[str, AgentBot], str], AgentBot | None],
     room_id: str,
-    *,
-    only: str | None = None,
 ) -> AgentBot:
-    """Return the bot ``pick`` names for the room among the runtime's bots running now, or among ``only`` that entity.
+    """Return the bot ``pick`` names for the room among the runtime's bots running now.
 
     A restarted bot acts with its new client. It answers 503 when no agent runs, or none it may pick is in the room.
     """
     bots = ensure_app_state(app).room_bots or {}
     if not any(bot.running for bot in bots.values()):
         raise HTTPException(503, "No MindRoom agent is running; try again.")
-    bot = pick(bots if only is None else {only: bots[only]} if only in bots else {}, room_id)
+    bot = pick(bots, room_id)
     if bot is None:
         raise HTTPException(503, "No MindRoom agent is in this room.")
     return bot

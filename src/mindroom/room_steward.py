@@ -33,6 +33,11 @@ def _joined(bots: Mapping[str, AgentBot], room_id: str) -> Iterator[tuple[str, A
             yield client.user_id, bot, client.rooms[room_id]
 
 
+def joined_bot(bots: Mapping[str, AgentBot], room_id: str, user_id: str) -> AgentBot | None:
+    """Return the running bot of that Matrix ID whose own client lists the room, None when there is none."""
+    return next((bot for bot_id, bot, _room in _joined(bots, room_id) if bot_id == user_id), None)
+
+
 def room_steward(bots: Mapping[str, AgentBot], room_id: str) -> AgentBot | None:
     """Return the room's steward: the running, joined bot with the highest power there, None when there is none.
 

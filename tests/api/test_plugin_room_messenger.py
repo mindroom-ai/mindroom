@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -39,6 +40,7 @@ from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import RoomMessenger, require_room_messenger
+from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
 from mindroom.thread_utils import check_agent_mentioned
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
 from tests.api.test_plugin_room_readers import ALICE, BOB, CAROL, ROOM, _joined, _state
@@ -135,12 +137,16 @@ def _router(config: Config, client: SimpleNamespace, name: str = ROUTER_AGENT_NA
         conversation_reader=make_conversation_reader_mock(),
         logger=get_logger("tests.plugin_room_messenger"),
     )
+    gate = ResponseAdmissionGate()
     return SimpleNamespace(
         client=client,
         running=True,
         config=config,
         runtime_paths=runtime_paths,
         hook_context=support,
+        admission_gate=gate,
+        # A bot whose admission closed is stopping: nothing waits for it to reopen.
+        admission_fence=partial(admitted_response_decision, gate, AsyncMock(return_value=False)),
     )
 
 
@@ -654,6 +660,31 @@ async def test_failed_send_answers_503(world: _World, kind: str) -> None:
         await _post(messenger, kind)
 
     assert refused.value.status_code == 503
+    transport.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["notice", "relay"])
+async def test_the_poster_is_held_while_it_posts_and_one_withdrawn_answers_503(world: _World, kind: str) -> None:
+    """A reload cannot take the posting bot during the thread lookup; a closed client or a stopping bot answers 503."""
+    messenger = await world.messenger(CAROL)
+    poster = world.bots[ROUTER_AGENT_NAME if kind == "notice" else "open"]
+    withdrawn_during_lookup: list[bool] = []
+
+    async def look_up(**_: object) -> None:
+        withdrawn_during_lookup.append(poster.admission_gate.close_if_idle())
+
+    poster.hook_context.conversation_reader.latest_thread_event_id = AsyncMock(side_effect=look_up)
+    with _transport() as transport:
+        transport.side_effect = nio.LocalProtocolError("client closed")
+        with pytest.raises(HTTPException) as closed:
+            await _post(messenger, kind)
+        poster.admission_gate.close()
+        with pytest.raises(HTTPException) as stopping:
+            await _post(messenger, kind)
+
+    assert withdrawn_during_lookup == [False]
+    assert (closed.value.status_code, stopping.value.status_code) == (503, 503)
     transport.assert_awaited_once()
 
 
