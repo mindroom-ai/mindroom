@@ -6,7 +6,7 @@ from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping
+    from collections.abc import Collection, Iterable, Mapping, Sequence
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -234,18 +234,22 @@ _RETIRED_FILE_SETTINGS = {
 #   list_files, search_files, or search_content, the functions of Agno's FileTools.
 # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit names them write_file,
 #   edit_file, read_file, ls, find_files, and grep.
-# Handling: Reject a glob that matches a retired name and not its replacement, unless another registered toolkit
-#   still offers the retired name, naming the rule and the replacement, so no call a rule gated runs ungated.
-# Coverage: tests/test_filesystem_tool_config.py::test_an_approval_rule_that_stops_gating_a_renamed_function_fails,
-#   tests/test_filesystem_tool_config.py::test_a_later_rule_matching_the_replacement_does_not_rescue_an_earlier_one,
-#   tests/test_filesystem_tool_config.py::test_approval_rules_that_keep_gating_what_they_gated_load.
-def renamed_file_functions_a_glob_misses(match: str, offered_elsewhere: Collection[str]) -> str:
-    """Return the renames ``match`` stops gating, as text, or an empty string when it gates all it gated before."""
-    return ", ".join(
-        f"{old} is now {new}"
-        for old, new in RETIRED_FILE_FUNCTIONS.items()
-        if old not in offered_elsewhere and fnmatchcase(old, match) and not fnmatchcase(new, match)
-    )
+# Handling: Reject the rules when the first one matching a retired name is not the first one matching its
+#   replacement, unless another registered toolkit still offers the retired name, naming that rule and the
+#   replacement, so the rule that decided a call still decides it.
+# Coverage:
+#   tests/test_filesystem_tool_config.py::test_an_approval_rule_that_stops_deciding_a_renamed_function_fails,
+#   tests/test_filesystem_tool_config.py::test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails,
+#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load.
+def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere: Collection[str]) -> str | None:
+    """Return the rule that decided a retired file function but not its replacement, as text, or None."""
+    for old, new in RETIRED_FILE_FUNCTIONS.items():
+        first_old, first_new = (
+            next((index for index, glob in enumerate(globs) if fnmatchcase(name, glob)), None) for name in (old, new)
+        )
+        if old not in offered_elsewhere and first_old is not None and first_old != first_new:
+            return f"tool_approval.rules[{first_old}].match {globs[first_old]!r} decided {old}; {old} is now {new}"
+    return None
 
 
 def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:

@@ -225,43 +225,58 @@ def test_openclaw_compat_brings_filesystem() -> None:
     assert "filesystem" in Config.expand_tool_names(["openclaw_compat"])
 
 
-def _load_rules(tmp_path: Path, *matches: str) -> Config:
+def _load_rules(tmp_path: Path, *rules: str | tuple[str, str]) -> Config:
+    """Load rules given as a match glob, which requires approval, or as a glob and its action."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    pairs = [(rule, "require_approval") if isinstance(rule, str) else rule for rule in rules]
     data = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "agents": {"a": {"display_name": "A", "tools": ["python"]}},
-        "tool_approval": {"rules": [{"match": match, "action": "require_approval"} for match in matches]},
+        "tool_approval": {"rules": [{"match": match, "action": action} for match, action in pairs]},
     }
     return Config.validate_with_runtime(data, runtime_paths)
 
 
 @pytest.mark.parametrize(
-    ("match", "lost"),
+    ("match", "renamed"),
     [
         ("save_file", "save_file is now write_file"),
-        ("search_*", "search_files is now find_files, search_content is now grep"),
+        ("search_*", "search_files is now find_files"),
         ("replace_file_chunk", "replace_file_chunk is now edit_file"),
         # It still matches read_file, but neither of the two writes it used to gate.
-        ("*a*", "save_file is now write_file, replace_file_chunk is now edit_file, search_files is now find_files"),
-        ("*_chunk", "replace_file_chunk is now edit_file, read_file_chunk is now read_file"),
+        ("*a*", "save_file is now write_file"),
+        ("*_chunk", "replace_file_chunk is now edit_file"),
     ],
 )
-def test_an_approval_rule_that_stops_gating_a_renamed_function_fails(tmp_path: Path, match: str, lost: str) -> None:
-    """A glob that matched a retired function and misses its replacement fails, naming the rule and the new name."""
-    expected = rf"tool_approval\.rules\[1\]\.match {re.escape(repr(match))} .*{re.escape(lost)}"
+def test_an_approval_rule_that_stops_deciding_a_renamed_function_fails(
+    tmp_path: Path,
+    match: str,
+    renamed: str,
+) -> None:
+    """A rule that decided a retired function and not its replacement fails, naming the rule and the new name."""
+    expected = rf"tool_approval\.rules\[1\]\.match {re.escape(repr(match))} .*{re.escape(renamed)}"
     with pytest.raises(ConfigRuntimeValidationError, match=expected):
         _load_rules(tmp_path, "run_shell_command", match)
 
 
-def test_a_later_rule_matching_the_replacement_does_not_rescue_an_earlier_one(tmp_path: Path) -> None:
-    """The first matching rule decides, so each rule is checked alone: a catch-all after it may decide otherwise."""
+def test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails(tmp_path: Path) -> None:
+    """The first matching rule decides: write_* auto-approving write_file ahead of the *_file gate fails."""
+    with pytest.raises(
+        ConfigRuntimeValidationError, match=r"rules\[1\]\.match '\*_file' .*save_file is now write_file"
+    ):
+        _load_rules(tmp_path, ("write_*", "auto_approve"), ("*_file", "require_approval"))
     with pytest.raises(ConfigRuntimeValidationError, match=r"rules\[0\]\.match 'save_file'"):
         _load_rules(tmp_path, "save_file", "*")
     with pytest.raises(ConfigRuntimeValidationError, match=r"rules\[1\]\.match 'save_file'"):
         _load_rules(tmp_path, "write_file", "save_file")
+    # In the other order the gate still decides both names.
+    assert _load_rules(tmp_path, ("*_file", "require_approval"), ("write_*", "auto_approve"))
 
 
-@pytest.mark.parametrize("match", ["*_file", "write_file", "*", "grep", "read_file*", "list_files", "*_files"])
-def test_approval_rules_that_keep_gating_what_they_gated_load(tmp_path: Path, match: str) -> None:
-    """A rule that matches each replacement loads, and so does list_files, which the python toolkit still offers."""
+@pytest.mark.parametrize(
+    "match",
+    ["write_file", "edit_file", "grep", "list_files", "*", "*_file", "read_*", "read_file*", "*_files"],
+)
+def test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load(tmp_path: Path, match: str) -> None:
+    """Rules for the new names, python's live list_files, and globs matching both names of a rename load."""
     assert _load_rules(tmp_path, match).tool_approval.rules[0].match == match

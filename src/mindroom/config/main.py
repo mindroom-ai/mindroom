@@ -52,7 +52,7 @@ from mindroom.config.legacy_access import (
     persist_access_migration,
     validate_access_migration_source,
 )
-from mindroom.config.legacy_fields import rename_legacy_knowledge_reranker, renamed_file_functions_a_glob_misses
+from mindroom.config.legacy_fields import approval_rule_a_file_rename_escapes, rename_legacy_knowledge_reranker
 from mindroom.config.matrix import (
     EventJournalConfig,
     MatrixSpaceConfig,
@@ -1521,13 +1521,10 @@ class Config(BaseModel):
             if name != "filesystem" and (metadata := tools.get(name)) is not None
             for function in metadata.function_names or ()
         }
-        for index, rule in enumerate(self.tool_approval.rules):
-            if missed := renamed_file_functions_a_glob_misses(rule.match, elsewhere):
-                msg = (
-                    f"tool_approval.rules[{index}].match {rule.match!r} no longer matches the filesystem functions "
-                    f"it gated ({missed}); name the new functions in the rule."
-                )
-                raise ToolConfigOverrideError(msg)
+        globs = [rule.match for rule in self.tool_approval.rules]
+        if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
+            msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
+            raise ToolConfigOverrideError(msg)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
         """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.
