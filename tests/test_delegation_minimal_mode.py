@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+from pydantic import TypeAdapter
 
 from mindroom import ai
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
@@ -16,6 +17,7 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.config.knowledge import RerankerConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -28,6 +30,7 @@ from mindroom.runtime_state import clear_api_server_address, set_api_server_addr
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -43,6 +46,7 @@ from tests.test_delegation_direct_audit import _identity
 from tests.test_mode_commands import _CLI_DEPLOYMENT_ENV
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.agent_modes import AgentMode
@@ -455,6 +459,134 @@ async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
     assert "Child answer" in result, result
     assert len(listings) == int(bash_runs)
     assert ("no longer permits" in str(child.requests[-1].messages)) is not bash_runs
+
+
+def _add_reranker(config: Config) -> None:
+    config.reranker = TypeAdapter(RerankerConfig).validate_python({"provider": "typesafe"})
+
+
+def _exclude_memory_archive(config: Config) -> None:
+    config.memory.search.exclude.append(f"archive-{len(config.memory.search.exclude)}/**")
+
+
+async def _run_minimal_child_through_reloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reload: Callable[[Config], object],
+    *,
+    bash_calls: int,
+    reload_every_command: bool = False,
+) -> tuple[str, list[Config], list[Config], ScriptedModel]:
+    """Run a minimal child whose config reloads after its first shell command, or after every one.
+
+    Returns the child's result, the config each command's catalog ran under, the reloaded configs, and its model.
+    """
+    config = _config(helper_tools=["shell"])
+    paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
+    entity_ids(config, paths)
+    current = [config]
+    reloaded: list[Config] = []
+    live = replace(_live_context(config, paths), config_provider=lambda: current[0])
+    ran_under: list[Config] = []
+
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
+        owner = shell_cli_owner(live.orchestrator.agent_cli_registry)
+        listing = await owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list"))
+        ran_under.append(owner.catalog.runtime_context.config)
+        if reload_every_command or not reloaded:
+            # The reload lands while the child runs, between its Bash calls.
+            reloaded.append(current[0].model_copy(deep=True))
+            reload(reloaded[-1])
+            current[0] = reloaded[-1]
+        return str(listing)
+
+    bash = [calls(tool_call("bash", f"bash-{turn}", command="mindroom-agent tools list")) for turn in range(bash_calls)]
+    child = ScriptedModel([*bash, answer("Child answer")])
+    install_scripted_shell(monkeypatch, run_shell_command)
+    ScriptedAgents({"leader": ScriptedModel([]), "helper": child}).install(monkeypatch)
+    toolkit = DelegateTools("leader", paths, config, _workspace(tmp_path, "leader"), execution_identity=_identity())
+    with tool_runtime_context(live):
+        result = await _delegate(
+            toolkit,
+            config,
+            paths,
+            "run_subagent",
+            leader=None,
+            task="Report",
+            agent_name="helper",
+            minimal=True,
+        )
+    return result, ran_under, reloaded, child
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize("reload", [_add_reranker, _exclude_memory_archive], ids=["reranker", "memory_search_exclude"])
+async def test_a_running_minimal_subagent_continues_on_rebuilt_tools_after_a_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reload: Callable[[Config], object],
+) -> None:
+    """A reload between two Bash calls stops the run at the refused call, and the turn goes on under the new config."""
+    result, ran_under, reloaded, child = await _run_minimal_child_through_reloads(
+        tmp_path,
+        monkeypatch,
+        reload,
+        bash_calls=3,
+    )
+
+    assert "Child answer" in result, result
+    # The refused call never ran; the one after the rebuild ran under the reloaded config.
+    assert len(ran_under) == 2
+    assert ran_under[1] is reloaded[0]
+    assert ran_under[0] is not reloaded[0]
+    assert len(child.requests) == 4
+    refused, rebuilt = str(child.requests[2].messages), str(child.requests[3].messages)
+    assert "CONFIGURATION RELOADED" in refused
+    assert "did not run" in refused
+    assert "no longer permits" not in rebuilt
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_a_reload_that_removes_a_running_minimal_subagents_shell_ends_its_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rebuilt agent has no shell, so the turn ends with the minimal-mode error and no call ran on the old tools."""
+    result, ran_under, _reloaded, child = await _run_minimal_child_through_reloads(
+        tmp_path,
+        monkeypatch,
+        lambda config: setattr(config.agents["helper"], "tools", []),
+        bash_calls=3,
+    )
+
+    assert "Child answer" not in result, result
+    assert "minimal" in result.lower(), result
+    assert len(ran_under) == 1
+    assert len(child.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_repeated_reloads_end_a_minimal_subagents_turn_at_the_continuation_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config that reloads after every command cannot keep a turn rebuilding past the continuation limit."""
+    result, ran_under, reloaded, child = await _run_minimal_child_through_reloads(
+        tmp_path,
+        monkeypatch,
+        _exclude_memory_archive,
+        bash_calls=2 * (TURN_CONTINUATION_LIMIT + 2),
+        reload_every_command=True,
+    )
+
+    assert "Child answer" not in result, result
+    assert f"{TURN_CONTINUATION_LIMIT} continuation attempts" in result, result
+    # Each attempt ran one command under the config of its own rebuild, and its next was refused.
+    assert ran_under[1:] == reloaded[:TURN_CONTINUATION_LIMIT]
+    assert len(child.requests) == 2 * (TURN_CONTINUATION_LIMIT + 1)
 
 
 @pytest.mark.asyncio
