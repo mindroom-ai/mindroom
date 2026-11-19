@@ -127,9 +127,11 @@ class _Room:
             config_lifecycle.ApiSnapshot(1, self.paths, runtime_config=self.config),
         )
         bind_embedded_runtime(self.app, self.runtime.embedded_runtime())
-        # Another running bot in the room answers room reads and agent access while the router is down.
+        # Another running bot in the room answers room reads while the router is down; each agent's own bot runs too.
         self.other = SimpleNamespace(client=self.client, running=True, config=config)
-        bind_room_members(self.app, {ROUTER_AGENT_NAME: self.router, "other": self.other})  # type: ignore[arg-type]
+        self.bots = {ROUTER_AGENT_NAME: self.router, "other": self.other}
+        bind_room_members(self.app, self.bots)  # type: ignore[arg-type]
+        self.apply(config)
 
     def serve(self, config: Config) -> None:
         """Serve ``config`` from the API, as a config save does."""
@@ -138,7 +140,11 @@ class _Room:
 
     def apply(self, config: Config) -> None:
         """Run ``config`` in the runtime, as a reload does once the API serves it."""
-        self.runtime.config = self.router.config = self.other.config = config
+        self.runtime.config = config
+        for name in config.agents:
+            self.bots.setdefault(name, SimpleNamespace(client=self.client, running=True))
+        for bot in self.bots.values():
+            bot.config = config
 
     def refreshes(self) -> int:
         """How many grant refreshes the router's client has served."""
@@ -699,8 +705,29 @@ async def test_agent_access_answers_without_the_owner_account_and_503_without_an
     room.router.running = False
     assert [agent.name for agent in await reader.agents()] == listed != []
 
-    room.other.running = False
+    for bot in room.bots.values():
+        bot.running = False
     assert await _status(reader.agents()) == (503, "Agent access is unavailable; try again.")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_opens_no_workspace_before_or_without_its_own_running_bot(tmp_path: Path) -> None:
+    """A saved grant opens nothing until the agent's own bot runs it; a stopped agent opens nothing while others run."""
+    room = _room(tmp_path, _agents())
+    agents = _agents()
+    agents["coder"].access = ResponderAccessConfig(users=[ALICE, BOB, CAROL])
+    saved = Config(agents=agents)
+    room.serve(saved)
+
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["notes"]
+    assert await _status(room.agent(CAROL, room.ids["coder"])) == (503, "Agent access is unavailable; try again.")
+
+    room.apply(saved)
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["coder", "notes"]
+
+    room.bots["coder"].running = False
+    assert [workspace.name for workspace in await room.agents(CAROL)] == ["notes"]
+    assert await _status(room.agent(CAROL, room.ids["coder"])) == (503, "Agent access is unavailable; try again.")
 
 
 @pytest.mark.asyncio

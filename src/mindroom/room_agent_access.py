@@ -359,7 +359,7 @@ def _workspace(
     )
 
 
-async def room_agent_workspaces(
+async def room_agent_workspaces(  # noqa: C901 - one ordered access check
     connection: HTTPConnection,
     user_id: str,
     room_id: str,
@@ -377,13 +377,13 @@ async def room_agent_workspaces(
     config = snapshot.runtime_config
     state = ensure_app_state(connection.app)
     runtime = state.embedded
-    bots = [bot for bot in (state.room_bots or {}).values() if bot.running and bot.client is not None]
+    bots = {name: bot for name, bot in (state.room_bots or {}).items() if bot.running and bot.client is not None}
     if (
         config is None
         or runtime is None
         or not bots
         # The runtime's grants follow its own config; a refresh under another membership policy would replace them.
-        or any(agent_reply_membership_policy_changed(bot.config, config) for bot in bots)
+        or any(agent_reply_membership_policy_changed(bot.config, config) for bot in bots.values())
     ):
         raise HTTPException(503, _ACCESS_UNAVAILABLE)
     runtime_paths = snapshot.runtime_paths
@@ -421,6 +421,11 @@ async def room_agent_workspaces(
     opened: list[tuple[str, str]] = []
     for name, agent_id in admitted:
         with _leaving_out(name, room_id, leave_out=listing):
+            # The agent's own bot admits its turns by the config it runs, so nothing opens before or without that bot.
+            bot = bots.get(name)
+            memberships = runtime.agent_reply_memberships
+            if bot is None or not _may_converse(user_id, name, room_id, bot.config, runtime_paths, memberships):
+                raise HTTPException(503, _ACCESS_UNAVAILABLE)
             # Every turn in a contact room runs as its agent's owner, whom the other side must never reach through it.
             if room_id not in contact_room_ids(config, runtime_paths, name, any_status=True):
                 opened.append((name, agent_id))
