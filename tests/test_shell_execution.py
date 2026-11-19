@@ -397,6 +397,13 @@ async def test_a_command_and_the_children_it_starts_run_at_the_lowest_cpu_priori
     assert message == "19 True"
 
 
+def _exited(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
 @pytest.mark.asyncio
 async def test_a_process_the_command_leaves_behind_before_its_policy_could_be_set_runs_at_the_idle_policy(
@@ -410,7 +417,7 @@ async def test_a_process_the_command_leaves_behind_before_its_policy_could_be_se
     async def spawn_then_let_the_shell_exit(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
         process = await original_spawn(*args, **kwargs)
         deadline = time.monotonic() + 10
-        while Path(f"/proc/{process.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z":
+        while not _exited(process.pid):
             assert time.monotonic() < deadline, "the shell never exited"
             await asyncio.sleep(0.01)
         return process
