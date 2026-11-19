@@ -39,6 +39,7 @@ from mindroom.tool_jobs.runtime import (
     JobGrant,
     JobSpec,
     ToolJobRuntime,
+    parse_saved_job,
     register_background_runtime,
 )
 from mindroom.tool_system.plugins import config_plugins
@@ -151,6 +152,8 @@ class ToolJobRuntimeCoordinator:
     _instance: ToolJobInstance | None = field(default=None, init=False)
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
+    # With jobs off, the pass that clears the listing of the saved jobs, which nothing runs (`_clear_listing`).
+    _clearing: asyncio.Task[None] | None = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
     _journal: EventJournalStore | None = field(default=None, init=False)
     _publisher: JobStatePublisher = field(default_factory=JobStatePublisher, init=False)
@@ -166,7 +169,8 @@ class ToolJobRuntimeCoordinator:
         config = self.config_provider()
         self._journal = journal = self.journal_provider()
         self._instance = instance = pin_background_tool_jobs(config, self.runtime_paths)
-        # With background jobs off, saved jobs wait untouched for the next enabled start, which reports them.
+        # With background jobs off, saved jobs wait untouched for the next enabled start, which reports them; only
+        # their listing is cleared (`_clear_listing`).
         if instance.settings.enabled:
             store = journal.tool_jobs(uuid4().hex)
             # Take the jobs over before dispatch starts, fencing any runtime that still writes from before;
@@ -328,6 +332,8 @@ class ToolJobRuntimeCoordinator:
         await self.initialize()
         runtime = self._runtime
         if runtime is None:
+            if self._journal is not None and self._clearing is None:
+                self._clearing = asyncio.create_task(self._clear_listing(self._journal), name="tool_job_listing")
             return
         if self._task is None or self._task.done():
             if self._task is not None and not self._task.cancelled():
@@ -341,16 +347,17 @@ class ToolJobRuntimeCoordinator:
 
     async def quiesce(self) -> None:
         """Stop the worker and execution while live response owners finish their receipts."""
-        task, self._task = self._task, None
-        if task is not None:
+        tasks = [task for task in (self._task, self._clearing) if task is not None]
+        self._task = self._clearing = None
+        for task in tasks:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        if self._runtime is not None:
-            await self._runtime.quiesce()
-            # The jobs it interrupted leave the rooms' state now, not at the next start, which may have jobs off; so
-            # do the subagent jobs it left running in storage for the next start to continue.
-            ended = [job for job in self._runtime.retained_jobs() if job.status in TERMINAL_STATUSES]
-            await self._publisher.publish(self.bot_provider, ended)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if runtime := self._runtime:
+            await runtime.quiesce()
+            # The jobs it ended leave the rooms' state now. Every job it returned without ending is a subagent job it
+            # keeps running in storage for the next start to continue (`_keeps`; a failed settle raises above), and
+            # stays listed as it was; a next start with jobs off clears it (`_clear_listing`).
+            await self._publisher.publish(self.bot_provider, runtime.retained_jobs(), awaited=runtime.awaited_job_ids())
 
     async def stop(self) -> None:
         """Release the service after response finalization has stopped using its receipts."""
@@ -365,6 +372,30 @@ class ToolJobRuntimeCoordinator:
                 release_background_tool_jobs(self.runtime_paths, self._instance)
             self._instance = self._runtime = self._journal = None
             self._initialized = False
+
+    async def _clear_listing(self, journal: EventJournalStore) -> None:
+        """With jobs off, clear the listing of the saved jobs an earlier shutdown kept running, which nothing runs now.
+
+        Each bot writes once it has synced, when its client holds its rooms; a bot that is gone writes nothing.
+        """
+        try:
+            saved = [parse_saved_job(saved) for saved in await journal.tool_jobs(uuid4().hex).load_all()]
+        except Exception:
+            logger.exception("Saved background jobs could not be read to clear their listing")
+            return
+        # Published as ended, they leave every room's listing; the saved jobs stay as they are.
+        kept = [replace(job, status="interrupted") for job in saved if job.status not in TERMINAL_STATUSES]
+
+        def ready(name: str) -> bool:
+            bot = self.bot_provider(name)
+            return bot is None or bot.first_sync_complete or self.entity_unavailable(name)
+
+        while True:
+            ready_jobs = [job for job in kept if ready(job.owner.recipient)]
+            await self._publisher.publish(self.bot_provider, ready_jobs)
+            if len(ready_jobs) == len(kept):
+                return
+            await asyncio.sleep(_RETRY_SECONDS)
 
     async def _run(self) -> None:
         next_retention = 0.0

@@ -158,7 +158,7 @@ def _updated(job: BackgroundJob, **changes: object) -> BackgroundJob:
     return replace(job, **changes, updated_at=datetime.now(UTC).isoformat())
 
 
-def _parse_saved_job(saved: SavedToolJob) -> BackgroundJob:
+def parse_saved_job(saved: SavedToolJob) -> BackgroundJob:
     """Validate one saved snapshot without claiming or changing its execution."""
     msg = f"Invalid tool job snapshot {saved.job_id!r}."
     try:
@@ -552,7 +552,7 @@ class ToolJobRuntime:
             for saved in await self._store.load_all():
                 if saved.job_id in self._entries:
                     continue
-                entry = _Entry(await asyncio.to_thread(_parse_saved_job, saved))
+                entry = _Entry(await asyncio.to_thread(parse_saved_job, saved))
                 if entry.job.status not in TERMINAL_STATUSES:
                     await self._settle_stopped(entry)
                 self._add_entry(entry)

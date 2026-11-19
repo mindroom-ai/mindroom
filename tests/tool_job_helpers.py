@@ -67,7 +67,7 @@ from mindroom.tool_jobs.runtime import (
     JobGrant,
     JobSpec,
     ToolJobRuntime,
-    _parse_saved_job,
+    parse_saved_job,
 )
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -344,7 +344,7 @@ async def saved_jobs(storage_root: Path) -> dict[str, BackgroundJob]:
     """Read every job the journal of one storage root holds, as the next process would recover it."""
     journal = tool_job_journal(storage_root)
     try:
-        return {saved.job_id: _parse_saved_job(saved) for saved in await journal.tool_jobs("reader").load_all()}
+        return {saved.job_id: parse_saved_job(saved) for saved in await journal.tool_jobs("reader").load_all()}
     finally:
         await journal.close()
 
