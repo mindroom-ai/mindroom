@@ -88,7 +88,7 @@ class SubagentSnapshot:
     # that ended, zero until the first did, the ``tool_calls`` it started, rows the caps removed included, and those tokens' ``cost_usd``,
     # left out when no model they used is priced. A feed's snapshot always has it.
     usage: Mapping[str, int | float] | None = None
-    # Set on the failed end a restart's settlement gave the turn, which its job may continue with a later turn.
+    # Set on the failed end a turn gets when a shutdown stops its attempt, which its job may continue with a later turn.
     interrupted_by_restart: bool = False
 
 

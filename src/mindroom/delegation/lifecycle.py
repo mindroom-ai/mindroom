@@ -455,7 +455,8 @@ async def child_run_context(
 ) -> AsyncIterator[ChildRunObservation]:
     """Observe and audit one child attempt, then settle it even when its last buffered output fails to record.
 
-    The attempt is published to its sub-agent sink as it starts and with how it ended, after its settlement.
+    The attempt is published to its sub-agent sink as it starts and with how it ended, after its settlement, or at once
+    as interrupted when a shutdown stopped it.
     """
     audit = await open_child_audit(child, config=config, runtime_paths=runtime_paths)
     parent = _CHILD_RUN.get()

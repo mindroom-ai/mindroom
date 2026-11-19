@@ -33,7 +33,7 @@ RESTART_INTERRUPTION_REASON = (
 )
 # LEGACY_COMPAT: restart-settled child turns with the reason that told the reader to send a follow-up.
 # Legacy format: a failed child whose result is this string, which a stopping build writes for the next one to continue.
-# Last legacy release: v2026.11.440 (recheck at merge); the first release containing this fix writes
+# Last legacy release: v2026.11.444; the first release containing this fix writes
 # `RESTART_INTERRUPTION_REASON` instead.
 # Handling: `interrupted_by_restart` reads it as a restart's, so a turn the old build settled on its way down continues.
 # Coverage: tests/test_background_subagent_behavior.py::test_a_subagent_a_release_before_the_upgrade_stopped_still_continues
