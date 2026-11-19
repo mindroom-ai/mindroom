@@ -45,7 +45,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
     networks:
       - mindroom-network
 
@@ -120,7 +120,7 @@ docker run -d \
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
-export MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
+export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
 mindroom run
 ```
 
@@ -167,15 +167,15 @@ Then route tools into workers and choose a [worker scope](#worker-scopes):
 
 ```yaml
 defaults:
-  worker_tools: [shell, file, python]
+  worker_tools: [shell, filesystem, python]
   worker_scope: shared
 
 agents:
   code:
-    tools: [shell, file, python]
+    tools: [shell, filesystem, python]
 
   research:
-    tools: [shell, file, python]
+    tools: [shell, filesystem, python]
 ```
 
 To verify, ask two agents to run `hostname`, then list the worker containers:
@@ -254,11 +254,11 @@ When both are omitted, the [execution mode](#execution-modes) environment settin
 
 ```yaml
 defaults:
-  worker_tools: [shell, file]        # route shell and file through workers for all agents
+  worker_tools: [shell, filesystem]        # route shell and filesystem through workers for all agents
 
 agents:
   code:
-    tools: [file, shell, calculator]
+    tools: [filesystem, shell, calculator]
     # inherits worker_tools from defaults
 
   research:
@@ -266,8 +266,8 @@ agents:
     worker_tools: []                 # run everything in the primary runtime
 
   untrusted:
-    tools: [shell, file, python]
-    worker_tools: [shell, file, python]
+    tools: [shell, filesystem, python]
+    worker_tools: [shell, filesystem, python]
 ```
 
 

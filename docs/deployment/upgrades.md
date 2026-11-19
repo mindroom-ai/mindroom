@@ -8,6 +8,19 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to the `filesystem` toolkit
+
+The `file` and `coding` tools are now one toolkit, [`filesystem`](../tools/execution-and-coding.md#filesystem), with the functions `coding` had.
+Configs that list `file` or `coding` in `tools`, `worker_tools`, or `MINDROOM_SANDBOX_PROXY_TOOLS` load unchanged, and an agent that listed both gets one toolkit.
+Nothing saved for the old tools is translated, so before upgrading, change what the list below names:
+
+- A `file` entry with a setting of the earlier toolkit fails config loading and names the replacement: `enable_save_file`, `enable_replace_file_chunk`, `enable_read_file`, `enable_read_file_chunk`, `enable_list_files`, `enable_search_files`, and `enable_search_content` become `exclude_tools` with `write_file`, `edit_file`, `read_file`, `read_file`, `ls`, `find_files`, and `grep`; `all` becomes `enable_delete_file: true`; `max_file_length`, `max_file_lines`, `line_separator`, `exclude_patterns`, and `expose_base_directory` have no counterpart; and `include_tools` or `exclude_tools` must name the new functions.
+- A [`tool_approval`](../tool-approval.md) rule whose `match` matched `save_file`, `replace_file_chunk`, `read_file_chunk`, `search_files`, or `search_content` and does not match its replacement fails config loading, naming the rule and the new function; a `list_files` rule loads, because `python` still has that function, and no longer covers `ls`.
+- Settings saved from the dashboard for `file` or `coding` stop the agent's `filesystem` toolkit from loading, and its room workspace from being listed, until you save them again under `filesystem` or delete them.
+- A contact's tools, a configured `contacts.tools` default, a `dynamic_workflow` `allowed_tools` entry, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
+- A background tool job that an agent started with `file` or `coding` does not resume after the upgrade, so let running jobs finish first.
+- Upgrade workers and the sandbox runner together with the primary.
+
 ## Upgrading to a shell that needs a worker
 
 The `shell` tool now refuses commands in the MindRoom process, so an agent with `shell` and no worker, such as one an earlier `mindroom config init` created with `worker_tools: []`, gets an error on every shell call.

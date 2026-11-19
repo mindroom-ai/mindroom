@@ -48,7 +48,7 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
-    tools: [coding, shell]
+    tools: [filesystem, shell]
     delegate_to: [research]  # can delegate further
 
   research:
@@ -146,7 +146,7 @@ agents:
     display_name: Lead
     delegate_to: [lead]
     dedicated_subagent_workers: true
-    worker_tools: [shell, file, python]
+    worker_tools: [shell, filesystem, python]
 ```
 
 ```python
@@ -201,7 +201,7 @@ The agent creates and edits profiles with its own file or shell tools.
 ```markdown
 ---
 description: Adversarial reviewer that returns the three biggest risks in a proposal.
-tools: [file, duckduckgo]
+tools: [filesystem, duckduckgo]
 model: haiku
 mode: standard
 ---
@@ -324,6 +324,7 @@ Ended jobs that no reply collected get one follow-up: a new message in the conve
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
 Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
+The agent then posts one notice in the conversation that results wait for a reply, which starts no turn of its own.
 Another requester's reply in a shared room never hears of these results.
 A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 

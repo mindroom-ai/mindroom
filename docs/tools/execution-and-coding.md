@@ -81,8 +81,9 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 
 <a id="file"></a><a id="coding"></a>
 `filesystem` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`, and `delete_file()` when `enable_delete_file` is on.
-The tool names `file` and `coding` select it too, wherever a tool name is accepted, such as `tools`, `worker_tools`, contact tools, and subagent tools, and config saved through the dashboard or API writes `filesystem`.
-Entries that name it twice by different names merge into the first one's place: settings of both apply, it is deferred only when both entries defer, and `initial` holds when either sets it; entries that set one setting to different values fail to load.
+The tool names `file` and `coding` select it too wherever a tool name is written anew, such as `tools`, `worker_tools`, `MINDROOM_SANDBOX_PROXY_TOOLS`, a new contact's tools, and subagent tools, and config saved through the dashboard or API writes `filesystem`.
+An agent's `tools` and the `defaults.tools` it takes may name it by more than one of the three names only when none of those entries has settings and their `defer` and `initial` flags agree; it then stands where the first one stood, and otherwise the config fails to load, naming both entries.
+What was saved under `file` or `coding` before the two became one toolkit is not carried over; see [Upgrading to the `filesystem` toolkit](../deployment/upgrades.md#upgrading-to-the-filesystem-toolkit).
 `read_file()` returns line-numbered output with pagination hints when a file is truncated, and names an image it cannot decode instead of returning its bytes, pointing to `view_file()` when the agent has it.
 `edit_file()` applies a list of `edits` to one file, each an `old_text` copied from the file and its `new_text`.
 Every `old_text` matches the file as it was before the call, not the results of the other edits, and must match exactly one place unless its edit sets `replace_all`, which replaces every non-overlapping match from left to right, as Python's `str.replace` does; when it has no exact match, a match that differs only in whitespace and quotes is used.
@@ -107,24 +108,6 @@ Paths follow the agent's [`file_access`](../architecture/security-posture.md#fil
 | `enable_delete_file` | `boolean` | `no` | `false` | Offer `delete_file()`; deletion is opt-in. |
 
 Turn functions off with the toolkit filters every tool takes, for example `exclude_tools: [write_file, edit_file]` for an agent that only reads.
-
-### Settings of the earlier `file` tool
-
-Before `file` and `coding` became one toolkit, `file` was Agno's file toolkit with other functions and settings.
-An entry named `file` still loads with them, mapped so that a function that was off stays off:
-
-| `file` setting | Becomes |
-| --- | --- |
-| `enable_save_file: false` | `exclude_tools: [write_file]` |
-| `enable_replace_file_chunk: false` | `exclude_tools: [edit_file]` |
-| `enable_read_file: false` and `enable_read_file_chunk: false` | `exclude_tools: [read_file]`; with only one of them off, `read_file()` stays |
-| `enable_list_files: false` | `exclude_tools: [ls]` |
-| `enable_search_files: false` | `exclude_tools: [find_files]` |
-| `enable_search_content: false` | `exclude_tools: [grep]` |
-| `save_file`, `replace_file_chunk`, `read_file_chunk`, `list_files`, `search_files`, `search_content` in `include_tools` or `exclude_tools` | `write_file`, `edit_file`, `read_file`, `ls`, `find_files`, `grep` |
-| `max_file_length`, `max_file_lines`, `line_separator`, `exclude_patterns`, `all`, `expose_base_directory` | Dropped with a warning; `read_file()` pages long files instead |
-
-A [`tool_approval`](../tool-approval.md) rule whose `match` names only those retired functions fails to load, naming their replacements, so it cannot silently stop gating calls.
 
 ### Example
 

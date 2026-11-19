@@ -4037,7 +4037,7 @@ agents:
   assistant:
     display_name: Assistant
     role: A helpful assistant with direct file access to source docs
-    tools: [file, shell]
+    tools: [filesystem, shell]
     knowledge_bases: [source_docs]
 ```
 
@@ -4501,7 +4501,7 @@ agents:
   analyst:
     display_name: Analyst
     role: Answers questions from the team's knowledge bundles
-    tools: [file]
+    tools: [filesystem]
     knowledge_bases: [acme_okf]
     skills: [open-knowledge-format]
 ```
@@ -5448,12 +5448,12 @@ Otherwise it replies `❌ Config command disabled.` or `❌ Admin only.`
 /config set agents.analyst.display_name "Research Expert"
 /config set models.default.id gpt-6.2-astra
 /config set defaults.markdown false
-/config set agents.analyst.tools [shell, file]
+/config set agents.analyst.tools [shell, filesystem]
 ```
 
 `/config` alone is the same as `/config show`.
 Paths use dot notation, such as `agents.analyst.role`, and list items use indexes, such as `agents.analyst.tools.0` for the first tool.
-Values are parsed as YAML, so `false`, `42`, and `[shell, file]` become a boolean, a number, and a list.
+Values are parsed as YAML, so `false`, `42`, and `[shell, filesystem]` become a boolean, a number, and a list.
 Quote a value to keep its exact spacing.
 
 Shown values are redacted like `config_manager` output; see [Access, Redaction, and Saving](https://docs.mindroom.chat/tools/agent-orchestration/#access-redaction-and-saving).
@@ -6360,7 +6360,7 @@ Conversation history keeps up to four recently viewed images within 10 MiB in to
 ### Saving Files to the Workspace
 
 `get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
-Save attachments this way before processing them with `file`, `coding`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
+Save attachments this way before processing them with `filesystem`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
@@ -8316,7 +8316,7 @@ agents:
     display_name: Mind
     role: Personal assistant
     model: sonnet
-    tools: [calculator, file]
+    tools: [calculator, filesystem]
     created_agents_per_owner: 2
 ```
 
@@ -8795,7 +8795,7 @@ agents:
     role: A helpful assistant with file and web access
     model: sonnet
     tools:
-      - file
+      - filesystem
       - shell
       - github
       - duckduckgo
@@ -8822,7 +8822,7 @@ defaults:
 agents:
   code:
     tools:
-      - file                               # no inline settings
+      - filesystem                         # no inline settings
       - shell:                             # this agent only
           extra_env_passthrough: "DAWARICH_*"
   research:
@@ -9346,7 +9346,7 @@ Use them for agents with many optional tools.
 | `initial` | bool | `false` | Send a deferred tool as an ordinary tool on every request; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
-The starter Mind agent from `mindroom config init` keeps `shell`, `coding`, `memory`, `scheduler`, `update_awareness`, and `matrix_message` eager and defers its other tools.
+The starter Mind agent from `mindroom config init` keeps `shell`, `filesystem`, `memory`, `scheduler`, `update_awareness`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:
@@ -9355,7 +9355,7 @@ agents:
     role: Help in chat
     tools:
       - shell
-      - coding: {defer: true, initial: true}
+      - filesystem: {defer: true, initial: true}
       - searxng: {defer: true, host: https://search.example.test, fixed_max_results: 10}
       - name: serper
         defer: true
@@ -9918,8 +9918,8 @@ agents:
     display_name: Researcher
     role: Research with a browser and save results.
     model: default
-    tools: [browser, shell, file]
-    worker_tools: [browser, shell, file]
+    tools: [browser, shell, filesystem]
+    worker_tools: [browser, shell, filesystem]
     worker_scope: user_agent
 ```
 
@@ -10057,7 +10057,7 @@ agents:
     display_name: Researcher
     role: Research with a browser and save results.
     model: default
-    tools: [browser_mcp, shell, file]
+    tools: [browser_mcp, shell, filesystem]
     worker_scope: user_agent
 ```
 
@@ -10737,8 +10737,9 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 
 
 `filesystem` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`, and `delete_file()` when `enable_delete_file` is on.
-The tool names `file` and `coding` select it too, wherever a tool name is accepted, such as `tools`, `worker_tools`, contact tools, and subagent tools, and config saved through the dashboard or API writes `filesystem`.
-Entries that name it twice by different names merge into the first one's place: settings of both apply, it is deferred only when both entries defer, and `initial` holds when either sets it; entries that set one setting to different values fail to load.
+The tool names `file` and `coding` select it too wherever a tool name is written anew, such as `tools`, `worker_tools`, `MINDROOM_SANDBOX_PROXY_TOOLS`, a new contact's tools, and subagent tools, and config saved through the dashboard or API writes `filesystem`.
+An agent's `tools` and the `defaults.tools` it takes may name it by more than one of the three names only when none of those entries has settings and their `defer` and `initial` flags agree; it then stands where the first one stood, and otherwise the config fails to load, naming both entries.
+What was saved under `file` or `coding` before the two became one toolkit is not carried over; see [Upgrading to the `filesystem` toolkit](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-the-filesystem-toolkit).
 `read_file()` returns line-numbered output with pagination hints when a file is truncated, and names an image it cannot decode instead of returning its bytes, pointing to `view_file()` when the agent has it.
 `edit_file()` applies a list of `edits` to one file, each an `old_text` copied from the file and its `new_text`.
 Every `old_text` matches the file as it was before the call, not the results of the other edits, and must match exactly one place unless its edit sets `replace_all`, which replaces every non-overlapping match from left to right, as Python's `str.replace` does; when it has no exact match, a match that differs only in whitespace and quotes is used.
@@ -10763,24 +10764,6 @@ Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture
 | `enable_delete_file` | `boolean` | `no` | `false` | Offer `delete_file()`; deletion is opt-in. |
 
 Turn functions off with the toolkit filters every tool takes, for example `exclude_tools: [write_file, edit_file]` for an agent that only reads.
-
-### Settings of the earlier `file` tool
-
-Before `file` and `coding` became one toolkit, `file` was Agno's file toolkit with other functions and settings.
-An entry named `file` still loads with them, mapped so that a function that was off stays off:
-
-| `file` setting | Becomes |
-| --- | --- |
-| `enable_save_file: false` | `exclude_tools: [write_file]` |
-| `enable_replace_file_chunk: false` | `exclude_tools: [edit_file]` |
-| `enable_read_file: false` and `enable_read_file_chunk: false` | `exclude_tools: [read_file]`; with only one of them off, `read_file()` stays |
-| `enable_list_files: false` | `exclude_tools: [ls]` |
-| `enable_search_files: false` | `exclude_tools: [find_files]` |
-| `enable_search_content: false` | `exclude_tools: [grep]` |
-| `save_file`, `replace_file_chunk`, `read_file_chunk`, `list_files`, `search_files`, `search_content` in `include_tools` or `exclude_tools` | `write_file`, `edit_file`, `read_file`, `ls`, `find_files`, `grep` |
-| `max_file_length`, `max_file_lines`, `line_separator`, `exclude_patterns`, `all`, `expose_base_directory` | Dropped with a warning; `read_file()` pages long files instead |
-
-A [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule whose `match` names only those retired functions fails to load, naming their replacements, so it cannot silently stop gating calls.
 
 ### Example
 
@@ -15765,7 +15748,7 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
-    tools: [coding, shell]
+    tools: [filesystem, shell]
     delegate_to: [research]  # can delegate further
 
   research:
@@ -15863,7 +15846,7 @@ agents:
     display_name: Lead
     delegate_to: [lead]
     dedicated_subagent_workers: true
-    worker_tools: [shell, file, python]
+    worker_tools: [shell, filesystem, python]
 ```
 
 ```python
@@ -15918,7 +15901,7 @@ The agent creates and edits profiles with its own file or shell tools.
 ```markdown
 ---
 description: Adversarial reviewer that returns the three biggest risks in a proposal.
-tools: [file, duckduckgo]
+tools: [filesystem, duckduckgo]
 model: haiku
 mode: standard
 ---
@@ -20663,7 +20646,7 @@ agents:
   mind:
     display_name: Mind
     memory_backend: file   # weekly_digest requires file memory
-    tools: [file]          # the agent writes the digest
+    tools: [filesystem]    # the agent writes the digest
     automations:
       - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
 ```
@@ -22008,7 +21991,7 @@ config = {
     "models": {"default": {"provider": "openai", "id": "gpt-6.2-sol"}},
     "memory": "none",
     "defaults": {"allow_shell_without_worker": True},
-    "agents": {"coder": {"display_name": "Coder", "tools": ["shell", "file"], "delegate_to": ["coder"]}},
+    "agents": {"coder": {"display_name": "Coder", "tools": ["shell", "filesystem"], "delegate_to": ["coder"]}},
 }
 result = asyncio.run(
     run_turn(config, agent="coder", prompt="Run the tests and fix what fails.", storage=Path("~/.cache/mindroom-runs"), workdir=Path(".")),
@@ -22026,7 +22009,7 @@ print(result.text)
 | `agent` | The configured agent that answers. |
 | `prompt` | The message it answers. |
 | `storage` | The directory where MindRoom keeps the run's state: sessions, saved tool outputs, subagent records, and the agent's workspace. |
-| `workdir` | The existing directory where `shell` runs and `file`, `coding`, and `python`'s file functions resolve paths, for the agent and its subagents; without it they work in the agent's workspace under `storage`. |
+| `workdir` | The existing directory where `shell` runs and `filesystem` and `python`'s file functions resolve paths, for the agent and its subagents; without it they work in the agent's workspace under `storage`. |
 | `requester_id` | The Matrix user ID the agent answers; it must be in `administrators`, and defaults to the first of them. |
 | `request_headers` | A function that takes a `HeadlessRun` and returns the headers that run's model requests carry; see [Request headers](#request-headers). |
 
@@ -22101,14 +22084,14 @@ They run in standard mode; [minimal mode](https://docs.mindroom.chat/tools/agent
 
 ## Files
 
-With a `workdir`, the files that `shell`, `file`, and `coding` write land there, and MindRoom's own files stay under `storage`.
+With a `workdir`, the files that `shell` and `filesystem` write land there, and MindRoom's own files stay under `storage`.
 Code that `python` runs uses the calling process's current directory, so give it absolute paths.
-`file_access: workspace` confines `file` and `coding` to the `workdir` instead of the workspace.
+`file_access: workspace` confines `filesystem` to the `workdir` instead of the workspace.
 An agent with the [`attachments`](https://docs.mindroom.chat/attachments/#viewing-content) tool sees images in the `workdir` through `view_file`, which `file_access: workspace` confines to the `workdir` too.
 Tool outputs saved to a file, because they are over `defaults.tool_output_auto_save_threshold_bytes` or the call set `mindroom_output_path`, go to `mindroom_tool_outputs/` in the agent's workspace, and the agent gets their absolute path.
-`file` and `coding` can read that directory under `file_access: workspace`, but not write it, as long as `storage` is outside the `workdir`.
+`filesystem` can read that directory under `file_access: workspace`, but not write it, as long as `storage` is outside the `workdir`.
 Other tools that work on files, such as `file_generation`, `visualization`, `gmail` attachments, and `google_drive` downloads, keep the agent's workspace under `storage`, so under `file_access: workspace` they cannot reach files in the `workdir`.
-The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; while `storage` is outside the `workdir`, `file` and `coding` under `file_access: workspace` cannot reach them, so an agent that writes its own profiles or skills there needs `file_access: unrestricted`, or `shell` or `python` given absolute paths.
+The agent's skills, subagent profiles, and delegation records stay in its workspace too, which its system prompt names by absolute path; while `storage` is outside the `workdir`, `filesystem` under `file_access: workspace` cannot reach them, so an agent that writes its own profiles or skills there needs `file_access: unrestricted`, or `shell` or `python` given absolute paths.
 In `shell` commands, `$MINDROOM_AGENT_WORKSPACE` holds the agent's workspace, not the `workdir`.
 
 All tools run with the calling process's permissions, and `shell` and `python` can reach anything that process can, whatever `file_access` says; see [Security Model](https://docs.mindroom.chat/architecture/security-posture/).
@@ -23168,7 +23151,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
     networks:
       - mindroom-network
 
@@ -23243,7 +23226,7 @@ docker run -d \
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
-export MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
+export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
 mindroom run
 ```
 
@@ -23290,15 +23273,15 @@ Then route tools into workers and choose a [worker scope](#worker-scopes):
 
 ```yaml
 defaults:
-  worker_tools: [shell, file, python]
+  worker_tools: [shell, filesystem, python]
   worker_scope: shared
 
 agents:
   code:
-    tools: [shell, file, python]
+    tools: [shell, filesystem, python]
 
   research:
-    tools: [shell, file, python]
+    tools: [shell, filesystem, python]
 ```
 
 To verify, ask two agents to run `hostname`, then list the worker containers:
@@ -23377,11 +23360,11 @@ When both are omitted, the [execution mode](#execution-modes) environment settin
 
 ```yaml
 defaults:
-  worker_tools: [shell, file]        # route shell and file through workers for all agents
+  worker_tools: [shell, filesystem]        # route shell and filesystem through workers for all agents
 
 agents:
   code:
-    tools: [file, shell, calculator]
+    tools: [filesystem, shell, calculator]
     # inherits worker_tools from defaults
 
   research:
@@ -23389,8 +23372,8 @@ agents:
     worker_tools: []                 # run everything in the primary runtime
 
   untrusted:
-    tools: [shell, file, python]
-    worker_tools: [shell, file, python]
+    tools: [shell, filesystem, python]
+    worker_tools: [shell, filesystem, python]
 ```
 
 
@@ -25662,6 +25645,19 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading to the `filesystem` toolkit
+
+The `file` and `coding` tools are now one toolkit, [`filesystem`](https://docs.mindroom.chat/tools/execution-and-coding/#filesystem), with the functions `coding` had.
+Configs that list `file` or `coding` in `tools`, `worker_tools`, or `MINDROOM_SANDBOX_PROXY_TOOLS` load unchanged, and an agent that listed both gets one toolkit.
+Nothing saved for the old tools is translated, so before upgrading, change what the list below names:
+
+- A `file` entry with a setting of the earlier toolkit fails config loading and names the replacement: `enable_save_file`, `enable_replace_file_chunk`, `enable_read_file`, `enable_read_file_chunk`, `enable_list_files`, `enable_search_files`, and `enable_search_content` become `exclude_tools` with `write_file`, `edit_file`, `read_file`, `read_file`, `ls`, `find_files`, and `grep`; `all` becomes `enable_delete_file: true`; `max_file_length`, `max_file_lines`, `line_separator`, `exclude_patterns`, and `expose_base_directory` have no counterpart; and `include_tools` or `exclude_tools` must name the new functions.
+- A [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule whose `match` matched `save_file`, `replace_file_chunk`, `read_file_chunk`, `search_files`, or `search_content` and does not match its replacement fails config loading, naming the rule and the new function; a `list_files` rule loads, because `python` still has that function, and no longer covers `ls`.
+- Settings saved from the dashboard for `file` or `coding` stop the agent's `filesystem` toolkit from loading, and its room workspace from being listed, until you save them again under `filesystem` or delete them.
+- A contact's tools, a configured `contacts.tools` default, a `dynamic_workflow` `allowed_tools` entry, and a subagent started before the upgrade that name `file` or `coding` grant nothing: name `filesystem` in them, and start a new subagent instead of continuing the old one.
+- A background tool job that an agent started with `file` or `coding` does not resume after the upgrade, so let running jobs finish first.
+- Upgrade workers and the sandbox runner together with the primary.
 
 ## Upgrading to a shell that needs a worker
 

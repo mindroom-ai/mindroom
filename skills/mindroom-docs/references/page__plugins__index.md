@@ -2169,7 +2169,7 @@ agents:
   mind:
     display_name: Mind
     memory_backend: file   # weekly_digest requires file memory
-    tools: [file]          # the agent writes the digest
+    tools: [filesystem]    # the agent writes the digest
     automations:
       - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
 ```
