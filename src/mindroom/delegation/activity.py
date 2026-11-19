@@ -90,7 +90,7 @@ class SubagentSnapshot:
     usage: Mapping[str, int | float] | None = None
     # Set on the failed end a turn gets when a shutdown stops its attempt, which its job may continue with a later turn.
     interrupted_by_restart: bool = False
-    # Redacted; what the call that started the sub-agent named it, empty when it named nothing.
+    # What the call that started the sub-agent named it, redacted when the call was resolved; empty for none.
     title: str = ""
 
 
@@ -202,7 +202,7 @@ class _SubagentActivity:
             model_name=child.model_name,
             source="workflow" if is_workflow else "delegate",
             task=_clip(child.task, _MAX_TASK_CHARACTERS),
-            title=child.title and redact_sensitive_text(child.title),
+            title=child.title,
             thread_id=identity.resolved_thread_id or identity.thread_id,
             started_at=now,
         )

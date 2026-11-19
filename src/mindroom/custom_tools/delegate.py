@@ -228,7 +228,6 @@ class DelegateTools(Toolkit):
     async def run_subagent(
         self,
         task: str,
-        title: str = "",
         agent_name: str | None = None,
         model: str | None = None,
         minimal: bool = False,
@@ -239,6 +238,8 @@ class DelegateTools(Toolkit):
         profile: str | None = None,
         dedicated_worker: bool = False,
         resource_profile: ScriptResourceProfileName | None = None,
+        *,
+        title: str = "",
     ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 
@@ -247,7 +248,6 @@ class DelegateTools(Toolkit):
 
         Args:
             task: Self-contained task with relevant context, constraints, and expected output.
-            title: Short title of 3-6 words naming the task, shown to people watching the run.
             agent_name: Allowed subagent name; omitted or null selects yourself, if allowed.
             model: Configured model name from models; omitted or null uses normal model selection.
             minimal: True runs the child in token-efficient minimal mode, only for subagents listed as supporting it.
@@ -258,6 +258,7 @@ class DelegateTools(Toolkit):
             profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge.
             dedicated_worker: True runs the child's worker tools in a new worker of its own, for parallel or heavy children.
             resource_profile: CPU and memory size of that worker, small, standard, or large; omit for the normal size.
+            title: Short title of 3-6 words naming the task, shown to people watching the run.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.

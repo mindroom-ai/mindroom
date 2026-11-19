@@ -435,6 +435,10 @@
                 ],
                 "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
               },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
               "mindroom_output_path": {
                 "anyOf": [
                   {
@@ -449,7 +453,8 @@
               }
             },
             "required": [
-              "task"
+              "task",
+              "title"
             ],
             "additionalProperties": false
           }
@@ -913,6 +918,10 @@
                 ],
                 "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
               },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
               "mindroom_output_path": {
                 "anyOf": [
                   {
@@ -927,7 +936,8 @@
               }
             },
             "required": [
-              "task"
+              "task",
+              "title"
             ],
             "additionalProperties": false
           }
@@ -1421,6 +1431,10 @@
                 ],
                 "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
               },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
               "mindroom_output_path": {
                 "anyOf": [
                   {
@@ -1435,7 +1449,8 @@
               }
             },
             "required": [
-              "task"
+              "task",
+              "title"
             ],
             "additionalProperties": false
           }

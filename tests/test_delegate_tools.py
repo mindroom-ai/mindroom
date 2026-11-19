@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -125,6 +126,10 @@ class TestDelegateTools:
         function = toolkit_offers(tools, "run_subagent")
         assert function.parameters["required"] == ["task", "title"]
         assert function.parameters["properties"]["title"]["type"] == "string"
+        # Existing positional calls such as run_subagent(task, "helper") still bind agent_name.
+        parameters = inspect.signature(DelegateTools.run_subagent).parameters
+        assert list(parameters)[1:3] == ["task", "agent_name"]
+        assert parameters["title"].kind is inspect.Parameter.KEYWORD_ONLY
         assert function.parameters["properties"]["agent_name"]["anyOf"] == [
             {"type": "string"},
             {"type": "null"},

@@ -21,6 +21,7 @@ from mindroom.delegation.recovery import load_settled_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT
 from mindroom.delegation.workers import dedicated_worker_refusal
+from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -210,13 +211,22 @@ def resolve_fresh_target(
     return DelegationTarget(
         child_name,
         task,
-        title=" ".join(title.split())[:80] if isinstance(title, str) else "",
+        title=display_title(title) if isinstance(title, str) else "",
         agent_mode=request.agent_mode,
         persona=request.persona,
         model=request.model,
         dedicated_worker=dedicated_worker,
         resource_profile=resource_profile,
     )
+
+
+# How much of a title redaction reads, far past the 80 characters shown, so a credential starting there is seen whole.
+_TITLE_REDACTION_SPAN = 4_000
+
+
+def display_title(title: str) -> str:
+    """Return ``title`` on one line, credentials redacted before the cut to 80 characters, so none survives in part."""
+    return redact_sensitive_text(" ".join(title[:_TITLE_REDACTION_SPAN].split()))[:80]
 
 
 def _dedicated_worker_request(

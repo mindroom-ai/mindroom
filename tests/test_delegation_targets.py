@@ -11,7 +11,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.state import SubagentPersona
-from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
+from mindroom.delegation.targets import display_title, resolve_follow_up_target, resolve_fresh_target
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
@@ -132,3 +132,16 @@ def test_a_fresh_call_with_arguments_of_the_wrong_type_is_refused(
     )
 
     assert result == refusal
+
+
+def test_a_title_is_redacted_whole_before_its_cut_to_80_characters() -> None:
+    """A credential the cut would split is still recognized, so no part of it reaches the shown title."""
+    lead = "Check the deploy job on the staging host before "
+    token = "mrb1." + "Ab3_" * 40 + "." + "Z9y-" * 10 + "abc"
+    title = display_title(f"{lead}\n{token} please")
+
+    # The token starts before character 80 and ends after it.
+    assert len(lead) + 1 < 80 < len(lead) + 1 + len(token)
+    assert "mrb1" not in title
+    assert len(title) <= 80
+    assert title.startswith("Check the deploy job on the staging host before ")

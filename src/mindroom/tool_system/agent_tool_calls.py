@@ -420,8 +420,8 @@ async def _execute_agent_tool_call(
                 return
         try:
             validate_tool_arguments(dict(binding.function.parameters), arguments)
-        except ValueError:
-            yield _failure(binding, call_id, arguments, "Invalid tool arguments")
+        except ValueError as error:
+            yield _failure(binding, call_id, arguments, str(error))
             return
         limit = catalog.max_tool_calls_per_turn
         if limit is not None and catalog._call_count >= limit:
