@@ -3231,6 +3231,26 @@ def test_user_services_are_loaded_off_the_event_loop(
     assert not any(on_loop)
 
 
+def test_adding_a_service_never_replaces_one_of_the_same_name(egress_portal: dict[str, Any]) -> None:
+    """An Add (`If-None-Match: *`) is refused for a name the scope has, which keeps its rules and key; an edit replaces."""
+    portal = egress_portal
+    client, headers = portal["client"], portal["headers"]["alice"]
+    assert _put_service(portal, "alice", "personal", "notes").status_code == 204
+    assert _put_key(portal, "alice", "personal", "notes", "notes-key").status_code == 204
+    other = {"rules": [{"host": "api.other.example.com", "auth": {"type": "bearer"}}]}
+
+    added = client.put(_service_url("personal", "notes"), json=other, headers={**headers, "If-None-Match": "*"})
+
+    assert added.status_code == 412, added.text
+    assert _get_service(portal, "alice", "personal", "notes").json() == _NOTES
+    assert _egress_row(portal, "alice", "personal", "notes")["configured"] is True
+    assert _put_service(portal, "alice", "personal", "notes", other).status_code == 204
+    assert (
+        client.put(_service_url("personal", "new"), json=other, headers={**headers, "If-None-Match": "*"}).status_code
+        == 204
+    )
+
+
 # --- Inactive entries ---
 
 

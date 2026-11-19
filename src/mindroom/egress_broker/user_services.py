@@ -40,7 +40,7 @@ from mindroom.egress_broker.secrets import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator, Mapping
+    from collections.abc import Callable, Collection, Iterator, Mapping
 
     from mindroom.config.egress_broker import EgressBrokerConfig
     from mindroom.credentials.manager import CredentialsManager
@@ -62,6 +62,7 @@ __all__ = [
     "InactiveUserService",
     "ServiceSource",
     "UserServiceConflictError",
+    "add_user_service",
     "consistent_read",
     "delete_user_service",
     "effective_config",
@@ -265,6 +266,40 @@ def delete_user_service(
         finally:
             _cache.invalidate()
     return True
+
+
+def add_user_service(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    service: EgressService,
+    *,
+    config_services: Mapping[str, EgressService],
+    then: Callable[[], bool],
+) -> bool:
+    """Add `service` as the scope's new key-only service `name`, then run `then` before any other user-service write.
+
+    `then` stores its key and says whether to keep it; when it returns False or raises, the service and any key are
+    taken back, which removes only this entry, since no other write could land meanwhile. Raises as
+    `save_user_service(only_new=True)` does before adding anything.
+    """
+    with _write_lock:
+        save_user_service(
+            manager,
+            target,
+            name,
+            service,
+            config_services=config_services,
+            oauth_providers=(),
+            only_new=True,
+        )
+        kept = False
+        try:
+            kept = then()
+        finally:
+            if not kept:
+                delete_user_service(manager, target, name, config_services=config_services)
+    return kept
 
 
 @contextlib.contextmanager
@@ -534,5 +569,6 @@ class _EffectiveConfigCache:
 
 _cache = _EffectiveConfigCache()
 # Serializes read-modify-write of the services documents in this process, so concurrent saves lose nothing;
-# `consistent_read` holds it too, so the broker checks a routed service and reads its key in one state.
-_write_lock = threading.Lock()
+# `consistent_read` holds it too, so the broker checks a routed service and reads its key in one state. Reentrant, so
+# `add_user_service` holds it across its own save, key, and take-back.
+_write_lock = threading.RLock()

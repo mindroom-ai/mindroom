@@ -74,6 +74,7 @@ export async function requestConnection<T>(
   method = "GET",
   body: object = {},
   messages: RequestErrorMessages = {},
+  headers: Record<string, string> = {},
 ): Promise<T> {
   const hasBody = method === "POST" || method === "PUT";
   let response: Response;
@@ -87,6 +88,7 @@ export async function requestConnection<T>(
           ? { "X-MindRoom-Connections-User": signedInUser }
           : {}),
         ...(hasBody ? { "Content-Type": "application/json" } : {}),
+        ...headers,
       },
       ...(hasBody ? { body: JSON.stringify(body) } : {}),
     });

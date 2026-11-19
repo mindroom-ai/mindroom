@@ -583,6 +583,24 @@ async def test_a_proposed_service_the_config_served_now_refuses_expires(
 
 
 @pytest.mark.asyncio
+async def test_a_proposed_service_that_is_not_the_one_the_card_showed_takes_no_key(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole definition must be the card's, not only its hosts; otherwise the added service is taken back."""
+    request = ask(new_service=ACME)
+    other_path = EgressService.model_validate({"rules": [{"host": "api.acme.test", "auth": {"type": "bearer"}}]})
+    monkeypatch.setattr(secret_requests, "agent_services", lambda *_args: {"acme": other_path})
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": SECRET})
+
+    assert (response.status_code, request.outcome.result()) == (404, "expired")
+    assert _own_services(room, request) == {}
+    assert load_secret(get_runtime_credentials_manager(room.paths), request.target.worker_target, "acme") is None
+
+
+@pytest.mark.asyncio
 async def test_a_key_that_fails_to_save_takes_the_proposed_service_back(
     room: _Room,
     ask: Callable[..., PendingSecretRequest],

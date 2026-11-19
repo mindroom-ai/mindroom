@@ -24,9 +24,8 @@ from mindroom.api.egress_status import agent_services, key_save_refusal, resolve
 from mindroom.egress_broker.secrets import egress_key_path, save_secret, validate_secret
 from mindroom.egress_broker.user_services import (
     UserServiceConflictError,
+    add_user_service,
     consistent_read,
-    delete_user_service,
-    save_user_service,
     user_service_hosts_error,
 )
 from mindroom.logging_config import get_logger
@@ -230,29 +229,26 @@ def _add_service_and_save(
     operator = scope.config.egress_broker
     if user_service_hosts_error(operator, service) is not None:
         return "expired"
+
+    def save_key() -> bool:
+        # The service as this agent's requests now match it must be the whole one the card showed.
+        if agent_services(scope.config, scope.manager, scope.target).get(target.service) != service:
+            return False
+        save_secret(scope.manager, target.worker_target, target.service, secret)
+        return True
+
     try:
-        save_user_service(
+        added = add_user_service(
             scope.manager,
             target.worker_target,
             target.service,
             service,
             config_services=operator.services,
-            oauth_providers=(),
-            only_new=True,
+            then=save_key,
         )
     except (ValueError, UserServiceConflictError):
         return "expired"
-    try:
-        with consistent_read():
-            added = agent_services(scope.config, scope.manager, scope.target).get(target.service)
-            if added is None or secret_request_hosts(added) != target.hosts:
-                # Another write replaced it; that service is not the card's to take back.
-                return "expired"
-            save_secret(scope.manager, target.worker_target, target.service, secret)
-    except BaseException:
-        delete_user_service(scope.manager, target.worker_target, target.service, config_services=operator.services)
-        raise
-    return "saved"
+    return "saved" if added else "expired"
 
 
 def _log_answer(pending: PendingSecretRequest, user: ClientUser, status: str) -> None:

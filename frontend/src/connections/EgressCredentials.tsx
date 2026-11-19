@@ -356,7 +356,12 @@ function AgentSection({
   // Writes are not interrupted by another action: the rows stay disabled
   // meanwhile. Resolves to whether the write still counts, which it does not
   // once another action took its place.
-  const write = async (path: string, method: string, body?: object) => {
+  const write = async (
+    path: string,
+    method: string,
+    body?: object,
+    headers?: Record<string, string>,
+  ) => {
     const controller = newOperation();
     setSaving(true);
     try {
@@ -366,6 +371,7 @@ function AgentSection({
         method,
         body,
         SERVICE_ERROR_MESSAGES,
+        headers,
       );
     } finally {
       setSaving(false);
@@ -375,8 +381,15 @@ function AgentSection({
 
   // The editor stays open after the service is written: it saves the key next
   // and closes through `onClose`, so a key that fails can be reported there.
+  // An Add only creates: it never replaces a service of that name, nor takes its key.
   const save = async (name: string, service: AuthoredEgressService) => {
-    if (await write(servicePath(agent.agent_name, name), "PUT", service))
+    const adding =
+      editor?.kind === "add" &&
+      !agent.services.some((row) => row.name === name);
+    const headers = adding ? { "If-None-Match": "*" } : undefined;
+    if (
+      await write(servicePath(agent.agent_name, name), "PUT", service, headers)
+    )
       onChanged();
   };
 

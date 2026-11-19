@@ -518,6 +518,21 @@ describe("egress services on the personal page", () => {
     ).toHaveLength(2);
   });
 
+  it("adds a service only as a new one, so it never replaces another's key", async () => {
+    const putHeaders = () =>
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(([, options]) => options?.method === "PUT")
+        .map(([, options]) => options?.headers as Record<string, string>);
+    await renderPage();
+    await openAdd();
+    fill("gh", "github");
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+    await waitFor(() => expect(putHeaders()).toHaveLength(1));
+    expect(putHeaders()[0]).toMatchObject({ "If-None-Match": "*" });
+  });
+
   it("keeps the editor and what is typed when the agent is closed and opened again", async () => {
     await renderPage();
     await openAdd();

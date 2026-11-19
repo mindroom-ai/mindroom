@@ -38,9 +38,9 @@ On Save the API re-runs the same checks against the config it serves now; any re
 
 1. The existing checks: same key store as the card's, requester may still manage keys.
 2. The key is validated first, so a refused value (422) creates nothing and the request stays pending.
-3. `save_user_service(..., only_new=True)` adds the service (the tool ran the same call with `write=False` before posting); a name taken meanwhile is `expired`.
-4. Under `consistent_read`, the service must still have the card's hosts; then the key is saved.
-5. When saving the key raises, the new service is deleted again (`delete_user_service`), so no keyless half-state remains.
+3. `add_user_service` holds the user-services write lock across all of: the create-only add (`save_user_service(..., only_new=True)`; the tool ran it with `write=False` before posting), the check that the service this agent's requests now match is the card's whole definition, the key write, and the take-back.
+4. A name taken meanwhile, or a definition that differs, is `expired`; a key write that raises takes the service back. The take-back removes only the entry this call added, since no other write can land meanwhile.
+5. The personal page's Add sends `If-None-Match: *`, so it only creates (412 for a name the scope has) and can never replace the card's new service while keeping its key; an Edit still replaces.
 
 Decline and expiry create nothing.
 
@@ -72,6 +72,7 @@ A valid one shows a compact "New service" block above the key field: the display
 
 - An older Chat without this change shows the usual card (the hosts are listed) and its Save also creates the service. Accepted; the hosts are shown.
 - Between the card and Save the user can create a service of the same name on the personal page; the answer then expires and the agent asks again.
+- The answer route resolves the config and the requester's scope before the write runs in a worker thread, as the existing key-save path does, so a config published in that short window is not seen (for example a config service of the same name, which then also matches the new key). Not a regression of this change.
 
 ## Checklist
 

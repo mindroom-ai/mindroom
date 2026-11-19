@@ -13,7 +13,7 @@ import functools
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ValidationError
 
 from mindroom.api import config_lifecycle, oauth
@@ -525,14 +525,16 @@ def put_user_service(
     requester_id: _EgressUser,
     _size: Annotated[None, Depends(_limit_service_body)],
     body: Annotated[object, Body()] = None,
+    if_none_match: Annotated[str | None, Header()] = None,
 ) -> None:
-    """Create or replace one of the scope's own services.
+    """Create or replace one of the scope's own services; with `If-None-Match: *` (the page's Add) only create it.
 
     The body has the fields of a config service except `oauth_on_shared_workers`. Returns 413 for a body over 16 KiB,
     409 for the name of a config service, and 422, always with a string detail, for a body that is not a JSON object,
     an invalid service, a limit (count or size), a placeholder user services may not set, an unknown OAuth provider,
     one on a shared or unscoped agent, or one whose rules leave its provider's preset hosts, a service's own account of a
     requester-scoped provider (GitHub, built-in Atlassian), or rules on hosts that `unmatched_hosts: deny` keeps closed.
+    An Add of a name the scope already has is a 412, so it never takes over that service's key.
     """
     _require_egress_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)
@@ -551,6 +553,9 @@ def put_user_service(
         )
         raise _unprocessable(msg)
     stored = load_user_services(agent.manager, agent.target).get(name)
+    only_new = if_none_match == "*"
+    if only_new and stored is not None:
+        raise HTTPException(412, "You already have a service with this name", headers=CONNECTIONS_HEADERS)
     same_own_account = (
         stored is not None and stored.oauth_separate_account and stored.oauth_provider == service.oauth_provider
     )
@@ -566,6 +571,7 @@ def put_user_service(
             service,
             config_services=operator.services,
             oauth_providers=providers.keys(),
+            only_new=only_new,
         )
     except ValueError as exc:
         raise _unprocessable(str(exc)) from exc
