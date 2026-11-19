@@ -129,6 +129,11 @@ The normal command reply carries the persisted result alongside readable text:
 
 Applied reset omits `model` and has `override:null`.
 Rejection has `status:"rejected"`, no `override`, and may include a readable `error`.
+The reply to a typed `!model <key>` or `!model reset` that was applied carries the same result, with the answering router's own account and device as `runtime_user_id` and `runtime_device_id`, so a client can pair any applied change with its command event and show both as one line.
+A typed listing or refusal carries no result and stays ordinary text.
+The result is room-visible, so it names only what the command itself named: the selected key and level.
+It must never carry a previous model, an inherited default, a display name, or which agents changed, because those come from the requester-scoped discovery reply and other room members may not be allowed to see them.
+Clients therefore show a change's new model only, and cannot show the model it replaced.
 Uncertain crash recovery may omit result metadata; clients refresh after timeout rather than infer success from sending.
 Accept an acknowledgement only for the client's current pending command event, exact room/thread, runtime user/device, operation, and model.
 Encrypted events additionally authenticate the sender device.

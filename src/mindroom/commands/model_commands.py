@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import addressable_responder_names
-from mindroom.model_selection import model_selection_result, parse_model_selection
+from mindroom.model_selection import ModelSelectionRequest, model_selection_result, parse_model_selection
 from mindroom.model_selection_scope import ModelPickerScope, validate_model_picker_scope
 from mindroom.thread_models import (
     clear_thread_model_override,
@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.model_selection import ModelSelectionRequest
 
 _RESET_ARGUMENTS = frozenset({"reset", "clear"})
 _LIST_ARGUMENTS = frozenset({"list", "show"})
@@ -182,36 +181,51 @@ def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: s
 def handle_model_command(
     args_text: str,
     *,
+    client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
     room_id: str,
     thread_id: str | None,
     requester_user_id: str,
-) -> str:
-    """Show, set, or clear the model override for one Matrix thread."""
+    command_event_id: str,
+) -> tuple[str, dict | None]:
+    """Show, set, or clear the model override for one Matrix thread.
+
+    A set or clear returns the picker's result too, tied to its command event, so a client can pair the reply with
+    the command it answers. The result names only what the command named: the room reads it, and the models the
+    thread's agents inherit are told only to a requester who may address them.
+    """
     requested = args_text.strip()
     # Configured model names win over list/reset aliases, so a model named
     # "list", "reset", or "default" stays reachable by its exact name.
-    if requested not in config.models:
-        if not requested or requested.lower() in _LIST_ARGUMENTS:
-            return _show_thread_model(config, runtime_paths, thread_id)
-        if thread_id is None:
-            return _THREAD_REQUIRED_MESSAGE
-        if requested.lower() in _RESET_ARGUMENTS:
-            return _clear_thread_model(
-                config,
-                runtime_paths,
-                thread_id,
-                addressable_responder_names(requester_user_id, room_id, config, runtime_paths, membership_index),
-            )
-        return f"❌ Unknown model `{requested}`. Available models:\n{available_models_text(config)}"
+    named_model = requested in config.models
+    if not named_model and (not requested or requested.lower() in _LIST_ARGUMENTS):
+        return _show_thread_model(config, runtime_paths, thread_id), None
     if thread_id is None:
-        return _THREAD_REQUIRED_MESSAGE
-    return _set_thread_model(
-        requested,
+        return _THREAD_REQUIRED_MESSAGE, None
+    if not named_model and requested.lower() not in _RESET_ARGUMENTS:
+        return f"❌ Unknown model `{requested}`. Available models:\n{available_models_text(config)}", None
+    request = ModelSelectionRequest(
+        client.user_id,
+        client.device_id or "",
+        "set" if named_model else "reset",
+        requested if named_model else None,
+    )
+    text, _ = _apply_model_selection(
+        request,
         config=config,
         runtime_paths=runtime_paths,
-        entity_names=addressable_responder_names(requester_user_id, room_id, config, runtime_paths, membership_index),
+        membership_index=membership_index,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_user_id=requester_user_id,
+    )
+    if not client.device_id:
+        return text, None
+    return text, model_selection_result(
+        request,
+        command_event_id=command_event_id,
+        room_id=room_id,
         thread_id=thread_id,
     )
