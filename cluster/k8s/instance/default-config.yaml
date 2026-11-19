@@ -85,10 +85,14 @@ agents:
     - HEARTBEAT.md
     tools:
     - shell
+    - coding
     - memory
     - scheduler
-    - todo
     - matrix_message
+    - name: todo
+      defer: true
+    - name: temporary_secrets
+      defer: true
     - name: config_manager
       defer: true
     - name: duckduckgo

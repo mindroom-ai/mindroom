@@ -667,11 +667,13 @@ class TestConfigInit:
         assert "knowledge_bases" not in mind
         assert mind["tools"] == [
             "shell",
+            "coding",
             "memory",
             "scheduler",
             "update_awareness",
-            "todo",
             "matrix_message",
+            {"name": "todo", "defer": True},
+            {"name": "temporary_secrets", "defer": True},
             {"name": "config_manager", "defer": True},
             {"name": "duckduckgo", "defer": True},
             {"name": "website", "defer": True},
