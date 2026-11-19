@@ -443,8 +443,10 @@ class _BrokerService:
             manage_url=manage_url(self._runtime_paths),
             scope_info=config.scope_info,
         )
-        self._thread = threading.Thread(target=self._run, args=(broker,), name=_THREAD_NAME, daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, args=(broker,), name=_THREAD_NAME, daemon=True)
+        thread.start()
+        # Recorded only once running, so cleanup after a refused start never joins an unstarted thread.
+        self._thread = thread
         self._listening.wait()
         if self._start_error is not None:
             raise self._start_error

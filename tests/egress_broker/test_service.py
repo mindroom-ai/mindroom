@@ -1037,8 +1037,18 @@ def test_the_default_broker_turns_off_where_it_cannot_run(
 
 
 @pytest.mark.usefixtures("no_proxy_env")
+class _RefusedBrokerThread(threading.Thread):
+    """A thread the OS refuses to start, only for the broker's own thread."""
+
+    def start(self) -> None:
+        if self.name == service._THREAD_NAME:
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        super().start()
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["bind", "ttl", "audit", "ca-bundle"])
+@pytest.mark.parametrize("failure", ["bind", "ttl", "audit", "ca-bundle", "thread"])
 async def test_a_default_broker_that_cannot_start_leaves_mindroom_running(
     tmp_runtime_paths: Callable[..., RuntimePaths],
     manager: CredentialsManager,
@@ -1054,6 +1064,8 @@ async def test_a_default_broker_that_cannot_start_leaves_mindroom_running(
         raise PermissionError(13, "Permission denied")
 
     env = {EGRESS_BROKER_ENV_BY_KEY["token_ttl_seconds"]: "soon"} if failure == "ttl" else {}
+    if failure == "thread":
+        monkeypatch.setattr(service.threading, "Thread", _RefusedBrokerThread)
     if failure == "bind":
         monkeypatch.setattr(service.EgressBroker, "start", refuse)
     if failure == "ca-bundle":
