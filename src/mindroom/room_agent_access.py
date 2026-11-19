@@ -359,7 +359,7 @@ def _workspace(
     )
 
 
-async def room_agent_workspaces(  # noqa: C901 - one ordered access check
+async def room_agent_workspaces(
     connection: HTTPConnection,
     user_id: str,
     room_id: str,
