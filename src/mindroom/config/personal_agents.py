@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
+from mindroom.config.models import ToolNames
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import validate_matrix_localpart
 from mindroom.constants import AGENT_NAME_PATTERN, config_relative_path, tracking_dir
@@ -181,7 +182,7 @@ class GeneratedAgentEdits(BaseModel):
     role: str | None = None
     instructions: list[str] | None = None
     # Names from the base agent's effective tool list; each is copied with its settings.
-    tools: list[str] | None = None
+    tools: ToolNames | None = None
 
 
 class CreatedAgentEntry(BaseModel):

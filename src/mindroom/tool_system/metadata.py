@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.legacy_fields import retired_tool_override
+from mindroom.config.models import canonical_tool_name
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
@@ -785,6 +786,7 @@ def get_tool_by_name(
     None follows the sandbox settings for those tools.
     ``in_sandbox_request`` is set only by the sandbox runner building a toolkit for the request it executes.
     """
+    tool_name = canonical_tool_name(tool_name)
     factory = tools.factory(tool_name)
     metadata = tools.entries[tool_name]
     routed = (

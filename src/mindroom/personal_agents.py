@@ -13,6 +13,7 @@ from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_u
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import config_validation_summary
+from mindroom.config.models import canonical_tool_name
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
     GeneratedAgentEdits,
@@ -333,7 +334,7 @@ def _refuse_owners(owners: list[str], runtime_paths: RuntimePaths) -> None:
 
 
 def _refuse_tools(tools: list[str] | None, allowed: tuple[str, ...]) -> None:
-    if outside := [name for name in tools or () if name not in allowed]:
+    if outside := [name for name in tools or () if canonical_tool_name(name) not in allowed]:
         msg = f"Not among the tools this agent may use: {', '.join(outside)}; allowed: {', '.join(allowed)}"
         raise _GeneratedAgentError(msg)
 

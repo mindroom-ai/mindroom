@@ -3,6 +3,7 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.judgment import JudgmentConfig
+from mindroom.config.models import ToolNames
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import validate_unique_entries
 
@@ -32,7 +33,7 @@ class ContactsConfig(BaseModel):
         default_factory=list,
         description="Rules that apply to every contact of this agent, ahead of each owner's own rules",
     )
-    tools: list[str] = Field(
+    tools: ToolNames = Field(
         default_factory=list,
         description="Default tools offered in contact turns when the owner chose none for that contact",
         json_schema_extra=dashboard_hint(reference="tool"),

@@ -1,13 +1,7 @@
-"""Ergonomic coding tools for LLM agents.
+"""The filesystem tools for LLM agents, which the ``file`` and ``coding`` tool names also select.
 
-Provides file read/write/edit, grep, find, and ls operations with
-smart truncation, fuzzy matching, and actionable pagination hints.
-
-Unlike the generic ``file`` tool (agno's FileTools), this toolkit is
-optimised for coding agents: line-numbered reads with pagination,
-search-and-replace edits (several per call) with fuzzy matching, ripgrep-backed grep,
-and gitignore-aware file discovery. Prefer this tool over ``file`` for
-coding-heavy agents; keep ``file`` for backward compatibility.
+Line-numbered reads with pagination, search-and-replace edits (several per call) with fuzzy matching,
+ripgrep-backed grep, gitignore-aware file discovery, and an opt-in delete.
 """
 
 from __future__ import annotations
@@ -33,12 +27,15 @@ from pydantic import BaseModel, ConfigDict, Field, SkipValidation, TypeAdapter, 
 
 from mindroom.file_locks import wait_for_exclusive_lock
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
+from mindroom.llm.media import named_mime_type
+from mindroom.media_delivery import SUPPORTED_IMAGE_FORMATS
 from mindroom.path_confinement import is_git_metadata_path
 from mindroom.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
     is_within_base_dir,
     read_resolved_file,
+    remove_resolved_path,
     resolve_base_dir_path,
     resolve_tool_base_dir,
     spelled_output_path,
@@ -69,6 +66,16 @@ _OMITTED: Any = cast("Any", object())
 _WORKER_LOCK_TIMEOUT_SECONDS = 10.0
 _PRIMARY_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
 _PRIMARY_LOCKS_GUARD = threading.Lock()
+# The image types view_file shows, which are never text and which read_file names it for.
+_VIEWABLE_IMAGE_TYPES = frozenset(f"image/{image_format.lower()}" for image_format in SUPPORTED_IMAGE_FORMATS)
+
+
+def image_read_error(path: str) -> str | None:
+    """Return what read_file answers for ``path`` it cannot decode, if it names an image view_file shows."""
+    mime_type = named_mime_type(path)
+    if mime_type not in _VIEWABLE_IMAGE_TYPES:
+        return None
+    return f"Error: {path} is an image ({mime_type}), not text."
 
 
 @dataclass
@@ -746,12 +753,8 @@ def _read_resolved(base_dir: Path, resolved: Path, path: str) -> bytes | str:
         return f"Error reading file: {e}"
 
 
-class CodingTools(Toolkit):
-    """Ergonomic coding tools for LLM agents.
-
-    Provides file read/write/edit, grep, find, and ls operations with
-    smart truncation, fuzzy matching, and actionable pagination hints.
-    """
+class FilesystemTools(Toolkit):
+    """Read, edit, write, search, list, and optionally delete files, with pagination hints and fuzzy edits."""
 
     def __init__(
         self,
@@ -760,6 +763,7 @@ class CodingTools(Toolkit):
         shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]] = no_shared_directory_roots,
         *,
         in_sandbox_request: bool = False,
+        enable_delete_file: bool = False,
     ) -> None:
         self.base_dir = resolve_tool_base_dir(base_dir)
         # Without a workspace the base dir is only the process working directory, which workspace access refuses.
@@ -767,17 +771,8 @@ class CodingTools(Toolkit):
         self.restrict_to_base_dir = file_access == "workspace"
         self.shared_directory_roots = shared_directory_roots
         self.in_sandbox_request = in_sandbox_request
-        super().__init__(
-            name="coding",
-            tools=[
-                self.read_file,
-                self.edit_file,
-                self.write_file,
-                self.grep,
-                self.find_files,
-                self.ls,
-            ],
-        )
+        functions = [self.read_file, self.edit_file, self.write_file, self.grep, self.find_files, self.ls]
+        super().__init__(name="filesystem", tools=[*functions, *([self.delete_file] if enable_delete_file else [])])
 
     def _file_lock(self, resolved: Path) -> AbstractContextManager[None]:
         return _directory_lock(resolved) if self.in_sandbox_request else _primary_file_lock(resolved)
@@ -807,7 +802,13 @@ class CodingTools(Toolkit):
         raw = _read_resolved(self.base_dir, resolved, path)
         if isinstance(raw, str):
             return raw
-        return _format_read_output(raw.decode("utf-8", errors="replace"), offset, limit)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if image_error := image_read_error(path):
+                return image_error
+            text = raw.decode("utf-8", errors="replace")
+        return _format_read_output(text, offset, limit)
 
     @shared_directory_aware("path", writes=True)
     def edit_file(
@@ -876,6 +877,27 @@ class CodingTools(Toolkit):
         lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return f"Wrote {byte_count} bytes ({lines} lines) to {path}"
 
+    @shared_directory_aware("path", writes=True)
+    def delete_file(self, path: str) -> str:
+        """Delete a file or an empty directory.
+
+        Args:
+            path: File or directory path (relative to working directory or absolute).
+
+        """
+        try:
+            resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
+        except ValueError as e:
+            return f"Error: {e}"
+        if is_git_metadata_path(resolved):
+            return blocked_git_metadata_message("removing file", path)
+        try:
+            with self._file_lock(resolved):
+                remove_resolved_path(self.base_dir, resolved)
+        except (OSError, ValueError) as e:
+            return f"Error removing file: {e}"
+        return f"Deleted {path}"
+
     @shared_directory_aware("path", writes=False)
     def grep(
         self,
@@ -887,7 +909,7 @@ class CodingTools(Toolkit):
         context: int = 0,
         limit: int = _DEFAULT_GREP_LIMIT,
     ) -> str:
-        """Search file contents for a pattern. Uses ripgrep if available, falls back to Python re.
+        """Search file contents for a pattern.
 
         Args:
             pattern: Regex pattern (or literal string if literal=True) to search for.

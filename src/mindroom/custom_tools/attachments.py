@@ -68,7 +68,7 @@ _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
 _ResolvedSendAttachment = AttachmentRecord | RuntimeEncryptedMediaAttachment
 _WORKER_ATTACHMENT_USAGE = (
     "Not in your workspace. Copy it there with get_attachment(attachment_id, mindroom_output_path=...) "
-    "before file, coding, python, or shell tools use it."
+    "before filesystem, python, or shell tools use it."
 )
 
 

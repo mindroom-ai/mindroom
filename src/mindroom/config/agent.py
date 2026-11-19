@@ -34,6 +34,7 @@ from mindroom.config.models import (
     CompactionOverrideConfig,
     FileAccess,
     ToolConfigEntry,
+    ToolNames,
     validate_unique_tool_entries,
 )
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
@@ -432,7 +433,7 @@ class AgentConfig(BaseModel):
         default=None,
         description="Whether streamed replies show the model's reasoning to the room (per-agent override)",
     )
-    worker_tools: list[str] | None = Field(
+    worker_tools: ToolNames | None = Field(
         default=None,
         description="Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
         json_schema_extra=dashboard_hint(reference="tool"),

@@ -5,15 +5,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePath, PureWindowsPath
-from typing import Any, Literal, Self, cast
+from typing import Annotated, Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
-from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.legacy_fields import migrate_legacy_file_overrides, reject_legacy_defaults_fields
 from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import (
@@ -53,8 +53,24 @@ _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 # Config-only tool names that expand to their member tools wherever they are authored.
 TOOL_PRESETS: dict[str, tuple[str, ...]] = {
-    "openclaw_compat": ("shell", "coding", "duckduckgo", "website", "browser", "scheduler", "matrix_message"),
+    "openclaw_compat": ("shell", "filesystem", "duckduckgo", "website", "browser", "scheduler", "matrix_message"),
 }
+# Other names of one registered toolkit, accepted wherever a tool name is authored, stored, or asked for.
+TOOL_ALIASES: dict[str, str] = {"file": "filesystem", "coding": "filesystem"}
+
+
+def canonical_tool_name(name: str) -> str:
+    """Return ``name``, a toolkit or ``toolkit.function``, with an aliased toolkit spelled by its registered name."""
+    toolkit, separator, function = name.partition(".")
+    return TOOL_ALIASES.get(toolkit, toolkit) + separator + function
+
+
+def canonical_tool_names[T: (list[str], tuple[str, ...])](names: T) -> T:
+    """Return ``names`` canonical, each once, in their first order."""
+    return type(names)(dict.fromkeys(canonical_tool_name(name) for name in names))
+
+
+ToolNames = Annotated[list[str], AfterValidator(canonical_tool_names)]
 # Tools that runtime policy injects, so they are never lazy-loading units.
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
     {
@@ -138,7 +154,7 @@ class BackgroundToolJobsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(default=True, description="Enable managed tool waits and durable jobs; requires restart.")
-    exclude_toolkits: list[str] = Field(
+    exclude_toolkits: ToolNames = Field(
         default_factory=list,
         description="Registered toolkit names that keep their own waiting behavior; requires restart.",
         json_schema_extra=dashboard_hint(reference="tool"),
@@ -260,11 +276,14 @@ class ToolConfigEntry(BaseModel):
             return {"name": data}
         if isinstance(data, dict):
             entry_dict = cast("dict[object, object]", data)
-            return (
+            entry = (
                 _coerce_named_tool_entry(entry_dict)
                 if "name" in entry_dict or "overrides" in entry_dict
                 else _coerce_single_key_tool_entry(entry_dict)
             )
+            if entry.get("name") == "file" and isinstance(overrides := entry.get("overrides"), dict):
+                entry["overrides"] = migrate_legacy_file_overrides(cast("dict[str, object]", overrides))
+            return entry
         msg = "Tool entries must be strings or single-key mappings"
         raise ValueError(msg)
 
@@ -302,9 +321,26 @@ def validate_unique_tool_entries(
     *,
     scope_name: str,
 ) -> list[ToolConfigEntry]:
-    """Ensure each normalized tool name appears at most once within one scope."""
+    """Ensure each tool appears once within one scope, merging entries that name one toolkit by its other names."""
     validate_unique_entries([entry.name for entry in tools], field_name=f"{scope_name} tools")
-    return tools
+    merged: dict[str, tuple[ToolConfigEntry, str]] = {}
+    for entry in tools:
+        name = canonical_tool_name(entry.name)
+        if name not in merged:
+            merged[name] = (entry if name == entry.name else entry.model_copy(update={"name": name}), entry.name)
+            continue
+        kept, kept_name = merged[name]
+        overrides = dict(kept.overrides)
+        for key, value in entry.overrides.items():
+            if overrides.setdefault(key, value) != value:
+                msg = f"{scope_name} tools '{kept_name}' and '{entry.name}' both select {name} but set {key} differently"
+                raise ValueError(msg)
+        update: dict[str, object] = {"overrides": overrides}
+        if (kept.model_fields_set | entry.model_fields_set) & _TOOL_CONFIG_CONTROL_KEYS:
+            update["defer"] = kept.defer and entry.defer
+            update["initial"] = update["defer"] and (kept.initial or entry.initial)
+        merged[name] = (kept.model_copy(update=update), kept_name)
+    return [entry for entry, _authored in merged.values()]
 
 
 def _validate_compaction_threshold_choice(
@@ -534,13 +570,13 @@ class DefaultsConfig(BaseModel):
     file_access: FileAccess = Field(
         default="workspace",
         description=(
-            "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) "
+            "Where in-process path-taking tools (filesystem, attachments, matrix_message, gmail, google_drive, browser) "
             "may read and write files: workspace confines them to the agent workspace and its attachments, "
             "unrestricted allows any path their process can reach. Code-execution tools such as shell and python "
             "are always unrestricted; isolate them with worker_tools"
         ),
     )
-    worker_tools: list[str] | None = Field(
+    worker_tools: ToolNames | None = Field(
         default=None,
         description="Tool names to route through scoped workers by default (None = use the built-in default routing policy)",
         json_schema_extra=dashboard_hint(reference="tool"),

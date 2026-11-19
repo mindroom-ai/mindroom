@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.config.models import canonical_tool_names
 from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge.utils import semantic_agent_knowledge_base_ids
@@ -110,7 +111,7 @@ def inline_persona(
         source_kind=source_kind,
         source_name=source_name,
         system_prompt=_system_prompt(system_prompt),
-        tools=_name_entries(tools, "tools", "tool"),
+        tools=None if (names := _name_entries(tools, "tools", "tool")) is None else canonical_tool_names(names),
         skills=_name_entries(skills, "skills", "skill"),
         knowledge=_name_entries(knowledge, "knowledge", "knowledge base"),
     )

@@ -6,6 +6,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
+from mindroom.config.models import canonical_tool_name
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool, tool
 from mindroom.tool_system.tool_access import tool_definition
@@ -66,7 +67,8 @@ class DynamicToolsToolkit(Toolkit):
 
         """
         raw_query = query.strip().lower()
-        query_tokens = _tokens(raw_query)
+        # A toolkit's other names find it too.
+        query_tokens = {name for token in _tokens(raw_query) for name in (token, canonical_tool_name(token))}
         # No function name lacks word characters, so a query without them can only browse.
         if not query_tokens:
             return self._listing()

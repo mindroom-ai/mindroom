@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mindroom.config.models import ToolNames
 from mindroom.config.schema_hints import dashboard_hint
 
 
@@ -32,7 +33,7 @@ class ListenConfig(BaseModel):
         le=60,
         description="Most silent turns per hour; further due runs are skipped and what was heard is kept",
     )
-    tools: list[str] = Field(
+    tools: ToolNames = Field(
         default_factory=lambda: ["memory", "react"],
         min_length=1,
         description=(
