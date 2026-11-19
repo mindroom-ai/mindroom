@@ -1099,6 +1099,21 @@ async def test_a_key_card_shows_a_link_and_a_field_hint(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_key_card_asks_for_the_overleaf_git_token(tmp_path: Path) -> None:
+    """The Overleaf preset takes a key, so the card names Overleaf and the Git bridge host the token goes to."""
+    tool, context = _asking(tmp_path, {"overleaf": {"preset": "overleaf"}})
+
+    task = _start(tool, context, "overleaf", url="https://www.overleaf.com/user/settings")
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    content = card[SECRET_REQUEST_CONTENT_KEY]
+    assert (content["service"], content["display_name"]) == ("overleaf", "Overleaf")
+    assert content["hosts"] == ["git.overleaf.com"]
+
+
+@pytest.mark.asyncio
 async def test_a_key_card_refuses_a_link_no_card_can_show(tmp_path: Path) -> None:
     """A link that is no `http` or `https` page posts no card and tells the agent why."""
     tool, context = _asking(tmp_path)

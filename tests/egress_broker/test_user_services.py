@@ -812,6 +812,15 @@ def test_oauth_provider_must_be_registered(manager: CredentialsManager) -> None:
     assert load_user_services(manager, worker_target())["mine"].oauth_provider == "github"
 
 
+def test_a_user_can_add_the_overleaf_preset_as_their_own_service(manager: CredentialsManager) -> None:
+    """Overleaf takes a key and no OAuth provider, so a user adds it as a plain preset service."""
+    _save(manager, worker_target(), "overleaf", EgressService.model_validate({"preset": "overleaf"}))
+
+    saved = load_user_services(manager, worker_target())["overleaf"]
+    assert saved.preset == "overleaf"
+    assert [rule.host for rule in saved.rules] == ["git.overleaf.com"]
+
+
 def test_equal_config_copies_share_a_cache_entry(manager: CredentialsManager, monkeypatch: pytest.MonkeyPatch) -> None:
     """The broker's and the tools' config objects can be separate equal copies; they share one entry, not evict."""
     _save(manager, worker_target(), "mine", _service())
