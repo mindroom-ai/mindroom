@@ -780,6 +780,23 @@ _INDEXES = (
     )
     """,
     """
+    -- Membership checks find an echoed event by its ID; the room prefix would read every delivery row in the room.
+    CREATE INDEX IF NOT EXISTS matrix_delivery_outbox_acknowledged_event
+    ON matrix_delivery_outbox (principal_id, room_id, acknowledged_event_id)
+    WHERE acknowledged_event_id IS NOT NULL
+    """,
+    """
+    -- Membership checks find an unacknowledged echo by its transaction ID, not by walking the room.
+    CREATE INDEX IF NOT EXISTS matrix_delivery_outbox_transaction
+    ON matrix_delivery_outbox (principal_id, room_id, transaction_id)
+    """,
+    """
+    -- The prompt-delivery check reads one membership's open deliveries, not every row the room ever sent.
+    CREATE INDEX IF NOT EXISTS matrix_delivery_outbox_open_membership
+    ON matrix_delivery_outbox (principal_id, room_id, membership_epoch)
+    WHERE acknowledged_event_id IS NULL AND retired = 0
+    """,
+    """
     -- A continuation holds its paused span's pending sources; each span pauses at most one.
     CREATE UNIQUE INDEX IF NOT EXISTS approval_continuations_span ON approval_continuations (principal_id, span_id)
     """,
@@ -797,6 +814,12 @@ _INDEXES = (
     """,
     """
     CREATE INDEX IF NOT EXISTS reply_messages_state ON reply_messages (principal_id, state, created_at_ns)
+    """,
+    """
+    -- Live spans map to their replies' events by span, not by every reply the room holds.
+    CREATE INDEX IF NOT EXISTS reply_messages_current_span
+    ON reply_messages (principal_id, current_span_id)
+    WHERE current_span_id IS NOT NULL
     """,
     """
     -- Every delivery recovery pass looks for debt; it must not read every

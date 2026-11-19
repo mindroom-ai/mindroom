@@ -61,8 +61,10 @@ from mindroom.event_journal import (
     approval_arguments_digest,
     delivery_transaction_id,
     journal,
+    outbox,
     reads,
     replacement_target,
+    reply_messages,
     sqlite_backend,
     turn_rows,
 )
@@ -9961,6 +9963,44 @@ class TestHotQueriesAreIndexCovered:
         assert all("thread_id=?" in step or "logical_event_id=?" in step for step in visible), steps
         assert any("COVERING INDEX" in step and "thread_id=?" in step for step in visible), steps
         assert not any(marker in step for step in steps for marker in ("SCAN ", "TEMP B-TREE")), steps
+
+    async def test_per_event_lookups_seek_their_own_column_instead_of_walking_the_room(self, tmp_path: Path) -> None:
+        """Each lookup the journal writer runs per event is entered on the column it matches, not the room prefix.
+
+        Entered on the room or principal prefix alone, the plan still says SEARCH while every call reads each row of
+        the room, payload included.
+        """
+        database = _plan_database(tmp_path / "lookup-plan.db")
+        steps: list[str] = []
+
+        class _PlanRecorder:
+            def fetchone(self, sql: str, params: Sequence[object] = ()) -> None:
+                self.fetchall(sql, params)
+
+            def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
+                rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
+                steps.append(" | ".join(row[-1] for row in rows))
+                return ()
+
+        recorder = cast("Transaction", _PlanRecorder())
+        principal = "agent@@agent:example.org"
+        outbox.event_belongs_to_membership(
+            recorder,
+            principal,
+            room_id=ROOM,
+            event_id="$echo",
+            membership_epoch=1,
+            sender="@agent:example.org",
+            transaction_id="txn",
+        )
+        outbox.has_attempted_unacknowledged_prompt_delivery(recorder, principal, room_id=ROOM, membership_epoch=1)
+        reply_messages.event_ids_of_spans(recorder, principal, ROOM, ("span-1", "span-2"))
+        reply_messages.waiting_to_replay(recorder, principal, ("$a", "$b"))
+
+        columns = ("acknowledged_event_id=?", "transaction_id=?", "membership_epoch=?", "current_span_id=?", "state=?")
+        assert len(steps) == len(columns), steps
+        for column, plan in zip(columns, steps, strict=True):
+            assert column in plan, plan
 
     async def test_room_activity_titles_load_by_primary_key(self, tmp_path: Path) -> None:
         """Roots and summary notices are loaded by their IDs, not by walking the room's index to find them."""
