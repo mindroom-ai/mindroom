@@ -54,6 +54,8 @@ const SERVICE_ERROR_MESSAGES: RequestErrorMessages = {
 type EditorState = (
   | {
       kind: "add";
+      /** Names this Add, which stays the same while the editor state is replaced. */
+      session: symbol;
       /** Add a limit on GitHub repositories, which has no key of its own. */
       restrictOnly?: boolean;
     }
@@ -383,13 +385,14 @@ function AgentSection({
   // and closes through `onClose`, so a key that fails can be reported there.
   // An Add only creates until its own create succeeded: it never replaces a
   // service of that name, nor takes its key, whatever the listing shows.
-  const created = useRef<EditorState | null>(null);
+  const created = useRef<symbol | null>(null);
   const save = async (name: string, service: AuthoredEgressService) => {
-    const adding = editor?.kind === "add" && created.current !== editor;
+    const session = editor?.kind === "add" ? editor.session : null;
+    const adding = session !== null && created.current !== session;
     const headers = adding ? { "If-None-Match": "*" } : undefined;
     const path = servicePath(agent.agent_name, name);
     if (!(await write(path, "PUT", service, headers))) return;
-    if (adding) created.current = editor;
+    if (adding) created.current = session;
     onChanged();
   };
 
@@ -428,7 +431,7 @@ function AgentSection({
       ),
     onLimitToRepositories: () => {
       setError(null);
-      setEditor({ kind: "add", restrictOnly: true });
+      setEditor({ kind: "add", session: Symbol(), restrictOnly: true });
     },
     limitDisabled: editor !== null,
     signInNext,
@@ -513,7 +516,7 @@ function AgentSection({
               aria-label={`Add service for ${agent.agent_display_name}`}
               onClick={() => {
                 setError(null);
-                setEditor({ kind: "add" });
+                setEditor({ kind: "add", session: Symbol() });
               }}
             >
               Add service
