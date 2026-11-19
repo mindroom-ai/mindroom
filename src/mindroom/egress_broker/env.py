@@ -130,10 +130,13 @@ def egress_tool_with_only_primary_python(config: Config, agent_name: str, runtim
     if agent_name not in config.agents:
         return False
     agent_tools = _agent_tools(config, agent_name, runtime_paths)
+    command_tools = EXECUTION_ENV_TOOL_NAMES.intersection(agent_tools.tool_names)
     return (
         _EGRESS_TOOL_NAME in agent_tools.tool_names
-        and not EXECUTION_ENV_TOOL_NAMES.isdisjoint(agent_tools.tool_names)
+        and bool(command_tools)
         and not _uses_broker(agent_tools, runtime_paths)
+        # A worker-routed command misses only the default broker's worker-facing URL, not a python in the primary.
+        and not _runs_in_a_worker(agent_tools, command_tools, runtime_paths)
     )
 
 
