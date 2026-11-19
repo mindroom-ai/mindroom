@@ -1,4 +1,4 @@
-"""Tests for the ergonomic coding tools."""
+"""Tests for the filesystem tools."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ import pytest
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.custom_tools import coding as coding_module
-from mindroom.custom_tools.coding import (
-    CodingTools,
+from mindroom.custom_tools import filesystem as filesystem_module
+from mindroom.custom_tools.filesystem import (
+    FilesystemTools,
     _find_all_matches,
     _normalize_for_fuzzy,
     _run_ripgrep,
@@ -36,7 +36,6 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_schema import tool_parameters, validated_entrypoint
-from mindroom.tools.file import file_tools
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -55,9 +54,9 @@ def tmp_base(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def tools(tmp_base: Path) -> CodingTools:
-    """Create CodingTools with the tmp base."""
-    return CodingTools(base_dir=str(tmp_base))
+def tools(tmp_base: Path) -> FilesystemTools:
+    """Create FilesystemTools with the tmp base."""
+    return FilesystemTools(base_dir=str(tmp_base))
 
 
 class TestTruncateHead:
@@ -146,26 +145,26 @@ class TestFuzzyMatching:
 
 
 class TestReadFile:
-    """Tests for CodingTools.read_file."""
+    """Tests for FilesystemTools.read_file."""
 
-    def test_read_simple(self, tools: CodingTools) -> None:
+    def test_read_simple(self, tools: FilesystemTools) -> None:
         """Reads a simple file with line numbers."""
         result = tools.read_file("hello.py")
         assert "print('hello')" in result
         assert "print('world')" in result
         assert "1|" in result
 
-    def test_read_nested(self, tools: CodingTools) -> None:
+    def test_read_nested(self, tools: FilesystemTools) -> None:
         """Reads a file in a subdirectory."""
         result = tools.read_file("sub/nested.txt")
         assert "nested content" in result
 
-    def test_read_missing(self, tools: CodingTools) -> None:
+    def test_read_missing(self, tools: FilesystemTools) -> None:
         """Returns error for missing files."""
         result = tools.read_file("nonexistent.py")
         assert "Error" in result
 
-    def test_read_with_offset(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_read_with_offset(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Reads from a given offset."""
         content = "\n".join(f"line {i}" for i in range(1, 21))
         (tmp_base / "many.txt").write_text(content)
@@ -173,7 +172,7 @@ class TestReadFile:
         assert "line 10" in result
         assert "line 1|" not in result
 
-    def test_read_with_limit(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_read_with_limit(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Respects line limit and shows pagination hint."""
         content = "\n".join(f"line {i}" for i in range(1, 21))
         (tmp_base / "many.txt").write_text(content)
@@ -181,49 +180,59 @@ class TestReadFile:
         assert "line 1" in result
         assert "offset=6" in result
 
-    def test_read_offset_past_end(self, tools: CodingTools) -> None:
+    def test_read_offset_past_end(self, tools: FilesystemTools) -> None:
         """Returns error when offset exceeds file length."""
         result = tools.read_file("hello.py", offset=9999)
         assert "Error" in result
         assert "exceeds" in result
 
-    def test_read_truncation_hint(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_read_truncation_hint(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Shows pagination hint for large files (>2000 lines)."""
         content = "\n".join(f"line {i}" for i in range(1, 3001))
         (tmp_base / "big.txt").write_text(content)
         result = tools.read_file("big.txt")
         assert "offset=" in result
 
-    def test_read_not_a_file(self, tools: CodingTools) -> None:
+    def test_read_not_a_file(self, tools: FilesystemTools) -> None:
         """Returns error when path is a directory."""
         result = tools.read_file("sub")
         assert "Error" in result
         assert "Not a file" in result
 
-    def test_read_empty_file(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_read_empty_file(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Reading an existing empty file should succeed with empty output."""
         (tmp_base / "empty.txt").write_text("")
         result = tools.read_file("empty.txt")
         assert result == ""
 
-    def test_read_rejects_non_positive_limit(self, tools: CodingTools) -> None:
+    def test_read_rejects_non_positive_limit(self, tools: FilesystemTools) -> None:
         """Rejects invalid non-positive line limits."""
         result = tools.read_file("hello.py", limit=-1)
         assert "Error" in result
         assert "limit" in result
 
-    def test_read_rejects_non_positive_offset(self, tools: CodingTools) -> None:
+    def test_read_rejects_non_positive_offset(self, tools: FilesystemTools) -> None:
         """Rejects invalid non-positive offsets."""
         result = tools.read_file("hello.py", offset=0)
         assert "Error" in result
         assert "offset" in result
 
-    def test_read_long_single_line_is_still_readable(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_read_long_single_line_is_still_readable(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Very long single-line files should return partial content, not an empty page."""
         (tmp_base / "single_long.txt").write_text("x" * 70_000)
         result = tools.read_file("single_long.txt")
         assert "1| " in result
         assert "[truncated]" in result
+
+    def test_read_image_names_its_type_instead_of_returning_junk(self, tools: FilesystemTools, tmp_base: Path) -> None:
+        """An image read_file cannot decode is named as one, not decoded into replacement characters."""
+        (tmp_base / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\xff\xfe")
+        assert tools.read_file("logo.png") == "Error: logo.png is an image (image/png), not text."
+
+    def test_read_undecodable_text_keeps_its_readable_parts(self, tools: FilesystemTools, tmp_base: Path) -> None:
+        """A text file that is not UTF-8 still reads, with its undecodable bytes replaced."""
+        (tmp_base / "latin.txt").write_bytes(b"caf\xe9\n")
+        assert tools.read_file("latin.txt") == "1| caf\ufffd"
 
 
 def _one(old_text: str, new_text: str) -> list[dict[str, str]]:
@@ -232,15 +241,15 @@ def _one(old_text: str, new_text: str) -> list[dict[str, str]]:
 
 
 class TestEditFile:
-    """Tests for CodingTools.edit_file."""
+    """Tests for FilesystemTools.edit_file."""
 
-    def test_exact_edit(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_exact_edit(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Replaces exact text and reports where the new text landed, without a diff."""
         result = tools.edit_file("hello.py", _one("print('hello')", "print('hi')"))
         assert result == "Applied 1 edit to hello.py: line 1."
         assert (tmp_base / "hello.py").read_text() == "print('hi')\nprint('world')\n"
 
-    def test_edits_match_the_original_file_not_each_other(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_edits_match_the_original_file_not_each_other(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Every old_text is matched against the file as it was, so two edits can swap lines."""
         (tmp_base / "swap.py").write_text("a = 1\nb = 2\nc = 3\n")
         result = tools.edit_file(
@@ -250,7 +259,7 @@ class TestEditFile:
         assert result == "Applied 2 edits to swap.py: lines 1-2."
         assert (tmp_base / "swap.py").read_text() == "b = 2\na = 1\nc = 3\n"
 
-    def test_reported_lines_are_in_the_new_file(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_reported_lines_are_in_the_new_file(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Line ranges count the replaced text where it sits after all edits."""
         (tmp_base / "lines.py").write_text("one\ntwo\nthree\nfour\n")
         result = tools.edit_file(
@@ -260,14 +269,14 @@ class TestEditFile:
         assert result == "Applied 2 edits to lines.py: lines 1-3, 6."
         assert (tmp_base / "lines.py").read_text() == "1\n1.1\n1.2\ntwo\nthree\n4\n"
 
-    def test_replace_all(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_replace_all(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """replace_all replaces every match."""
         (tmp_base / "dup.py").write_text("foo\nbar\nfoo\n")
         result = tools.edit_file("dup.py", [{"old_text": "foo", "new_text": "baz", "replace_all": True}])
         assert result == "Applied 1 edit (2 replacements) to dup.py: lines 1, 3."
         assert (tmp_base / "dup.py").read_text() == "baz\nbar\nbaz\n"
 
-    def test_overlapping_edits_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_overlapping_edits_are_refused(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Edits whose matches overlap are refused and nothing is written."""
         (tmp_base / "overlap.py").write_text("alpha beta gamma\n")
         result = tools.edit_file(
@@ -284,7 +293,7 @@ class TestEditFile:
         )
         assert (tmp_base / "overlap.py").read_text() == "alpha beta gamma\n"
 
-    def test_overlap_with_replace_all_says_it_changes_every_match(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_overlap_with_replace_all_says_it_changes_every_match(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """An overlap with a replace_all edit says that edit already changes every match."""
         (tmp_base / "cfg.py").write_text("import os\n\n\ndef get_cfg(path=None):\n    return get_cfg\n")
         result = tools.edit_file(
@@ -299,7 +308,7 @@ class TestEditFile:
             "Merge them into one edit, or make old_text more specific.\nNo changes written."
         )
 
-    def test_overlap_of_two_replace_all_edits(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_overlap_of_two_replace_all_edits(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Two replace_all edits that overlap get the same advice."""
         (tmp_base / "abc.txt").write_text("alpha beta gamma\nalpha beta\nbeta gamma\n")
         result = tools.edit_file(
@@ -314,26 +323,26 @@ class TestEditFile:
             "Merge them into one edit, or make old_text more specific.\nNo changes written."
         )
 
-    def test_deeply_nested_string_edits_is_reported_not_raised(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_deeply_nested_string_edits_is_reported_not_raised(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A string edits too deeply nested to decode gets the not-valid-JSON error instead of raising."""
         result = tools.edit_file("hello.py", "[" * 100_000)
         assert result.startswith("Error: edits must be a JSON array, but it arrived as a string that is not valid JSON")
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
-    def test_overlap_line_is_numbered_as_read_file_numbers_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_overlap_line_is_numbered_as_read_file_numbers_lines(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A file whose lines end in a lone CR names the overlap's line as read_file would."""
         (tmp_base / "cr.txt").write_bytes(b"one\rtwo three\rfour\r")
         result = tools.edit_file("cr.txt", [*_one("two three", "x"), *_one("three", "y")])
         assert result.startswith("Error: edits[0] and edits[1] overlap at line 2.")
 
-    def test_replace_all_of_self_overlapping_text_goes_left_to_right(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_replace_all_of_self_overlapping_text_goes_left_to_right(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """replace_all replaces non-overlapping matches from left to right, as str.replace does."""
         (tmp_base / "a.txt").write_text("aaa\n")
         result = tools.edit_file("a.txt", [{"old_text": "aa", "new_text": "b", "replace_all": True}])
         assert result == "Applied 1 edit to a.txt: line 1."
         assert (tmp_base / "a.txt").read_text() == "aaa\n".replace("aa", "b")
 
-    def test_identity_edit_is_not_reported(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_identity_edit_is_not_reported(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """An edit that changes nothing in a multi-edit call is left out of the reported lines."""
         (tmp_base / "id.py").write_text("one\ntwo\nthree\n")
         result = tools.edit_file(
@@ -343,7 +352,7 @@ class TestEditFile:
         assert result == "Applied 2 edits to id.py: line 3."
         assert (tmp_base / "id.py").read_text() == "one\ntwo\n3\n"
 
-    def test_one_failing_edit_writes_nothing(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_one_failing_edit_writes_nothing(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """All edits apply or none does."""
         result = tools.edit_file(
             "hello.py",
@@ -353,7 +362,7 @@ class TestEditFile:
         assert result.endswith("No changes written.")
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
-    def test_not_found_names_the_closest_line(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_not_found_names_the_closest_line(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A missed old_text points at the line it most likely meant."""
         (tmp_base / "calc.py").write_text("import math\n\n\ndef compute_total(items):\n    return sum(items)\n")
         result = tools.edit_file("calc.py", _one("\ndef compute_totals(items):\n    pass\n", "x"))
@@ -361,7 +370,7 @@ class TestEditFile:
             "Error: old_text not found in the file.\nClosest line 4: def compute_total(items):\nNo changes written."
         )
 
-    def test_not_found_names_up_to_three_close_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_not_found_names_up_to_three_close_lines(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Several near lines are listed in file order, so the meant one is among them."""
         body = "".join(f"# filler line {i}\n" for i in range(17))
         body += "def fetch(url, timeout=30, headers=None):\n    pass\n\n\n\n\ndef fetch_json(url, timeout=30):\n"
@@ -372,7 +381,7 @@ class TestEditFile:
             " | 24: def fetch_json(url, timeout=30):\nNo changes written."
         )
 
-    def test_not_found_names_distinct_close_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_not_found_names_distinct_close_lines(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Repeated lines count once, so they don't crowd out other candidates."""
         (tmp_base / "f.py").write_text("f(x=2)\nf(x=2)\nf(x=2)\nf(y=3)\n")
         result = tools.edit_file("f.py", _one("f(x=1)", "z"))
@@ -381,24 +390,24 @@ class TestEditFile:
             == "Error: old_text not found in the file.\nClosest lines: 1: f(x=2) | 4: f(y=3)\nNo changes written."
         )
 
-    def test_incidental_new_text_is_not_called_applied(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_incidental_new_text_is_not_called_applied(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A new_text found only inside a line, or inside old_text, still gets the closest line."""
         (tmp_base / "flag.py").write_text("flag = enabled\n")
         result = tools.edit_file("flag.py", _one("flag = enabled  # stale comment", "enabled"))
         assert result == "Error: old_text not found in the file.\nClosest line 1: flag = enabled\nNo changes written."
 
-    def test_not_found_without_a_close_line(self, tools: CodingTools) -> None:
+    def test_not_found_without_a_close_line(self, tools: FilesystemTools) -> None:
         """No hint when nothing in the file resembles old_text."""
         result = tools.edit_file("hello.py", _one("nonexistent text", "replacement"))
         assert result == "Error: old_text not found in the file.\nNo changes written."
 
-    def test_closest_line_is_cut(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_closest_line_is_cut(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A long closest line is cut to 200 characters."""
         (tmp_base / "long.py").write_text("x" * 500 + "\n")
         result = tools.edit_file("long.py", _one("x" * 499 + "y", "z"))
         assert f"Closest line 1: {'x' * 200}\nNo changes written." in result
 
-    def test_several_matches_lists_their_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_several_matches_lists_their_lines(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """An ambiguous old_text names every line it matches and how to pick one."""
         (tmp_base / "dup.py").write_text("foo\nx\nfoo\nfoo\n")
         result = tools.edit_file("dup.py", _one("foo", "bar"))
@@ -408,7 +417,7 @@ class TestEditFile:
         )
         assert (tmp_base / "dup.py").read_text() == "foo\nx\nfoo\nfoo\n"
 
-    def test_edits_as_a_json_string(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_edits_as_a_json_string(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Edits a model sent as a JSON string still apply, through the validated tool call too."""
         edits = json.dumps(_one("print('hello')", "print('hi')"))
         assert (
@@ -417,7 +426,7 @@ class TestEditFile:
         assert tools.edit_file("hello.py", json.dumps(_one("print('hi')", "print('hey')"))).startswith("Applied 1 edit")
         assert (tmp_base / "hello.py").read_text() == "print('hey')\nprint('world')\n"
 
-    def test_edits_as_a_broken_json_string(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_edits_as_a_broken_json_string(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A string that is no JSON is named as the problem, before the debris it left in other keys."""
         edits = '[{"old_text">def upload(client, key, data):\n    retries = 3'
         result = validated_entrypoint(tools.edit_file)(path="hello.py", edits=edits, new_text="x")
@@ -428,7 +437,7 @@ class TestEditFile:
         )
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
-    def test_legacy_flat_call_still_applies(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_legacy_flat_call_still_applies(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A call with the old flat old_text and new_text arguments works, though the schema no longer shows them."""
         result = validated_entrypoint(tools.edit_file)(
             path="hello.py",
@@ -438,19 +447,19 @@ class TestEditFile:
         assert result == "Applied 1 edit to hello.py: line 1."
         assert (tmp_base / "hello.py").read_text() == "print('hi')\nprint('world')\n"
 
-    def test_legacy_flat_call_passes_the_argument_gate(self, tools: CodingTools) -> None:
+    def test_legacy_flat_call_passes_the_argument_gate(self, tools: FilesystemTools) -> None:
         """The CLI and MCP gates check the offered schema, which must still admit the old flat call."""
         offered = next(f for f in adapt_toolkit(tools).functions if f.name == "edit_file")
         validate_tool_arguments(dict(offered.parameters), {"path": "hello.py", "old_text": "a", "new_text": "b"})
 
-    def test_unknown_arguments_show_the_shape(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_unknown_arguments_show_the_shape(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A call without edits gets an error that shows how to call it."""
         result = validated_entrypoint(tools.edit_file)(path="hello.py", old_str="print('hello')", new_str="x")
         assert result.startswith("Error:")
         assert '"old_text"' in result
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
-    def test_schema_offers_only_path_and_edits(self, tools: CodingTools) -> None:
+    def test_schema_offers_only_path_and_edits(self, tools: FilesystemTools) -> None:
         """The model sees edits items with old_text, new_text and replace_all, and no top-level old_text."""
         parameters = tool_parameters(tools.edit_file)
         assert list(parameters["properties"]) == ["path", "edits"]
@@ -458,7 +467,7 @@ class TestEditFile:
         assert list(items["properties"]) == ["old_text", "new_text", "replace_all"]
         assert items["required"] == ["old_text", "new_text"]
 
-    def test_crlf_and_bom_survive(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_crlf_and_bom_survive(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Line endings and a byte order mark stay as they were."""
         (tmp_base / "win.txt").write_bytes(b"\xef\xbb\xbfline one\r\nline two\r\nline three\r\n")
         result = tools.edit_file(
@@ -468,56 +477,56 @@ class TestEditFile:
         assert result == "Applied 2 edits to win.txt: lines 1, 3."
         assert (tmp_base / "win.txt").read_bytes() == b"\xef\xbb\xbffirst\r\nline two\r\nthird\r\n"
 
-    def test_lf_edits_of_a_crlf_file_keep_crlf(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_lf_edits_of_a_crlf_file_keep_crlf(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """An old_text written with LF matches a CRLF file, and its new_text lands with CRLF."""
         (tmp_base / "win.txt").write_bytes(b"line one\r\nline two\r\nline three\r\n")
         result = tools.edit_file("win.txt", _one("line one\nline two\n", "first\nsecond\nthird\n"))
         assert result == "Applied 1 edit to win.txt: lines 1-3."
         assert (tmp_base / "win.txt").read_bytes() == b"first\r\nsecond\r\nthird\r\nline three\r\n"
 
-    def test_crlf_leading_lf_never_splits_a_pair(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_crlf_leading_lf_never_splits_a_pair(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """An old_text that starts with LF matches the whole CRLF, so no stray carriage return is left."""
         (tmp_base / "win.txt").write_bytes(b"a\r\nb\r\nc\r\n")
         result = tools.edit_file("win.txt", _one("\nb", "\nB"))
         assert result == "Applied 1 edit to win.txt: lines 1-2."
         assert (tmp_base / "win.txt").read_bytes() == b"a\r\nB\r\nc\r\n"
 
-    def test_crlf_newline_only_edit(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_crlf_newline_only_edit(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A newline-only edit of a CRLF file works on whole line endings."""
         (tmp_base / "win.txt").write_bytes(b"a\r\nb\r\n")
         result = tools.edit_file("win.txt", [{"old_text": "\n", "new_text": "\n\n", "replace_all": True}])
         assert result == "Applied 1 edit (2 replacements) to win.txt: lines 1-4."
         assert (tmp_base / "win.txt").read_bytes() == b"a\r\n\r\nb\r\n\r\n"
 
-    def test_crlf_identical_edit_is_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_crlf_identical_edit_is_refused(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Swapping an LF for the CRLF it stands for changes nothing, so it is refused."""
         (tmp_base / "win.txt").write_bytes(b"a\r\nb\r\n")
         result = tools.edit_file("win.txt", _one("a\r\n", "a\n"))
         assert "identical" in result
         assert (tmp_base / "win.txt").read_bytes() == b"a\r\nb\r\n"
 
-    def test_mixed_endings_no_op_is_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_mixed_endings_no_op_is_refused(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """In a file with mixed endings an edit that changes nothing is refused, and no ending is rewritten."""
         (tmp_base / "mixed.txt").write_bytes(b"a\nb\r\n")
         result = tools.edit_file("mixed.txt", _one("a\n", "a\n"))
         assert result.startswith("Error: the edits leave the file identical")
         assert (tmp_base / "mixed.txt").read_bytes() == b"a\nb\r\n"
 
-    def test_mixed_endings_replace_all_keeps_each_ending(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_mixed_endings_replace_all_keeps_each_ending(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """replace_all in a mixed file keeps the ending of every line."""
         (tmp_base / "mixed.txt").write_bytes(b"a\r\nb\na\r\n")
         result = tools.edit_file("mixed.txt", [{"old_text": "a", "new_text": "c", "replace_all": True}])
         assert result == "Applied 1 edit (2 replacements) to mixed.txt: lines 1, 3."
         assert (tmp_base / "mixed.txt").read_bytes() == b"c\r\nb\nc\r\n"
 
-    def test_mixed_endings_are_matched_as_they_are(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_mixed_endings_are_matched_as_they_are(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A mixed file is matched byte for byte, as origin/main matched it, so both LF pairs count."""
         (tmp_base / "mixed.txt").write_bytes(b"A\r\n\n\nB\n\nC")
         result = tools.edit_file("mixed.txt", _one("\n\n", "!"))
         assert result.startswith("Error: old_text matches 2 places")
         assert (tmp_base / "mixed.txt").read_bytes() == b"A\r\n\n\nB\n\nC"
 
-    def test_lone_cr_in_an_edit_edits_a_crlf_file_as_it_is(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_lone_cr_in_an_edit_edits_a_crlf_file_as_it_is(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """An edit carrying a lone CR is applied byte for byte, so no CR is added beside it."""
         (tmp_base / "win.txt").write_bytes(b"a\r\nb\r\n")
         assert tools.edit_file("win.txt", _one("a", "z\r")) == "Applied 1 edit to win.txt: line 1."
@@ -526,21 +535,21 @@ class TestEditFile:
         assert tools.edit_file("win.txt", _one("a\r", "c")) == "Applied 1 edit to win.txt: line 1."
         assert (tmp_base / "win.txt").read_bytes() == b"c\nb\r\n"
 
-    def test_identity_edit_copying_the_bom_is_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_identity_edit_copying_the_bom_is_refused(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """An old_text and new_text that both copy the byte order mark change nothing, and the mark stays single."""
         (tmp_base / "bom.txt").write_bytes("\ufeffa\n".encode())
         result = tools.edit_file("bom.txt", _one("\ufeffa", "\ufeffa"))
         assert result.startswith("Error: the edits leave the file identical")
         assert (tmp_base / "bom.txt").read_bytes() == b"\xef\xbb\xbfa\n"
 
-    def test_fuzzy_match_keeps_the_bom(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_fuzzy_match_keeps_the_bom(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A fuzzy match at the start of the file leaves the byte order mark in place."""
         (tmp_base / "bom.txt").write_bytes("\ufeff\u201calpha\u201d\r\nx\r\n".encode())
         result = tools.edit_file("bom.txt", _one('"alpha"', '"beta"'))
         assert result.startswith("Applied 1 edit to bom.txt: line 1 (matched after normalizing")
         assert (tmp_base / "bom.txt").read_bytes() == b'\xef\xbb\xbf"beta"\r\nx\r\n'
 
-    def test_old_text_with_the_bom_keeps_it(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_old_text_with_the_bom_keeps_it(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """The byte order mark is file metadata: an old_text that copies it does not remove it."""
         (tmp_base / "bom.txt").write_bytes("\ufeffa\r\nb\r\n".encode())
         tools.edit_file("bom.txt", _one("\ufeffa", "c"))
@@ -557,7 +566,7 @@ class TestEditFile:
     )
     def test_u_feff_away_from_byte_zero_is_text(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         before: str,
         old_text: str,
@@ -569,32 +578,32 @@ class TestEditFile:
         assert tools.edit_file("f.txt", _one(old_text, new_text)).startswith("Applied 1 edit")
         assert (tmp_base / "f.txt").read_bytes() == after.encode()
 
-    def test_anchor_copying_the_bom_never_edits_a_later_line(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_anchor_copying_the_bom_never_edits_a_later_line(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """An old_text that copies the BOM qualifies line 1, so it never silently edits another line."""
         (tmp_base / "bom.txt").write_bytes("\ufeffalpha   \nalpha\n".encode())
         result = tools.edit_file("bom.txt", _one("\ufeffalpha\n", "B\n"))
         assert result.startswith("Error: old_text matches 2 places")
         assert (tmp_base / "bom.txt").read_bytes() == "\ufeffalpha   \nalpha\n".encode()
 
-    def test_fuzzy_end_stops_at_the_line_boundary(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_fuzzy_end_stops_at_the_line_boundary(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A fuzzy match ending at a line boundary leaves the next line's whitespace alone."""
         (tmp_base / "ws.txt").write_text("foo   \n   \nZ")
         tools.edit_file("ws.txt", _one("foo\n", "X\n"))
         assert (tmp_base / "ws.txt").read_bytes() == b"X\n   \nZ"
 
-    def test_fuzzy_start_keeps_a_blank_line_s_whitespace(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_fuzzy_start_keeps_a_blank_line_s_whitespace(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A fuzzy match starting at the newline after a whitespace-only line leaves that whitespace, as on main."""
         (tmp_base / "ws.txt").write_text("foo\n   \n\u201cZ\u201d\n")
         tools.edit_file("ws.txt", _one('\n"Z"', "\nW"))
         assert (tmp_base / "ws.txt").read_bytes() == b"foo\n   \nW\n"
 
-    def test_many_replacements_merge_into_one_range(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_many_replacements_merge_into_one_range(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Adjacent replaced lines merge into one range, and the result counts the replacements."""
         (tmp_base / "many.txt").write_text("a\n" * 20000)
         result = tools.edit_file("many.txt", [{"old_text": "a", "new_text": "b", "replace_all": True}])
         assert result == "Applied 1 edit (20000 replacements) to many.txt: lines 1-20000."
 
-    def test_line_list_is_capped(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_line_list_is_capped(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """At most ten ranges are listed, then how many more."""
         (tmp_base / "many.txt").write_text("a\nx\n" * 30)
         result = tools.edit_file("many.txt", [{"old_text": "a", "new_text": "b", "replace_all": True}])
@@ -606,7 +615,7 @@ class TestEditFile:
             "Error: old_text matches 30 places (lines 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, and 20 more).",
         )
 
-    def test_deletion_reports_a_line_that_exists(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_deletion_reports_a_line_that_exists(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A deletion names the line it happened at, or the end of the file."""
         (tmp_base / "del.txt").write_text("foo\nbar\nbaz\n")
         assert tools.edit_file("del.txt", _one("bar\n", "")) == "Applied 1 edit to del.txt: line 2."
@@ -616,13 +625,13 @@ class TestEditFile:
         two = tools.edit_file("eof.txt", [{"old_text": "aa", "new_text": ""}, {"old_text": "bb", "new_text": ""}])
         assert two == "Applied 2 edits to eof.txt: end of file."
 
-    def test_lines_follow_read_file(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_lines_follow_read_file(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Lines are numbered as read_file numbers them, so a lone CR ends a line too."""
         (tmp_base / "cr.txt").write_bytes(b"A\rB\rC\r")
         assert tools.edit_file("cr.txt", _one("C", "D")) == "Applied 1 edit to cr.txt: line 3."
         assert tools.read_file("cr.txt").splitlines()[2].endswith("D")
 
-    def test_unknown_edit_fields_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_unknown_edit_fields_are_refused(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """An edit item with a field it does not have is refused in one short line."""
         result = tools.edit_file("hello.py", [{"old_text": "print('world')", "new_text": "x", "line": 2}])
         assert result == (
@@ -631,7 +640,7 @@ class TestEditFile:
         )
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
-    def test_missing_field_is_one_short_line(self, tools: CodingTools) -> None:
+    def test_missing_field_is_one_short_line(self, tools: FilesystemTools) -> None:
         """A missing field gets one line naming it, not pydantic's report."""
         result = tools.edit_file("hello.py", [{"old_text": "print('hello')"}])
         assert result == (
@@ -639,7 +648,7 @@ class TestEditFile:
             'Pass edits=[{"old_text": "...", "new_text": "..."}].\nNo changes written.'
         )
 
-    def test_edits_and_flat_fields_together_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_edits_and_flat_fields_together_are_refused(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A call mixing edits with the old flat fields is refused, showing the one shape to use."""
         call = validated_entrypoint(tools.edit_file)
         result = call(path="hello.py", edits=_one("print('hello')", "x"), old_text="print('world')", new_text="y")
@@ -647,7 +656,7 @@ class TestEditFile:
         assert result.endswith("No changes written.")
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
-    def test_null_edits_with_flat_fields_are_refused(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_null_edits_with_flat_fields_are_refused(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Only a call that leaves edits out uses the flat fields; an explicit null with them is refused."""
         result = validated_entrypoint(tools.edit_file)(
             path="hello.py",
@@ -658,26 +667,26 @@ class TestEditFile:
         assert result.startswith("Error: edit_file takes path and edits, not new_text, old_text.")
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
-    def test_unknown_top_level_argument_gets_the_shape(self, tools: CodingTools) -> None:
+    def test_unknown_top_level_argument_gets_the_shape(self, tools: FilesystemTools) -> None:
         """A stray top-level argument of any type gets the shape, not a validation dump."""
         result = validated_entrypoint(tools.edit_file)(path="hello.py", edits=_one("print('hello')", "x"), force=True)
         assert result.startswith("Error: edit_file takes path and edits, not force. Pass edits=[")
 
     @pytest.mark.parametrize("empty", [[], "[]", None, ""])
-    def test_every_empty_edits_form_gets_the_empty_error(self, tools: CodingTools, empty: object) -> None:
+    def test_every_empty_edits_form_gets_the_empty_error(self, tools: FilesystemTools, empty: object) -> None:
         """An empty list, its JSON, or no edits at all get the empty-edits error."""
         result = validated_entrypoint(tools.edit_file)(path="hello.py", edits=empty)
         assert result.startswith("Error: edits is empty. Pass edits=[")
         assert result.endswith("No changes written.")
 
-    def test_fuzzy_edit_whitespace(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_fuzzy_edit_whitespace(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Handles trailing whitespace differences via fuzzy matching."""
         (tmp_base / "ws.py").write_text("def foo():   \n    pass\n")
         result = tools.edit_file("ws.py", _one("def foo():\n    pass", "def bar():\n    pass"))
         assert result == "Applied 1 edit to ws.py: lines 1-2 (matched after normalizing whitespace/quotes)."
         assert (tmp_base / "ws.py").read_text() == "def bar():\n    pass\n"
 
-    def test_fuzzy_note_names_the_edit(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_fuzzy_note_names_the_edit(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """With several edits, the fuzzy note says which one matched loosely."""
         (tmp_base / "q.py").write_text("a = 1\nsay(\u201chi\u201d)\n")
         result = tools.edit_file(
@@ -687,7 +696,7 @@ class TestEditFile:
         assert result == "Applied 2 edits to q.py: lines 1-2 (edits[1] matched after normalizing whitespace/quotes)."
         assert (tmp_base / "q.py").read_text() == 'a = 2\nsay("bye")\n'
 
-    def test_fuzzy_edit_multiline_preserves_line_boundaries(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_fuzzy_edit_multiline_preserves_line_boundaries(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Fuzzy multiline edits should consume trailing spaces and line ending of matched lines."""
         (tmp_base / "fuzzy_multiline.py").write_text("foo   \nbar\n")
         result = tools.edit_file("fuzzy_multiline.py", _one("foo\n", "X\n"))
@@ -696,7 +705,7 @@ class TestEditFile:
 
     def test_fuzzy_edit_single_line_consumes_trailing_whitespace_and_newline(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
     ) -> None:
         """Fuzzy single-line edits should not leave trailing whitespace artifacts."""
@@ -705,31 +714,31 @@ class TestEditFile:
         assert "normalizing" in result
         assert (tmp_base / "fuzzy_single_line.py").read_text() == "X\n"
 
-    def test_fuzzy_edit_handles_composed_vs_decomposed_unicode(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_fuzzy_edit_handles_composed_vs_decomposed_unicode(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Fuzzy edits should replace full graphemes across NFC differences."""
         (tmp_base / "unicode.py").write_text("Cafe\u0301")
         result = tools.edit_file("unicode.py", _one("Café", "Tea"))
         assert "normalizing" in result
         assert (tmp_base / "unicode.py").read_text() == "Tea"
 
-    def test_edit_missing_file(self, tools: CodingTools) -> None:
+    def test_edit_missing_file(self, tools: FilesystemTools) -> None:
         """Returns error for missing files, saying nothing was written."""
         result = tools.edit_file("missing.py", _one("old", "new"))
         assert result == "Error: File not found: missing.py\nNo changes written."
 
-    def test_edit_rejects_empty_old_text(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_edit_rejects_empty_old_text(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Rejects empty old_text instead of attempting a replacement."""
         result = tools.edit_file("hello.py", [*_one("print('hello')", "x"), *_one("", "replacement")])
         assert result == "Error: edits[1].old_text is empty.\nNo changes written."
         assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
-    def test_edit_rejects_empty_edits(self, tools: CodingTools) -> None:
+    def test_edit_rejects_empty_edits(self, tools: FilesystemTools) -> None:
         """An empty edits list is refused with the shape to use."""
         result = tools.edit_file("hello.py", [])
         assert result.startswith("Error: edits is empty.")
         assert '"old_text"' in result
 
-    def test_edit_rejects_a_no_op(self, tools: CodingTools) -> None:
+    def test_edit_rejects_a_no_op(self, tools: FilesystemTools) -> None:
         """Edits that leave the file as it was are refused."""
         result = tools.edit_file("hello.py", _one("print('hello')", "print('hello')"))
         assert result.startswith("Error:")
@@ -746,7 +755,7 @@ def _edit_after_both_read(
     results: Any,  # noqa: ANN401 - a multiprocessing queue.
 ) -> None:
     """Run in a child process as a sandbox request: edit ``path``, waiting after the read until the other has read."""
-    read = coding_module.read_resolved_file
+    read = filesystem_module.read_resolved_file
 
     def read_then_wait(base: Path, resolved: Path) -> bytes:
         content = read(base, resolved)
@@ -754,22 +763,22 @@ def _edit_after_both_read(
             barrier.wait(timeout=1)
         return content
 
-    coding_module.read_resolved_file = read_then_wait
-    tools = CodingTools(base_dir=base_dir, file_access=file_access, in_sandbox_request=True)
+    filesystem_module.read_resolved_file = read_then_wait
+    tools = FilesystemTools(base_dir=base_dir, file_access=file_access, in_sandbox_request=True)
     results.put(tools.edit_file(path, _one(*edit)))
 
 
 def _write_while_holding(base_dir: str, held: Any, release: Any) -> None:  # noqa: ANN401 - multiprocessing events.
     """Run in a child process as a sandbox request: write ``a.txt``, pausing inside the directory lock."""
-    write = coding_module.write_resolved_file
+    write = filesystem_module.write_resolved_file
 
     def write_after_release(base: Path, resolved: Path, payload: bytes) -> None:
         held.set()
         release.wait(timeout=60)
         write(base, resolved, payload)
 
-    coding_module.write_resolved_file = write_after_release
-    CodingTools(base_dir=base_dir, in_sandbox_request=True).write_file("a.txt", "runner\n")
+    filesystem_module.write_resolved_file = write_after_release
+    FilesystemTools(base_dir=base_dir, in_sandbox_request=True).write_file("a.txt", "runner\n")
 
 
 def _reap(processes: list[Any]) -> None:
@@ -808,11 +817,11 @@ class TestEditFileConcurrency:
         runner_toolkit, _entrypoint = sandbox_runner_module._resolve_entrypoint(
             runtime_paths=runtime_paths,
             config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
-            tool_name="coding",
+            tool_name="filesystem",
             function_name="edit_file",
             tools=tools,
         )
-        primary_toolkit = get_tool_by_name("coding", runtime_paths, tools=tools, worker_target=None)
+        primary_toolkit = get_tool_by_name("filesystem", runtime_paths, tools=tools, worker_target=None)
 
         assert runner_toolkit.in_sandbox_request is True
         assert primary_toolkit.in_sandbox_request is False
@@ -828,8 +837,8 @@ class TestEditFileConcurrency:
         context = multiprocessing.get_context("spawn")
         held, release = context.Event(), context.Event()
         runner = context.Process(target=_write_while_holding, args=(str(tmp_path), held, release))
-        monkeypatch.setattr(coding_module, "_directory_lock", _no_directory_lock)
-        tools = CodingTools(base_dir=str(tmp_path))
+        monkeypatch.setattr(filesystem_module, "_directory_lock", _no_directory_lock)
+        tools = FilesystemTools(base_dir=str(tmp_path))
         runner.start()
         try:
             assert held.wait(timeout=60)
@@ -863,7 +872,7 @@ class TestEditFileConcurrency:
         file_access = "workspace" if where == "inside" else "unrestricted"
         first_read, contended = threading.Event(), threading.Event()
         free_mutexes: list[Path] = []
-        read, lock = coding_module.read_resolved_file, coding_module._primary_file_lock
+        read, lock = filesystem_module.read_resolved_file, filesystem_module._primary_file_lock
 
         def read_then_wait(base: Path, resolved: Path) -> bytes:
             content = read(base, resolved)
@@ -875,7 +884,7 @@ class TestEditFileConcurrency:
         def probed_lock(resolved: Path) -> AbstractContextManager[None]:
             if first_read.is_set() and not contended.is_set():
                 # The second edit: the shared mutex of this path must be held by the paused first edit.
-                mutex = coding_module._PRIMARY_LOCKS.get(resolved)
+                mutex = filesystem_module._PRIMARY_LOCKS.get(resolved)
                 if mutex is None or mutex.acquire(blocking=False):
                     free_mutexes.append(resolved)
                     if mutex is not None:
@@ -886,14 +895,14 @@ class TestEditFileConcurrency:
         def second_edit() -> None:
             assert first_read.wait(timeout=30)
             results.append(
-                CodingTools(base_dir=str(base_dir), file_access=file_access).edit_file(str(target), _one("BBBB", "b")),
+                FilesystemTools(base_dir=str(base_dir), file_access=file_access).edit_file(str(target), _one("BBBB", "b")),
             )
 
-        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
-        monkeypatch.setattr(coding_module, "_primary_file_lock", probed_lock)
-        monkeypatch.setattr(coding_module, "_directory_lock", _no_directory_lock)
+        monkeypatch.setattr(filesystem_module, "read_resolved_file", read_then_wait)
+        monkeypatch.setattr(filesystem_module, "_primary_file_lock", probed_lock)
+        monkeypatch.setattr(filesystem_module, "_directory_lock", _no_directory_lock)
         results: list[str] = []
-        first = CodingTools(base_dir=str(base_dir), file_access=file_access)
+        first = FilesystemTools(base_dir=str(base_dir), file_access=file_access)
         threads = [
             threading.Thread(target=lambda: results.append(first.edit_file(str(target), _one("AAAA", "A" * 50)))),
             threading.Thread(target=second_edit),
@@ -942,8 +951,8 @@ class TestEditFileConcurrency:
     def test_runner_lock_wait_is_bounded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A runner request that cannot get the directory lock fails with a busy error and changes nothing."""
         (tmp_path / "f.txt").write_text("old\n")
-        monkeypatch.setattr(coding_module, "_WORKER_LOCK_TIMEOUT_SECONDS", 0.2)
-        tools = CodingTools(base_dir=str(tmp_path), in_sandbox_request=True)
+        monkeypatch.setattr(filesystem_module, "_WORKER_LOCK_TIMEOUT_SECONDS", 0.2)
+        tools = FilesystemTools(base_dir=str(tmp_path), in_sandbox_request=True)
         descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -961,9 +970,9 @@ class TestEditFileConcurrency:
         """A write_file that tries to lock while an edit is between its read and its write lands after the edit."""
         target = tmp_path / "race.txt"
         target.write_text("old\n")
-        tools = CodingTools(base_dir=str(tmp_path))
+        tools = FilesystemTools(base_dir=str(tmp_path))
         edit_read, write_waits = threading.Event(), threading.Event()
-        read, lock = coding_module.read_resolved_file, coding_module._primary_file_lock
+        read, lock = filesystem_module.read_resolved_file, filesystem_module._primary_file_lock
 
         def read_then_wait(base: Path, resolved: Path) -> bytes:
             content = read(base, resolved)
@@ -980,8 +989,8 @@ class TestEditFileConcurrency:
             assert edit_read.wait(timeout=30)
             results.append(tools.write_file("race.txt", "new\n"))
 
-        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
-        monkeypatch.setattr(coding_module, "_primary_file_lock", observed_lock)
+        monkeypatch.setattr(filesystem_module, "read_resolved_file", read_then_wait)
+        monkeypatch.setattr(filesystem_module, "_primary_file_lock", observed_lock)
         results: list[str] = []
         threads = [
             threading.Thread(target=lambda: results.append(tools.edit_file("race.txt", _one("old", "edited")))),
@@ -1003,7 +1012,7 @@ class TestEditFileConcurrency:
         base_dir.mkdir()
         locked.mkdir()
         (locked / "f.txt").write_text("old\n")
-        tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted", in_sandbox_request=True)
+        tools = FilesystemTools(base_dir=str(base_dir), file_access="unrestricted", in_sandbox_request=True)
         locked.chmod(0o300)
         try:
             assert tools.edit_file(str(locked / "f.txt"), _one("old", "new")).startswith("Applied 1 edit")
@@ -1021,16 +1030,16 @@ class TestEditFileConcurrency:
         for name in ("one", "two"):
             (tmp_path / name).mkdir()
             (tmp_path / name / "f.txt").write_text(f"{name}\n")
-        tools = CodingTools(base_dir=str(tmp_path), in_sandbox_request=True)
+        tools = FilesystemTools(base_dir=str(tmp_path), in_sandbox_request=True)
         barrier = threading.Barrier(2)
-        read = coding_module.read_resolved_file
+        read = filesystem_module.read_resolved_file
 
         def read_then_wait(base: Path, resolved: Path) -> bytes:
             content = read(base, resolved)
             barrier.wait(timeout=10)
             return content
 
-        monkeypatch.setattr(coding_module, "read_resolved_file", read_then_wait)
+        monkeypatch.setattr(filesystem_module, "read_resolved_file", read_then_wait)
         results: list[str] = []
         threads = [
             threading.Thread(target=lambda n=name: results.append(tools.edit_file(f"{n}/f.txt", _one(n, n.upper()))))
@@ -1046,21 +1055,21 @@ class TestEditFileConcurrency:
 
 
 class TestWriteFile:
-    """Tests for CodingTools.write_file."""
+    """Tests for FilesystemTools.write_file."""
 
-    def test_write_new_file(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_write_new_file(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Creates a new file."""
         result = tools.write_file("new.py", "content here\n")
         assert "Wrote" in result
         assert (tmp_base / "new.py").read_text() == "content here\n"
 
-    def test_write_creates_dirs(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_write_creates_dirs(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Auto-creates parent directories."""
         result = tools.write_file("a/b/c.txt", "deep\n")
         assert "Wrote" in result
         assert (tmp_base / "a" / "b" / "c.txt").read_text() == "deep\n"
 
-    def test_write_overwrite(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_write_overwrite(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Overwrites an existing file."""
         result = tools.write_file("hello.py", "overwritten\n")
         assert "Wrote" in result
@@ -1068,40 +1077,40 @@ class TestWriteFile:
 
 
 class TestGrep:
-    """Tests for CodingTools.grep."""
+    """Tests for FilesystemTools.grep."""
 
-    def test_grep_simple(self, tools: CodingTools) -> None:
+    def test_grep_simple(self, tools: FilesystemTools) -> None:
         """Finds a simple pattern."""
         result = tools.grep("hello")
         assert "hello" in result
 
-    def test_grep_no_match(self, tools: CodingTools) -> None:
+    def test_grep_no_match(self, tools: FilesystemTools) -> None:
         """Returns 'No matches' when nothing matches."""
         result = tools.grep("nonexistent_string_xyz")
         assert "No matches" in result
 
-    def test_grep_with_glob(self, tools: CodingTools) -> None:
+    def test_grep_with_glob(self, tools: FilesystemTools) -> None:
         """Filters by glob pattern."""
         result = tools.grep("content", glob="*.txt")
         assert "nested" in result
 
-    def test_grep_with_glob_python_fallback(self, tools: CodingTools, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_grep_with_glob_python_fallback(self, tools: FilesystemTools, monkeypatch: pytest.MonkeyPatch) -> None:
         """Python fallback should treat bare '*.ext' as recursive like ripgrep."""
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         result = tools.grep("content", glob="*.txt")
         assert "nested" in result
 
     def test_grep_with_absolute_glob_returns_error_in_fallback(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Invalid absolute glob patterns should return an error, not raise."""
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         result = tools.grep("content", glob="/absolute/path/*.txt")
         assert "Error: Invalid glob pattern" in result
 
-    def test_grep_with_absolute_glob_returns_error_with_rg(self, tools: CodingTools) -> None:
+    def test_grep_with_absolute_glob_returns_error_with_rg(self, tools: FilesystemTools) -> None:
         """Absolute glob validation should not depend on ripgrep availability."""
         result = tools.grep("content", glob="/absolute/path/*.txt")
         assert "Error: Invalid glob pattern" in result
@@ -1116,8 +1125,8 @@ class TestGrep:
         (tmp_path / ".hidden").mkdir()
         (tmp_path / ".hidden" / "inside.txt").write_text("match me\n")
 
-        tools = CodingTools(base_dir=str(tmp_path))
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        tools = FilesystemTools(base_dir=str(tmp_path))
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         result = tools.grep("match")
 
         assert "visible.txt:1:match me" in result
@@ -1142,9 +1151,9 @@ class TestGrep:
         (workspace / ".gitignore").write_text("ignored.txt\n")
         (workspace / "visible.txt").write_text("match me\n")
         (workspace / "ignored.txt").write_text("match me\n")
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
 
-        result = CodingTools(base_dir=str(workspace)).grep("match")
+        result = FilesystemTools(base_dir=str(workspace)).grep("match")
 
         assert "visible.txt:1:match me" in result
         assert "ignored.txt" not in result
@@ -1162,8 +1171,8 @@ class TestGrep:
             (tmp_path / f"visible{i}.txt").write_text("needle\n")
         (tmp_path / "ignored.txt").write_text("needle\n")
 
-        tools = CodingTools(base_dir=str(tmp_path))
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        tools = FilesystemTools(base_dir=str(tmp_path))
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
 
         run_calls = 0
         original_run = subprocess.run
@@ -1175,7 +1184,7 @@ class TestGrep:
                 run_calls += 1
             return original_run(*args, **kwargs)
 
-        monkeypatch.setattr("mindroom.custom_tools.coding.subprocess.run", counting_run)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.subprocess.run", counting_run)
         result = tools.grep("needle")
 
         assert "visible0.txt" in result
@@ -1195,8 +1204,8 @@ class TestGrep:
         except (NotImplementedError, OSError):
             pytest.skip("Symlinks not supported on this platform")
 
-        tools = CodingTools(base_dir=str(tmp_path))
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        tools = FilesystemTools(base_dir=str(tmp_path))
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         result = tools.grep("needle", glob="link/*.txt")
         assert "secret.txt" not in result
         assert "No matches found." in result
@@ -1242,9 +1251,9 @@ class TestGrep:
             ],
         )
 
-        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: "rg")
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: "rg")
         monkeypatch.setattr(
-            "mindroom.custom_tools.coding.subprocess.run",
+            "mindroom.custom_tools.filesystem.subprocess.run",
             lambda *_args, **_kwargs: subprocess.CompletedProcess(
                 args=["rg"],
                 returncode=0,
@@ -1331,9 +1340,9 @@ class TestGrep:
             ],
         )
 
-        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: "rg")
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: "rg")
         monkeypatch.setattr(
-            "mindroom.custom_tools.coding.subprocess.run",
+            "mindroom.custom_tools.filesystem.subprocess.run",
             lambda *_args, **_kwargs: subprocess.CompletedProcess(
                 args=["rg"],
                 returncode=0,
@@ -1363,13 +1372,13 @@ class TestGrep:
 
     def test_grep_context_deduplicates_overlapping_lines(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Nearby matches with overlapping context should not duplicate shared lines."""
         (tmp_base / "overlap.txt").write_text("a\nmatch1\nb\nmatch2\nc\n")
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         result = tools.grep("match", path="overlap.txt", context=1)
         lines = result.strip().splitlines()
         # Line "b" (line 3) is shared context — must appear exactly once.
@@ -1378,13 +1387,13 @@ class TestGrep:
 
     def test_grep_context_no_separator_lines(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Python fallback context output should not contain '--' separator lines."""
         (tmp_base / "ctx.txt").write_text("a\nb\nmatch\nc\nd\n")
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         result = tools.grep("match", path="ctx.txt", context=1)
         assert "match" in result
         assert "\n--\n" not in result
@@ -1394,23 +1403,23 @@ class TestGrep:
         lines = result.strip().splitlines()
         assert all(line != "--" for line in lines)
 
-    def test_grep_ignore_case(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_grep_ignore_case(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Supports case-insensitive search."""
         (tmp_base / "case.txt").write_text("Hello World\n")
         result = tools.grep("hello world", path="case.txt", ignore_case=True)
         assert "Hello World" in result
 
-    def test_grep_invalid_regex(self, tools: CodingTools) -> None:
+    def test_grep_invalid_regex(self, tools: FilesystemTools) -> None:
         """Handles invalid regex gracefully."""
         result = tools.grep("[invalid")
         assert isinstance(result, str)
 
-    def test_grep_missing_path(self, tools: CodingTools) -> None:
+    def test_grep_missing_path(self, tools: FilesystemTools) -> None:
         """Returns error for missing paths."""
         result = tools.grep("hello", path="nonexistent_dir")
         assert "Error" in result
 
-    def test_grep_with_limit(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_grep_with_limit(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Respects match limit."""
         (tmp_base / "repeat.txt").write_text("\n".join(f"match{i}" for i in range(50)))
         result = tools.grep("match", path="repeat.txt", limit=5)
@@ -1418,13 +1427,13 @@ class TestGrep:
 
     def test_grep_python_fallback_limit_does_not_emit_extra_match(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Python fallback should not emit the (limit+1)th match while detecting truncation."""
         (tmp_base / "limit.txt").write_text("match1\nmatch2\nmatch3\n")
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         result = tools.grep("match", path="limit.txt", limit=2)
 
         match_lines = [line for line in result.splitlines() if line.startswith("limit.txt:")]
@@ -1434,31 +1443,31 @@ class TestGrep:
 
     def test_grep_limit_banner_not_shown_at_exact_count(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Limit banner should not appear when total matches exactly equal the limit."""
         (tmp_base / "exact.txt").write_text("match\nmatch\nmatch\n")
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         result = tools.grep("match", path="exact.txt", limit=3)
         assert "match" in result
         assert "limited" not in result.lower()
 
-    def test_grep_literal(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_grep_literal(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Literal mode escapes regex special chars."""
         (tmp_base / "regex.txt").write_text("foo[bar]\nfoo.bar\n")
         result = tools.grep("[bar]", path="regex.txt", literal=True)
         assert "foo[bar]" in result
 
-    def test_grep_dash_prefixed_pattern(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_grep_dash_prefixed_pattern(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Patterns starting with '-' should not be parsed as ripgrep flags."""
         (tmp_base / "flags.txt").write_text("--files\n--color\nregular\n")
         result = tools.grep("--files", path="flags.txt")
         assert "--files" in result
         assert "No matches" not in result
 
-    def test_grep_line_truncation(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_grep_line_truncation(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Long match lines are truncated at 500 chars."""
         long_line = "x" * 600
         (tmp_base / "long.txt").write_text(long_line + "\n")
@@ -1467,30 +1476,30 @@ class TestGrep:
 
     def test_grep_python_fallback_single_file_shows_filename(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Python fallback should show the filename, not '.', when path points to a single file."""
         (tmp_base / "a.txt").write_text("needle\n")
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         result = tools.grep("needle", path="a.txt")
         assert "a.txt:1:" in result
         assert ".:1:" not in result
 
     def test_grep_python_fallback_applies_global_output_truncation(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Python fallback should enforce the same global output truncation limits."""
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
         (tmp_base / "huge.txt").write_text("\n".join(f"match line {i}" for i in range(7000)))
         result = tools.grep("match", path="huge.txt", limit=7000)
         assert "[Output truncated." in result
 
-    def test_grep_explicit_hidden_path_returns_matches(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_grep_explicit_hidden_path_returns_matches(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Explicit hidden path targets are not filtered — only recursive discovery excludes dotfiles."""
         (tmp_base / ".hidden_dir").mkdir()
         (tmp_base / ".hidden_dir" / "secret.txt").write_text("needle\n")
@@ -1500,7 +1509,7 @@ class TestGrep:
 
     def test_grep_rg_and_fallback_emit_same_relative_paths(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1519,9 +1528,9 @@ class TestGrep:
                 },
             },
         )
-        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: "rg")
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: "rg")
         monkeypatch.setattr(
-            "mindroom.custom_tools.coding.subprocess.run",
+            "mindroom.custom_tools.filesystem.subprocess.run",
             lambda *_args, **_kwargs: subprocess.CompletedProcess(
                 args=["rg"],
                 returncode=0,
@@ -1532,14 +1541,14 @@ class TestGrep:
         rg_result = tools.grep("needle", path="parity.txt")
 
         # Capture fallback output
-        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         fallback_result = tools.grep("needle", path="parity.txt")
 
         assert rg_result == fallback_result
 
     def test_grep_rg_and_fallback_parity_subdirectory(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1555,9 +1564,9 @@ class TestGrep:
                 },
             },
         )
-        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: "rg")
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: "rg")
         monkeypatch.setattr(
-            "mindroom.custom_tools.coding.subprocess.run",
+            "mindroom.custom_tools.filesystem.subprocess.run",
             lambda *_args, **_kwargs: subprocess.CompletedProcess(
                 args=["rg"],
                 returncode=0,
@@ -1567,7 +1576,7 @@ class TestGrep:
         )
         rg_result = tools.grep("nested", path="sub")
 
-        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         fallback_result = tools.grep("nested", path="sub")
 
         assert rg_result == fallback_result
@@ -1575,7 +1584,7 @@ class TestGrep:
 
     def test_grep_rg_and_fallback_parity_nested_single_file(
         self,
-        tools: CodingTools,
+        tools: FilesystemTools,
         tmp_base: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1591,9 +1600,9 @@ class TestGrep:
                 },
             },
         )
-        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: "rg")
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: "rg")
         monkeypatch.setattr(
-            "mindroom.custom_tools.coding.subprocess.run",
+            "mindroom.custom_tools.filesystem.subprocess.run",
             lambda *_args, **_kwargs: subprocess.CompletedProcess(
                 args=["rg"],
                 returncode=0,
@@ -1603,7 +1612,7 @@ class TestGrep:
         )
         rg_result = tools.grep("nested", path="sub/nested.txt")
 
-        monkeypatch.setattr("mindroom.custom_tools.coding.shutil.which", lambda _name: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         fallback_result = tools.grep("nested", path="sub/nested.txt")
 
         assert rg_result == fallback_result
@@ -1626,24 +1635,24 @@ class TestLineTruncation:
 
 
 class TestFindFiles:
-    """Tests for CodingTools.find_files."""
+    """Tests for FilesystemTools.find_files."""
 
-    def test_find_py_files(self, tools: CodingTools) -> None:
+    def test_find_py_files(self, tools: FilesystemTools) -> None:
         """Finds Python files."""
         result = tools.find_files("**/*.py")
         assert "hello.py" in result
 
-    def test_find_txt_files(self, tools: CodingTools) -> None:
+    def test_find_txt_files(self, tools: FilesystemTools) -> None:
         """Finds text files in subdirectories."""
         result = tools.find_files("**/*.txt")
         assert "nested.txt" in result
 
-    def test_find_no_match(self, tools: CodingTools) -> None:
+    def test_find_no_match(self, tools: FilesystemTools) -> None:
         """Returns message when no files match."""
         result = tools.find_files("**/*.rs")
         assert "No files" in result
 
-    def test_find_with_limit(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_find_with_limit(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Respects result limit."""
         for i in range(20):
             (tmp_base / f"file{i}.txt").write_text(f"content{i}")
@@ -1654,16 +1663,16 @@ class TestFindFiles:
         """Limit banner should not appear when total files exactly equal the limit."""
         for i in range(3):
             (tmp_path / f"file{i}.txt").write_text("")
-        tools = CodingTools(base_dir=str(tmp_path))
+        tools = FilesystemTools(base_dir=str(tmp_path))
         result = tools.find_files("*.txt", limit=3)
         assert "limited" not in result.lower()
 
-    def test_find_with_absolute_glob_returns_error(self, tools: CodingTools) -> None:
+    def test_find_with_absolute_glob_returns_error(self, tools: FilesystemTools) -> None:
         """Invalid absolute glob patterns should return an error, not raise."""
         result = tools.find_files("/absolute/path/*.txt")
         assert "Error: Invalid glob pattern" in result
 
-    def test_find_filters_dotfiles(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_find_filters_dotfiles(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """find_files should exclude dotfiles and files inside dot-directories."""
         (tmp_base / ".hidden_file.txt").write_text("hidden")
         (tmp_base / ".hidden_dir").mkdir()
@@ -1673,7 +1682,7 @@ class TestFindFiles:
         assert ".hidden_file.txt" not in result
         assert ".hidden_dir" not in result
 
-    def test_find_searches_a_named_dot_directory(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_find_searches_a_named_dot_directory(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """A dot directory named in path or in the pattern's leading directories is searched, not hidden."""
         staging = tmp_base / ".mindroom" / "runs" / "r1" / "memory"
         staging.mkdir(parents=True)
@@ -1697,7 +1706,7 @@ class TestFindFiles:
         for i in range(4):
             (tmp_path / f"ignored{i}.txt").write_text("x")
 
-        tools = CodingTools(base_dir=str(tmp_path))
+        tools = FilesystemTools(base_dir=str(tmp_path))
         run_calls = 0
         original_run = subprocess.run
 
@@ -1708,14 +1717,14 @@ class TestFindFiles:
                 run_calls += 1
             return original_run(*args, **kwargs)
 
-        monkeypatch.setattr("mindroom.custom_tools.coding.subprocess.run", counting_run)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.subprocess.run", counting_run)
         result = tools.find_files("*.txt")
 
         assert "visible0.txt" in result
         assert "ignored0.txt" not in result
         assert run_calls == 1
 
-    def test_find_does_not_follow_symlink_outside_base(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_find_does_not_follow_symlink_outside_base(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """find_files should ignore matches that resolve outside base_dir."""
         outside_dir = tmp_base.parent / "outside"
         outside_dir.mkdir()
@@ -1743,7 +1752,7 @@ class TestFindFiles:
         except (NotImplementedError, OSError):
             pytest.skip("Symlinks not supported on this platform")
 
-        tools = CodingTools(base_dir=str(base_dir))
+        tools = FilesystemTools(base_dir=str(base_dir))
         result = tools.find_files("link/*.txt", path="src")
 
         assert "src/link/match.txt" in result
@@ -1751,37 +1760,37 @@ class TestFindFiles:
 
 
 class TestLs:
-    """Tests for CodingTools.ls."""
+    """Tests for FilesystemTools.ls."""
 
-    def test_ls_root(self, tools: CodingTools) -> None:
+    def test_ls_root(self, tools: FilesystemTools) -> None:
         """Lists root directory with directory indicators."""
         result = tools.ls()
         assert "hello.py" in result
         assert "sub/" in result
 
-    def test_ls_subdir(self, tools: CodingTools) -> None:
+    def test_ls_subdir(self, tools: FilesystemTools) -> None:
         """Lists a subdirectory."""
         result = tools.ls("sub")
         assert "nested.txt" in result
 
-    def test_ls_missing(self, tools: CodingTools) -> None:
+    def test_ls_missing(self, tools: FilesystemTools) -> None:
         """Returns error for missing paths."""
         result = tools.ls("nonexistent")
         assert "Error" in result
 
-    def test_ls_not_dir(self, tools: CodingTools) -> None:
+    def test_ls_not_dir(self, tools: FilesystemTools) -> None:
         """Returns error when path is not a directory."""
         result = tools.ls("hello.py")
         assert "Error" in result
         assert "Not a directory" in result
 
-    def test_ls_includes_dotfiles(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_ls_includes_dotfiles(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Includes dotfiles like PI's ls tool."""
         (tmp_base / ".hidden").write_text("secret")
         result = tools.ls()
         assert ".hidden" in result
 
-    def test_ls_with_limit(self, tools: CodingTools, tmp_base: Path) -> None:
+    def test_ls_with_limit(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """Respects entry limit."""
         for i in range(20):
             (tmp_base / f"item{i}.txt").write_text("")
@@ -1792,11 +1801,11 @@ class TestLs:
         """Limit banner should not appear when total entries exactly equal the limit."""
         for i in range(3):
             (tmp_path / f"file{i}.txt").write_text("")
-        tools = CodingTools(base_dir=str(tmp_path))
+        tools = FilesystemTools(base_dir=str(tmp_path))
         result = tools.ls(limit=3)
         assert "limited" not in result.lower()
 
-    def test_ls_rejects_non_positive_limit(self, tools: CodingTools) -> None:
+    def test_ls_rejects_non_positive_limit(self, tools: FilesystemTools) -> None:
         """Rejects invalid non-positive entry limits."""
         result = tools.ls(limit=0)
         assert "Error" in result
@@ -1806,27 +1815,27 @@ class TestLs:
 class TestPathTraversal:
     """Tests for path traversal prevention."""
 
-    def test_read_traversal(self, tools: CodingTools) -> None:
+    def test_read_traversal(self, tools: FilesystemTools) -> None:
         """Blocks read of files outside base directory."""
         result = tools.read_file("../../etc/passwd")
         assert "Error" in result
 
-    def test_write_traversal(self, tools: CodingTools) -> None:
+    def test_write_traversal(self, tools: FilesystemTools) -> None:
         """Blocks write of files outside base directory."""
         result = tools.write_file("../../tmp/evil.txt", "evil")
         assert "Error" in result
 
-    def test_edit_traversal(self, tools: CodingTools) -> None:
+    def test_edit_traversal(self, tools: FilesystemTools) -> None:
         """Blocks edit of files outside base directory."""
         result = tools.edit_file("../../etc/passwd", _one("root", "hacked"))
         assert "Error" in result
 
-    def test_absolute_outside_base(self, tools: CodingTools) -> None:
+    def test_absolute_outside_base(self, tools: FilesystemTools) -> None:
         """Blocks absolute paths outside base directory."""
         result = tools.read_file("/etc/hostname")
         assert "Error" in result
 
-    def test_tilde_not_expanded(self, tools: CodingTools) -> None:
+    def test_tilde_not_expanded(self, tools: FilesystemTools) -> None:
         """Tilde paths are not expanded and treated as literal relative paths."""
         result = tools.read_file("~/../../etc/passwd")
         assert "Error" in result
@@ -1878,7 +1887,7 @@ class TestPathSafetyHelpers:
         assert parent_pattern == "*.txt"
 
 
-class TestCodingToolsFileAccess:
+class TestFilesystemToolsFileAccess:
     """Tests for the coding tool's agent file_access mode."""
 
     def test_coding_tools_workspace_mode_rejects_outside_paths(self, tmp_path: Path) -> None:
@@ -1887,7 +1896,7 @@ class TestCodingToolsFileAccess:
         base.mkdir()
         outside = tmp_path / "outside.txt"
         outside.write_text("x")
-        tools = CodingTools(base_dir=str(base), file_access="workspace")
+        tools = FilesystemTools(base_dir=str(base), file_access="workspace")
         assert tools.read_file(str(outside)).startswith("Error")
 
     def test_coding_tools_unrestricted_mode_reads_outside_paths(self, tmp_path: Path) -> None:
@@ -1896,7 +1905,7 @@ class TestCodingToolsFileAccess:
         base.mkdir()
         outside = tmp_path / "outside.txt"
         outside.write_text("hello")
-        tools = CodingTools(base_dir=str(base), file_access="unrestricted")
+        tools = FilesystemTools(base_dir=str(base), file_access="unrestricted")
         assert "hello" in tools.read_file(str(outside))
 
     def test_default_workspace_mode_blocks_outside(self, tmp_path: Path) -> None:
@@ -1907,7 +1916,7 @@ class TestCodingToolsFileAccess:
         outside_dir.mkdir()
         (outside_dir / "secret.txt").write_text("secret\n")
 
-        tools = CodingTools(base_dir=str(base_dir))
+        tools = FilesystemTools(base_dir=str(base_dir))
         result = tools.read_file(str(outside_dir / "secret.txt"))
 
         assert "Error" in result
@@ -1922,7 +1931,7 @@ class TestCodingToolsFileAccess:
         outside_dir.mkdir()
         outside_file = outside_dir / "secret.txt"
 
-        tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted")
+        tools = FilesystemTools(base_dir=str(base_dir), file_access="unrestricted")
         write_result = tools.write_file(str(outside_file), "outside\n")
         read_result = tools.read_file(str(outside_file))
 
@@ -1935,7 +1944,7 @@ class TestCodingToolsFileAccess:
         base_dir = tmp_path / "base"
         base_dir.mkdir()
 
-        tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted")
+        tools = FilesystemTools(base_dir=str(base_dir), file_access="unrestricted")
         write_result = tools.write_file("nested/file.txt", "workspace\n")
         read_result = tools.read_file("nested/file.txt")
 
@@ -1952,7 +1961,7 @@ class TestCodingToolsFileAccess:
         outside_file = outside_dir / "secret.txt"
         outside_file.write_text("hello\n")
 
-        tools = CodingTools(base_dir=str(base_dir))
+        tools = FilesystemTools(base_dir=str(base_dir))
         result = tools.edit_file(str(outside_file), _one("hello", "goodbye"))
 
         assert "Error" in result
@@ -1968,7 +1977,7 @@ class TestCodingToolsFileAccess:
         outside_file = outside_dir / "secret.txt"
         outside_file.write_text("hello\n")
 
-        tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted")
+        tools = FilesystemTools(base_dir=str(base_dir), file_access="unrestricted")
         result = tools.edit_file(str(outside_file), _one("hello", "goodbye"))
 
         assert result.startswith("Applied 1 edit")
@@ -1987,8 +1996,8 @@ class TestCodingToolsFileAccess:
         outside_file = outside_dir / "match.txt"
         outside_file.write_text("needle\n")
 
-        tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted")
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        tools = FilesystemTools(base_dir=str(base_dir), file_access="unrestricted")
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
 
         find_result = tools.find_files("*.txt", path=str(outside_dir))
         grep_result = tools.grep("needle", path=str(outside_dir), glob="*.txt")
@@ -2009,8 +2018,8 @@ class TestCodingToolsFileAccess:
         outside_file = outside_dir / "match.txt"
         outside_file.write_text("needle\n")
 
-        tools = CodingTools(base_dir=str(base_dir), file_access="unrestricted")
-        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+        tools = FilesystemTools(base_dir=str(base_dir), file_access="unrestricted")
+        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
 
         find_result = tools.find_files("../outside/*.txt")
         grep_result = tools.grep("needle", glob="../outside/*.txt")
@@ -2019,298 +2028,48 @@ class TestCodingToolsFileAccess:
         assert f"{outside_file}:1:needle" in grep_result
 
 
-class TestFileToolFileAccess:
-    """Tests for the file tool's agent file_access mode."""
+class TestDeleteFile:
+    """delete_file is offered only on request and keeps the write path rules."""
 
-    def test_file_tool_workspace_mode_rejects_outside_paths(self, tmp_path: Path) -> None:
-        """Workspace mode refuses reads outside the workspace."""
-        base = tmp_path / "ws"
-        base.mkdir()
-        outside = tmp_path / "outside.txt"
-        outside.write_text("x")
-        tool = file_tools()(base_dir=base, file_access="workspace")
-        assert tool.read_file(str(outside)).startswith("Error")
+    def test_delete_file_is_offered_only_when_enabled(self) -> None:
+        """The toolkit offers delete_file only with enable_delete_file."""
+        assert "delete_file" not in FilesystemTools().functions
+        assert "delete_file" in FilesystemTools(enable_delete_file=True).functions
 
-    def test_file_tool_unrestricted_mode_reads_outside_paths(self, tmp_path: Path) -> None:
-        """Unrestricted mode reads files outside the workspace."""
-        base = tmp_path / "ws"
-        base.mkdir()
-        outside = tmp_path / "outside.txt"
-        outside.write_text("hello")
-        tool = file_tools()(base_dir=base, file_access="unrestricted")
-        assert "hello" in tool.read_file(str(outside))
+    def test_delete_file_removes_a_file_or_an_empty_directory(self, tmp_path: Path) -> None:
+        """A file and an empty directory go; a directory with files stays."""
+        (tmp_path / "note.txt").write_text("x")
+        (tmp_path / "empty").mkdir()
+        (tmp_path / "full").mkdir()
+        (tmp_path / "full" / "kept.txt").write_text("x")
+        tool = FilesystemTools(base_dir=str(tmp_path), enable_delete_file=True)
 
-    def test_file_tool_default_workspace_mode_blocks_outside(self, tmp_path: Path) -> None:
-        """File tools should still block outside-base reads by default."""
+        assert tool.delete_file("note.txt") == "Deleted note.txt"
+        assert tool.delete_file("empty") == "Deleted empty"
+        assert tool.delete_file("full").startswith("Error removing file:")
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["full"]
+
+    def test_delete_file_blocked_when_restricted(self, tmp_path: Path) -> None:
+        """Workspace file access refuses to delete outside the workspace."""
         base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
         base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
+        outside_file = tmp_path / "secret.txt"
         outside_file.write_text("secret\n")
+        tool = FilesystemTools(base_dir=str(base_dir), enable_delete_file=True)
 
-        cls = file_tools()
-        tool = cls(base_dir=base_dir)
-        result = tool.read_file(str(outside_file))
-
-        assert "outside base_dir" in result
-        assert "file_access to 'unrestricted'" in result
-
-    def test_file_tool_search_files_blocks_parent_traversal_when_restricted(self, tmp_path: Path) -> None:
-        """Restricted search_files should block ../ traversal before globbing."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        (outside_dir / "secret.txt").write_text("secret\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir)
-        result = tool.search_files("../outside/*.txt")
-
-        assert "outside base_dir" in result
-        assert "searching files" in result
-
-    def test_file_tool_search_files_blocks_symlink_escape_when_restricted(self, tmp_path: Path) -> None:
-        """Restricted search_files should reject symlinked directories escaping base_dir."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        (outside_dir / "secret.txt").write_text("secret\n")
-        try:
-            (base_dir / "link").symlink_to(outside_dir, target_is_directory=True)
-        except (NotImplementedError, OSError):
-            pytest.skip("Symlinks not supported on this platform")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir)
-        result = tool.search_files("link/*.txt")
-
-        assert "outside base_dir" in result
-        assert "searching files" in result
-
-    def test_file_tool_search_content_blocks_parent_traversal_when_restricted(self, tmp_path: Path) -> None:
-        """Restricted search_content refuses a ../ directory instead of searching it."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        (outside_dir / "secret.txt").write_text("needle here\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir)
-        result = tool.search_content("needle", "../outside")
-
-        assert result.startswith("Error searching content: path '../outside' is outside base_dir")
-
-    def test_file_tool_search_content_searches_inside_base_dir(self, tmp_path: Path) -> None:
-        """Agno's content search runs unchanged inside base_dir, with base-relative paths."""
-        base_dir = tmp_path / "base"
-        (base_dir / "docs").mkdir(parents=True)
-        (base_dir / "docs" / "inside.txt").write_text("needle inside\n")
-        (base_dir / "other.txt").write_text("nothing here\n")
-
-        cls = file_tools()
-        result = json.loads(cls(base_dir=base_dir).search_content("needle", "docs"))
-
-        assert [match["file"] for match in result["files"]] == ["docs/inside.txt"]
-
-    def test_file_tool_search_content_matches_multiline_queries_in_crlf_and_cr_files(self, tmp_path: Path) -> None:
-        """Workspace content search translates line endings as Agno's search does, so multiline queries match."""
-        base_dir = tmp_path / "base"
-        base_dir.mkdir()
-        (base_dir / "crlf.txt").write_bytes(b"first line\r\nsecond line\r\n")
-        (base_dir / "cr.txt").write_bytes(b"first line\rsecond line\r")
-
-        cls = file_tools()
-        result = json.loads(cls(base_dir=base_dir).search_content("first line\nsecond line"))
-
-        assert sorted(match["file"] for match in result["files"]) == ["cr.txt", "crlf.txt"]
-        assert all("\r" not in match["snippet"] for match in result["files"])
-
-    def test_file_tool_search_content_searches_outside_directories_when_unrestricted(self, tmp_path: Path) -> None:
-        """Unrestricted content search reaches outside directories and reports absolute paths."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        (outside_dir / "sub").mkdir(parents=True)
-        (outside_dir / "sub" / "secret.txt").write_text("needle outside\n")
-        (outside_dir / "other.txt").write_text("nothing here\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, file_access="unrestricted")
-        result = json.loads(tool.search_content("needle", str(outside_dir)))
-        relative_result = json.loads(tool.search_content("needle", "../outside"))
-
-        expected = [str(outside_dir / "sub" / "secret.txt")]
-        assert [match["file"] for match in result["files"]] == expected
-        assert [match["file"] for match in relative_result["files"]] == expected
-        assert "needle outside" in result["files"][0]["snippet"]
-        missing = outside_dir / "missing"
-        assert tool.search_content("needle", str(missing)) == f"Error: '{missing}' is not a directory"
-
-    def test_file_tool_unrestricted_allows_outside_and_relative_paths(self, tmp_path: Path) -> None:
-        """File tools should allow outside absolute paths while keeping relative paths anchored."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, file_access="unrestricted")
-
-        outside_write = tool.save_file("outside\n", str(outside_file))
-        relative_write = tool.save_file("workspace\n", "note.txt")
-
-        assert outside_write == str(outside_file)
-        assert outside_file.read_text() == "outside\n"
-        assert relative_write == "note.txt"
-        assert (base_dir / "note.txt").read_text() == "workspace\n"
-
-    def test_file_tool_delete_file_blocked_when_restricted(self, tmp_path: Path) -> None:
-        """Restricted delete_file should reject outside-base paths."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
-        outside_file.write_text("secret\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir)
-        result = tool.delete_file(str(outside_file))
-
-        assert "outside base_dir" in result
+        assert "outside base_dir" in tool.delete_file(str(outside_file))
         assert outside_file.exists()
 
-    def test_file_tool_delete_file_allowed_when_unrestricted(self, tmp_path: Path) -> None:
-        """Unrestricted delete_file should allow outside-base paths."""
+    def test_delete_file_allowed_when_unrestricted(self, tmp_path: Path) -> None:
+        """Unrestricted file access deletes outside the workspace."""
         base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
         base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
+        outside_file = tmp_path / "secret.txt"
         outside_file.write_text("secret\n")
+        tool = FilesystemTools(base_dir=str(base_dir), file_access="unrestricted", enable_delete_file=True)
 
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, file_access="unrestricted")
-        result = tool.delete_file(str(outside_file))
-
-        assert result == ""
+        assert tool.delete_file(str(outside_file)) == f"Deleted {outside_file}"
         assert not outside_file.exists()
-
-    def test_file_tool_read_file_chunk_blocked_when_restricted(self, tmp_path: Path) -> None:
-        """Restricted read_file_chunk should reject outside-base paths."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
-        outside_file.write_text("alpha\nbeta\ngamma\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir)
-        result = tool.read_file_chunk(str(outside_file), 0, 1)
-
-        assert "outside base_dir" in result
-        assert "reading file" in result
-
-    def test_file_tool_read_file_chunk_allowed_when_unrestricted(self, tmp_path: Path) -> None:
-        """Unrestricted read_file_chunk should allow outside-base paths."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
-        outside_file.write_text("alpha\nbeta\ngamma\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, file_access="unrestricted")
-        result = tool.read_file_chunk(str(outside_file), 1, 2)
-
-        assert result == "beta\ngamma"
-
-    def test_file_tool_replace_file_chunk_blocked_when_restricted(self, tmp_path: Path) -> None:
-        """Restricted replace_file_chunk should use the correct blocked-path message."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
-        outside_file.write_text("alpha\nbeta\ngamma\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir)
-        result = tool.replace_file_chunk(str(outside_file), 1, 1, "updated")
-
-        assert "outside base_dir" in result
-        assert "replacing file chunk" in result
-        assert outside_file.read_text() == "alpha\nbeta\ngamma\n"
-
-    def test_file_tool_replace_file_chunk_allowed_when_unrestricted(self, tmp_path: Path) -> None:
-        """Unrestricted replace_file_chunk should allow outside-base paths."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
-        outside_file.write_text("alpha\nbeta\ngamma\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, file_access="unrestricted")
-        result = tool.replace_file_chunk(str(outside_file), 1, 1, "updated")
-
-        assert result == str(outside_file)
-        assert outside_file.read_text() == "alpha\nupdated\ngamma\n"
-
-    def test_file_tool_list_files_outside_base_dir_formats_absolute_paths(self, tmp_path: Path) -> None:
-        """Listing an outside directory should return absolute paths instead of crashing."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
-        outside_file.write_text("secret\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, file_access="unrestricted")
-        result = tool.list_files(directory=str(outside_dir))
-
-        assert json.loads(result) == [str(outside_file)]
-
-    def test_file_tool_search_files_supports_absolute_patterns_when_unrestricted(self, tmp_path: Path) -> None:
-        """Absolute search patterns should work with unrestricted file access."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
-        outside_file.write_text("secret\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, file_access="unrestricted")
-        result = json.loads(tool.search_files(str(outside_dir / "*.txt")))
-
-        assert result["files"] == [str(outside_file)]
-        assert result["matches_found"] == 1
-
-    def test_file_tool_search_files_supports_parent_traversal_when_unrestricted(self, tmp_path: Path) -> None:
-        """Relative ../ search patterns should work with unrestricted file access."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        outside_dir.mkdir()
-        outside_file = outside_dir / "secret.txt"
-        outside_file.write_text("secret\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, file_access="unrestricted")
-        result = json.loads(tool.search_files("../outside/*.txt"))
-
-        assert result["files"] == [str(outside_file)]
-        assert result["matches_found"] == 1
 
 
 class TestGitMetadataWrites:
@@ -2327,37 +2086,35 @@ class TestGitMetadataWrites:
         config_path.write_text(self._ORIGINAL)
         return config_path
 
-    def test_file_tool_blocks_git_metadata_writes(self, tmp_path: Path, git_config: Path) -> None:
-        """save_file, replace_file_chunk, and delete_file refuse .git paths but reads still work."""
+    def test_delete_file_and_writes_refuse_git_metadata_but_reads_work(self, tmp_path: Path, git_config: Path) -> None:
+        """write_file and delete_file refuse .git paths, whatever their spelling, but reads still work."""
         (tmp_path / "linked").symlink_to(git_config.parent, target_is_directory=True)
-        tool = file_tools()(base_dir=tmp_path, enable_delete_file=True)
+        tool = FilesystemTools(base_dir=str(tmp_path), enable_delete_file=True)
 
         for result in (
-            tool.save_file("[core]\n", self._CONFIG),
-            tool.save_file("[core]\n", "linked/config"),
-            tool.save_file("gitdir: elsewhere\n", "knowledge/other/.git"),
-            tool.save_file("[core]\n", "knowledge/other/.GIT/config"),
-            tool.replace_file_chunk(self._CONFIG, 0, 0, "[core]"),
+            tool.write_file("knowledge/other/.git", "gitdir: elsewhere\n"),
+            tool.write_file("knowledge/other/.GIT/config", "[core]\n"),
             tool.delete_file(self._CONFIG),
+            tool.delete_file("linked/config"),
         ):
             assert "Git metadata" in result
 
         assert git_config.read_text() == self._ORIGINAL
         assert not (tmp_path / "knowledge" / "other").exists()
-        assert tool.read_file(self._CONFIG) == self._ORIGINAL
+        assert tool.read_file(self._CONFIG).endswith("bare = false")
 
     def test_unrestricted_coding_tools_still_refuse_git_metadata_writes(self, tmp_path: Path) -> None:
         """Unrestricted file access keeps the .git write block."""
         base = tmp_path / "ws"
         (base / ".git").mkdir(parents=True)
-        tools = CodingTools(base_dir=str(base), file_access="unrestricted")
+        tools = FilesystemTools(base_dir=str(base), file_access="unrestricted")
         assert "Git metadata" in tools.write_file(".git/config", "[core]")
         assert not (base / ".git" / "config").exists()
 
     def test_coding_tools_block_git_metadata_writes(self, tmp_path: Path, git_config: Path) -> None:
         """write_file and edit_file refuse .git paths."""
         (tmp_path / "linked").symlink_to(git_config.parent, target_is_directory=True)
-        tools = CodingTools(base_dir=str(tmp_path))
+        tools = FilesystemTools(base_dir=str(tmp_path))
 
         assert "Git metadata" in tools.write_file(self._CONFIG, "[core]\n")
         assert "Git metadata" in tools.write_file("linked/config", "[core]\n")
@@ -2369,26 +2126,38 @@ class TestGitMetadataWrites:
 class TestRegistration:
     """Tests for tool registration."""
 
-    def test_coding_tool_registered(self) -> None:
-        """Coding tool is in the metadata registry."""
-        assert "coding" in builtin_tool_registry()
+    def test_filesystem_is_registered_and_its_other_names_are_not(self) -> None:
+        """Only filesystem is in the registry; file and coding are config aliases of it."""
+        registry = builtin_tool_registry()
+        assert "filesystem" in registry
+        assert "file" not in registry.entries
+        assert "coding" not in registry.entries
 
     def test_restrict_to_base_dir_field_removed(self) -> None:
         """Path tools follow the agent file_access instead of a per-tool restriction field."""
-        for tool_name in ("coding", "file", "python"):
+        for tool_name in ("filesystem", "python"):
             field_names = {field.name for field in builtin_tool_registry().entries[tool_name].config_fields}
             assert "restrict_to_base_dir" not in field_names, tool_name
 
-    def test_coding_tool_factory(self) -> None:
-        """Factory returns the CodingTools class."""
-        from mindroom.tools.coding import coding_tools  # noqa: PLC0415
+    def test_filesystem_tool_factory(self) -> None:
+        """Factory returns the FilesystemTools class."""
+        from mindroom.tools.filesystem import filesystem_tools  # noqa: PLC0415
 
-        cls = coding_tools()
-        assert cls is CodingTools
+        cls = filesystem_tools()
+        assert cls is FilesystemTools
+
+    def test_get_tool_by_name_builds_filesystem_for_its_other_names(self, tmp_path: Path) -> None:
+        """A caller that asks for file or coding gets the filesystem toolkit."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+        runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+        tools = builtin_tool_registry()
+        for name in ("file", "coding"):
+            assert isinstance(get_tool_by_name(name, runtime_paths, tools=tools, worker_target=None), FilesystemTools)
 
     def test_toolkit_has_six_methods(self) -> None:
         """Toolkit exposes exactly the 6 expected methods."""
-        tools = CodingTools()
+        tools = FilesystemTools()
         func_names = set(tools.functions)
         expected = {"read_file", "edit_file", "write_file", "grep", "find_files", "ls"}
         assert expected == func_names

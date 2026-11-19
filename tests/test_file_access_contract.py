@@ -21,7 +21,7 @@ import mindroom.custom_tools.agno_compat_moviepy as moviepy_module
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
 import mindroom.custom_tools.chat_ui as chat_ui_module
-import mindroom.custom_tools.coding as coding_module
+import mindroom.custom_tools.filesystem as filesystem_module
 import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
@@ -37,7 +37,7 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.chat_ui import ChatUITools
-from mindroom.custom_tools.coding import CodingTools
+from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
@@ -319,7 +319,7 @@ async def _read_with_coding_tool(
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    tool = CodingTools(base_dir=None if workspace is None else str(workspace), file_access=file_access)
+    tool = FilesystemTools(base_dir=None if workspace is None else str(workspace), file_access=file_access)
     return _TEXT.strip() in tool.read_file(raw_path)
 
 
@@ -559,7 +559,7 @@ async def test_file_swapped_for_link_after_the_check_is_refused(
 @pytest.mark.parametrize("swap", ["file", "workspace"])
 @pytest.mark.parametrize(
     ("probe", "resolver_module"),
-    [(_PROBES[-2], file_tool_module), (_PROBES[-1], coding_module)],
+    [(_PROBES[-2], file_tool_module), (_PROBES[-1], filesystem_module)],
     ids=["file:read_file", "coding:read_file"],
 )
 async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused(
@@ -605,11 +605,11 @@ def test_worker_path_tool_refuses_a_workspace_replaced_by_link_after_constructio
     tmp_path: Path,
     workspace: Path,
     outside: Path,
-    operation: Callable[[FileTools, CodingTools], str],
+    operation: Callable[[FileTools, FilesystemTools], str],
 ) -> None:
     """Once built, `file` and `coding` never follow a workspace that worker code replaced with a link."""
     file_tool = file_tools()(base_dir=workspace, enable_delete_file=True)
-    coding_tool = CodingTools(base_dir=str(workspace))
+    coding_tool = FilesystemTools(base_dir=str(workspace))
     workspace.rename(tmp_path / "moved-workspace")
     workspace.symlink_to(outside, target_is_directory=True)
 
@@ -652,12 +652,12 @@ def test_worker_path_tool_does_not_list_or_search_a_workspace_replaced_by_link(
     tmp_path: Path,
     workspace: Path,
     outside: Path,
-    operation: Callable[[FileTools, CodingTools], str],
+    operation: Callable[[FileTools, FilesystemTools], str],
 ) -> None:
     """Listing and searching never reveal the target of a workspace that worker code replaced with a link."""
     (outside / "openai.json").write_text('{"api_key": "sk-SECRET-VALUE"}\n')
     file_tool = file_tools()(base_dir=workspace)
-    coding_tool = CodingTools(base_dir=str(workspace))
+    coding_tool = FilesystemTools(base_dir=str(workspace))
     workspace.rename(tmp_path / "moved-workspace")
     workspace.symlink_to(outside, target_is_directory=True)
 
@@ -707,7 +707,7 @@ def test_file_tool_content_search_never_reads_a_planted_link_target(
 @pytest.mark.parametrize("swap", ["workspace-link", "ancestor-swapped-while-resolving"])
 @pytest.mark.parametrize(
     "build",
-    [lambda base_dir: file_tools()(base_dir=base_dir), lambda base_dir: CodingTools(base_dir=str(base_dir))],
+    [lambda base_dir: file_tools()(base_dir=base_dir), lambda base_dir: FilesystemTools(base_dir=str(base_dir))],
     ids=["file", "coding"],
 )
 def test_worker_path_tool_refuses_a_base_dir_swapped_before_construction(

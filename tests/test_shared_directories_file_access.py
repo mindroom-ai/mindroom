@@ -13,7 +13,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.custom_tools.coding import CodingTools
+from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shared_directories import paths as shared_paths
 from mindroom.shared_directories.paths import shared_directory_roots
@@ -128,7 +128,7 @@ def test_shares_created_after_the_toolkit_are_reachable(tmp_path: Path) -> None:
 def test_coding_tool_reads_greps_and_lists_a_share(tmp_path: Path) -> None:
     """The coding tool reads, searches, and lists a joined share by absolute path and refuses to edit it."""
     workspace, share, other = _layout(tmp_path)
-    tool = CodingTools(
+    tool = FilesystemTools(
         base_dir=str(workspace),
         file_access="workspace",
         shared_directory_roots=lambda: (_root(share, writable=False),),
@@ -166,7 +166,7 @@ def _toolkits_without_a_workspace(share: Path) -> dict[str, Any]:
     roots = (_root(share, writable=True),)
     return {
         "file": file_tools()(file_access="workspace", enable_delete_file=True, shared_directory_roots=lambda: roots),
-        "coding": CodingTools(file_access="workspace", shared_directory_roots=lambda: roots),
+        "coding": FilesystemTools(file_access="workspace", shared_directory_roots=lambda: roots),
     }
 
 
