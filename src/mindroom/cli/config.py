@@ -1247,11 +1247,15 @@ agents:
       - HEARTBEAT.md
     tools:
       - shell
+      - coding
       - memory
       - scheduler
       - update_awareness
-      - todo
       - matrix_message
+      - name: todo
+        defer: true
+      - name: temporary_secrets
+        defer: true
       - name: config_manager
         defer: true
       - name: duckduckgo
