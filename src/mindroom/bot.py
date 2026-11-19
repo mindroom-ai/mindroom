@@ -1067,10 +1067,6 @@ class AgentBot:
         )
         await emit(self.hook_registry, event_name, context)
 
-    async def join_configured_rooms(self) -> None:
-        """Join all rooms this agent is configured for."""
-        await self._room_lifecycle.join_configured_rooms()
-
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after configured joins and across restarts."""
         self._request_call_reconciliation(room_id)
@@ -1140,10 +1136,6 @@ class AgentBot:
         if client is None or content == self._server_state_content(previous_config):
             return
         await asyncio.gather(*(publish_server_state(client, room_id, content) for room_id in sorted(client.rooms)))
-
-    async def leave_unconfigured_rooms(self) -> None:
-        """Leave any rooms this agent is no longer configured for."""
-        await self._room_lifecycle.leave_unconfigured_rooms()
 
     async def refresh_presence(self) -> None:
         """Set presence status with model information."""
@@ -1256,27 +1248,10 @@ class AgentBot:
     async def _recover_unacknowledged_matrix_deliveries(self) -> bool:
         """Resend answers this bot could not confirm reaching Matrix.
 
-        After the first sync response, not before it. A send into an encrypted
-        room is refused until sync has rebuilt the local room and device state,
-        so recovery run at startup would spend its retry budget failing and
-        leave every encrypted room's owed answer unsent -- exactly the rooms
-        this matters in.
-
-        The first response is not always enough, though. It can arrive while a
-        room is still unrecovered, and nio refuses ordinary sends into one. So
-        the pass runs after every sync response, not once.
-
-        It asks the outbox rather than tracking whether anything is owed. A
-        flag would have to be armed from every path that can leave a row
-        unacknowledged -- a pass that raised before reporting, a live send the
-        homeserver refused, a claim that never came back -- and the answer a
-        user is waiting for would be lost by whichever path nobody remembered.
-        The outbox already knows, the query is one probe of a partial index,
-        and it sends nothing when nothing is owed.
-
-        Resending is safe: each delivery carries the transaction ID its first
-        attempt used, so one the homeserver already accepted collapses back
-        onto the same event.
+        It runs only after a sync response, since a send into an encrypted room is refused before one.
+        It runs after every later response too, since a room can still be unrecovered at the first.
+        It asks the outbox what is owed rather than tracking it, so no failure path can lose an answer.
+        Each resend carries its first attempt's transaction ID, so an accepted one collapses onto its event.
         """
         try:
             # A deletion history recovery learned ended replies too: their spans stop and what they owe follows.
@@ -1444,14 +1419,9 @@ class AgentBot:
             await self._room_lifecycle.on_contact_room_left(room_id)
 
     async def ensure_rooms(self) -> None:
-        """Ensure agent is in the correct rooms based on configuration.
-
-        This consolidates room management into a single method that:
-        1. Joins configured rooms
-        2. Leaves unconfigured rooms
-        """
-        await self.join_configured_rooms()
-        await self.leave_unconfigured_rooms()
+        """Join the rooms this entity belongs in and leave the ones it no longer does."""
+        await self._room_lifecycle.join_configured_rooms()
+        await self._room_lifecycle.leave_unconfigured_rooms()
         if self._ingestion_session is not None:
             await subscribe_sliding_rooms(self._ingestion_session, self.config, self.rooms)
 

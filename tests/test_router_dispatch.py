@@ -189,7 +189,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch("mindroom.bot_room_lifecycle.get_joined_rooms", new=AsyncMock(return_value=[])),
         ):
-            await bot.join_configured_rooms()
+            await bot._room_lifecycle.join_configured_rooms()
 
         assert "!welcome:localhost" in bot.client.rooms
         bot.client.join.assert_awaited_once_with("!welcome:localhost")

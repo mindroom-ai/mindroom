@@ -852,7 +852,7 @@ async def test_startup_cleanup_leaves_room_before_first_membership_observation(
         runner = asyncio.create_task(session.run())
         try:
             await asyncio.wait_for(first_poll.wait(), timeout=2)
-            await asyncio.wait_for(bot.leave_unconfigured_rooms(), timeout=2)
+            await asyncio.wait_for(bot._room_lifecycle.leave_unconfigured_rooms(), timeout=2)
             assert len(leave_requests) == 1
             facts = await consume_one_ingestion_batch(session, principal, account_id=bot.agent_user.user_id)
             assert facts is not None
@@ -1219,8 +1219,8 @@ async def test_sliding_join_of_an_unconfigured_room_keeps_it_subscribed_until_ni
     bot = _agent_bot(tmp_path)
     configured = "!configured:localhost"
     bot.rooms = [configured]
-    monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
-    monkeypatch.setattr(bot, "leave_unconfigured_rooms", AsyncMock())
+    monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", AsyncMock())
+    monkeypatch.setattr(bot._room_lifecycle, "leave_unconfigured_rooms", AsyncMock())
     joined: list[str] = []
     delivered_with: list[set[str]] = []
     subscribed = asyncio.Event()

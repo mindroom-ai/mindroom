@@ -598,7 +598,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
 
     # Test that the bot joins its configured rooms
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     # Verify the bot joined both configured rooms
     assert len(joined_rooms) == 2
@@ -632,7 +632,7 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=["!room1:localhost"]))
 
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     join_room.assert_awaited_once_with(mock_client, "!room2:localhost")
 
@@ -684,7 +684,7 @@ async def test_startup_already_joined_reconciles_gateway_without_membership_http
         AsyncMock(return_value=[room_id]),
     )
 
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     session.wait_for_membership_idle.assert_awaited_once_with()
     principal.ingestion_membership_position.assert_awaited_once_with(room_id)
@@ -741,7 +741,7 @@ async def test_unconfigured_leave_uses_durable_gateway_without_direct_http(
         AsyncMock(return_value=False),
     )
 
-    await bot.leave_unconfigured_rooms()
+    await bot._room_lifecycle.leave_unconfigured_rooms()
 
     session.change_membership.assert_awaited_once_with(
         operation_id=UUID("46fba72c-1729-5252-a01c-ca8a8746cc6e"),
@@ -778,7 +778,7 @@ async def test_join_configured_rooms_retries_when_membership_inventory_is_unavai
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=None))
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
 
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     assert {call.args[1] for call in join_room.await_args_list} == {
         "!room1:localhost",
@@ -818,7 +818,7 @@ async def test_stale_client_room_after_leave_cannot_reopen_cache(
 
     await admit_room_membership(bot.journal_principal(), room_id, "leave")
     with pytest.raises(RuntimeError) as raised:
-        await bot.join_configured_rooms()
+        await bot._room_lifecycle.join_configured_rooms()
 
     assert raised.value is failure
     join_room.assert_awaited_once_with(bot.client, room_id)
@@ -869,7 +869,7 @@ async def test_agent_rejoins_persisted_invited_rooms_on_startup(
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
 
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     join_room.assert_awaited_once_with(mock_client, "!invited-room:localhost")
 
@@ -937,7 +937,7 @@ async def test_accepted_agent_invite_persists_and_rejoins_on_startup(
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
     monkeypatch.setattr(restarted_bot, "_post_join_room_setup", AsyncMock())
 
-    await restarted_bot.join_configured_rooms()
+    await restarted_bot._room_lifecycle.join_configured_rooms()
 
     join_room.assert_awaited_once_with(restarted_bot.client, "!agent-invited:localhost")
 
@@ -2050,7 +2050,7 @@ async def test_agent_leaves_unconfigured_rooms(tmp_path: Path) -> None:
     install_runtime_journal_support(bot)
 
     # Test that the bot leaves unconfigured rooms
-    await bot.leave_unconfigured_rooms()
+    await bot._room_lifecycle.leave_unconfigured_rooms()
 
     # Verify the bot left room2 (unconfigured) but not room1 (configured)
     assert len(left_rooms) == 1
@@ -2497,7 +2497,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
         orchestrator=runtime,
     )
     router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-    router_bot.join_configured_rooms = AsyncMock()
+    router_bot._room_lifecycle.join_configured_rooms = AsyncMock()
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     invite_router = AsyncMock(return_value=True)
@@ -2512,7 +2512,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
 
     join_room.assert_awaited_once_with(bot.client, "!project-room:localhost")
     invite_router.assert_not_awaited()
-    router_bot.join_configured_rooms.assert_not_awaited()
+    router_bot._room_lifecycle.join_configured_rooms.assert_not_awaited()
     assert router_bot._room_lifecycle.invited_room_ids() == set()
     assert _invited_rooms_path(config, ROUTER_AGENT_NAME).exists() is False
 
@@ -2578,7 +2578,7 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
     )
     monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
 
-    await bot.leave_unconfigured_rooms()
+    await bot._room_lifecycle.leave_unconfigured_rooms()
 
     assert bot._room_lifecycle.invited_room_ids() == {"!invited-room:localhost"}
     assert left_room_ids == ["!old-room:localhost"]

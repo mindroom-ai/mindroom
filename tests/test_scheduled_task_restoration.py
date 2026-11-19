@@ -82,7 +82,7 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
             new_callable=AsyncMock,
         ) as mock_welcome,
     ):
-        await bot.join_configured_rooms()
+        await bot._room_lifecycle.join_configured_rooms()
 
     mock_join.assert_awaited_once_with(bot.client, "lobby")
     restore_room.assert_awaited_once_with(bot, "lobby")
@@ -103,7 +103,7 @@ async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: P
             new_callable=AsyncMock,
         ) as mock_welcome,
     ):
-        await bot.join_configured_rooms()
+        await bot._room_lifecycle.join_configured_rooms()
 
     mock_join.assert_not_awaited()
     restore_room.assert_awaited_once_with(bot, "lobby")

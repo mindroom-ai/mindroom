@@ -193,7 +193,7 @@ async def test_router_joins_rooms_on_start(
     install_runtime_journal_support(router_bot)
 
     # Test that the router joins all configured rooms
-    await router_bot.join_configured_rooms()
+    await router_bot._room_lifecycle.join_configured_rooms()
 
     # Verify all rooms were joined
     expected_rooms = {"room1", "room2", "room3", "room4"}
