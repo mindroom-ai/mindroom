@@ -150,12 +150,15 @@ async def _sized_without_held_updates(
     """Return the size and compaction decision of ``request``, which ``sizer`` sized as ``size``.
 
     Updates of a held prompt alone must not fold a history the current prompt fits with: then the conversation's
-    hold starts over, and the size and decision are those of the request with the current prompt.
+    hold starts over, and the size and decision are those of the request with the current prompt, ``size`` less
+    what the route estimates the held prompt and its updates add.
     """
     decision = decide(request_tokens=size.tokens)
     if decision.mode != "required" or request.prompt_hold is None or request.prompt_hold_pin is not None:
         return size, decision
-    fresh_size = await asyncio.to_thread(sizer.size, replace(request, prompt_hold=None))
+    fresh = replace(request, prompt_hold=None)
+    added = await asyncio.to_thread(lambda: sizer.model.request_tokens(request) - sizer.model.request_tokens(fresh))
+    fresh_size = replace(size, tokens=size.tokens - added)
     fresh_decision = decide(request_tokens=fresh_size.tokens)
     if fresh_decision.mode == "required":
         return size, decision
