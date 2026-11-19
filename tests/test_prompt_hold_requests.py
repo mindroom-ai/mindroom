@@ -1134,3 +1134,47 @@ async def test_usage_reported_for_a_request_sent_as_built_sizes_only_requests_se
     size, _estimate = _next_size(capture)
     assert size.reported
     assert 7000 < size.tokens < 8500
+
+
+async def _summaries(root: Path, monkeypatch: pytest.MonkeyPatch, question: str) -> tuple[int, int]:
+    """Edit the prompt at length before each of twelve turns; return the folds made and the most updates sent."""
+    conversation = _Conversation.start(root, monkeypatch)
+    conversation.config.defaults.compaction.threshold_tokens = 26_000
+    folds: list[None] = []
+
+    async def summarize(*_args: object, **_kwargs: object) -> str:
+        folds.append(None)
+        return "Short summary."
+
+    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", summarize)
+    await conversation.turn("First question")
+    most = 0
+    for revision in range(12):
+        conversation.write_rules(f"- Revision {revision}." + " Remain accurate and concise." * 190)
+        [body] = await conversation.turn(f"Question {revision}.{question}")
+        most = max(most, len(_updates(body)))
+    return len(folds), most
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_edited_every_turn_folds_no_history_a_conversation_without_a_hold_keeps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Updates are sent again by every request; once they alone would fold the history, the hold starts over."""
+    with monkeypatch.context() as unheld:
+        unheld.setattr("mindroom.ai._with_prompt_hold", lambda _ctx, build, _scope: build)
+        assert await _summaries(tmp_path / "unheld", monkeypatch, "") == (0, 0)
+    folds, most = await _summaries(tmp_path / "held", monkeypatch, "")
+    # More updates than main kept, and no fold.
+    assert (folds, most > 8) == (0, True)
+
+
+@pytest.mark.asyncio
+async def test_a_held_conversation_whose_history_outgrows_the_window_still_folds_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A history too long even under the current prompt alone is compacted, as without a hold."""
+    folds, _most = await _summaries(tmp_path, monkeypatch, " Explain it in depth." * 800)
+    assert folds >= 1
