@@ -549,12 +549,8 @@ async def serve_egress_broker(
                 raise
             logger.warning("egress_broker_default_unavailable", error_type=type(exc).__name__, error=str(exc))
         else:
-            _active.runtime = service.runtime
-            logger.info(
-                "egress_broker_started",
-                host=settings.host,
-                url=service.runtime and service.runtime.primary_url,
-            )
+            _active.runtime = runtime = service.runtime
+            logger.info("egress_broker_started", url=runtime and runtime.primary_url)
         yield
     finally:
         _active.runtime = None
