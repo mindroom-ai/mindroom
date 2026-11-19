@@ -31,7 +31,12 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.egress_broker import oauth_source, service, user_services
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
-from mindroom.egress_broker.env import BROKER_CA_PEM_ENV, RUNNER_CA_BUNDLE_ENV, apply_runner_ca_bundle
+from mindroom.egress_broker.env import (
+    BROKER_CA_PEM_ENV,
+    RUNNER_CA_BUNDLE_ENV,
+    apply_runner_ca_bundle,
+    egress_broker_enabled,
+)
 from mindroom.egress_broker.github_app import GITHUB_APP_PERMISSIONS
 from mindroom.egress_broker.secrets import (
     Secret,
@@ -998,6 +1003,64 @@ async def test_unused_all_proxy_does_not_stop_startup(
     runtime_paths = tmp_runtime_paths(**_broker_env(free_port()), **env)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
         assert active_ca_pem() is not None
+
+
+@pytest.mark.usefixtures("no_proxy_env")
+@pytest.mark.parametrize(
+    ("env", "api", "on"),
+    [
+        pytest.param({}, True, True, id="default"),
+        pytest.param({"HTTPS_PROXY": "http://user:hunter2@proxy:3128"}, True, False, id="default-unusable-proxy"),
+        pytest.param({"ALL_PROXY": "socks5://x:1080"}, True, False, id="default-socks"),
+        # Without the API nobody can answer a key card, so the default broker and its tool stay off.
+        pytest.param({}, False, False, id="default-no-api"),
+        # An explicit port keeps its loud refusal at startup and its warning without the API.
+        pytest.param({**_broker_env(8768), "HTTPS_PROXY": "http://user:hunter2@proxy:3128"}, True, True, id="set"),
+        pytest.param(_broker_env(8768), False, True, id="set-no-api"),
+    ],
+)
+def test_the_default_broker_turns_off_where_it_cannot_run(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    env: dict[str, str],
+    *,
+    api: bool,
+    on: bool,
+) -> None:
+    """The implicit broker never stops MindRoom: where it cannot run, Agent Keys is off and a warning says why."""
+    with capture_logs() as logs:
+        runtime_paths = service.turn_off_unusable_default_broker(tmp_runtime_paths(**env), api=api)
+
+    assert egress_broker_enabled(runtime_paths) is on
+    assert "hunter2" not in str(logs)
+    assert any(log["event"] == "egress_broker_default_off" for log in logs) is (not on and api)
+
+
+@pytest.mark.usefixtures("no_proxy_env")
+@pytest.mark.asyncio
+async def test_a_default_broker_that_cannot_start_leaves_mindroom_running(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bind failure of the implicit broker is logged and MindRoom runs on without it; a set port still raises."""
+
+    async def refuse(_broker: object, _host: str, _port: int) -> None:
+        raise OSError(98, "Address already in use")
+
+    monkeypatch.setattr(service.EgressBroker, "start", refuse)
+    with capture_logs() as logs:
+        async with serve_egress_broker(tmp_runtime_paths(), config_provider=lambda: None, credentials_manager=manager):
+            assert active_ca_pem() is None
+            assert _broker_threads() == []
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["egress_broker_default_unavailable"]
+
+    with pytest.raises(OSError, match="in use"):
+        async with serve_egress_broker(
+            tmp_runtime_paths(**_broker_env(free_port())),
+            config_provider=lambda: None,
+            credentials_manager=manager,
+        ):
+            pytest.fail("the broker must not start")
 
 
 @pytest.mark.asyncio
