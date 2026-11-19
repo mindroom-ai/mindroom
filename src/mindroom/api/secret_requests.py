@@ -24,10 +24,10 @@ from mindroom.api.egress_status import agent_services, key_save_refusal, resolve
 from mindroom.egress_broker.secrets import egress_key_path, save_secret, validate_secret
 from mindroom.egress_broker.user_services import (
     UserServiceConflictError,
-    check_new_user_service,
     consistent_read,
     delete_user_service,
     save_user_service,
+    user_service_hosts_error,
 )
 from mindroom.logging_config import get_logger
 from mindroom.plugin_http import ClientUser, require_room_member
@@ -221,23 +221,16 @@ def _add_service_and_save(
     service: EgressService,
     secret: str,
 ) -> Literal["saved", "expired"]:
-    """Add the card's proposed service to the scope as the requester's own, then store its key, never one alone.
+    """Add the card's proposed service as the requester's own, then store its key; never one without the other.
 
-    `expired` when the config served now, or the scope, no longer lets the Agent Keys page add it as a new service
-    (`check_new_user_service`), or when it changed before the key was stored. A value the key store refuses raises
-    before anything is added, and a key that fails to save takes the service back.
+    `expired` when the config served now or the scope no longer lets the Agent Keys page add it as a new service, or
+    when it changed before the key was stored. A refused value raises before anything is added.
     """
     validate_secret(secret)
     operator = scope.config.egress_broker
+    if user_service_hosts_error(operator, service) is not None:
+        return "expired"
     try:
-        check_new_user_service(
-            operator,
-            scope.manager,
-            target.worker_target,
-            target.service,
-            service,
-            oauth_providers=(),
-        )
         save_user_service(
             scope.manager,
             target.worker_target,

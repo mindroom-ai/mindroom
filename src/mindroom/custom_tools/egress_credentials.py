@@ -34,10 +34,11 @@ from mindroom.egress_broker.secrets import egress_key_path, is_personal_target, 
 from mindroom.egress_broker.service import manage_url
 from mindroom.egress_broker.user_services import (
     UserServiceConflictError,
-    check_new_user_service,
     effective_config,
+    save_user_service,
     service_source,
     services_for_agent,
+    user_service_hosts_error,
 )
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_execution
@@ -173,9 +174,20 @@ def _proposed_service(
             f"`new_service` cannot set {', '.join(map(str, refused))}: a service proposed on a card takes only an API "
             f"key, so it sets only {', '.join(_PROPOSABLE_FIELDS)}."
         )
+    broker = config.egress_broker
     try:
         service = EgressService.model_validate({**body, "oauth_provider": None})
-        check_new_user_service(config.egress_broker, manager, target, name, service, oauth_providers=())
+        # Checked as the Agent Keys page saves a new service, writing nothing.
+        save_user_service(
+            manager,
+            target,
+            name,
+            service,
+            config_services=broker.services,
+            oauth_providers=(),
+            only_new=True,
+            write=False,
+        )
     except ValidationError as error:
         issues = [
             f"{'.'.join(map(str, issue['loc']))}: {validation_issue_message(issue)}"
@@ -185,6 +197,8 @@ def _proposed_service(
         ]
         return f"New service '{name}' is invalid: {'; '.join(issues)}."
     except (ValueError, UserServiceConflictError) as error:
+        return f"New service '{name}' cannot be added: {error}."
+    if error := user_service_hosts_error(broker, service):
         return f"New service '{name}' cannot be added: {error}."
     return service
 

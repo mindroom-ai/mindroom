@@ -38,7 +38,7 @@ On Save the API re-runs the same checks against the config it serves now; any re
 
 1. The existing checks: same key store as the card's, requester may still manage keys.
 2. The key is validated first, so a refused value (422) creates nothing and the request stays pending.
-3. `save_user_service(..., only_new=True)` adds the service; a name taken meanwhile is `expired`.
+3. `save_user_service(..., only_new=True)` adds the service (the tool ran the same call with `write=False` before posting); a name taken meanwhile is `expired`.
 4. Under `consistent_read`, the service must still have the card's hosts; then the key is saved.
 5. When saving the key raises, the new service is deleted again (`delete_user_service`), so no keyless half-state remains.
 
@@ -75,9 +75,9 @@ A valid one shows a compact "New service" block above the key field: the display
 
 ## Checklist
 
-- [ ] Spec committed.
-- [ ] Backend tests red: tool refusals without posting, `new_service` on the card, Save creates service and key, config gained the name expires, key-save failure removes the service, decline creates nothing.
-- [ ] Backend: `user_services` (`only_new`, `check_new_user_service`, `user_service_hosts_error`), `secret_requests` (`KeyTarget.new_service`, content), tool, API.
-- [ ] Docs: `docs/deployment/egress-broker.md` "Asking in chat"; regenerated tool schema goldens and skill references.
-- [ ] Chat tests red: parser accepts/rejects, preview renders, malformed `new_service` offers no Save.
-- [ ] Chat: parser, card block, i18n in all 17 locale overlays.
+- [x] Spec committed.
+- [x] Backend tests red: tool refusals without posting, `new_service` on the card, Save creates service and key, config gained the name expires, key-save failure removes the service, decline creates nothing.
+- [x] Backend: `user_services` (`save_user_service(only_new=..., write=...)`, `user_service_hosts_error`), `secret_requests` (`KeyTarget.new_service`, content), tool, API.
+- [x] Docs: `docs/deployment/egress-broker.md` "Asking in chat"; regenerated tool schema golden and skill references.
+- [x] Chat tests red: parser accepts/rejects, preview renders, malformed `new_service` offers no Save.
+- [x] Chat: parser, card block, i18n in all 17 locale overlays.
