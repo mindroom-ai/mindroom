@@ -123,7 +123,7 @@ async def consume_one_ingestion_batch(
     account_id: str,
     before_admission: _BeforeAdmission | None = None,
     after_admission: _AfterAdmission | None = None,
-    after_sync: Callable[[], Awaitable[None]] | None = None,
+    after_sync: Callable[[bool], Awaitable[None]] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> ej.AdmissionFacts | None:
@@ -155,7 +155,7 @@ async def consume_one_ingestion_batch(
         if converted_record.disposition is ej.IngestionRecordDisposition.COMPATIBILITY_ONLY:
             await _dispatch_auxiliary_record(session, record, account_id)
     if batch.completes_sync and after_sync is not None:
-        await after_sync()
+        await after_sync(result.receipt_new)
     await session.ack(batch)
     return result
 
@@ -184,7 +184,7 @@ async def run_ingestion_pump(
     wait_for_delivery_projection: Callable[[], Awaitable[None]] | None = None,
     before_admission: _BeforeAdmission | None = None,
     after_admission: _AfterAdmission | None = None,
-    after_sync: Callable[[], Awaitable[None]] | None = None,
+    after_sync: Callable[[bool], Awaitable[None]] | None = None,
     after_ack: Callable[[], None] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,

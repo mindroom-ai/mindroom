@@ -117,7 +117,7 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
 
     monkeypatch.setattr(journal_ops, "_apply_ingestion_disposition", fail_after_leave)
 
-    async def complete() -> None:
+    async def complete(_receipt_new: bool) -> None:
         nonlocal completed
         completed += 1
 

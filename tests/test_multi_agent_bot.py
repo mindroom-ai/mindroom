@@ -406,13 +406,13 @@ class TestAgentBot(AgentBotTestBase):
         assert next_batch() is None
         next_batch.reset_mock()
 
-        await bot._on_ingestion_frame_completion()
+        await bot._on_ingestion_frame_completion(True)
         next_batch.assert_not_called()
         assert bot._first_sync_done is True
         bot._run_sync_response_side_effects.assert_awaited_once_with(
             first_sync_response=True,
         )
-        await bot._on_ingestion_frame_completion()
+        await bot._on_ingestion_frame_completion(True)
         assert bot._mark_sync_progress.call_count == 2
         assert bot._run_sync_response_side_effects.await_args_list == [
             call(first_sync_response=True),

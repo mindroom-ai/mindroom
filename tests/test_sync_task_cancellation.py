@@ -106,7 +106,7 @@ from tests.conftest import (
 async def _complete_frame(bot: AgentBot, index: int = 0) -> None:
     """Drive runtime side effects through the durable completion owner."""
     del index
-    await bot._on_ingestion_frame_completion()
+    await bot._on_ingestion_frame_completion(True)
 
 
 def _shutdown_bot_mock() -> AsyncMock:

@@ -229,7 +229,7 @@ async def _consume_frame(bot: AgentBot, session: DurableSync, frame: bytes) -> N
     runner = asyncio.create_task(session.run())
     completed = False
 
-    async def after_sync() -> None:
+    async def after_sync(_receipt_new: bool) -> None:
         nonlocal completed
         completed = True
 
@@ -271,7 +271,7 @@ async def _consume_repaired_frame(
     complete = False
     seen: list[SyncRecord] = []
 
-    async def after_sync() -> None:
+    async def after_sync(_receipt_new: bool) -> None:
         nonlocal complete
         complete = True
 
@@ -295,6 +295,52 @@ async def _consume_repaired_frame(
         runner.cancel()
         await asyncio.gather(runner, return_exceptions=True)
     return seen
+
+
+@pytest.mark.asyncio
+async def test_replayed_completion_does_not_complete_the_first_sync(tmp_path: Path) -> None:
+    """A restart replays a completion the stopped process admitted; only a new response proves the bot caught up."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    handle_bot_ready = AsyncMock()
+    bot.orchestrator.handle_bot_ready = handle_bot_ready
+    membership_sync = bot.orchestrator.agent_reply_membership_sync
+    membership_sync.observer_loop_started(bot.config, bot.matrix_id.full_id)
+    marker = SyncBatch(uuid4(), 1, (), completes_sync=True)
+    principal = bot.journal_principal()
+    consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
+    await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=marker.stream_id)
+    account = bot.agent_user.user_id
+
+    async def consume(session: Session) -> None:
+        await consume_one_ingestion_batch(
+            session,
+            principal,
+            account_id=account,
+            after_sync=bot._on_ingestion_frame_completion,
+        )
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+    # The stopped process admitted the marker; its acknowledgement was not yet durable when it was killed.
+    await consume_one_ingestion_batch(Session(marker), principal, account_id=account)
+    replayed = Session(marker)
+    try:
+        # The marker drains while the first new response is still outstanding.
+        await consume(replayed)
+        assert replayed.acked == [marker]
+        assert bot.seconds_since_last_sync_activity() is not None
+        assert not bot.first_sync_complete
+        assert not membership_sync.observer_is_open(bot.matrix_id.full_id)
+        handle_bot_ready.assert_not_awaited()
+
+        await consume(Session(SyncBatch(marker.stream_id, 2, (), completes_sync=True)))
+        assert bot.first_sync_complete
+        assert membership_sync.observer_is_open(bot.matrix_id.full_id)
+        handle_bot_ready.assert_awaited_once_with(bot)
+    finally:
+        bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+        await bot.prepare_for_sync_shutdown()
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
 
 @pytest.mark.asyncio
@@ -1012,7 +1058,7 @@ async def test_startup_welcome_reaches_matrix_once_nio_accepts_sends_to_the_room
         "joined_before_startup": [json.dumps({"next_batch": "initial"}).encode(), _rooms_frame("joined", [ROOM])],
     }[ordering]
     synced = asyncio.Semaphore(0)
-    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=synced.release))
+    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=lambda _new: synced.release()))
     config = DurableSyncConfig(sync_filter=bot_module._SYNC_FILTER) if ordering == "join_before_first_sync" else None
     async with _owned_session(bot, config) as session:
         assert bot.client is not None
@@ -1114,7 +1160,7 @@ async def _sliding_bot_syncing(
     """Run a Sliding source whose subscriptions start empty, as if every room were created after it opened."""
     bot.config.matrix_sync = MatrixSyncConfig.model_construct(mode="sliding", sliding_timeline_limit=5)
     synced = asyncio.Event()
-    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=synced.set))
+    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=lambda _new: synced.set()))
     async with _owned_session(bot, DurableSyncConfig(sliding=SlidingSyncConfig())) as session:
         client = bot.client
         assert client is not None
