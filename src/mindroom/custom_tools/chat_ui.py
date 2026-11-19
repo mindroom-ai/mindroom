@@ -9,7 +9,7 @@ import json
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, get_args
 
 import nio
 from nio.api import RelationshipType
@@ -48,6 +48,8 @@ _SettingsSection = Literal[
     "about",
 ]
 _SidePanel = Literal["members", "computer"]
+# The libraries MindRoom Chat serves to canvas pages itself.
+_CanvasLibrary = Literal["chartjs", "d3", "mermaid", "katex"]
 
 logger = get_logger(__name__)
 
@@ -160,6 +162,15 @@ def _canvas_title_is_valid(title: str) -> bool:
         and not any(unicodedata.category(char) in {"Cc", "Cs"} or char in "\u2028\u2029" for char in title)
         and len(title.encode("utf-16-le")) // 2 <= _CANVAS_TITLE_MAX_UNITS
     )
+
+
+def _canvas_presentation_error(width: int | None, libraries: list[_CanvasLibrary] | None) -> str | None:
+    if width is not None and (isinstance(width, bool) or not isinstance(width, int) or not 320 <= width <= 2560):
+        return "Canvas width must be an integer from 320 to 2560 (not a boolean)."
+    known = get_args(_CanvasLibrary)
+    if libraries is not None and (not isinstance(libraries, list) or any(name not in known for name in libraries)):
+        return f"Canvas libraries must be a list of: {', '.join(known)}."
+    return None
 
 
 class ChatUITools(Toolkit):
@@ -454,6 +465,7 @@ class ChatUITools(Toolkit):
         inline: bool = False,
         raw: bool = False,
         width: int | None = None,
+        libraries: list[_CanvasLibrary] | None = None,
     ) -> str:
         """Show the user the Canvas panel: an interactive web page you wrote, beside this conversation.
 
@@ -484,12 +496,11 @@ class ChatUITools(Toolkit):
         browser, and taller content scrolls inside it. The panel shows raw pages too,
         at the panel's own width.
 
-        Design it like a polished web app. Write self-contained HTML with inline CSS
-        and JavaScript. Fetch, XHR, and WebSocket requests are always blocked.
-        External images, scripts, styles, and fonts are blocked too unless your
-        instructions name a source that works; otherwise draw charts with inline SVG
-        and embed images as data: URLs.
-        The panel can be resized from narrow to full width, so use a responsive layout.
+        Design it like a polished web app. Fetch, XHR, and WebSockets are always
+        blocked. External images, scripts, styles, and fonts are blocked too
+        unless your instructions name a source that works; embed images as data: URLs.
+        ``libraries`` loads Chart.js, D3, Mermaid, or KaTeX from Chat, without jsDelivr.
+        The panel resizes from narrow to full width, so use a responsive layout.
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
         --mr-text-muted, --mr-accent, --mr-accent-text, --mr-success, --mr-warning,
@@ -545,7 +556,7 @@ class ChatUITools(Toolkit):
 
         Args:
             title: Short single-line panel title; when updating, omit it to keep the canvas's first title.
-            html: Self-contained HTML with inline CSS and JavaScript. Give html or path.
+            html: HTML with inline CSS and JavaScript. Give html or path.
             path: Workspace-relative path of an HTML file you wrote, shown instead of html.
             canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
             share_state: Let read_canvas_state read what the user does in this new canvas; updates keep the choice.
@@ -554,6 +565,7 @@ class ChatUITools(Toolkit):
             raw: Add no Chat styles or theme variables for this revision; updates must set it again.
             width: Target viewport width in CSS pixels (integer 320-2560) for this revision;
                 updates must set it again, and the panel uses its own width.
+            libraries: For this revision; updates must set them again.
 
         """
         validated = self._validated_context("show_canvas")
@@ -563,7 +575,7 @@ class ChatUITools(Toolkit):
         # Models often send an empty string for an omitted optional argument.
         canvas_event_id = canvas_event_id or None
         title = (title or "").strip()
-        input_error = self._canvas_input_error(title, html, path, canvas_event_id, width)
+        input_error = self._canvas_input_error(title, html, path, canvas_event_id, width, libraries)
         page = input_error or await self._read_canvas_page(html, path)
         if isinstance(page, str):
             return page
@@ -572,7 +584,17 @@ class ChatUITools(Toolkit):
             return target
         metadata, title = target
         body = f"Interactive panel: {title}. Open it in MindRoom Chat to respond."
-        canvas = await self._canvas_field(context, metadata, body, title, page, canvas_event_id, raw=raw, width=width)
+        canvas = await self._canvas_field(
+            context,
+            metadata,
+            body,
+            title,
+            page,
+            canvas_event_id,
+            raw=raw,
+            width=width,
+            libraries=libraries,
+        )
         if isinstance(canvas, str):
             return canvas
         if canvas_event_id is None:
@@ -687,9 +709,10 @@ class ChatUITools(Toolkit):
         path: str | None,
         canvas_event_id: str | None,
         width: int | None,
+        libraries: list[_CanvasLibrary] | None,
     ) -> str | None:
-        if width is not None and (isinstance(width, bool) or not isinstance(width, int) or not 320 <= width <= 2560):
-            return cls._canvas_error("Canvas width must be an integer from 320 to 2560 (not a boolean).")
+        if presentation_error := _canvas_presentation_error(width, libraries):
+            return cls._canvas_error(presentation_error)
         if canvas_event_id is not None and not canvas_event_id.startswith("$"):
             return cls._canvas_error(_CANVAS_EVENT_ID_ERROR, canvas_event_id=canvas_event_id)
         # An update may omit the title; it is checked once the canvas's own title is known.
@@ -773,6 +796,7 @@ class ChatUITools(Toolkit):
         *,
         raw: bool = False,
         width: int | None = None,
+        libraries: list[_CanvasLibrary] | None = None,
     ) -> dict[str, object] | str:
         """Carry a page inside the event when an edit of it fits, otherwise as uploaded media."""
         presentation: dict[str, object] = {}
@@ -780,6 +804,8 @@ class ChatUITools(Toolkit):
             presentation["raw"] = True
         if width is not None:
             presentation["width"] = width
+        if libraries:
+            presentation["libraries"] = list(dict.fromkeys(libraries))
         # Serialized JSON is never smaller than the UTF-8 page, so larger pages skip the measurement.
         if len(page) < EDIT_MESSAGE_SIZE_LIMIT:
             inline: dict[str, object] = {"title": title, "html": page.decode("utf-8"), **presentation}

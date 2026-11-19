@@ -92,7 +92,8 @@ The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoev
 
 ### Let pages load libraries
 
-Pages can also load libraries such as Chart.js, D3, Mermaid, or KaTeX from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
+Chart.js, D3, Mermaid, and KaTeX need no switch: MindRoom Chat serves its own copies to pages whose agent names them in `show_canvas`, and no viewer's address reaches a CDN.
+Pages can also load any other npm library from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
 This takes two more switches, both off by default; turn on both, because a page that needs a library breaks where Chat blocks it.
 
 ```yaml

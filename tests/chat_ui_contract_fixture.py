@@ -170,6 +170,7 @@ async def _invoke_contract_case(tool: ChatUITools, case: _ContractCase) -> str:
             inline=case.argument in {"inline", "page"},
             raw=case.argument == "page",
             width=1440 if case.argument == "page" else None,
+            libraries=["chartjs", "katex"] if case.argument == "page" else None,
         )
     return await tool.open_panel(panel=case.argument)  # type: ignore[arg-type]
 
