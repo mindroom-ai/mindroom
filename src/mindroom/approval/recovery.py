@@ -40,6 +40,8 @@ class ApprovalRecovery:
     journal_provider: Callable[[], EventJournalStore] | None = None
     entity_configured: Callable[[str], bool] | None = None
     entity_permanently_unavailable: Callable[[str], bool] | None = None
+    # Whether the config starts no owner account, the sender of every card from before cards recorded their sender.
+    owner_absent: Callable[[], bool] | None = None
     recover_unavailable_final: Callable[[str, ApprovalContinuation], Awaitable[bool]] | None = None
     cancel_delegations: Callable[[ApprovalContinuation, str], Awaitable[None]] | None = None
     manager: ApprovalManager | None = None
@@ -163,10 +165,14 @@ class ApprovalRecovery:
         """Expire every pending card the router sent before cards recorded their sender; return how many it found.
 
         Each paused turn resumes as after a timeout; a later call finds only a card whose edit waits for a router bot.
+        A router the config no longer starts never edits its card, which then retires unedited, keeping its pending look.
         """
         if self.manager is None:
             return 0
-        return len(await self.manager.expire_cards(lambda card: card.sender_principal_id is None, _UPGRADE_REASON))
+        absent = self.owner_absent is not None and self.owner_absent()
+        return len(
+            await self.manager.expire_cards(lambda card: card.sender_principal_id is None, _UPGRADE_REASON, absent),
+        )
 
     def reset_startup_cleanup_gate(self) -> None:
         """Reset one-shot startup approval cleanup state."""

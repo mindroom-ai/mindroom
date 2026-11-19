@@ -479,6 +479,7 @@ class _MultiAgentOrchestrator:
             deliver_unavailable_notice=self._approval_transport.deliver_unavailable_notice,
             journal_provider=self.event_journal_store,
             entity_configured=lambda name: name in self.config.agents or name in self.config.teams,
+            owner_absent=lambda: not self.config.needs_owner_account(),
             entity_permanently_unavailable=self.fleet.is_disabled,
             recover_unavailable_final=self._recover_unavailable_final,
             cancel_delegations=lambda continuation, reason: cancel_approval_delegations(

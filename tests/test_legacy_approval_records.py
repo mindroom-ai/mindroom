@@ -286,7 +286,7 @@ def _manager(
         test_runtime_paths(tmp_path),
         send_approval_delivery=send,
         cards=store.principal(_ROUTER),
-        sender_bot=lambda _sender, _room_id: object(),
+        sender_bot=lambda _sender, _room_id: object() if sender_ready else None,
         sender_device_id=AsyncMock(return_value="DEVICE"),
     )
 
@@ -800,18 +800,24 @@ async def test_a_receipt_outliving_its_reply_keeps_its_granted_call_until_it_ret
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("router_in_room", [True, False])
+@pytest.mark.parametrize(("router_in_room", "owner_configured"), [(True, True), (False, True), (False, False)])
 async def test_pending_router_card_is_ended_once_at_upgrade(
     recorded_journal: Callable[[str], _Journal],
     tmp_path: Path,
     router_in_room: bool,
+    owner_configured: bool,
 ) -> None:
-    """A card the router sent before upgrade expires at the first startup; its edit waits for a router bot."""
+    """A card the router sent before upgrade expires at the first startup.
+
+    Its edit waits for a router bot that is only unavailable; a router the config no longer starts never edits it,
+    so the card retires unedited.
+    """
     store = recorded_journal("01_waiting_card_acknowledged.sql").open()
     sent: list[MatrixDelivery] = []
     manager = _manager(tmp_path, store, sent, sender_ready=router_in_room)
-    recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock())
+    recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock(), owner_absent=lambda: not owner_configured)
     recovery.bind(manager)
+    retired = router_in_room or not owner_configured
     try:
         approvals = store.principal(_ROUTER).approvals
         pending = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
@@ -822,10 +828,10 @@ async def test_pending_router_card_is_ended_once_at_upgrade(
 
         card = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
         assert isinstance(card, ApprovalCardView)
-        assert (card.decided, card.retired) == (True, router_in_room)
+        assert (card.decided, card.retired) == (True, retired)
         assert [delivery.stage for delivery in sent] == ([DeliveryStage.FINAL] if router_in_room else [])
         # A later startup finds the card again only while its edit still waits for a router bot.
-        assert await recovery.end_cards_without_sender() == (0 if router_in_room else 1)
+        assert await recovery.end_cards_without_sender() == (0 if retired else 1)
     finally:
         await manager.shutdown()
         await store.close()
