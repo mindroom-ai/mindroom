@@ -79,15 +79,21 @@ class _PreparedMatrixMessage:
     cache_bypass: bool
 
 
+# The fixed reasons homeservers that can disable encryption (Conduwuit and its forks, Tuwunel included) give.
+_ENCRYPTION_DISABLED_REASONS = frozenset(
+    {"encryption has been disabled", "encryption is disabled on this homeserver"},
+)
+
+
 def _refuses_encryption(response: nio.RoomSendError) -> bool:
     """Return whether the homeserver refused an encrypted event because it refuses encryption.
 
-    Matrix has no errcode for this. Homeservers that can disable encryption (Conduwuit and its forks) answer
-    M_FORBIDDEN with a reason that names encryption. Any other refusal, such as one a membership or power-level
-    change can lift, stays retryable; a power-level refusal names the `m.room.encrypted` event type, so the match
-    is on "encryption", not "encrypt".
+    Matrix has no errcode for this, so only the exact disabled-encryption reason counts. Any other refusal, such
+    as one a membership or power-level change can lift, stays retryable, even when a user or room ID in its
+    reason happens to contain "encryption".
     """
-    return response.status_code == "M_FORBIDDEN" and "encryption" in (response.message or "").lower()
+    reason = (response.message or "").strip().rstrip(".").lower()
+    return response.status_code == "M_FORBIDDEN" and reason in _ENCRYPTION_DISABLED_REASONS
 
 
 def _sanitized_delivery_error_message(error: Exception) -> str:

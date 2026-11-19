@@ -429,6 +429,7 @@ async def test_send_message_outcome_maps_a_homeserver_that_refuses_encryption() 
     ("encrypted", "message"),
     [
         (True, "You are not in this room."),
+        (True, "User @encryption-bot:example.org not in room !r:example.org"),
         (True, "Auth check failed: sender does not have enough power (0) for `m.room.encrypted` event type (50)"),
         (False, "Encryption has been disabled"),
     ],
