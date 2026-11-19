@@ -44,6 +44,7 @@ from tests.conftest import (
     postgres_journal_schema_url,
     test_runtime_paths,
 )
+from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -641,6 +642,42 @@ async def test_a_scheduled_approval_still_arms_and_claims(recorded_journal: Call
 
 
 @pytest.mark.asyncio
+async def test_a_scheduled_approval_is_not_spent_once_the_agent_left(
+    recorded_journal: Callable[[str], _Journal],
+) -> None:
+    """An approval given before the upgrade is not spent through an agent that is no longer in the room."""
+    store = recorded_journal("12_scheduled_calls.sql").open()
+    try:
+        armed = await store.principal(_ROUTER).approvals.scheduled_call(task_id="task-armed")
+        assert armed is not None
+        await admit_room_membership(store.principal(_CODE), _ROOM, "join")
+        await admit_room_membership(store.principal(_CODE), _ROOM, "leave")
+
+        claimed = await store.backend.write(
+            lambda transaction: scheduled_approvals.claim(
+                transaction,
+                _ROUTER,
+                call=armed,
+                arguments_json=armed.arguments_json,
+                receipt=ApprovalCardReservation(
+                    delivery_id="scheduled-receipt:task-armed",
+                    tool_call_id="task-armed",
+                    event_type="io.mindroom.tool_approval",
+                    payload={"approval_id": "scheduled-receipt:task-armed", "tool_name": armed.tool_name},
+                    approver_user_id=_ALICE,
+                    approvable=False,
+                    sender_principal_id=_CODE,
+                ),
+                now_ns=armed.execute_at_ns,
+            ),
+        )
+
+        assert claimed == "left_room"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_timed_grants_keep_their_scope_receipts_and_revocation(
     recorded_journal: Callable[[str], _Journal],
 ) -> None:
@@ -880,6 +917,8 @@ async def test_the_sender_column_is_added_to_a_current_card_table(tmp_path: Path
     await EventJournalStore.open_sqlite(path).close()
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("ALTER TABLE approval_cards DROP COLUMN sender_principal_id")
+        for column in ("sender_principal_id", "sender_epoch"):
+            connection.execute(f"ALTER TABLE scheduled_call_approvals DROP COLUMN {column}")
         connection.execute(
             "INSERT INTO room_membership (principal_id, room_id, membership_epoch, departure_fenced) VALUES (?, ?, 1, 1)",
             (_ROUTER, _ROOM),
@@ -891,7 +930,9 @@ async def test_the_sender_column_is_added_to_a_current_card_table(tmp_path: Path
 
     with closing(sqlite3.connect(path)) as connection:
         columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(approval_cards)")]
+        scheduled = {str(row[1]) for row in connection.execute("PRAGMA table_info(scheduled_call_approvals)")}
         memberships = connection.execute("SELECT membership_epoch, departure_fenced FROM room_membership").fetchall()
     assert columns.count("sender_principal_id") == 1
+    assert {"sender_principal_id", "sender_epoch"} <= scheduled
     # The room the router had left keeps its epoch and is open to the cards an agent sends there.
     assert memberships == [(1, 0)]

@@ -642,6 +642,51 @@ async def test_cancelling_the_task_denies_its_pending_card(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("returns", [False, True], ids=["left", "left-and-rejoined"])
+async def test_approval_is_not_spent_once_the_asking_agent_left_the_room(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    returns: bool,
+) -> None:
+    """An approval the agent asked for in one membership of the room is not spent after that membership ended."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    manager.transport.responder_principal_id = lambda entity_name: entity_name + "@shared"
+    asker = journal.principal(_AGENT + "@shared")
+    await admit_room_membership(asker, _ROOM, "join")
+    try:
+        await _armed(manager)
+
+        await admit_room_membership(asker, _ROOM, "leave")
+        if returns:
+            await admit_room_membership(asker, _ROOM, "join")
+
+        assert await _claim(manager) == "left_room"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_is_spent_while_the_asking_agent_stays_after_the_owner_account_left(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The owner account leaving the room does not void an approval an agent that stays there asked for."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    manager.transport.responder_principal_id = lambda entity_name: entity_name + "@shared"
+    await admit_room_membership(journal.principal(_AGENT + "@shared"), _ROOM, "join")
+    try:
+        await _armed(manager)
+
+        await admit_room_membership(journal.principal("router@shared"), _ROOM, "leave")
+
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_direct_call_to_the_tool_still_asks_for_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,

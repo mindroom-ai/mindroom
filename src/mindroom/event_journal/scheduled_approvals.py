@@ -181,16 +181,20 @@ def reserve(
         card=card,
     ):
         return False
-    epoch = transaction.fetchone(
-        "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
-        (principal_id, binding.room_id),
+    ledger_epoch, sender_epoch = (
+        transaction.fetchone(
+            "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
+            (principal, binding.room_id),
+        )
+        for principal in (principal_id, card.sender_principal_id)
     )
     transaction.execute(
         """
         INSERT INTO scheduled_call_approvals (
             principal_id, task_id, room_id, thread_id, requester_id, agent_name, toolkit_name, tool_name,
-            arguments_json, workflow_digest, execute_at_ns, membership_epoch, any_arguments_offered
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            arguments_json, workflow_digest, execute_at_ns, membership_epoch, any_arguments_offered,
+            sender_principal_id, sender_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, task_id) DO NOTHING
         """,
         (
@@ -205,8 +209,10 @@ def reserve(
             binding.arguments_json,
             binding.workflow_digest,
             binding.execute_at_ns,
-            0 if epoch is None else int(epoch["membership_epoch"]),
+            0 if ledger_epoch is None else int(ledger_epoch["membership_epoch"]),
             int(any_arguments_offered),
+            card.sender_principal_id,
+            0 if sender_epoch is None else int(sender_epoch["membership_epoch"]),
         ),
     )
     return True
@@ -323,12 +329,14 @@ def claim(
     if receipt.tool_call_id != call.task_id or receipt.payload.get("tool_name") != call.tool_name:
         msg = f"Scheduled call receipt {receipt.delivery_id!r} names another call"
         raise ValueError(msg)
-    if not membership_state.claim_membership_epoch(
-        transaction,
-        principal_id,
-        room_id=call.room_id,
-        expected_membership_epoch=int(row["membership_epoch"]),
-    ):
+    # The approval is spent in the ledger's epoch and in the membership the asking account gave its consent in; the
+    # account that sends the receipt must be in the room, which is all a row from before askers were recorded can tell.
+    tenures = ((principal_id, row["membership_epoch"]), (row["sender_principal_id"], row["sender_epoch"]))
+    claim, sends = membership_state.claim_membership_epoch, receipt.sender_principal_id
+    if not all(
+        who is None or claim(transaction, str(who), room_id=call.room_id, expected_membership_epoch=int(epoch))
+        for who, epoch in tenures
+    ) or (sends and membership_state.claim_active_membership_epoch(transaction, sends, room_id=call.room_id) is None):
         return "left_room"
     approved_at = None if row["resolved_at_ns"] is None else approval_timestamp(int(row["resolved_at_ns"]))
     # An approved card always records its approver, which may be the canonical account behind an aliased requester.

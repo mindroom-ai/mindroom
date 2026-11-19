@@ -622,8 +622,8 @@ def sender_of(transaction: Transaction, principal_id: str, *, delivery_id: str) 
     return None if row is None else (cast("str | None", row["sender"]), str(row["room_id"]))
 
 
-def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> bool:
-    """Retire a decided request card Matrix is done with; return whether it is retired.
+def retire(transaction: Transaction, principal_id: str, *, delivery_id: str, without_edit: bool = False) -> bool:
+    """Retire a decided request card Matrix is done with, or ``without_edit``; return whether it is retired.
 
     Matrix is done with it once its terminal edit is acknowledged or refused for good; a card Matrix refused to post
     refuses its terminal edit too. A card whose delivery Matrix refuses must not keep the paused reply it shows from
@@ -651,7 +651,7 @@ def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> 
         return False
     if bool(row["retired"]):
         return True
-    if bool(row["undecided"]) or (row["final_event_id"] is None and row["final_refused"] is None):
+    if bool(row["undecided"]) or (not without_edit and row["final_event_id"] is None and row["final_refused"] is None):
         return False
     _retire(transaction, principal_id, delivery_id)
     return True

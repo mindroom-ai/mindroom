@@ -222,6 +222,10 @@ _SCHEDULED_CALL_APPROVALS_TABLE = """
         workflow_digest TEXT NOT NULL,
         execute_at_ns BIGINT NOT NULL,
         membership_epoch BIGINT NOT NULL,
+        -- The account that asked and its membership epoch then; NULL in a
+        -- row stored before askers were recorded.
+        sender_principal_id TEXT,
+        sender_epoch BIGINT,
         -- Whether its card offered approval for any arguments.
         any_arguments_offered INTEGER NOT NULL CHECK (any_arguments_offered IN (0, 1)),
         armed_at_ns BIGINT,

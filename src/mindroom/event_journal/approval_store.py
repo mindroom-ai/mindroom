@@ -234,9 +234,9 @@ class ApprovalStore(PrincipalRows):
             grant_id=grant_id,
         )
 
-    async def retire_approval_card(self, *, delivery_id: str) -> bool:
+    async def retire_approval_card(self, *, delivery_id: str, without_edit: bool = False) -> bool:
         """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit."""
-        return await self._write(approval_cards.retire, delivery_id=delivery_id)
+        return await self._write(approval_cards.retire, delivery_id=delivery_id, without_edit=without_edit)
 
     async def approval_card_sender(self, *, delivery_id: str) -> tuple[str | None, str] | None:
         """Return a card's sender principal, None for a card the router sent before upgrade, with its room."""

@@ -2,6 +2,7 @@
 
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,18 +12,25 @@ import pytest
 import pytest_asyncio
 
 from mindroom.approval.manager import ApprovalManager, ToolApprovalTransportError, UnverifiableApprovalCardError
+from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.transport import ApprovalMatrixTransport, _offload_oversized_full_arguments
 from mindroom.event_journal import (
+    ApprovalCall,
     ApprovalCardReservation,
     ApprovalDeliveryView,
     CallKey,
     DeliveryStage,
+    EventClass,
     EventJournalStore,
+    EventKind,
+    InboundEvent,
     MatrixDelivery,
 )
 from mindroom.matrix.large_messages import content_fits_normal_event
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import approval_manager_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 
 _ROOM = "!room:example.org"
 _CARD_TYPE = "io.mindroom.tool_approval"
@@ -371,6 +379,91 @@ async def test_sweep_during_a_reload_gap_leaves_the_card_for_the_replacement_bot
         assert (await manager.recover_cards_on_startup()).complete
         assert sending_clients == [bots["code"].client]
     finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_removed_owner_ends_once_after_its_card_edit_failed_before_the_removal(
+    tmp_path: Path,
+    journal: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent removed from the config, whose card edit failed while it still ran, ends its paused turn once."""
+    cards = journal.principal(_BOOKS)
+    owner = journal.principal(_CODE)
+    bots = {"code": _bot("code"), "other": _bot("other")}
+    bots["other"].journal_principal.return_value = journal.principal("other@@mindroom_other:example.org")
+    configured = {"code", "other"}
+    sent: list[tuple[nio.AsyncClient, dict]] = []
+
+    async def send(client: nio.AsyncClient, room_id: str, _type: str, content: dict, **_options: object) -> object:
+        if "m.new_content" in content:
+            return nio.RoomSendError(message="Matrix temporarily unavailable")
+        sent.append((client, content))
+        return nio.RoomSendResponse(f"$event-{len(sent)}", room_id)
+
+    monkeypatch.setattr("mindroom.approval.transport.send_room_event_result", send)
+    monkeypatch.setattr("mindroom.approval.transport.can_send_to_encrypted_room", lambda *_args, **_options: True)
+    manager = _manager(tmp_path, bots, cards)
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=manager.transport.deliver_unavailable_notice,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name in configured,
+    )
+    recovery.bind(manager)
+    await owner.admit(
+        InboundEvent(
+            event_id="$source",
+            room_id=_ROOM,
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@alice:example.org",
+            origin_server_ts=1_000,
+            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
+        ),
+    )
+    call = ApprovalCall(tool_call_id="call-1", tool_name="shell", invoking_agent="code", expires_at_ns=9 * 10**18)
+    paused = approval_continuation(
+        approval_id="approval-1",
+        entity_name="code",
+        room_id=_ROOM,
+        thread_id=None,
+        calls=(call,),
+        state="waiting",
+        runtime_generation="runtime-a",
+    )
+    await paused_for_approval(owner, paused)
+    try:
+        card = replace(
+            _reservation(),
+            payload={
+                "approval_id": "card-1",
+                "continuation_id": "approval-1",
+                "continuation_generation": 0,
+                "tool_call_id": "call-1",
+            },
+        )
+        assert await manager.reserve_and_publish(
+            continuation_principal_id=_CODE,
+            continuation_id="approval-1",
+            continuation_generation=0,
+            cards=(card,),
+        )
+        # The agent still runs when its removal first settles it, and Matrix refuses the edit for now.
+        assert await recovery.reconcile_removed_entities({"code"}) == {"code"}
+
+        del bots["code"]
+        # No bot while the config still lists the agent is a gap, not a removal: the edit stays owed.
+        assert await recovery.reconcile_removed_entities({"code"}) == {"code"}
+        configured.discard("code")
+        for _ in range(2):
+            await recovery.reconcile_unavailable_entities({"code"})
+
+        assert await owner.approvals.approval_continuation("approval-1") is None
+        assert [(client, content["msgtype"]) for client, content in sent[1:]] == [(bots["other"].client, "m.notice")]
+    finally:
+        await recovery.close()
         await manager.shutdown()
 
 

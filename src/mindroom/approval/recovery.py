@@ -134,6 +134,8 @@ class ApprovalRecovery:
                 current,
             )
         manager = self.manager
+        # The bot of an owner the config no longer lists had its chance to edit its cards before it stopped.
+        removed = self.entity_configured is not None and not self.entity_configured(current.entity_name)
         current = await prepare_approval_failure(
             current,
             ApprovalFailure(ApprovalFailureKind.ERROR, reason),
@@ -144,7 +146,7 @@ class ApprovalRecovery:
                 expected_generation=current.generation,
                 expected_runtime_generation=current.runtime_generation,
             ),
-            expire_cards=None if manager is None else manager.expire_continuation_cards,
+            expire_cards=None if manager is None else partial(manager.expire_continuation_cards, unedited=removed),
         )
         if current is None:
             return False
