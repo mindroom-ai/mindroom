@@ -141,9 +141,17 @@ async def handle_auto_approve_command(  # noqa: PLR0911 - one answer per outcome
         )
 
     if requested == "off":
-        if not end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id):
+        ended = end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
+        # A window always ends here; an `off` with none open still clears what the room shows of an earlier failure.
+        published = await _publish_windows(put_room_state, runtime_paths, room.room_id, logger)
+        if published is False:
+            return (
+                f"⚠️ Auto-approve for all your tool calls is off in {place}, but the room may still show it as on. "
+                "Run `/auto_approve off` again to retry."
+            )
+        if not ended:
             return f"Auto-approve for all your tool calls is not on in {place}."
-        if await _publish_windows(put_room_state, runtime_paths, room.room_id, logger) is None:
+        if published is None:
             return moderator_rights_message("show that auto-approve is off")
         return (
             f"✅ Auto-approve for all your tool calls is off in {place}; they follow the usual approval rules again. "

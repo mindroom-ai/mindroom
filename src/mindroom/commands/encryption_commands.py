@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from aiohttp import ClientError
+
 from mindroom.matrix.client_room_admin import (
     ensure_room_encryption_enabled,
     room_admin_power_user,
@@ -33,7 +35,10 @@ async def _confirm_encrypt(
     admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
     if admin_user_id is None:
         return "❌ Room admin only."
-    enabled = await ensure_room_encryption_enabled(client, room_id, put_state=put_state)
+    try:
+        enabled = await ensure_room_encryption_enabled(client, room_id, put_state=put_state)
+    except (ClientError, OSError):
+        enabled = False  # The request did not get through, which a retry can fix.
     if enabled:
         return "🔐 End-to-end encryption is now enabled for this room. This cannot be undone."
     if enabled is None:

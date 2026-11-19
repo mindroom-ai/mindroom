@@ -359,6 +359,25 @@ async def test_auto_approve_off_says_when_the_room_refuses_to_show_it(tmp_path: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [{"return_value": False}, {"side_effect": OSError("connection reset")}])
+async def test_auto_approve_off_says_when_clearing_fails_and_a_repeat_retries(
+    tmp_path: Path,
+    failure: dict[str, Any],
+) -> None:
+    """A window ends here though the room still shows it, the answer says so, and another `off` clears it."""
+    await _send(tmp_path, "!auto_approve 30")
+
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve off", put_room_state=AsyncMock(**failure))
+    retried = AsyncMock(return_value=True)
+    again, _ = await _send(tmp_path, "!auto_approve off", put_room_state=retried)
+
+    assert reply.startswith("⚠️ Auto-approve for all your tool calls is off in this thread, but")
+    assert _window(runtime_paths) is None
+    assert again == "Auto-approve for all your tool calls is not on in this thread."
+    assert retried.await_args.args[2] == {"windows": []}
+
+
+@pytest.mark.asyncio
 async def test_auto_approve_command_names_the_whole_room_in_a_room_without_threads_and_uses_local_time(
     tmp_path: Path,
 ) -> None:
