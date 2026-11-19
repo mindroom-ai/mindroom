@@ -249,7 +249,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.30",
+  "mindroom_plugin_api": "1.31",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
