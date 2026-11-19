@@ -132,8 +132,9 @@ save_file("temporary notes\n", "scratch/notes.txt")
 `shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 It runs commands only in a worker unless [`defaults.allow_shell_without_worker: true`](../configuration/agents.md#defaults) lets them run in the MindRoom process; otherwise each call there is refused.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and stderr under `Stderr:`.
-With a working directory, the returned output and any saved file start with a `[cwd: <dir>]` line.
+The tool returns the last `tail` lines of stdout (default 100), then the last `tail` lines of any stderr under `Stderr:`, each capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and all of stderr under `Stderr:`.
+When `tail` or the cap leaves lines out, the result starts with one notice, such as `[Showing the last 100 of 230 lines. Pass a larger tail, or narrow the command.]`.
+The command runs in the agent's workspace, or in its workdir, and the result holds only the command's output.
 With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
 
 A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
