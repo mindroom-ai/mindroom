@@ -216,7 +216,7 @@ class ApprovalManager:
     """Own approval semantics while the generic worker owns Matrix delivery."""
 
     runtime_paths: RuntimePaths
-    # Prepares, sends, and verifies cards through the router, and wakes the replies their decisions unblock.
+    # Prepares, sends, and verifies cards through the account that asks, and wakes the replies their decisions unblock.
     transport: ApprovalMatrixTransport
     cards: ApprovalDeliveryView | None = None
     recovery: ApprovalRecovery | None = None
@@ -264,6 +264,7 @@ class ApprovalManager:
             tool_name=tool_name,
             raw_arguments=arguments,
             agent_name=agent_name,
+            sender_entity=entity_name,
             room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
@@ -330,6 +331,7 @@ class ApprovalManager:
             tool_name=tool_name,
             raw_arguments=arguments,
             agent_name=agent_name,
+            sender_entity=entity_name or agent_name,
             room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
@@ -435,6 +437,7 @@ class ApprovalManager:
             tool_name=binding.tool_name,
             raw_arguments=json.loads(binding.arguments_json),
             agent_name=binding.agent_name,
+            sender_entity=binding.agent_name,
             room_id=binding.room_id,
             thread_id=binding.thread_id,
             requester_id=binding.requester_id,
@@ -483,6 +486,7 @@ class ApprovalManager:
             tool_name=call.tool_name,
             raw_arguments=json.loads(arguments_json),
             agent_name=call.agent_name,
+            sender_entity=call.agent_name,
             room_id=call.room_id,
             thread_id=call.thread_id,
             requester_id=call.requester_id,
@@ -534,6 +538,7 @@ class ApprovalManager:
         tool_name: str,
         raw_arguments: dict[str, Any],
         agent_name: str | None,
+        sender_entity: str,
         room_id: str,
         thread_id: str | None,
         requester_id: str,
@@ -570,7 +575,7 @@ class ApprovalManager:
         content.update(target_fields)
         if grant_operation is None:
             content.pop("approval_scope", None)
-        prepared = await self.transport.prepare_approval_event(room_id, thread_id, content)
+        prepared = await self.transport.prepare_approval_event(room_id, thread_id, content, sender_entity)
         if prepared is None:
             return None
         if prepared.get("approvable", True) is not True:
@@ -585,6 +590,7 @@ class ApprovalManager:
             approver_user_id=approver_user_id,
             approvable=card_approvable(prepared),
             grant_operation=grant_operation,
+            sender_entity=sender_entity,
         )
 
     async def settle_background_approval(
@@ -645,10 +651,9 @@ class ApprovalManager:
 
     async def _publish_reserved_cards(self, delivery_ids: list[str]) -> None:
         """Send reserved cards now, leaving any failed send to the delivery worker's retries."""
-        worker = self._worker()
         for delivery_id in delivery_ids:
             try:
-                await worker.flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+                await (await self._worker(delivery_id)).flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
             except Exception:
                 logger.warning(
                     "approval_card_initial_delivery_deferred",
@@ -657,7 +662,8 @@ class ApprovalManager:
                 )
         self._ensure_deadline_sweep()
 
-    def _worker(self) -> MatrixDeliveryWorker:
+    async def _worker(self, delivery_id: str | None = None) -> MatrixDeliveryWorker:
+        """Return the worker that sends one card as its sender's device; without a card, one that walks the outbox."""
         if self.cards is None:
             raise ToolApprovalTransportError(RUNTIME_NOT_READY_REASON)
         return MatrixDeliveryWorker(
@@ -667,7 +673,7 @@ class ApprovalManager:
             resend_after_reconciliation_miss=lambda delivery: (
                 delivery.payload.get("status") == "approved" and delivery.payload.get("approvable") is False
             ),
-            sending_device_id=self.transport.transport_device_id(),
+            sending_device_id=None if delivery_id is None else await self.transport.sender_device_id(delivery_id),
             resolve_delivered=self.transport.resolve_approval_delivery,
             delivery_locks=self._delivery_locks,
         )
@@ -722,7 +728,7 @@ class ApprovalManager:
             self._ensure_deadline_sweep()
             return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
         if (
-            not self._transport_ready()
+            not self._sender_ready(card)
             or card.approver_user_id != sender_id
             or not _approval_action_authorized(card, authorize_responder)
             or (
@@ -932,10 +938,11 @@ class ApprovalManager:
         """Deliver one committed card decision, preserving INITIAL before FINAL; return whether the card retired."""
         assert self.cards is not None
         try:
+            worker = await self._worker(delivery_id)
             if card_event_id is None:
-                card_event_id = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+                card_event_id = await worker.flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
             if card_event_id is not None:
-                await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+                await worker.flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
         except Exception:
             logger.warning(
                 "approval_terminal_delivery_deferred",
@@ -948,16 +955,37 @@ class ApprovalManager:
         # already retired is delivered too.
         return await self.cards.approvals.retire_approval_card(delivery_id=delivery_id)
 
-    async def expire_continuation_cards(self, continuation_id: str, reason: str) -> bool:
-        """Enqueue and flush expiry for every card owned by one failed continuation, with its failure's reason."""
+    async def expire_continuation_cards(
+        self,
+        continuation_id: str,
+        reason: str,
+        *,
+        edit_optional: bool = False,
+    ) -> bool:
+        """Enqueue and flush expiry for every card owned by one failed continuation, with its failure's reason.
+
+        ``edit_optional`` ends without an edit a card whose sender no longer runs in its room, as a removed entity's.
+        """
         if self.cards is None:
             return False
         complete = True
         for room_id in await self.cards.approvals.pending_approval_room_ids():
             async for card in self._pending_cards(self.cards, room_id):
                 if card.owner_kind == "reply" and card.call.owner_id == continuation_id:
-                    complete = await self._expire_stored(card, reason=reason) and complete
+                    complete = await self._expire_card(card, reason, edit_optional=edit_optional) and complete
         return complete
+
+    async def expire_cards_without_sender(self, reason: str) -> int:
+        """Expire every live card that records no sender; return how many were still undecided."""
+        if self.cards is None:
+            return 0
+        ended = 0
+        for room_id in await self.cards.approvals.pending_approval_room_ids():
+            async for card in self._pending_cards(self.cards, room_id):
+                if card.sender_entity is None:
+                    ended += not card.decided
+                    await self._expire_card(card, reason, edit_optional=True)
+        return ended
 
     @staticmethod
     async def _pending_cards(cards: ApprovalDeliveryView, room_id: str) -> AsyncIterator[ApprovalCardView]:
@@ -1004,6 +1032,27 @@ class ApprovalManager:
             ],
         )
 
+    async def _expire_card(self, card: ApprovalCardView, reason: str, *, edit_optional: bool) -> bool:
+        """Expire one card and deliver its terminal edit; ``edit_optional`` retires it unedited when its sender is gone."""
+        if not edit_optional or self._sender_ready(card):
+            return await self._expire_stored(card, reason=reason)
+        assert self.cards is not None
+        if not card.decided:
+            recorded = await self.cards.approvals.resolve_approval_call(
+                card.call,
+                requested_status="expired",
+                reason=reason,
+            )
+            if recorded.recorded and recorded.continuation_ready:
+                await self._wake_continuation(recorded)
+        logger.warning(
+            "approval_card_ended_without_edit",
+            delivery_id=card.delivery_id,
+            room_id=card.room_id,
+            sender_entity=card.sender_entity,
+        )
+        return await self.cards.approvals.retire_approval_card(delivery_id=card.delivery_id, without_edit=True)
+
     async def _expire_stored(self, card: ApprovalCardView, *, reason: str = TIMEOUT_REASON) -> bool:
         if self.cards is None:
             return False
@@ -1019,7 +1068,7 @@ class ApprovalManager:
             if recorded.recorded and recorded.continuation_ready:
                 await self._wake_continuation(recorded)
             return False
-        if not self._transport_ready():
+        if not self._sender_ready(card):
             return False
         if card.decided:
             return await self._flush_card_delivery(card.delivery_id, card.card_event_id, room_id=card.room_id)
@@ -1051,7 +1100,8 @@ class ApprovalManager:
         failed: set[tuple[str, DeliveryStage]] = set()
         for delivery_id in await self.cards.approvals.maintain_automatic_approvals(grant_id=grant_id):
             try:
-                acknowledged = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+                worker = await self._worker(delivery_id)
+                acknowledged = await worker.flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
             except Exception:
                 logger.warning("approval_grant_revocation_delivery_deferred", delivery_id=delivery_id, exc_info=True)
                 acknowledged = None
@@ -1063,7 +1113,7 @@ class ApprovalManager:
         """Run generic delivery recovery, deadline decisions, and domain retirement."""
         if self.cards is None:
             return _ApprovalStartupSweep(discarded=0, failed=1)
-        outcome = await self._worker().recover()
+        outcome = await (await self._worker()).recover(self._worker)
         transport_failures = set(outcome.failed_deliveries)
         failed = outcome.failed - len(transport_failures)
         transport_failures.update(await self._maintain_automatic_approvals())
@@ -1161,9 +1211,9 @@ class ApprovalManager:
             with self._live_lock:
                 self._resolving_card_event_ids.discard(card_event_id)
 
-    def _transport_ready(self) -> bool:
-        """Return whether this process's transport account is known, without which no card is acted on."""
-        return self.transport.transport_sender_id() is not None
+    def _sender_ready(self, card: ApprovalCardView) -> bool:
+        """Return whether the account that sent a card runs in its room, without which the card is not acted on."""
+        return self.transport.sender_bot(card.sender_entity, card.room_id) is not None
 
     @staticmethod
     def _pending_event_content(

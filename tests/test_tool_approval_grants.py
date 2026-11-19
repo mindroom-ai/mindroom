@@ -513,7 +513,7 @@ async def test_republished_receipt_aliases_remain_terminal(
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
-    manager.transport.transport_device_id = lambda: "original-device"
+    manager.transport.sender_device_id = AsyncMock(return_value="original-device")
     owner = journal.principal("router@shared")
     try:
         first = await _card(journal, manager, "first")
@@ -525,7 +525,7 @@ async def test_republished_receipt_aliases_remain_terminal(
 
         manager.transport.send_approval_delivery = lose_acknowledgement
         old_event_id = await _card(journal, manager, "subsequent")
-        manager.transport.transport_device_id = lambda: "replacement-device"
+        manager.transport.sender_device_id = AsyncMock(return_value="replacement-device")
         manager.transport.resolve_approval_delivery = AsyncMock(return_value=None)
         manager.transport.send_approval_delivery = AsyncMock(return_value="$replacement-receipt")
         assert (
@@ -665,7 +665,7 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
     """A failed receipt send survives recovery and leaves an approval-only tombstone."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
-    manager.transport.transport_device_id = lambda: "test-device"
+    manager.transport.sender_device_id = AsyncMock(return_value="test-device")
     delivered: list[MatrixDelivery] = []
     try:
         first = await _card(journal, manager, "first")
@@ -691,7 +691,7 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
         return "$receipt-deferred"
 
     manager.transport.send_approval_delivery = recover_send
-    manager.transport.transport_device_id = lambda: recovery_device
+    manager.transport.sender_device_id = AsyncMock(side_effect=lambda _delivery_id: recovery_device)
 
     async def no_receipt_in_history(_delivery: MatrixDelivery) -> str | None:
         return None
@@ -730,7 +730,7 @@ async def test_transport_refused_arguments_cannot_receive_automatic_approval(
         first = await _card(journal, manager, "first")
         await _approve(manager, first)
 
-        async def refuse_arguments(_room: str, _thread: str | None, content: dict) -> dict:
+        async def refuse_arguments(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
             return {**content, "approvable": False}
 
         manager.transport.prepare_approval_event = refuse_arguments
@@ -1408,7 +1408,7 @@ async def _card(
 
 
 def _manager(journal: EventJournalStore, tmp_path: Path) -> ApprovalManager:
-    async def prepare(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send(delivery: MatrixDelivery) -> str:
@@ -1419,7 +1419,7 @@ def _manager(journal: EventJournalStore, tmp_path: Path) -> ApprovalManager:
         cards=journal.principal("router@shared"),
         prepare_approval_event=prepare,
         send_approval_delivery=send,
-        transport_sender_id=lambda: "@router:test",
+        sender_bot=lambda _entity_name, _room_id: object(),
         responder_principal_id=lambda entity_name: journal_principal_id("agent", entity_name),
     )
 

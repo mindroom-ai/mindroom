@@ -106,6 +106,8 @@ from mindroom.workers.runtime import (
 
 from . import file_watcher
 from .bot import AgentBot, create_bot_for_entity
+from .entity_resolution import entity_identity_registry
+from .event_journal.identity import journal_principal_id
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.accounts import prepare_managed_accounts, validate_entity_accounts
@@ -472,6 +474,8 @@ class _MultiAgentOrchestrator:
         )
         self._approval_transport = ApprovalMatrixTransport(
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
+            room_poster=self.room_poster,
+            cards=self._approval_cards,
         )
         self._approval_recovery = ApprovalRecovery(
             deliver_unavailable_notice=self._approval_transport.deliver_unavailable_notice,
@@ -621,17 +625,10 @@ class _MultiAgentOrchestrator:
         finally:
             self.response_admission_gate.release()
 
-    def _approval_cards(self) -> ApprovalDeliveryView | None:
-        """Return the router principal's approval-card store, once it exists.
-
-        Bound before the router bot is built as well as after, because the
-        transport is configured on every config reload. The store belongs to
-        the bot, so the early call has nothing to give; the manager treats a
-        missing store as "no card is recoverable", and the rebind that follows
-        bot construction supplies the real one.
-        """
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        return None if router_bot is None else router_bot.journal_principal()
+    def _approval_cards(self) -> ApprovalDeliveryView:
+        """Return the one principal that keeps every approval's calls, cards and grants, whichever account sends a card."""
+        router_id = entity_identity_registry(self.config, self.runtime_paths).current_ids[ROUTER_AGENT_NAME]
+        return self.event_journal_store().principal(journal_principal_id(ROUTER_AGENT_NAME, router_id.full_id))
 
     def _bind_started_runtime_support_services(self) -> None:
         """Bind current runtime support objects needed by live callbacks."""
@@ -1466,8 +1463,11 @@ class _MultiAgentOrchestrator:
         store.approval_signals.follow_ended_approvals(self._end_paused_turn)
 
     def _end_paused_turn(self, ended: EndedApproval) -> None:
-        """End a paused turn through the bot of its entity, or through the router's for an entity now gone."""
-        bot = self.agent_bots.get(ended.continuation.entity_name) or self.agent_bots.get(ROUTER_AGENT_NAME)
+        """End a paused turn through the bot of its entity, or through any running bot for an entity now gone."""
+        bot = self.agent_bots.get(ended.continuation.entity_name) or next(
+            (bot for bot in self.agent_bots.values() if bot.running),
+            None,
+        )
         if bot is not None:
             bot.end_paused_turn(ended)
 

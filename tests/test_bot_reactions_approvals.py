@@ -1493,6 +1493,7 @@ class TestAgentBot(AgentBotTestBase):
                 _room_id: str,
                 _thread_id: str | None,
                 content: dict[str, Any],
+                _sender_entity: str,
             ) -> dict[str, Any]:
                 return content
 
@@ -1505,8 +1506,8 @@ class TestAgentBot(AgentBotTestBase):
                 send_approval_delivery=send_delivery,
                 resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=first._journal_store.principal(router_principal_id),
-                transport_sender_id=lambda: "@mindroom_router:localhost",
-                transport_device_id=lambda: "DEVICE",
+                sender_bot=lambda _entity_name, _room_id: object(),
+                sender_device_id=AsyncMock(return_value="DEVICE"),
             )
         source = InboundEvent(
             event_id="$source",
@@ -1581,8 +1582,8 @@ class TestAgentBot(AgentBotTestBase):
                 send_approval_delivery=send_delivery,
                 resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=restarted._journal_store.principal(router_principal_id),
-                transport_sender_id=lambda: "@mindroom_router:localhost",
-                transport_device_id=lambda: "DEVICE",
+                sender_bot=lambda _entity_name, _room_id: object(),
+                sender_device_id=AsyncMock(return_value="DEVICE"),
                 wake_continuation_sources=AsyncMock(
                     side_effect=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
                         room_id,

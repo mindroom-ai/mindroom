@@ -358,6 +358,7 @@ def claim(
         room_id=call.room_id,
         thread_id=call.thread_id,
         membership_epoch=int(row["membership_epoch"]),
+        sender_entity=receipt.sender_entity,
         payload=approval_cards.terminal_content(
             receipt.payload,
             status="approved",

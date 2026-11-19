@@ -29,6 +29,7 @@ _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
 _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
 _UNAVAILABLE_OWNER_SCAN_LIMIT = 100
+_UPGRADE_REASON = "MindRoom was upgraded while this approval was pending. Ask again."
 
 
 @dataclass
@@ -148,7 +149,8 @@ class ApprovalRecovery:
                 expected_generation=current.generation,
                 expected_runtime_generation=current.runtime_generation,
             ),
-            expire_cards=None if manager is None else manager.expire_continuation_cards,
+            # The owner's bot sent the cards; one that no longer runs in the room edits none of them.
+            expire_cards=None if manager is None else partial(manager.expire_continuation_cards, edit_optional=True),
         )
         if current is None:
             return False
@@ -164,6 +166,25 @@ class ApprovalRecovery:
             notice_principal_id=notice_store.principal_id,
         )
         return effects is not None
+
+    async def end_cards_without_sender(self) -> int:
+        """Expire every pending card the router sent before cards recorded their sender; return how many it ended.
+
+        The paused turn of such a card resumes with the expiry, as it does when a card times out.
+        A later call ends nothing: every card sent since records its sender.
+        """
+        # LEGACY_COMPAT: Approval cards the router sent, pending at upgrade.
+        # Legacy format: a live approval_cards row whose sender_entity is NULL.
+        # Last legacy release: v2026.11.385; replacement: the next release sends each card from the entity that asks.
+        # Handling: the first startup expires each one, editing the card where the router account still runs in its
+        # room and retiring it unedited elsewhere.
+        # Coverage: tests/test_legacy_approval_records.py::test_pending_router_card_is_ended_once_at_upgrade.
+        if self.manager is None:
+            return 0
+        ended = await self.manager.expire_cards_without_sender(_UPGRADE_REASON)
+        if ended:
+            logger.info("approval_cards_without_sender_ended", count=ended)
+        return ended
 
     def reset_startup_cleanup_gate(self) -> None:
         """Reset one-shot startup approval cleanup state."""
@@ -233,6 +254,7 @@ class ApprovalRecovery:
             manager = self.manager
             if manager is None:
                 return False
+            await self.end_cards_without_sender()
             sweep = await manager.recover_cards_on_startup()
         except Exception as exc:
             logger.warning(

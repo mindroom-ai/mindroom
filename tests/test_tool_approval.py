@@ -28,6 +28,7 @@ from mindroom.approval.manager import (
 )
 from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import (
+    human_gate,
     ApprovalActionResult,
     MatrixApprovalAction,
     ToolApprovalScriptError,
@@ -273,7 +274,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
         resolve_approval_delivery=AsyncMock(return_value=None),
         resolve_approval_action_delivery=resolve_action,
         cards=cards,
-        transport_device_id=lambda: "NEW-DEVICE",
+        sender_device_id=AsyncMock(return_value="NEW-DEVICE"),
     )
     before_consume = AsyncMock()
 
@@ -418,17 +419,24 @@ async def test_action_delivery_resolver_ignores_a_room_the_router_does_not_serve
     client.room_get_event.assert_not_awaited()
 
 
-def test_router_missing_only_when_the_running_router_does_not_serve_the_room() -> None:
+def test_human_gate_has_no_router_denial(tmp_path: Path) -> None:
+    """A room the router is not in asks the approver, as every room does."""
     router = MagicMock(agent_name="router", running=True, client=MagicMock(), approval_room_ids=frozenset({"!room:a"}))
-    transport = approval_transport.ApprovalMatrixTransport(
-        bot_provider=lambda name: router if name == "router" else None,
+    runtime_paths = test_runtime_paths(tmp_path)
+    initialize_approval_store(
+        runtime_paths,
+        transport=approval_transport.ApprovalMatrixTransport(
+            bot_provider=lambda name: router if name == "router" else None,
+            room_poster=lambda _room_id: None,
+            cards=lambda: None,
+        ),
+        cards=None,
+        recovery=None,
     )
 
-    assert not transport.router_missing("!room:a")
-    assert transport.router_missing("!personal:a")
-    # A router that is not running yet says nothing about the room, so the card path reports its own failure.
-    router.running = False
-    assert not transport.router_missing("!personal:a")
+    gate = human_gate(runtime_paths, approver_id="@alice:localhost", room_id="!personal:a", thread_id=None)
+
+    assert gate is None
 
 
 @pytest.mark.asyncio
@@ -748,8 +756,8 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         send_approval_delivery=send,
         cards=cards,
         resolve_approval_action_delivery=AsyncMock(return_value=card_delivery_id),
-        transport_sender_id=lambda: "@mindroom_router:localhost",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
     authorize_responder = MagicMock(return_value=True)
     try:
@@ -813,7 +821,7 @@ async def test_startup_recovery_settles_only_due_cards(tmp_path: Path) -> None:
         test_runtime_paths(tmp_path),
         send_approval_delivery=AsyncMock(),
         cards=cards,
-        transport_device_id=lambda: "DEVICE",
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
 
     try:
@@ -839,7 +847,7 @@ async def test_startup_recovery_logs_a_deferred_terminal_flush(tmp_path: Path) -
         test_runtime_paths(tmp_path),
         cards=MagicMock(),
         send_approval_delivery=AsyncMock(),
-        transport_sender_id=lambda: "@mindroom_router:localhost",
+        sender_bot=lambda _entity_name, _room_id: object(),
     )
     worker = MagicMock(flush=AsyncMock(side_effect=RuntimeError("homeserver unavailable")))
 

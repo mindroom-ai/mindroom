@@ -58,6 +58,8 @@ class ApprovalCardReservation:
     # Whether an approval can be honored: the arguments were reviewable when the card was prepared.
     approvable: bool
     grant_operation: ApprovalOperation | None = None
+    # The entity whose account sends and edits the card.
+    sender_entity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +105,8 @@ class ApprovalCardView:
     responder_entity_name: str | None
     offers_timed_approval: bool
     any_arguments_offered: bool
+    # The entity whose account sends and edits the card; None for a card the router sent before upgrade.
+    sender_entity: str | None = None
 
     @property
     def terminal(self) -> bool:
@@ -187,6 +191,7 @@ def _reserve(
     thread_id: str | None,
     membership_epoch: int,
     approvable: bool,
+    sender_entity: str | None,
 ) -> None:
     """Reserve one card's frozen INITIAL delivery in the shared Matrix delivery lifecycle, with its card row."""
     outbox.enqueue(
@@ -205,8 +210,8 @@ def _reserve(
         """
         INSERT INTO approval_cards (
             principal_id, delivery_id, kind, owner_id, generation, tool_call_id,
-            room_id, thread_id, approvable
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            room_id, thread_id, approvable, sender_entity
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             principal_id,
@@ -218,6 +223,7 @@ def _reserve(
             room_id,
             encode_thread_id(thread_id),
             int(approvable),
+            sender_entity,
         ),
     )
 
@@ -234,6 +240,7 @@ def reserve_receipt(
     thread_id: str | None,
     membership_epoch: int,
     payload: Mapping[str, object],
+    sender_entity: str | None,
 ) -> None:
     """Reserve the receipt that shows a call an automatic approval decided."""
     _reserve(
@@ -248,6 +255,7 @@ def reserve_receipt(
         thread_id=thread_id,
         membership_epoch=membership_epoch,
         approvable=False,
+        sender_entity=sender_entity,
     )
 
 
@@ -289,6 +297,7 @@ def _reserve_card(
         thread_id=thread_id,
         membership_epoch=membership_epoch,
         approvable=reserved.approvable,
+        sender_entity=card.sender_entity,
     )
     if offer is not None and offer.scope is not None:
         approval_grants.insert_scope(transaction, principal_id, delivery_id=card.delivery_id, scope=offer.scope)
@@ -591,8 +600,19 @@ def _retire(transaction: Transaction, principal_id: str, delivery_id: str) -> No
     )
 
 
-def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> bool:
+def sender_of(transaction: Transaction, principal_id: str, *, delivery_id: str) -> str | None:
+    """Return the entity whose account sends and edits a card; None for the router's cards from before upgrade."""
+    row = transaction.fetchone(
+        "SELECT sender_entity FROM approval_cards WHERE principal_id = ? AND delivery_id = ?",
+        (principal_id, delivery_id),
+    )
+    return None if row is None else cast("str | None", row["sender_entity"])
+
+
+def retire(transaction: Transaction, principal_id: str, *, delivery_id: str, without_edit: bool = False) -> bool:
     """Retire a decided request card Matrix is done with; return whether it is retired.
+
+    ``without_edit`` gives up the terminal edit of a card whose sender no longer exists.
 
     Matrix is done with it once its terminal edit is acknowledged or refused for good; a card Matrix refused to post
     refuses its terminal edit too. A card whose delivery Matrix refuses must not keep the paused reply it shows from
@@ -620,7 +640,7 @@ def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> 
         return False
     if bool(row["retired"]):
         return True
-    if bool(row["undecided"]) or (row["final_event_id"] is None and row["final_refused"] is None):
+    if bool(row["undecided"]) or (not without_edit and row["final_event_id"] is None and row["final_refused"] is None):
         return False
     _retire(transaction, principal_id, delivery_id)
     return True
@@ -665,7 +685,7 @@ _VIEW_COLUMNS = f"""
     cards.delivery_id AS delivery_id, cards.kind AS kind,
     cards.owner_id AS owner_id, cards.generation AS generation, cards.tool_call_id AS tool_call_id,
     cards.room_id AS room_id, cards.thread_id AS thread_id,
-    cards.approvable AS approvable, cards.retired AS retired,
+    cards.approvable AS approvable, cards.retired AS retired, cards.sender_entity AS sender_entity,
     COALESCE(initial.created_at_ns, 0) AS created_at_ns,
     {_CURRENT_MEMBERSHIP} AS current_membership,
     calls.owner_kind AS owner_kind, calls.approver_user_id AS approver_user_id,
@@ -720,6 +740,7 @@ def _view(row: Row, card_event_id: str | None) -> ApprovalCardView:
         responder_entity_name=cast("str | None", row["responder_entity_name"]),
         offers_timed_approval=row["scope_delivery_id"] is not None,
         any_arguments_offered=bool(row["any_arguments_offered"]),
+        sender_entity=cast("str | None", row["sender_entity"]),
     )
 
 

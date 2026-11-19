@@ -657,7 +657,16 @@ def live_turn_tools_for_test(
     return LiveTurnTools(owner, catalog=catalog, authorize=authorize, **(turn_options | options))
 
 
-async def _no_approval_event(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> dict[str, Any] | None:
+async def _no_approval_event(
+    _room_id: str,
+    _thread_id: str | None,
+    _content: dict[str, Any],
+    _sender_entity: str,
+) -> dict[str, Any] | None:
+    return None
+
+
+async def _no_device(_delivery_id: str) -> str | None:
     return None
 
 
@@ -678,21 +687,20 @@ async def _no_sources_to_wake(_entity_name: str, _room_id: str, _source_event_id
 class FakeApprovalTransport:
     """The approval transport an approval manager uses, with the methods a test sets.
 
-    The others prepare and send nothing, find no earlier delivery, know no sender, device, or responder principal,
-    wake nothing, and find the router in every room.
+    The others prepare and send nothing, find no earlier delivery, find no card's sender in its room, know no device
+    or responder principal, and wake nothing.
     """
 
-    prepare_approval_event: Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]] = (
+    prepare_approval_event: Callable[[str, str | None, dict[str, Any], str], Awaitable[dict[str, Any] | None]] = (
         _no_approval_event
     )
     send_approval_delivery: Callable[[MatrixDelivery], Awaitable[str]] = _no_approval_delivery
     resolve_approval_delivery: Callable[[MatrixDelivery], Awaitable[str | None]] = _no_delivered_event
     resolve_approval_action_delivery: Callable[[str, str], Awaitable[str | None]] = _no_delivered_event
-    transport_sender_id: Callable[[], str | None] = lambda: None
-    transport_device_id: Callable[[], str | None] = lambda: None
+    sender_bot: Callable[[str | None, str], object | None] = lambda _entity_name, _room_id: None
+    sender_device_id: Callable[[str], Awaitable[str | None]] = _no_device
     wake_continuation_sources: Callable[[str, str, tuple[str, ...]], Awaitable[None]] = _no_sources_to_wake
     responder_principal_id: Callable[[str], str | None] = lambda _entity_name: None
-    router_missing: Callable[[str], bool] = lambda _room_id: False
 
 
 def approval_manager_for_test(

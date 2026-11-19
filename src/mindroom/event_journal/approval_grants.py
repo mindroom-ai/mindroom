@@ -297,6 +297,7 @@ def apply_active(
         room_id=room_id,
         thread_id=thread_id,
         membership_epoch=membership_epoch,
+        sender_entity=card.sender_entity,
         payload=approval_cards.terminal_content(
             card.payload,
             status="approved",

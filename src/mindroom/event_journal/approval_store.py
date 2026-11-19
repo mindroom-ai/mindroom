@@ -234,9 +234,16 @@ class ApprovalStore(PrincipalRows):
             grant_id=grant_id,
         )
 
-    async def retire_approval_card(self, *, delivery_id: str) -> bool:
-        """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit."""
-        return await self._write(approval_cards.retire, delivery_id=delivery_id)
+    async def retire_approval_card(self, *, delivery_id: str, without_edit: bool = False) -> bool:
+        """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit.
+
+        ``without_edit`` retires one whose sender no longer exists to edit it.
+        """
+        return await self._write(approval_cards.retire, delivery_id=delivery_id, without_edit=without_edit)
+
+    async def approval_card_sender(self, *, delivery_id: str) -> str | None:
+        """Return the entity whose account sends and edits a card; None for a card the router sent before upgrade."""
+        return await self._read(approval_cards.sender_of, delivery_id=delivery_id)
 
     async def remember_terminal_approval_alias(self, *, room_id: str, card_event_id: str, delivery_id: str) -> None:
         """Remember a transport-verified copy of an automatic receipt as another event of that receipt."""

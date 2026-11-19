@@ -131,7 +131,7 @@ _OTHER_ARGUMENTS: dict[str, object] = {"channel": "U999", "text": "Other"}
 
 
 def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelivery]) -> ApprovalManager:
-    async def prepare(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send(delivery: MatrixDelivery) -> str:
@@ -143,7 +143,7 @@ def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelive
         cards=journal.principal("router@shared"),
         prepare_approval_event=prepare,
         send_approval_delivery=send,
-        transport_sender_id=lambda: "@router:test",
+        sender_bot=lambda _entity_name, _room_id: object(),
     )
 
 

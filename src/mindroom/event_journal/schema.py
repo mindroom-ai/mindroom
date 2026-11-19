@@ -155,6 +155,9 @@ _APPROVAL_CARDS_TABLE = """
         -- Whether an approval can be honored: its arguments were reviewable when it was prepared.
         approvable INTEGER NOT NULL CHECK (approvable IN (0, 1)),
         retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),
+        -- The entity whose account sends and edits the card; NULL for a
+        -- card the router sent before cards recorded their sender.
+        sender_entity TEXT,
         PRIMARY KEY (principal_id, delivery_id)
     )
 """

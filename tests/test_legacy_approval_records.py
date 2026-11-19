@@ -13,8 +13,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from unittest.mock import AsyncMock
+
 import psycopg
 import pytest
+
+from mindroom.approval.recovery import ApprovalRecovery
 
 from mindroom.event_journal import (
     JOB_ENDED_REASON,
@@ -261,7 +265,13 @@ async def test_every_recording_converts_to_consistent_rows_once(
     assert _snapshot(journal) == converted
 
 
-def _manager(tmp_path: Path, store: EventJournalStore, sent: list[MatrixDelivery]) -> ApprovalManager:
+def _manager(
+    tmp_path: Path,
+    store: EventJournalStore,
+    sent: list[MatrixDelivery],
+    *,
+    sender_in_room: bool = True,
+) -> ApprovalManager:
     async def send(delivery: MatrixDelivery) -> str:
         sent.append(delivery)
         return f"${delivery.delivery_id}:{delivery.stage.value}"
@@ -270,8 +280,8 @@ def _manager(tmp_path: Path, store: EventJournalStore, sent: list[MatrixDelivery
         test_runtime_paths(tmp_path),
         send_approval_delivery=send,
         cards=store.principal(_ROUTER),
-        transport_sender_id=lambda: "@mindroom_router:example.org",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object() if sender_in_room else None,
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
 
 
@@ -742,4 +752,59 @@ async def test_a_receipt_outliving_its_reply_keeps_its_granted_call_until_it_ret
         assert isinstance(retired, ApprovalCardView)
         assert retired.retired
     finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("router_in_room", [True, False])
+async def test_pending_router_card_is_ended_once_at_upgrade(
+    recorded_journal: Callable[[str], _Journal],
+    tmp_path: Path,
+    router_in_room: bool,
+) -> None:
+    """A card the router sent before upgrade expires at the first startup, edited only where the router still is."""
+    store = recorded_journal("01_waiting_card_acknowledged.sql").open()
+    sent: list[MatrixDelivery] = []
+    manager = _manager(tmp_path, store, sent, sender_in_room=router_in_room)
+    recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock())
+    recovery.bind(manager)
+    try:
+        approvals = store.principal(_ROUTER).approvals
+        assert await approvals.approval_card_sender(delivery_id="waiting") is None
+
+        assert await recovery.end_cards_without_sender() == 1
+
+        card = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
+        assert isinstance(card, ApprovalCardView)
+        assert card.retired
+        assert [delivery.stage for delivery in sent] == ([DeliveryStage.FINAL] if router_in_room else [])
+        assert await recovery.end_cards_without_sender() == 0
+    finally:
+        await manager.shutdown()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_grants_survive_upgrade(recorded_journal: Callable[[str], _Journal], tmp_path: Path) -> None:
+    """Ending the router's pending cards at upgrade leaves every timed grant as it was."""
+    journal = recorded_journal("13_timed_grants.sql")
+    store = journal.open()
+    manager = _manager(tmp_path, store, [], sender_in_room=False)
+    recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock())
+    recovery.bind(manager)
+    try:
+        grants = sorted(journal.query("SELECT grant_id, revoked_at_ns FROM approval_grants"))
+        assert grants
+
+        await recovery.end_cards_without_sender()
+
+        assert sorted(journal.query("SELECT grant_id, revoked_at_ns FROM approval_grants")) == grants
+        grant = await store.principal(_ROUTER).approvals.approval_grant_for_card(
+            room_id=_ROOM,
+            card_event_id="$grant-origin-0-0",
+        )
+        assert grant is not None
+        assert grant.revoked_at_ns is None
+    finally:
+        await manager.shutdown()
         await store.close()
