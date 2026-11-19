@@ -227,6 +227,22 @@ def test_unsupported_tags_escaped() -> None:
     assert "<tool>" not in html
 
 
+@pytest.mark.parametrize(
+    ("md", "html"),
+    [
+        ("Before <!-- <title --> **after**", "<p>Before &lt;!-- &lt;title --&gt; <strong>after</strong></p>\n"),
+        (
+            'See <img src="mxc://example.org/image" alt="<title excerpt"> then **bold**',
+            '<p>See <img src="mxc://example.org/image" alt="&lt;title excerpt"> then <strong>bold</strong></p>\n',
+        ),
+    ],
+    ids=["comment", "quoted-attribute"],
+)
+def test_a_raw_text_tag_name_inside_other_html_is_not_a_tag(md: str, html: str) -> None:
+    """A ``<title`` inside a comment or a quoted attribute value is left to the sanitizer, as on main."""
+    assert markdown_to_html(md) == html
+
+
 def test_tag_followed_by_long_whitespace_renders_within_a_cpu_budget() -> None:
     """A line opening a tag and trailing off into whitespace classifies in linear time."""
     for line in ("<a" + " " * 1_000, "<a" + " " * 60_000, "<a" + " " * 60_000 + "x"):
