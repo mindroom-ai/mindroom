@@ -199,7 +199,7 @@ def _seed_usage_database(storage_root: Path) -> None:
 def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str | None:
     """Build the one malformed or untrusted assertion named by a rejection test case."""
     now = datetime.now(UTC)
-    missing_claims = ("exp", "iat", "iss", "aud", "type", "common_name", "sub")
+    missing_claims = ("exp", "iat", "iss", "aud", "type", "common_name")
     builders = {
         "missing-assertion": lambda: None,
         "query-assertion": lambda: None,
@@ -418,7 +418,6 @@ def test_usage_export_fails_closed_when_auth_setting_is_missing(
         "missing-aud",
         "missing-type",
         "missing-common_name",
-        "missing-sub",
         "wrong-issuer",
         "wrong-audience",
         "wrong-client",

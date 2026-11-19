@@ -86,6 +86,28 @@ def test_budget_service_assertion_reads_budget_status(
     assert response.json()["default_limit_usd"] == 20.0
 
 
+@pytest.mark.parametrize("claims", [pytest.param({"sub": ""}, id="empty-subject"), pytest.param({}, id="no-subject")])
+def test_budget_service_accepts_service_assertion_with_or_without_subject(
+    temp_config_file: Path,
+    tmp_path: Path,
+    budget_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+    claims: dict[str, object],
+) -> None:
+    """Cloudflare has sent service-token assertions with an empty `sub` and with none at all."""
+    env, private_key = budget_service_auth
+    client = _client(temp_config_file, tmp_path, env)
+    omit = frozenset() if claims else frozenset({"sub"})
+    token = _service_assertion(
+        private_key,
+        omit_claims=omit,
+        **{"aud": _BUDGET_AUDIENCE, "common_name": _BUDGET_CLIENT_ID, "policy_id": "p", **claims},
+    )
+
+    response = client.get("/api/budgets/service", headers={_ASSERTION_HEADER: token})
+
+    assert response.status_code == 200
+
+
 @pytest.mark.parametrize(
     "claims",
     [

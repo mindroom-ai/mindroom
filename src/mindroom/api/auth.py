@@ -29,6 +29,7 @@ from mindroom.api.auth_user import (
 )
 from mindroom.api.connections_session_cookie import connections_session_cookie, read_connections_session
 from mindroom.api.open_access import open_access_rejection
+from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
     try_parse_historical_matrix_user_id,
@@ -72,6 +73,8 @@ def require_operator_key(request: Request, authorization: str | None) -> None:
     if token is None or not _api_key_matches(token, configured_key):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
+
+logger = get_logger(__name__)
 
 # Host-only by prefix, so sibling tenant subdomains can neither receive nor overwrite it.
 _PLATFORM_SESSION_COOKIE_NAME = "__Host-mindroom_platform_session"
@@ -385,6 +388,12 @@ async def _verified_trusted_upstream_jwt_claims(
             options={"require": list(required_claims)},
         )
     except PyJWTError as exc:
+        logger.warning(
+            "Trusted upstream JWT rejected",
+            detail=invalid_detail,
+            error=type(exc).__name__,
+            reason=str(exc),
+        )
         raise HTTPException(status_code=401, detail=invalid_detail) from exc
     return claims
 
@@ -1025,17 +1034,21 @@ async def _require_service_jwt(
         audience=audience,
         issuer=settings.issuer,
         algorithms=("RS256",),
-        required_claims=("exp", "iat", "iss", "aud", "type", "common_name", "sub"),
+        required_claims=("exp", "iat", "iss", "aud", "type", "common_name"),
         invalid_detail=invalid_detail,
     )
 
-    if (
-        claims.get("type") != "app"
-        or claims.get("sub") != ""
-        or not isinstance(claims.get("common_name"), str)
-        or claims["common_name"] != client_id
-    ):
-        raise HTTPException(status_code=401, detail=invalid_detail)
+    # Cloudflare sends `sub: ""` for service tokens but has also sent none at all; a person's `sub` is never empty.
+    if claims.get("type") != "app":
+        failed_check = "type"
+    elif claims.get("sub", "") != "":
+        failed_check = "sub"
+    elif not isinstance(claims.get("common_name"), str) or claims["common_name"] != client_id:
+        failed_check = "common_name"
+    else:
+        return
+    logger.warning("Service JWT rejected", audience_env=audience_env, failed_check=failed_check)
+    raise HTTPException(status_code=401, detail=invalid_detail)
 
 
 async def _require_signed_matrix_user(request: Request, *, label: str) -> SignedMatrixUser:
