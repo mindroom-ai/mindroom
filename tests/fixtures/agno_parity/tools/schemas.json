@@ -6428,7 +6428,7 @@
             },
             "app": {
               "type": "string",
-              "description": "Exact application ID returned by list_apps."
+              "description": "Exact application ID returned by list_apps; while status reports control_scope computer, any installed app's bundle ID also works."
             },
             "state_id": {
               "type": "string",

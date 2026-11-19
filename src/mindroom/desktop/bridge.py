@@ -408,15 +408,15 @@ class DesktopBridge:
         ``file_roots`` is reported in full here: the native NDJSON channel the Mac app reads over
         has no to-device size limit, unlike the remote ``status`` action reply.
         """
-        control = self._control_available()
+        status = self._bridge_status()
         deadline = self._control_lease_deadline
         remaining = 0.0
-        if control and deadline is not None and deadline != math.inf:
+        if status["control_available"] and deadline is not None and deadline != math.inf:
             remaining = max(0.0, deadline - self.monotonic_clock())
         return {
-            **self._bridge_status(),
+            **status,
             "file_roots": self.filesystem.list_folders()["folders"] if self.filesystem is not None else [],
-            "gui_mode": "stopped" if not self._accepting else ("control" if control else "observe_only"),
+            "gui_mode": status["gui_mode"] if self._accepting else "stopped",
             "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
             "lease_remaining_seconds": remaining,
             "active_action": self._active_action,
@@ -477,17 +477,16 @@ class DesktopBridge:
         self,
         duration_seconds: int | None = None,
         *,
-        until_revoked: bool = False,
         computer: bool = False,
     ) -> dict[str, object]:
-        """Grant control only through the local helper's private management channel.
+        """Grant control only through the local helper's private management channel; it is never saved.
 
-        It lasts a bounded duration or until revoked or stopped, and is never saved.
-        ``computer`` extends it from the saved apps to every app but MindRoom's own and the primary screen.
+        A duration grants a bounded lease over the saved apps.
+        ``computer`` instead grants every app but MindRoom's own and the primary screen until revoked or stopped.
         """
-        timed = until_revoked is False and type(duration_seconds) is int and 60 <= duration_seconds <= 3600
-        if not timed and not (until_revoked is True and duration_seconds is None):
-            msg = "Local control must last 60 to 3600 seconds or until revoked."
+        timed = computer is False and type(duration_seconds) is int and 60 <= duration_seconds <= 3600
+        if not timed and not (computer is True and duration_seconds is None):
+            msg = "Local control must last 60 to 3600 seconds over the saved apps, or cover the computer until revoked."
             raise ValueError(msg)
         if not self._accepting:
             msg = "Restart the stopped bridge before granting control."
@@ -505,7 +504,7 @@ class DesktopBridge:
         self._control_lease_deadline = (
             math.inf if duration_seconds is None else self.monotonic_clock() + duration_seconds
         )
-        self._computer_control = computer is True
+        self._computer_control = computer
         return self.local_status()
 
     def revoke_local_control(self) -> dict[str, object]:
@@ -593,7 +592,7 @@ class DesktopBridge:
             return await self._browser_image_response(command, execution)
         if execution.capture_app is None or execution.capture_state_id is None:
             return success_response(command, result=execution.result)
-        return await self._capture_response(
+        return self._observation_refused(command, execution, execution.capture_app) or await self._capture_response(
             command,
             result=execution.result,
             app_id=execution.capture_app,
@@ -652,6 +651,9 @@ class DesktopBridge:
         app_id = execution.follow_up_app
         if app_id is None:
             return execution
+        refused = self._observation_refused(command, execution, app_id)
+        if refused is not None:
+            return refused
         try:
             state = await asyncio.to_thread(self._required_gui_provider().get_app_state, app_id)
             self._observations.remember(state, command)
@@ -780,9 +782,7 @@ class DesktopBridge:
             return _Execution(await execute_file(self.filesystem, command))
         if command.action in DESKTOP_SHELL_ACTIONS:
             return _Execution(await execute_shell(self.client, self.shell, command))
-        if self.provider is not None:
-            # The provider checks every target itself, so it follows the scope live control has right now.
-            self.provider.set_all_apps(self._computer_scope())
+        self._live_scope()
         return await self._execute_desktop(command)
 
     async def _execute_desktop(self, command: DesktopCommand) -> _Execution:
@@ -925,6 +925,25 @@ class DesktopBridge:
     def _computer_scope(self) -> bool:
         """Report whether live control reaches every app; expiry, Revoke, and stop all return to the saved apps."""
         return self._computer_control and self._control_available()
+
+    def _live_scope(self) -> bool:
+        """Give the provider, which checks every target itself, the scope live control has right now."""
+        all_apps = self._computer_scope()
+        if self.provider is not None:
+            self.provider.set_all_apps(all_apps)
+        return all_apps
+
+    def _observation_refused(
+        self,
+        command: DesktopCommand,
+        execution: _Execution,
+        app_id: str,
+    ) -> DesktopResponse | None:
+        """Return the receipt alone when the app left the live scope before a new observation of it began."""
+        if app_targetable(app_id, self.policy.allowed_app_ids, all_apps=self._live_scope()):
+            return None
+        warning = "Access to this application ended before a new observation; none was taken."
+        return success_response(command, result={**execution.result, "warning": warning})
 
     def _capture_error_response(
         self,

@@ -126,11 +126,9 @@ class FakeRuntime:
         self,
         duration_seconds: int | None = None,
         *,
-        until_revoked: bool = False,
         computer: bool = False,
     ) -> dict[str, object]:
-        grant = (duration_seconds, until_revoked, computer)
-        self.grants.append(duration_seconds if grant[1:] == (False, False) else grant)
+        self.grants.append("computer" if computer else duration_seconds)
         return self.status()
 
     def revoke_control(self) -> dict[str, object]:
@@ -316,33 +314,34 @@ def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
     assert runtime.stopped == 1
 
 
-def test_host_grants_control_until_revoked_and_over_the_computer_only_as_asked(tmp_path: Path) -> None:
-    """Control lasts a duration or until revoked, over the saved apps unless the local app names the computer."""
+def test_host_grants_only_a_timed_saved_apps_lease_or_the_computer_until_revoked(tmp_path: Path) -> None:
+    """The native channel offers main's timed lease and the app's one full-control form, and nothing between."""
     runtime = FakeRuntime()
     host = _host(tmp_path, runtime)
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
     asyncio.run(host.handle(_request("start")))
 
-    asyncio.run(host.handle(_request("grant_control", until_revoked=True)))
+    asyncio.run(host.handle(_request("grant_control", duration_seconds=60)))
     asyncio.run(host.handle(_request("grant_control", until_revoked=True, scope="computer")))
-    asyncio.run(host.handle(_request("grant_control", duration_seconds=60, scope="computer")))
     for parameters in (
         {},
         {"scope": "computer"},
-        {"until_revoked": False},
-        {"until_revoked": 1},
-        {"until_revoked": True, "duration_seconds": 60},
+        {"until_revoked": True},
+        {"duration_seconds": 60, "scope": "computer"},
+        {"until_revoked": False, "scope": "computer"},
+        {"until_revoked": 1, "scope": "computer"},
+        {"until_revoked": True, "scope": "computer", "duration_seconds": 60},
         {"until_revoked": True, "scope": "apps"},
         {"until_revoked": True, "scope": None},
         {"duration_seconds": 60, "full_control": True},
     ):
-        with pytest.raises(NativeProtocolError, match="exactly duration_seconds or until_revoked") as refused:
+        with pytest.raises(NativeProtocolError, match="missing or unsupported") as refused:
             asyncio.run(host.handle(_request("grant_control", **parameters)))
         assert refused.value.code == "invalid_request"
     with pytest.raises(NativeProtocolError, match="range"):
-        asyncio.run(host.handle(_request("grant_control", duration_seconds=3601, scope="computer")))
+        asyncio.run(host.handle(_request("grant_control", duration_seconds=3601)))
 
-    assert runtime.grants == [(None, True, False), (None, True, True), (60, False, True)]
+    assert runtime.grants == [60, "computer"]
     assert host.status()["authority"]["control_scope"] == "saved_apps"
     removed = {"v": 1, "request_id": str(uuid4()), "action": "reset_emergency_stop", "parameters": {}}
     with pytest.raises(NativeProtocolError, match="action is unsupported"):
@@ -666,6 +665,26 @@ def offline_runtime_session(
     monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: session)
     monkeypatch.setattr("mindroom.desktop.bridge_session.PyAutoGuiDesktopProvider", forbidden_gui_provider)
     return _OfflineMatrix(owner, offline_session_deps(owner))
+
+
+@pytest.mark.asyncio
+async def test_running_bridge_reports_the_session_it_opened_not_a_later_saved_login(
+    tmp_path: Path,
+    offline_runtime_session: _OfflineMatrix,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A login saved while access runs names nobody the running bridge serves, so status keeps naming the opened one."""
+    host, _bridge = await _shell_host(tmp_path, offline_runtime_session, monkeypatch)
+    replaced = DesktopMatrixSession("https://other.example.org", "@other:example.org", "REPLACED", "secret-token")
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: replaced)
+
+    def identity() -> tuple[object, ...]:
+        pairing = cast("dict[str, object]", host.status()["pairing"])
+        return pairing["session_state"], pairing["homeserver"], pairing["user_id"], pairing["device_id"]
+
+    assert identity() == ("ready", "https://example.org", "@desktop:example.org", "LOCAL")
+    await host.handle(_request("stop"))
+    assert identity() == ("ready", "https://other.example.org", "@other:example.org", "REPLACED")
 
 
 def _offline_host(tmp_path: Path, offline: _OfflineMatrix) -> NativeDesktopHost:

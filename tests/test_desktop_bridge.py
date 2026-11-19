@@ -2203,13 +2203,16 @@ async def _app_error(
 
 
 @pytest.mark.asyncio
-async def test_control_until_revoked_never_expires_and_keeps_to_the_saved_apps(transport: AsyncMock) -> None:
-    """A grant until revoked has no lease, outlives any duration, and alone reaches no app that was not saved."""
+async def test_computer_control_never_expires_and_a_timed_lease_keeps_to_the_saved_apps(transport: AsyncMock) -> None:
+    """Control of the computer has no lease and outlives any duration; a timed lease reaches no unsaved app."""
     now = [NOW_SECONDS]
     provider = FakeProvider()
     bridge = _granting_bridge(provider, now)
 
-    status = bridge.grant_local_control(until_revoked=True)
+    bridge.grant_local_control(60)
+    assert bridge.local_status()["control_scope"] == "saved_apps"
+    assert "allowlist" in (await _app_error(bridge, transport, "get_app_state", OTHER_APP_ID, 1) or "")
+    status = bridge.grant_local_control(computer=True)
     now[0] += 10_000_000
 
     assert (status["gui_mode"], status["lease_expires_at_ms"], status["lease_remaining_seconds"]) == (
@@ -2217,12 +2220,46 @@ async def test_control_until_revoked_never_expires_and_keeps_to_the_saved_apps(t
         None,
         0.0,
     )
-    assert json.loads(json.dumps(bridge.local_status(), allow_nan=False))["control_scope"] == "saved_apps"
-    assert await _app_error(bridge, transport, "get_app_state", APP_ID, 1) is None
-    assert await _app_error(bridge, transport, "click", APP_ID, 2) is None
-    assert "allowlist" in (await _app_error(bridge, transport, "click", OTHER_APP_ID, 3) or "")
+    assert json.loads(json.dumps(bridge.local_status(), allow_nan=False))["control_scope"] == "computer"
+    assert await _app_error(bridge, transport, "get_app_state", OTHER_APP_ID, 2) is None
+    assert await _app_error(bridge, transport, "click", OTHER_APP_ID, 3) is None
     assert bridge.revoke_local_control()["gui_mode"] == "observe_only"
-    assert "observe-only" in (await _app_error(bridge, transport, "click", APP_ID, 4) or "")
+    assert "allowlist" in (await _app_error(bridge, transport, "click", OTHER_APP_ID, 4) or "")
+    assert "observe-only" in (await _app_error(bridge, transport, "click", APP_ID, 5) or "")
+
+
+class _EndingProvider(FakeProvider):
+    """End control while an input is in flight, as Revoke does without interrupting it."""
+
+    bridge: DesktopBridge
+
+    def click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
+        super().click(app_id=app_id, state_id=state_id, x=x, y=y, button=button)
+        self.bridge.revoke_local_control()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("app_id", "observed"), [(OTHER_APP_ID, False), (APP_ID, True)])
+async def test_no_new_observation_starts_once_the_app_left_the_scope(
+    transport: AsyncMock,
+    app_id: str,
+    observed: bool,
+) -> None:
+    """Revoke during an input keeps its receipt, and only a saved app is read again afterwards, as on main."""
+    provider = _EndingProvider()
+    bridge = provider.bridge = _granting_bridge(provider, [NOW_SECONDS])
+    bridge.grant_local_control(computer=True)
+    assert await _app_error(bridge, transport, "get_app_state", app_id, 1) is None
+    calls = len(provider.calls)
+
+    assert await _app_error(bridge, transport, "click", app_id, 2) is None
+
+    result = _response(transport).result
+    assert result["action_completed"] is True
+    assert ("state" in result, _response(transport).screenshot is not None) == (observed, observed)
+    assert ("warning" in result) is not observed
+    assert [name for name, _ in provider.calls[calls:]] == ["click", *(["get_app_state", "screenshot"] * observed)]
+    assert provider.all_apps is False
 
 
 @pytest.mark.asyncio
@@ -2233,7 +2270,7 @@ async def test_computer_scope_targets_every_app_but_mindroom(transport: AsyncMoc
     bridge = _granting_bridge(provider, now)
 
     assert "allowlist" in (await _app_error(bridge, transport, "get_app_state", OTHER_APP_ID, 1) or "")  # As on main.
-    bridge.grant_local_control(until_revoked=True, computer=True)
+    bridge.grant_local_control(computer=True)
 
     await _handle(bridge, _event(_command("list_apps", request_id="r2", sequence=2)))
     assert [app["id"] for app in _response(transport).result["apps"]] == [APP_ID, OTHER_APP_ID]
@@ -2250,20 +2287,18 @@ async def test_computer_scope_targets_every_app_but_mindroom(transport: AsyncMoc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ending", ["revoke", "expiry", "stop", "saved_apps_grant"])
+@pytest.mark.parametrize("ending", ["revoke", "stop", "saved_apps_grant"])
 async def test_computer_scope_ends_with_its_grant(transport: AsyncMock, ending: str) -> None:
-    """Revoke, expiry, stop, and a later saved-apps grant all return to the saved apps, for the provider too."""
+    """Revoke, stop, and a later saved-apps lease all return to the saved apps, for the provider too."""
     now = [NOW_SECONDS]
     provider = FakeProvider(running_apps=[DesktopApp(OTHER_APP_ID, "Terminal", True)])
     bridge = _granting_bridge(provider, now)
-    bridge.grant_local_control(60, computer=True)
+    bridge.grant_local_control(computer=True)
     assert await _app_error(bridge, transport, "get_app_state", OTHER_APP_ID, 1) is None
     calls = list(provider.calls)
 
     if ending == "revoke":
         bridge.revoke_local_control()
-    elif ending == "expiry":
-        now[0] += 61
     elif ending == "saved_apps_grant":
         bridge.grant_local_control(60)
     else:
@@ -2301,7 +2336,7 @@ async def test_computer_scope_app_list_fits_one_reply_and_keeps_the_primary_scre
     running = [DesktopApp(f"com.example.App{index:05d}", f"App {index}", True) for index in range(5_000)]
     provider = FakeProvider(running_apps=[*running, DesktopApp("primary-screen", "Primary Screen", True)])
     bridge = _granting_bridge(provider, [NOW_SECONDS])
-    bridge.grant_local_control(until_revoked=True, computer=True)
+    bridge.grant_local_control(computer=True)
 
     await _handle(bridge, _event(_command("list_apps")))
 
@@ -2492,13 +2527,12 @@ def test_local_control_grant_expiry_and_revocation() -> None:
     bridge.grant_local_control(60)
     assert bridge.revoke_local_control()["control_available"] is False
     for duration in (True, 0, 3601, None):
-        with pytest.raises(ValueError, match="60 to 3600 seconds or until revoked"):
+        with pytest.raises(ValueError, match="60 to 3600 seconds over the saved apps"):
             bridge.grant_local_control(duration)
-    for until_revoked in (1, "yes"):
-        with pytest.raises(ValueError, match="60 to 3600 seconds or until revoked"):
-            bridge.grant_local_control(until_revoked=until_revoked)
-    with pytest.raises(ValueError, match="60 to 3600 seconds or until revoked"):
-        bridge.grant_local_control(60, until_revoked=True)
+    # The computer is granted only until revoked, and only by the exact flag.
+    for duration, computer in ((60, True), (None, 1), (None, "yes")):
+        with pytest.raises(ValueError, match="60 to 3600 seconds over the saved apps"):
+            bridge.grant_local_control(duration, computer=computer)
     assert bridge.local_status()["control_available"] is False
 
 

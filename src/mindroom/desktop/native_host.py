@@ -66,13 +66,7 @@ class _NativeBridgeRuntimeProtocol(Protocol):
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
     def status(self) -> dict[str, object]: ...
-    def grant_control(
-        self,
-        duration_seconds: int | None = None,
-        *,
-        until_revoked: bool = False,
-        computer: bool = False,
-    ) -> dict[str, object]: ...
+    def grant_control(self, duration_seconds: int | None = None, *, computer: bool = False) -> dict[str, object]: ...
     def revoke_control(self) -> dict[str, object]: ...
     def decide_shell(
         self,
@@ -162,6 +156,9 @@ class NativeDesktopHost:
         config = self._config
         session_state, session_identity = _saved_session_identity(self._runtime_paths)
         runtime_status = self._runtime.status() if self._runtime is not None else {}
+        if isinstance(opened := runtime_status.get("session"), dict):
+            # A running bridge keeps the session it opened, whatever a later login saved.
+            session_state, session_identity = "ready", cast("dict[str, str]", opened)
         gui_mode = str(runtime_status.get("gui_mode", "stopped"))
         bridge_state = (
             gui_mode if gui_mode in {"stopped", "observe_only", "control", "stopping", "faulted"} else "faulted"
@@ -463,22 +460,16 @@ class NativeDesktopHost:
                 self._helper_state = "running"
             return {"status": self.status()}
         if action == "grant_control":
-            lasting = set(parameters) - {"scope"}
-            until_revoked = lasting == {"until_revoked"} and parameters["until_revoked"] is True
-            if (
-                not (until_revoked or lasting == {"duration_seconds"})
-                or parameters.get("scope", "computer") != "computer"
-            ):
-                raise NativeProtocolError(
-                    "invalid_request",
-                    "Native desktop grant_control needs exactly duration_seconds or until_revoked: true, "
-                    'and may add scope: "computer".',
-                )
+            # The whole computer is granted only until revoked; a duration grants only the saved apps.
+            computer = (
+                parameters == {"until_revoked": True, "scope": "computer"} and parameters["until_revoked"] is True
+            )
+            if not computer:
+                _expect_keys(parameters, {"duration_seconds"})
             try:
                 self._require_runtime().grant_control(
-                    None if until_revoked else _required_int(parameters, "duration_seconds", minimum=60, maximum=3600),
-                    until_revoked=until_revoked,
-                    computer="scope" in parameters,
+                    None if computer else _required_int(parameters, "duration_seconds", minimum=60, maximum=3600),
+                    computer=computer,
                 )
             except ValueError as exc:
                 raise NativeProtocolError("control_denied", str(exc)) from exc
@@ -636,6 +627,7 @@ class NativeBridgeRuntime:
         self._runtime_paths, self._config = runtime_paths, config
         self._deps = deps
         self._session: DesktopBridgeSession | None = None
+        self._opened_session: dict[str, str] = {}
         self._supervisor: asyncio.Task[None] | None = None
         self._fault: str | None = None
 
@@ -650,6 +642,11 @@ class NativeBridgeRuntime:
             _matrix_http_headers_path(self._runtime_paths),
             cloudflare_access=session.cloudflare_access,
         )
+        self._opened_session = {
+            "homeserver": session.homeserver,
+            "user_id": session.user_id,
+            "device_id": session.device_id,
+        }
         self._session = await start_desktop_bridge_session(
             self._config,
             session,
@@ -677,7 +674,11 @@ class NativeBridgeRuntime:
         session = self._live_session()
         if session is not None:
             browser = session.browser
-            return {**session.bridge.local_status(), "browser_connected": browser is not None and browser.running}
+            return {
+                **session.bridge.local_status(),
+                "browser_connected": browser is not None and browser.running,
+                "session": self._opened_session,
+            }
         if self._fault is not None:
             return {
                 "gui_mode": "faulted",
@@ -695,19 +696,9 @@ class NativeBridgeRuntime:
             }
         return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
 
-    def grant_control(
-        self,
-        duration_seconds: int | None = None,
-        *,
-        until_revoked: bool = False,
-        computer: bool = False,
-    ) -> dict[str, object]:
-        """Grant local control for a bounded duration or until revoked or stopped, over the saved apps or every app."""
-        return self._required_bridge().grant_local_control(
-            duration_seconds,
-            until_revoked=until_revoked,
-            computer=computer,
-        )
+    def grant_control(self, duration_seconds: int | None = None, *, computer: bool = False) -> dict[str, object]:
+        """Grant a bounded lease over the saved apps, or control of the whole computer until revoked or stopped."""
+        return self._required_bridge().grant_local_control(duration_seconds, computer=computer)
 
     def revoke_control(self) -> dict[str, object]:
         """Revoke new local control actions."""
