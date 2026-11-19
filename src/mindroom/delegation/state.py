@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 
 from mindroom.history.types import HistoryScope
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -204,6 +205,11 @@ class DelegationChild:
         fields: dict[str, Any] = dict(data)
         persona = fields.pop("persona")
         return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))
+
+
+def display_title(title: object) -> str:
+    """Return ``title`` on one line of at most 80 characters, redacted before it is cut; anything but text is none."""
+    return redact_sensitive_text(" ".join(title.split()), max_length=80) if isinstance(title, str) and title else ""
 
 
 def interrupted_by_restart(child: DelegationChild) -> bool:

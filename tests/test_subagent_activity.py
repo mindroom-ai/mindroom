@@ -435,6 +435,11 @@ def test_a_title_s_url_password_after_long_whitespace_is_redacted() -> None:
     assert title.startswith("Fetch https://")
 
 
+def test_a_restored_title_that_is_not_text_is_no_title() -> None:
+    """A stored child whose title is not text publishes none, so its row shows the task."""
+    assert _activity(title=3).snapshot().title == ""  # type: ignore[arg-type]
+
+
 def test_terminal_status_sets_ended_at_and_running_clears_it() -> None:
     """Terminal statuses end the run; resuming clears the end."""
     a = _activity()

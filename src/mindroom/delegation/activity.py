@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.background_tasks import create_background_task
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_identity
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_identity, display_title
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import ToolTraceEntry, format_tool_completed_event, format_tool_started_event
@@ -100,11 +100,6 @@ type SubagentSink = Callable[[SubagentSnapshot], None]
 def _clip(text: str, limit: int) -> str:
     """Return the redacted head of ``text``, at most ``limit`` characters, redacting only a head with a margin past it."""
     return redact_sensitive_text(text[: limit + _REDACTION_MARGIN])[:limit]
-
-
-def display_title(title: str) -> str:
-    """Return ``title`` on one line of at most 80 characters, redacted by the bounded redactor before it is cut."""
-    return redact_sensitive_text(" ".join(title.split()), max_length=80) if title else ""
 
 
 def _cut_preview(preview: str | None) -> tuple[str | None, bool]:

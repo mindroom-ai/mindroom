@@ -19,7 +19,7 @@ from mindroom.delegation.personas import (
 )
 from mindroom.delegation.recovery import load_settled_subagent
 from mindroom.delegation.sessions import SubagentSessionError
-from mindroom.delegation.state import CONTINUE_SUBAGENT
+from mindroom.delegation.state import CONTINUE_SUBAGENT, display_title
 from mindroom.delegation.workers import dedicated_worker_refusal
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.plugins import config_plugins
@@ -45,7 +45,7 @@ class DelegationTarget:
     agent_name: str
     task: str
     previous_child: DelegationChild | None = None
-    # What people watching the run see it as, as the call named it; empty when it named none.
+    # What people watching the run see it as (``display_title``); empty when the call named none.
     title: str = ""
     agent_mode: AgentMode = "standard"
     persona: SubagentPersona | None = None
@@ -209,7 +209,8 @@ def resolve_fresh_target(
     return DelegationTarget(
         child_name,
         task,
-        title=cast("str | None", title) or "",
+        # Stored, copied to follow-ups, and shown as the same short value.
+        title=display_title(title),
         agent_mode=request.agent_mode,
         persona=request.persona,
         model=request.model,

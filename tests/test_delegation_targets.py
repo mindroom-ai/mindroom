@@ -135,3 +135,20 @@ def test_a_fresh_call_with_arguments_of_the_wrong_type_is_refused(
     )
 
     assert result == refusal
+
+
+def test_a_fresh_call_stores_its_title_short_and_redacted(tmp_path: Path) -> None:
+    """The child records, persists, and hands its follow-ups the shown title, not the call's raw text."""
+    result = resolve_fresh_target(
+        {"task": "Read.", "title": "Measure cold start\n" * 500},
+        caller_name="leader",
+        config=_config(("file",)),
+        runtime_paths=_runtime_paths(tmp_path),
+        depth=0,
+        workspace_root=lambda: tmp_path,
+        cap=None,
+    )
+
+    assert not isinstance(result, str)
+    assert len(result.title) <= 80
+    assert result.title.startswith("Measure cold start Measure cold start")
