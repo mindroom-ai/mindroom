@@ -300,6 +300,9 @@ def _apply_membership_effect(
         if state.departure_fenced:
             raise IngestionBatchIntegrityError
         _advance_membership_epoch(transaction, principal_id, room_id)
+    elif admission.membership != "join" and admission.previous_membership == "join":
+        # The owner account still reads rooms it stewards, and a rejoin can show it another slice of history.
+        _drop_room_projection(transaction, principal_id, room_id)
     transaction.execute(
         "UPDATE room_membership SET departure_fenced = ? WHERE principal_id = ? AND room_id = ?",
         (int(fences and admission.membership != "join"), principal_id, room_id),
@@ -661,6 +664,20 @@ def ingestion_membership_position(
     return RoomMembershipPosition(membership, epoch)
 
 
+def _drop_room_projection(transaction: Transaction, principal_id: str, room_id: str) -> None:
+    """Drop the conversations one membership of a room projected, with their hydration and recovery state."""
+    for table in (
+        "conversation_hydration",
+        "visible_messages",
+        "unresolved_edits",
+        "room_history_recovery",
+    ):
+        transaction.execute(
+            f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
+            (principal_id, room_id),
+        )
+
+
 def _advance_membership_epoch(
     transaction: Transaction,
     principal_id: str,
@@ -692,16 +709,7 @@ def _advance_membership_epoch(
         """,
         (principal_id, room_id, epoch),
     )
-    for table in (
-        "conversation_hydration",
-        "visible_messages",
-        "unresolved_edits",
-        "room_history_recovery",
-    ):
-        transaction.execute(
-            f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
-            (principal_id, room_id),
-        )
+    _drop_room_projection(transaction, principal_id, room_id)
     # A delivery that was never attempted was written for the conversation this
     # bot was in before it left, and nothing outside this process has seen it.
     # Sending it now would answer the previous membership inside the new one.
