@@ -60,8 +60,8 @@ class EntityFleetHooks:
 
     # Build bots for entities the published config configures, preparing their Matrix accounts first.
     create_bots: Callable[[set[str]], Awaitable[dict[str, AgentBot]]]
-    # Finish what one bot's start needs, the optional owner's account; a failure is that bot's start failure.
-    before_start: Callable[[AgentBot], Awaitable[None]]
+    # Return the bot to start, the optional owner's built from the account prepared here; a failure is its start failure.
+    before_start: Callable[[AgentBot], Awaitable[AgentBot]]
     # Entities that must not start yet because a required MCP server is unavailable.
     start_blocked: Callable[[set[str]], set[str]]
     # Withdraw capabilities bound to these entities, and drain work borrowing their clients, before any of them stops.
@@ -151,7 +151,7 @@ class EntityFleet:
         results.retryable_entities.extend(sorted(blocked))
         slots = [(name, slot) for name, slot in slots if name not in blocked]
         before_start = self._hooks.before_start
-        outcomes = await asyncio.gather(*(_start_once(name, slot.bot, before_start) for name, slot in slots))
+        outcomes = await asyncio.gather(*(_start_once(name, slot, before_start) for name, slot in slots))
         for (name, slot), outcome in zip(slots, outcomes, strict=True):
             slot.disabled = outcome is None
             if outcome is None:
@@ -427,13 +427,13 @@ class EntityFleet:
 
 async def _start_once(
     entity_name: str,
-    bot: AgentBot,
-    before_start: Callable[[AgentBot], Awaitable[None]],
+    slot: _EntitySlot,
+    before_start: Callable[[AgentBot], Awaitable[AgentBot]],
 ) -> bool | None:
     """Start one bot once: True when started, False when worth retrying, None when it can never start."""
     try:
-        await before_start(bot)
-        await bot.start()
+        slot.bot = await before_start(slot.bot)
+        await slot.bot.start()
     except PermanentStartupError as exc:
         logger.error(  # noqa: TRY400 - a permanent configuration error needs no traceback
             "Bot startup failed permanently; leaving bot disabled until configuration changes",

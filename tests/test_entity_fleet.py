@@ -81,8 +81,9 @@ class _Bot:
         self.pending_response_owner_count = 0
 
 
-async def _no_preparation(_bot: object) -> None:
-    """Stand in for the hook that prepares the optional owner's account before its start."""
+async def _no_preparation(bot: _Bot) -> _Bot:
+    """Stand in for the hook that builds the optional owner's bot from its account before its start."""
+    return bot
 
 
 @dataclass

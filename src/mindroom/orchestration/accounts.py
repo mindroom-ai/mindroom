@@ -134,14 +134,14 @@ async def prepare_managed_accounts(
     return users
 
 
-async def prepare_owner_account(config: Config, runtime_paths: constants.RuntimePaths, user: AgentMatrixUser) -> None:
-    """Create or load the optional owner's account in one attempt and give ``user`` its credentials.
+async def prepare_owner_account(config: Config, runtime_paths: constants.RuntimePaths) -> AgentMatrixUser:
+    """Create or load the optional owner's account in one attempt; the homeserver may give it another ID than asked.
 
     A failure is the owner's start failure, which the fleet reports and retries like any other.
     """
-    request = _entity_request(config, user.agent_name)
-    preflight_managed_account_provisioning([request], runtime_paths)
+    name = constants.ROUTER_AGENT_NAME
+    preflight_managed_account_provisioning([_entity_request(config, name)], runtime_paths)
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
-    prepared = await create_agent_user(homeserver, user.agent_name, user.display_name, runtime_paths=runtime_paths)
+    user = await create_agent_user(homeserver, name, config.entity_display_name(name), runtime_paths=runtime_paths)
     validate_entity_accounts(config, runtime_paths)
-    user.password, user.device_id, user.access_token = prepared.password, prepared.device_id, prepared.access_token
+    return user

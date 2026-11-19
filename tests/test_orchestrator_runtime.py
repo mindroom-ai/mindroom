@@ -5954,7 +5954,33 @@ async def test_owner_account_failure_is_only_the_owners_start_failure(
     assert results.started_bots == [general]
     assert getattr(results, outcome) == [ROUTER_AGENT_NAME]
     owner.start.assert_not_awaited()
-    prepare.assert_awaited_once_with(orchestrator.config, orchestrator.runtime_paths, owner.agent_user)
+    prepare.assert_awaited_once_with(orchestrator.config, orchestrator.runtime_paths)
+    assert orchestrator.agent_bots[ROUTER_AGENT_NAME] is owner
+
+
+@pytest.mark.asyncio
+async def test_owner_bot_is_built_from_the_account_its_start_prepared(tmp_path: Path) -> None:
+    """A homeserver may register another ID than the generated one; the owner's bot, and its room setup, run as it."""
+    paths = orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml")
+    config = bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General", rooms=["lobby"])}), paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=paths, config=config)
+    guessed = AgentMatrixUser(ROUTER_AGENT_NAME, "@mindroom_router:localhost", "MindRoom", password=None)
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: AgentBot(guessed, rooms=[], orchestrator=orchestrator)})
+    returned = AgentMatrixUser(ROUTER_AGENT_NAME, "@owner_7:localhost", "MindRoom", password=TEST_PASSWORD)
+
+    with (
+        patch("mindroom.orchestrator.prepare_owner_account", new=AsyncMock(return_value=returned)) as prepare,
+        patch.object(AgentBot, "start", autospec=True) as start,
+    ):
+        results = await orchestrator.fleet.try_start([ROUTER_AGENT_NAME])
+        # A later start of the same bot prepares no second account.
+        await orchestrator.fleet.try_start([ROUTER_AGENT_NAME])
+
+    owner = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+    assert results.started_bots == [owner]
+    assert [call.args[0] for call in start.await_args_list] == [owner, owner]
+    assert (owner.agent_user, owner.matrix_id.full_id) == (returned, "@owner_7:localhost")
+    prepare.assert_awaited_once_with(config, paths)
 
 
 @pytest.mark.asyncio

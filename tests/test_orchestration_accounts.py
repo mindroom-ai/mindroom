@@ -521,12 +521,13 @@ async def test_owner_account_is_prepared_apart_from_the_agents(tmp_path: Path, r
         patch("mindroom.orchestration.accounts.create_agent_user", new=occupied),
         pytest.raises(PermanentStartupError, match="taken"),
     ):
-        await prepare_owner_account(config, paths, owner)
+        await prepare_owner_account(config, paths)
     assert list(entity_identity_registry(config, paths).current_ids) == ["general"]
 
     with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
-        await prepare_owner_account(config, paths, owner)
-    assert owner.password == TEST_PASSWORD
+        prepared = await prepare_owner_account(config, paths)
+    # The homeserver registered another ID than the generated one, and the owner's bot is built from this account.
+    assert (prepared.user_id, prepared.password) == ("@actual_router:localhost", TEST_PASSWORD)
     assert list(entity_identity_registry(config, paths).current_ids) == [ROUTER_AGENT_NAME, "general"]
 
 
@@ -539,9 +540,9 @@ async def test_owner_localpart_taken_by_the_internal_user_fails_only_the_owner_a
     create = AsyncMock(side_effect=_recording_user(paths, {}))
 
     with patch("mindroom.orchestration.accounts.create_agent_user", new=create):
-        users = await _prepare(config, configured_entity_names(config), paths)
+        await _prepare(config, configured_entity_names(config), paths)
         with pytest.raises(PermanentStartupError, match="localpart collision"):
-            await prepare_owner_account(config, paths, users[ROUTER_AGENT_NAME])
+            await prepare_owner_account(config, paths)
 
     assert _created(create) == ["general"]
 

@@ -781,10 +781,12 @@ class _MultiAgentOrchestrator:
             for entity_name in sorted(entity_names)
         }
 
-    async def _prepare_owner_account(self, bot: AgentBot) -> None:
-        """Prepare the optional owner's account at its start, apart from the agents', whose start it never blocks."""
-        if bot.agent_name == ROUTER_AGENT_NAME and (bot.agent_user.password or bot.agent_user.access_token) is None:
-            await prepare_owner_account(self.config, self.runtime_paths, bot.agent_user)
+    async def _prepare_owner_account(self, bot: AgentBot) -> AgentBot:
+        """Build the optional owner's bot from the account its start prepares, so its failure blocks no agent's start."""
+        if bot.agent_name != ROUTER_AGENT_NAME or (bot.agent_user.password or bot.agent_user.access_token) is not None:
+            return bot
+        user = await prepare_owner_account(self.config, self.runtime_paths)
+        return create_bot_for_entity(ROUTER_AGENT_NAME, user, self)
 
     def observe_room_activity(self, room_id: str) -> None:
         """Let thread exports know that a bot admitted a conversation event in one room."""
