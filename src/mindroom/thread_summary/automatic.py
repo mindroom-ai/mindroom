@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from functools import partial
+from html import unescape
 from typing import TYPE_CHECKING
 
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -14,6 +15,7 @@ from mindroom.matrix.thread_forks import fork_parent_thread_id
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import (
+    GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
     generate_summary,
     resolve_thread_summary_model_name,
@@ -65,6 +67,20 @@ logger = get_logger(__name__)
 _rooms_refusing_automatic_tags: set[str] = set()
 # Ends every automatic title of a forked thread.
 _FORKED_TITLE_SUFFIX = " (forked)"
+# The title rule's word limit after the emoji; a longer title is never offered to keep.
+_KEEPABLE_TITLE_MAX_WORDS = 6
+
+
+def _keepable_title(title: str) -> bool:
+    """Return whether a title already obeys the short-title rule, so a refresh may keep it instead of rewriting it."""
+    base = title.removesuffix(_FORKED_TITLE_SUFFIX)
+    words = [word for word in base.split() if any(char.isalnum() for char in word)]
+    return len(base) <= GENERATED_TITLE_MAX_LENGTH and len(words) <= _KEEPABLE_TITLE_MAX_WORDS
+
+
+def _same_title(generated: str, current: str) -> bool:
+    """Return whether a generated title repeats the current one; the model read it HTML-escaped."""
+    return normalize_thread_summary_text(unescape(generated)).casefold() == current.casefold()
 
 
 def _with_fork_marker(title: str, history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str:
@@ -300,12 +316,16 @@ async def _deliver_generated_summary(
     trusted_sender_ids: Collection[str],
     authorize_human: Callable[[str], bool],
     projected_state: SummaryState,
+    keep_title: bool = False,
 ) -> None:
-    """Apply initial tags, then independently deliver the generated summary.
+    """Apply initial tags, then independently deliver the generated summary, unless ``keep_title`` keeps the current one.
 
     Re-reads pin state first (``_summary_delivery_timestamp``): a superseded
     summary should apply neither its tags nor its title.
     """
+    if keep_title and not generated.tags:
+        logger.debug("Keeping the current thread title", room_id=room_id, thread_id=thread_id)
+        return
     try:
         generated_at = await _summary_delivery_timestamp(
             conversation_reader,
@@ -330,6 +350,8 @@ async def _deliver_generated_summary(
     initial_enrichment_complete: bool | None = None
     if generated.tags:
         initial_enrichment_complete = await _apply_initial_tags(client, room_id, thread_id, generated.tags)
+    if keep_title:
+        return
 
     try:
         await send_thread_summary_notice(
@@ -623,10 +645,16 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             return
 
         tag_vocabulary = None
-        if state.last_summary_count > 0 and not state.initial_enrichment_complete:
+        # A kept title sends no notice, so only this process's baseline shows that a refresh already ran.
+        refreshed = state.last_summary_count > 0 or (
+            state.summary is not None and baselines.count(room_id, thread_id) > 0
+        )
+        if refreshed and not state.initial_enrichment_complete:
             tag_vocabulary = refreshed_tag_vocabulary or format_tag_vocabulary_with_counts(
                 load_tag_vocabulary_snapshot(runtime_paths, room_id),
             )
+        # A long legacy title is rewritten once; a retitle asks for a new title outright.
+        current_title = state.summary if state.summary and not retitle and _keepable_title(state.summary) else None
         try:
             model_name = resolve_thread_summary_model_name(
                 config,
@@ -641,6 +669,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
                 model_name=model_name,
                 tag_vocabulary=tag_vocabulary,
                 room_instructions=await room_summary_instructions(client, room_id),
+                current_title=current_title,
             )
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
@@ -676,6 +705,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             trusted_sender_ids=trusted_sender_ids,
             authorize_human=authorize_human,
             projected_state=state,
+            keep_title=current_title is not None and _same_title(normalized_summary, current_title),
         )
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.

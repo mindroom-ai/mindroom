@@ -17,7 +17,6 @@ from mindroom.llm.provider import RequestOverrides
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.providers import registry as provider_registry
-from mindroom.thread_summary.state import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name
 from mindroom.timing import timed
 from mindroom.tool_system.events import body_without_tool_markers
@@ -34,6 +33,8 @@ _MAX_INITIAL_TAGS = 3
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
 _TRUNCATION_SAMPLE_SIZE = 3
 _ROOM_INSTRUCTIONS_MAX_LENGTH = 2000
+# Generated titles only; a person's pin may still use the whole ``THREAD_SUMMARY_MAX_LENGTH``.
+GENERATED_TITLE_MAX_LENGTH = 80
 
 logger = get_logger(__name__)
 
@@ -42,8 +43,8 @@ class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
     summary: str = Field(
-        max_length=THREAD_SUMMARY_MAX_LENGTH,
-        description="One-line summary of the thread conversation",
+        max_length=GENERATED_TITLE_MAX_LENGTH,
+        description="Short one-line title of the thread conversation",
     )
 
 
@@ -149,10 +150,12 @@ async def generate_summary(
     model_name: str,
     tag_vocabulary: str | None,
     room_instructions: str | None = None,
+    current_title: str | None = None,
 ) -> GeneratedSummary | None:
     """Summarize a thread's ordinary messages with ``model_name``, plus one-shot tags from ``tag_vocabulary`` when given.
 
     ``room_instructions`` are the room admins' extra title rules, appended to the summary instructions.
+    ``current_title`` is shown after the thread with the rule to repeat it unless the topic changed.
     """
     provider = _summary_provider(config, runtime_paths, model_name)
     prompt = config.render_prompt(
@@ -164,6 +167,10 @@ async def generate_summary(
             else "(tags are not requested for this summary refresh)"
         ),
     )
+    if current_title is not None:
+        # Appended in code, so a user prompt override without the placeholder keeps working.
+        current = config.render_prompt("THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE", current_title=escape(current_title))
+        prompt = f"{prompt}\n\n{current}"
     response = await complete_prompt(
         provider,
         prompt,
