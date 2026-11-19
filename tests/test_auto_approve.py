@@ -348,6 +348,46 @@ async def test_tool_call_needs_approval_while_the_window_is_being_published(tmp_
 
 
 @pytest.mark.asyncio
+async def test_windows_opened_at_once_are_both_published(tmp_path: Path) -> None:
+    """Two people who open a window in one room at once both end up in what the room shows."""
+    published: list[dict[str, Any]] = []
+
+    async def put_room_state(_room_id: str, _event_type: str, content: dict[str, Any], **_kwargs: object) -> bool:
+        await asyncio.sleep(0)
+        published.append(content)
+        return True
+
+    await asyncio.gather(
+        _send(tmp_path, "!auto_approve 30", put_room_state=put_room_state),
+        _send(tmp_path, "!auto_approve 30", requester_user_id="@other:localhost", put_room_state=put_room_state),
+    )
+
+    assert {window["requester_id"] for window in published[-1]["windows"]} == {HUMAN, "@other:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_off_ends_a_window_that_is_still_being_published(tmp_path: Path) -> None:
+    """`off` sent while the same window is opening waits for it and ends it, so no window opens after `off` answers."""
+    publishing, published = asyncio.Event(), asyncio.Event()
+
+    async def put_room_state(*_args: object, **_kwargs: object) -> bool:
+        publishing.set()
+        await published.wait()
+        return True
+
+    opening = asyncio.create_task(_send(tmp_path, "!auto_approve 30", put_room_state=put_room_state))
+    await publishing.wait()
+    closing = asyncio.create_task(_send(tmp_path, "!auto_approve off"))
+    await asyncio.wait([closing], timeout=0.2)
+    published.set()
+    await opening
+    reply, runtime_paths = await closing
+
+    assert reply.startswith("✅ Auto-approve for all your tool calls is off")
+    assert _window(runtime_paths) is None
+
+
+@pytest.mark.asyncio
 async def test_auto_approve_off_says_when_the_room_refuses_to_show_it(tmp_path: Path) -> None:
     """Ending a window always ends it here, and a refused state write asks for moderator rights."""
     await _send(tmp_path, "!auto_approve 30")

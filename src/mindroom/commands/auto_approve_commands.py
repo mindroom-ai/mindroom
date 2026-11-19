@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -22,6 +23,7 @@ from mindroom.steward_duties import moderator_rights_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
     import nio
     import structlog
@@ -30,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
+_CHANGES: dict[tuple[Path, str], asyncio.Lock] = {}
 _USAGE = "Usage: `/auto_approve <minutes>`, `/auto_approve <hours>h`, `/auto_approve off`, or `/auto_approve` to show the current window"
 # A bare number counts minutes; five digits already exceed the longest window.
 _DURATION = re.compile(r"^(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?)?$")
@@ -140,10 +143,13 @@ async def handle_auto_approve_command(  # noqa: PLR0911 - one answer per outcome
             else f"⚠️ Auto-approve for all your tool calls is on in {place} until {_until(expires_at, config)}.\n\nUse `/auto_approve off` to end it."
         )
 
+    # One change at a time per room, so what the room shows is what the windows here were when it was written.
+    changing = _CHANGES.setdefault((runtime_paths.storage_root, room.room_id), asyncio.Lock())
     if requested == "off":
-        ended = end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
-        # A window always ends here; an `off` with none open still clears what the room shows of an earlier failure.
-        published = await _publish_windows(put_room_state, runtime_paths, room.room_id, logger)
+        async with changing:
+            ended = end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
+            # A window always ends here; an `off` with none open still clears what the room shows of a failed clear.
+            published = await _publish_windows(put_room_state, runtime_paths, room.room_id, logger)
         if published is False:
             return (
                 f"⚠️ Auto-approve for all your tool calls is off in {place}, but the room may still show it as on. "
@@ -162,21 +168,22 @@ async def handle_auto_approve_command(  # noqa: PLR0911 - one answer per outcome
     if duration is None or not timedelta(minutes=1) <= duration <= AUTO_APPROVE_MAX_DURATION:
         return f"❌ Choose a duration from 1 minute to 24 hours, such as `30` or `2h`.\n\n{_USAGE}"
     # The room shows the window before it opens here, so no tool call runs unasked under a window the room refuses.
-    now = datetime.now(UTC)
-    opening = {(thread_id, approver_id): now + duration}
-    published = await _publish_windows(put_room_state, runtime_paths, room.room_id, logger, opening)
-    if published is None:
-        return moderator_rights_message("turn on auto-approve")
-    if not published:
-        return "⚠️ Auto-approve was not turned on because publishing it failed. Run the command again to retry."
-    expires_at = start_auto_approve(
-        runtime_paths,
-        room_id=room.room_id,
-        thread_id=thread_id,
-        requester_id=approver_id,
-        duration=duration,
-        now=now,
-    )
+    async with changing:
+        now = datetime.now(UTC)
+        opening = {(thread_id, approver_id): now + duration}
+        published = await _publish_windows(put_room_state, runtime_paths, room.room_id, logger, opening)
+        if published is None:
+            return moderator_rights_message("turn on auto-approve")
+        if not published:
+            return "⚠️ Auto-approve was not turned on because publishing it failed. Run the command again to retry."
+        expires_at = start_auto_approve(
+            runtime_paths,
+            room_id=room.room_id,
+            thread_id=thread_id,
+            requester_id=approver_id,
+            duration=duration,
+            now=now,
+        )
     approved = await _approve_pending_cards(
         config=config,
         runtime_paths=runtime_paths,

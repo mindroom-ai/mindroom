@@ -24,6 +24,7 @@ from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.room_modes import change_room_thread_mode
 from mindroom.room_thread_modes import (
     clear_room_thread_mode_override,
     resolve_room_thread_mode_override,
@@ -348,6 +349,28 @@ async def test_command_set_and_reset_publish_immediately(room_state: RoomState) 
             sender_user_id="@admin:localhost",
         )
         assert events[EVENT_TYPE, ""] == {"mode": expected}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_mode_change_does_not_undo_one_made_meanwhile(room_state: RoomState) -> None:
+    """A refused change restores the override it replaced, and a change made while it waited still takes effect."""
+    config, paths, _, events, client = room_state
+    refusing, refused = asyncio.Event(), asyncio.Event()
+
+    async def refuse(*_args: object) -> None:
+        refusing.set()
+        await refused.wait()
+
+    first = asyncio.create_task(change_room_thread_mode(client, config, paths, ROOM_ID, "room", put_state=refuse))
+    await refusing.wait()
+    second = asyncio.create_task(change_room_thread_mode(client, config, paths, ROOM_ID, "thread"))
+    await asyncio.sleep(0)
+    refused.set()
+
+    assert await first is None
+    assert await second is True
+    assert resolve_room_thread_mode_override(paths, ROOM_ID) == "thread"
+    assert events[EVENT_TYPE, ""] == {"mode": "thread"}
 
 
 @pytest.mark.asyncio
