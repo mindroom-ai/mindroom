@@ -291,8 +291,10 @@ def _commit(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
     try:
         with advisory_file_lock(path.parent / ".lock"):
             for other in path.parent.glob("*.json"):
-                if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:
-                    other.unlink()
+                # A hold a compaction check dropped outside the lock may be gone already.
+                with suppress(FileNotFoundError):
+                    if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:
+                        other.unlink()
             state = _read(path, now)
             plan = _plan(inner, request, state)
             if plan is None:

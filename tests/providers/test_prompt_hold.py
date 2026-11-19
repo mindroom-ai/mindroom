@@ -7,6 +7,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -35,8 +36,7 @@ from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import pipeline_provider
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
-    from pathlib import Path
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
     from mindroom.llm.provider import ModelProvider, StreamEvent, TokenCounter
 
@@ -811,6 +811,26 @@ async def test_holds_are_kept_per_conversation_pruned_when_idle_and_survive_conc
     monkeypatch.setattr(prompt_hold, "write_text_atomic", _refuse)
     request = conversation.request([*_system(_C), _user("another conversation")])
     assert prompt_hold._commit(conversation.model, request).messages == request.messages
+
+
+@pytest.mark.asyncio
+async def test_a_hold_deleted_while_another_request_lists_the_holds_keeps_that_request_held(
+    conversation: _Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compaction check drops a hold outside the lock, so the prune scan may list a file that is gone by its stat."""
+    first = await conversation.send([*_system(_A), _user("one")])
+    gone = conversation.path.with_name("gone.json")
+    listed = Path.glob
+
+    def glob(self: Path, pattern: str) -> Iterator[Path]:
+        yield gone
+        yield from listed(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", glob)
+    second = await conversation.send([*_system(_B), _user("one"), _answer(), _user("two")])
+    assert second[0].content == first[0].content == _A
+    assert len(_updates(second)) == 1
 
 
 def _refuse(*_args: object, **_kwargs: object) -> None:
