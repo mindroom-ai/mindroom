@@ -423,12 +423,6 @@ class _SpyTurnPolicy:
     def adaptive_participation(self, **kwargs: Any) -> Any:  # noqa: ANN401
         return self.inner.adaptive_participation(**kwargs)
 
-    def router_mention_skips(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool | None:
-        return self.inner.router_mention_skips(room, source)
-
-    async def router_thread_skips(self, room: nio.MatrixRoom, requester_user_id: str, thread_history: Any) -> bool:  # noqa: ANN401
-        return await self.inner.router_thread_skips(room, requester_user_id, thread_history)
-
     def routes_for_sender_in_room(self, sender_id: str, room_id: str) -> bool:
         return self.inner.routes_for_sender_in_room(sender_id, room_id)
 
@@ -4259,6 +4253,57 @@ async def test_a_steward_runs_none_of_its_hooks_on_a_message_it_only_routes(
 
     assert hooks.await_count == (1 if may_answer else 0)
     assert len(harness.gateway.routes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mentions_owner", [True, False])
+async def test_the_owner_runs_room_hooks_and_posts_nothing_where_only_it_listens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    mentions_owner: bool,
+) -> None:
+    """The owner account alone in a room hands a person's message to `message:received` hooks and answers nothing."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME)
+    monkeypatch.setattr(harness.policy, "can_reply_to_sender_in_room", lambda *_args, **_kwargs: True)
+    hooks = AsyncMock(return_value=False)
+    monkeypatch.setattr(harness.dispatcher.deps.ingress_hook_runner, "emit_message_received_hooks", hooks)
+    event = _text_event("note this down", event_id="$owner-only:localhost")
+    if mentions_owner:
+        event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, ROUTER_AGENT_NAME)]}
+
+    await harness.deliver(room, event)
+
+    assert hooks.await_count == 1
+    assert harness.runner.requests == []
+    assert harness.gateway.sent == []
+    assert harness.gateway.routes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("members", "routes"), [((), 0), (("general", "research"), 1)], ids=["alone", "steward"])
+async def test_owner_ingress_admits_route_work_and_never_a_reply_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    members: tuple[str, ...],
+    routes: int,
+) -> None:
+    """The owner account never runs a reply turn: its queued work ends in a route as steward, or in nothing."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, *members)
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+
+    await harness.deliver(room, _text_event("who can help with this?", event_id="$unmentioned:localhost"))
+
+    assert harness.runner.requests == []
+    assert harness.gateway.sent == []
+    assert len(harness.gateway.routes) == routes
 
 
 @pytest.mark.asyncio

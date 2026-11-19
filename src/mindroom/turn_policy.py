@@ -522,36 +522,6 @@ class TurnPolicy:
             available_responders_in_room=available_responders,
         )
 
-    def router_mention_skips(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool:
-        """Return whether the router may drop a message before shared ingress work by its mentions alone.
-
-        A message that mentions anyone is never routed, and the owner account answers no mention of itself.
-        """
-        mentioned_agents, _am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-            source,
-            self.deps.matrix_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            room=room,
-        )
-        return bool(mentioned_agents) or has_non_agent_mentions
-
-    async def router_thread_skips(
-        self,
-        room: nio.MatrixRoom,
-        requester_user_id: str,
-        thread_history: Sequence[ResolvedVisibleMessage],
-    ) -> bool:
-        """Return whether the router may drop an unmentioned thread message whose thread names its responders.
-
-        The same thread rule decides the router's dispatch plan, which runs it on complete planning history.
-        """
-        return self._thread_defers_to_named_responders(
-            thread_history,
-            sender_id=requester_user_id,
-            available_responders=await self.responder_candidates_for_room(room, requester_user_id),
-        )
-
     async def aims_command_at_me(
         self,
         room: nio.MatrixRoom,

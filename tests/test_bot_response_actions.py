@@ -45,7 +45,6 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
-    make_ingress_facts,
     make_matrix_client_mock,
     message_origin,
     runtime_paths_for,
@@ -1299,74 +1298,6 @@ class TestAgentBot(AgentBotTestBase):
 
         assert plan is not None
         assert plan.kind == "route"
-
-    @pytest.mark.asyncio
-    async def test_router_pre_ingress_skip_ignores_stale_thread_owner_outside_responder_boundary(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Router pre-ingress skip must use the same configured-room responder boundary."""
-        config = _runtime_bound_config(
-            with_current_room_member_access(
-                Config(
-                    agents={
-                        "calculator": AgentConfig(display_name="CalculatorAgent"),
-                        "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
-                        "writer": AgentConfig(display_name="WriterAgent", rooms=["!room:localhost"]),
-                    },
-                    authorization={},
-                ),
-            ),
-            tmp_path,
-        )
-        runtime_paths = runtime_paths_for(config)
-        ids = entity_ids(config, runtime_paths)
-        router_user = AgentMatrixUser(
-            agent_name=ROUTER_AGENT_NAME,
-            user_id=ids[ROUTER_AGENT_NAME].full_id,
-            display_name="Router",
-            password=TEST_PASSWORD,
-        )
-        bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
-        bot.client = AsyncMock()
-        room = _matrix_room(
-            own_user_id=bot.matrix_id.full_id,
-            user_ids=[
-                ids[ROUTER_AGENT_NAME].full_id,
-                ids["calculator"].full_id,
-                ids["research"].full_id,
-                ids["writer"].full_id,
-                "@user:localhost",
-            ],
-        )
-        event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
-        event.body = "continue"
-        event.source = {"content": {"body": "continue"}}
-        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
-            return_value=ThreadHistoryResult(
-                [
-                    ResolvedVisibleMessage(
-                        sender=ids["calculator"].full_id,
-                        body="old answer",
-                        timestamp=1,
-                        event_id="$calculator",
-                        content={"body": "old answer"},
-                        thread_id="$thread",
-                        latest_event_id="$calculator",
-                    ),
-                ],
-                is_full_history=True,
-            ),
-        )
-
-        should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-            room,
-            event,
-            facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-            thread_id="$thread",
-        )
-
-        assert should_skip is False
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_requires_explicit_mention_in_multi_human_thread_even_after_prior_team_mentions(

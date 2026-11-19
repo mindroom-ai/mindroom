@@ -7710,99 +7710,6 @@ async def test_router_skips_intermediate_agent_stream_edit_without_precheck(tmp_
 
 
 @pytest.mark.asyncio
-async def test_router_early_skip_keeps_sidecar_preview_for_hydration(tmp_path: Path) -> None:
-    """Router early skip should not drop sidecar previews before hydration can recover metadata."""
-    bot = _make_bot(tmp_path, agent_name="router")
-    room = _make_room()
-    sidecar_preview = cast("nio.RoomMessageText", _file_event(event_id="$sidecar-preview", body="preview"))
-    content = sidecar_preview.source["content"]
-    assert isinstance(content, dict)
-    content["io.mindroom.long_text"] = {
-        "version": 2,
-        "encoding": "matrix_event_content_json",
-        "original_event_size": 100_000,
-        "preview_size": len(sidecar_preview.body),
-        "is_complete_content": True,
-    }
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        sidecar_preview,
-        facts=make_ingress_facts(sidecar_preview.sender, requester_user_id="@user:localhost"),
-        thread_id="$thread",
-    )
-
-    assert should_skip is False
-
-
-@pytest.mark.parametrize(
-    ("membership", "expected"),
-    [
-        ("absent", False),
-        ("invited", False),
-        ("joined", True),
-    ],
-)
-@pytest.mark.asyncio
-async def test_router_early_skip_only_honors_joined_non_agent_mentions(
-    tmp_path: Path,
-    membership: str,
-    expected: bool,
-) -> None:
-    """An absent or merely invited human mention must not bypass normal router dispatch."""
-    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
-    room.add_member(bot.matrix_id.full_id, "Router", None)
-    room.add_member("@user:localhost", "User", None)
-    # A synced cache is what makes "absent" mean absent rather than "not fetched yet".
-    room.members_synced = True
-    mentioned_user_id = "@human:localhost"
-    if membership != "absent":
-        room.add_member(
-            mentioned_user_id,
-            "Human",
-            None,
-            invited=membership == "invited",
-        )
-    event = _text_event(event_id="$human-mention", body=f"hello {mentioned_user_id}")
-    content = event.source["content"]
-    assert isinstance(content, dict)
-    content["m.mentions"] = {"user_ids": [mentioned_user_id]}
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        event,
-        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-        thread_id=None,
-    )
-
-    assert should_skip is expected
-
-
-@pytest.mark.asyncio
-async def test_router_early_skip_drops_a_message_that_mentions_only_the_owner_account(tmp_path: Path) -> None:
-    """The owner account answers nobody, so a message mentioning only it is dropped like one for anyone else."""
-    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
-    room.add_member(bot.matrix_id.full_id, "Router", None)
-    room.add_member("@user:localhost", "User", None)
-    room.members_synced = True
-    event = _text_event(event_id="$router-mention", body=f"hello {bot.matrix_id.full_id}")
-    content = event.source["content"]
-    assert isinstance(content, dict)
-    content["m.mentions"] = {"user_ids": [bot.matrix_id.full_id]}
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        event,
-        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-        thread_id=None,
-    )
-
-    assert should_skip is True
-
-
-@pytest.mark.asyncio
 async def test_first_router_turn_refreshes_lazy_members_before_mention_routing(tmp_path: Path) -> None:
     """A partial lazy-member cache must not hide a joined mentioned participant."""
     bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
@@ -7829,9 +7736,8 @@ async def test_first_router_turn_refreshes_lazy_members_before_mention_routing(t
         "_dispatch_prepared_text_like_ingress",
         new=AsyncMock(return_value=TurnDispatchOutcome.DEFERRED),
     ):
-        outcome = await bot._turn_ingress.handle_text_event(room, event)
+        await bot._turn_ingress.handle_text_event(room, event)
 
-    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert room_membership_is_complete(room)
     assert mentioned_user_id in cached_joined_member_ids(room)
     assert not room.members_synced
@@ -7857,79 +7763,3 @@ async def test_first_turn_membership_refresh_failure_reuses_cached_state_for_pla
     assert drain_result.dispatch_failure_count == 0
     bot.client.joined_members.assert_awaited_once_with(room.room_id)
     assert not room.members_synced
-
-
-@pytest.mark.asyncio
-async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) -> None:
-    """Router skip checks should attribute dispatch-safe snapshot refreshes."""
-    bot = _make_bot(tmp_path, agent_name="router")
-    room = _make_room()
-    event = cast(
-        "nio.RoomMessageText",
-        nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$event",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1000,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-                "content": {
-                    "msgtype": "m.text",
-                    "body": "plain follow-up",
-                },
-            },
-        ),
-    )
-    snapshot = AsyncMock(return_value=ThreadHistoryResult([], is_full_history=False))
-    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = snapshot
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        event,
-        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-        thread_id="$thread",
-    )
-
-    assert should_skip is False
-    snapshot.assert_awaited_once_with(
-        room.room_id,
-        "$thread",
-    )
-
-
-@pytest.mark.asyncio
-async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path: Path) -> None:
-    """Router early skip should not abort live dispatch when its optional snapshot read fails."""
-    bot = _make_bot(tmp_path, agent_name="router")
-    room = _make_room()
-    event = cast(
-        "nio.RoomMessageText",
-        nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$event",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1000,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-                "content": {
-                    "msgtype": "m.text",
-                    "body": "plain follow-up",
-                },
-            },
-        ),
-    )
-    snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
-    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = snapshot
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        event,
-        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-        thread_id="$maybe-root",
-    )
-
-    assert should_skip is False
-    snapshot.assert_awaited_once_with(
-        room.room_id,
-        "$maybe-root",
-    )

@@ -758,21 +758,6 @@ async def test_a_mention_of_only_the_owner_account_gets_no_answer(config: Config
     assert plan.response_action is None
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("members", [(), ("general",), ("general", "research")], ids=["alone", "one", "several"])
-@pytest.mark.parametrize("is_dm", [False, True])
-async def test_owner_never_enqueues_a_turn(config: Config, members: tuple[str, ...], is_dm: bool) -> None:
-    """The owner account plans no answer of its own, whoever shares the room: it routes as steward or stops."""
-    policy = _policy_for(config, ROUTER_AGENT_NAME)
-    room = _room_with_members(_SENDER, *(_entity_id(config, name).full_id for name in members))
-
-    with patch("mindroom.turn_policy.is_dm_room", AsyncMock(return_value=is_dm)):
-        plan = await _plan(policy, room, _dispatch(_context(), agent_name=ROUTER_AGENT_NAME))
-
-    assert plan.kind in {"ignore", "route"}
-    assert plan.response_action is None
-
-
 def test_owner_reply_access_reads_no_membership_without_router_access(config: Config) -> None:
     """Without `router.access` the owner works on anyone's message and waits for no room's membership row."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
@@ -1198,43 +1183,33 @@ async def test_router_does_not_recruit_when_current_sender_is_second_human(confi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("mentioned", "pre_ingress_skip"),
+    ("mentioned", "ignored"),
     [("general", True), (ROUTER_AGENT_NAME, True), (None, False)],
 )
-async def test_router_pre_ingress_mention_rule_is_its_dispatch_plan_rule(
+async def test_owner_routes_only_a_message_that_mentions_nobody(
     config: Config,
     mentioned: str | None,
-    pre_ingress_skip: bool,
+    ignored: bool,
 ) -> None:
-    """The router drops a message before ingress work only where its dispatch plan would ignore it."""
+    """The owner account's plan ignores a message that mentions anyone and routes one that mentions nobody."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
     mentioned_ids = [] if mentioned is None else [_entity_id(config, mentioned)]
-    source = {
-        "content": {
-            "body": "hello",
-            "msgtype": "m.text",
-            "m.mentions": {"user_ids": [matrix_id.full_id for matrix_id in mentioned_ids]},
-        },
-        "sender": _SENDER,
-    }
 
-    assert policy.router_mention_skips(room, source) is pre_ingress_skip
     plan = await _plan(policy, room, _dispatch(_context(mentioned=mentioned_ids), agent_name=ROUTER_AGENT_NAME))
-    assert plan.kind == ("ignore" if pre_ingress_skip else "route")
+    assert plan.kind == ("ignore" if ignored else "route")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owned", [True, False])
-async def test_router_pre_ingress_thread_rule_is_its_dispatch_plan_rule(config: Config, owned: bool) -> None:
-    """The router drops an unmentioned thread message before ingress work only where its plan would ignore it."""
+async def test_owner_leaves_a_thread_to_the_responders_it_names(config: Config, owned: bool) -> None:
+    """The owner account's plan ignores an unmentioned message in a thread whose history names its responders."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
     history = [make_visible_message(sender=_SENDER, body="please help")]
     if owned:
         history.append(make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"))
 
-    assert await policy.router_thread_skips(room, _SENDER, history) is owned
     plan = await _plan(
         policy,
         room,
