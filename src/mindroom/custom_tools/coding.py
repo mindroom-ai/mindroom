@@ -64,8 +64,6 @@ _MAX_HINT_CHARS = 200
 _MAX_LISTED_RANGES = 10
 _EDITS_SHAPE = 'Pass edits=[{"old_text": "...", "new_text": "..."}].'
 _NO_CHANGES = "\nNo changes written."
-# read_file's "N| " gutter, or the one space after it, at the start of every line.
-_READ_FILE_GUTTERS = (re.compile(r" *\d+\| ?"), re.compile(" "))
 # The default of edit_file's edits, so a call that leaves them out differs from one that sends null.
 _OMITTED: Any = cast("Any", object())
 _WORKER_LOCK_TIMEOUT_SECONDS = 10.0
@@ -447,28 +445,20 @@ def _line_ranges(text: str, spans: list[tuple[int, int]]) -> str:
 
 
 def _not_found_hint(content: str, edit: _Edit) -> str:
-    """Say why old_text matched nothing: a copied read_file gutter, an edit already applied, or the lines most like it."""
-    lines = edit.old_text.splitlines(keepends=True)
-    for gutter in _READ_FILE_GUTTERS:
-        cuts = [(cut.end() if (cut := gutter.match(line)) else -1) if line.strip() else 0 for line in lines]
-        unprefixed = "".join(line[cut:] for line, cut in zip(lines, cuts, strict=True))
-        if -1 not in cuts and _find_all_matches(content, unprefixed):
-            return "; don't copy read_file's \"N| \" line-number prefix."
-    # Only a new_text that is not part of old_text, holds whole lines and occurs once suggests the edit already ran.
-    found = _find_all_matches(content, edit.new_text) if edit.new_text.strip() not in edit.old_text else []
-    if len(found) == 1 and content[found[0].start - 1 : found[0].start] in ("", "\n"):
-        start, end = found[0].start, found[0].end
-        if content[end - 1] == "\n" or content[end : end + 1] in ("", "\r", "\n"):
-            return f", but its new_text is already at {_line_ranges(content, [(start, end)])}; this edit may already be applied."
+    """Name the lines most like old_text's first non-blank line, and where its new_text already is, if only once."""
     first = next((line.strip() for line in edit.old_text.splitlines() if line.strip()), "")
     lines = content.splitlines()
     stripped = [line.strip() for line in lines]
     close = difflib.get_close_matches(first, list(dict.fromkeys(stripped)), n=3, cutoff=0.6) if first else []
     cut = _MAX_HINT_CHARS if len(close) == 1 else _MAX_HINT_CHARS // 2
     hits = [f"{index + 1}: {lines[index].rstrip()[:cut]}" for index in sorted(map(stripped.index, close))]
-    if len(hits) > 1:
-        return f".\nClosest lines: {' | '.join(hits)}"
-    return f".\nClosest line {hits[0]}" if hits else "."
+    hint = f"\nClosest lines: {' | '.join(hits)}" if len(hits) > 1 else f"\nClosest line {hits[0]}" if hits else ""
+    at = content.find(edit.new_text) if edit.new_text.strip() and edit.new_text.strip() not in edit.old_text else -1
+    if at >= 0 and content.find(edit.new_text, at + 1) == -1:
+        hint += (
+            f"\nnew_text already appears at line {content.count('\n', 0, at) + 1}; this edit may already be applied."
+        )
+    return hint
 
 
 def _edits_argument(edits: object, legacy: dict[str, object]) -> list[_Edit] | str:
@@ -496,34 +486,6 @@ def _edits_argument(edits: object, legacy: dict[str, object]) -> list[_Edit] | s
         return f"edits{where}: {error['msg']}. {_EDITS_SHAPE}"
 
 
-def _overlap_error(
-    content: str,
-    edits: list[_Edit],
-    spans: list[tuple[_MatchResult, int]],
-    pair: list[int],
-    at: int,
-) -> str:
-    """Say how to fix two edits that overlap at offset ``at``, naming a replace_all edit that already does the other's."""
-    low, high = pair
-    if not (edits[low].replace_all or edits[high].replace_all):
-        return f"edits[{low}] and edits[{high}] overlap. Merge them into one edit."
-    line = content.count("\n", 0, at) + 1
-    # Dropping an edit is right only when the replace_all alone makes each of its matches what it asks for.
-    for covering, other in ((low, high), (high, low)):
-        old, new = edits[covering].old_text, edits[covering].new_text
-        if edits[covering].replace_all and all(
-            content[m.start : m.end].replace(old, new) == edits[other].new_text for m, i in spans if i == other
-        ):
-            return (
-                f"edits[{covering}] (replace_all) already replaces the text edits[{other}] targets at line "
-                f"{line}. Drop edits[{other}], or merge them into one edit."
-            )
-    return (
-        f"edits[{low}] and edits[{high}] overlap at line {line}. "
-        "Merge them into one edit, or make old_text more specific."
-    )
-
-
 def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult, int]] | str:
     """Match every edit against ``content`` and return its spans in file order, each with its edit's index, or why not."""
     many = len(edits) > 1
@@ -534,7 +496,7 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
             return f"{f'edits[{index}].' if many else ''}old_text is empty."
         matches = _find_all_matches(content, edit.old_text)
         if not matches:
-            return f"{who} not found in the file{_not_found_hint(content, edit)}"
+            return f"{who} not found in the file.{_not_found_hint(content, edit)}"
         if len(matches) > 1 and not edit.replace_all:
             lines = _line_ranges(content, [(match.start, match.end) for match in matches])
             return (
@@ -545,7 +507,14 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
     spans.sort(key=lambda span: span[0].start)
     for (first, first_index), (second, second_index) in itertools.pairwise(spans):
         if second.start < first.end:
-            return _overlap_error(content, edits, spans, sorted((first_index, second_index)), second.start)
+            low, high = sorted((first_index, second_index))
+            covers = " (a replace_all edit already changes every match)" * (
+                edits[low].replace_all or edits[high].replace_all
+            )
+            return (
+                f"edits[{low}] and edits[{high}] overlap at line {content.count('\n', 0, second.start) + 1}{covers}. "
+                "Merge them into one edit, or make old_text more specific."
+            )
     return spans
 
 

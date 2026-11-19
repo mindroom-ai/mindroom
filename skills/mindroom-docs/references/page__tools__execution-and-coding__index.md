@@ -282,7 +282,7 @@ pip_install_package("rich")
 `edit_file()` applies a list of `edits` to one file, each an `old_text` copied from the file and its `new_text`.
 Every `old_text` matches the file as it was before the call, not the results of the other edits, and must match exactly one place unless its edit sets `replace_all`, which replaces every non-overlapping match from left to right, as Python's `str.replace` does; whitespace and quote differences are tolerated.
 Edits must not overlap, so a `replace_all` edit already covers every match of its `old_text`.
-When an edit fails validation, none is written: the error names the edit, lists the lines of an `old_text` that matches several places, and, for one that matches none, says when it carries `read_file()`'s line-number prefix or its `new_text` already stands once on whole lines of the file, or else shows up to three distinct lines that come close, if any do.
+When an edit fails validation, none is written: the error names the edit, lists the lines of an `old_text` that matches several places, and, for one that matches none, shows up to three distinct lines that come close, if any do, and where its `new_text` already appears when it appears exactly once.
 A failure while writing the file is reported as a write error instead.
 On success it returns the lines each edit changed in the new file, numbered as `read_file()` numbers them, not a diff; an edit whose `new_text` equals the text it replaces is not listed.
 In a file whose lines all end in CRLF, `old_text` and `new_text` may use LF or CRLF and the file keeps CRLF, unless the file or an edit holds a lone CR; then, as with mixed endings, the file is matched and edited with its line endings as they are.

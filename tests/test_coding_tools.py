@@ -278,11 +278,14 @@ class TestEditFile:
                 {"old_text": "beta gamma", "new_text": "B"},
             ],
         )
-        assert result == "Error: edits[1] and edits[2] overlap. Merge them into one edit.\nNo changes written."
+        assert result == (
+            "Error: edits[1] and edits[2] overlap at line 1. Merge them into one edit, or make old_text more specific."
+            "\nNo changes written."
+        )
         assert (tmp_base / "overlap.py").read_text() == "alpha beta gamma\n"
 
-    def test_overlap_with_replace_all_says_to_drop_the_other_edit(self, tools: CodingTools, tmp_base: Path) -> None:
-        """An edit inside a replace_all edit's matches is named as already covered."""
+    def test_overlap_with_replace_all_says_it_changes_every_match(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An overlap with a replace_all edit says that edit already changes every match."""
         (tmp_base / "cfg.py").write_text("import os\n\n\ndef get_cfg(path=None):\n    return get_cfg\n")
         result = tools.edit_file(
             "cfg.py",
@@ -292,12 +295,12 @@ class TestEditFile:
             ],
         )
         assert result == (
-            "Error: edits[1] (replace_all) already replaces the text edits[0] targets at line 4. "
-            "Drop edits[0], or merge them into one edit.\nNo changes written."
+            "Error: edits[0] and edits[1] overlap at line 4 (a replace_all edit already changes every match). "
+            "Merge them into one edit, or make old_text more specific.\nNo changes written."
         )
 
-    def test_partial_overlap_with_replace_all_is_not_called_covered(self, tools: CodingTools, tmp_base: Path) -> None:
-        """An edit with matches outside a replace_all edit's matches is not told to be dropped."""
+    def test_overlap_of_two_replace_all_edits(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Two replace_all edits that overlap get the same advice."""
         (tmp_base / "abc.txt").write_text("alpha beta gamma\nalpha beta\nbeta gamma\n")
         result = tools.edit_file(
             "abc.txt",
@@ -307,8 +310,8 @@ class TestEditFile:
             ],
         )
         assert result == (
-            "Error: edits[0] and edits[1] overlap at line 1. Merge them into one edit, or make old_text more specific."
-            "\nNo changes written."
+            "Error: edits[0] and edits[1] overlap at line 1 (a replace_all edit already changes every match). "
+            "Merge them into one edit, or make old_text more specific.\nNo changes written."
         )
 
     def test_replace_all_of_self_overlapping_text_goes_left_to_right(self, tools: CodingTools, tmp_base: Path) -> None:
@@ -372,37 +375,20 @@ class TestEditFile:
         result = tools.edit_file("flag.py", _one("flag = enabled  # stale comment", "enabled"))
         assert result == "Error: old_text not found in the file.\nClosest line 1: flag = enabled\nNo changes written."
 
-    def test_uneven_indent_is_not_called_a_gutter(self, tools: CodingTools, tmp_base: Path) -> None:
-        """Only a numbered gutter or one space on every line counts as copied from read_file."""
-        (tmp_base / "k.txt").write_text("start\nvalue = keep\n")
-        result = tools.edit_file("k.txt", _one("start\n value = keep", "z"))
-        assert "line-number prefix" not in result
-        assert result.endswith("No changes written.")
-
     def test_not_found_but_new_text_present(self, tools: CodingTools, tmp_base: Path) -> None:
         """An edit whose new_text is already in the file is named as maybe applied."""
         (tmp_base / "app.ini").write_text("[server]\nhost = 0.0.0.0\nport = 9090\n")
         result = tools.edit_file("app.ini", _one("port = 8080", "port = 9090"))
         assert result == (
-            "Error: old_text not found in the file, but its new_text is already at line 3; "
-            "this edit may already be applied.\nNo changes written."
+            "Error: old_text not found in the file.\nClosest line 3: port = 9090\n"
+            "new_text already appears at line 3; this edit may already be applied.\nNo changes written."
         )
 
-    @pytest.mark.parametrize(
-        "old_text",
-        [" [server]\n host = 0.0.0.0\n port = 8080", "1| [server]\n2| host = 0.0.0.0\n3| port = 8080"],
-    )
-    def test_not_found_with_read_file_prefix(self, tools: CodingTools, tmp_base: Path, old_text: str) -> None:
-        """An old_text copied with read_file's gutter is told to drop it."""
-        (tmp_base / "app.ini").write_text("[server]\nhost = 0.0.0.0\nport = 8080\n")
-        result = tools.edit_file(
-            "app.ini",
-            [{"old_text": "host", "new_text": "h"}, {"old_text": old_text, "new_text": "z"}],
-        )
-        assert result == (
-            "Error: edits[1] not found in the file; don't copy read_file's \"N| \" line-number prefix."
-            "\nNo changes written."
-        )
+    def test_new_text_found_twice_is_not_called_applied(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A new_text that occurs more than once, overlapping occurrences included, adds no note."""
+        (tmp_base / "a.txt").write_text("aaa\n")
+        result = tools.edit_file("a.txt", _one("bbb", "aa"))
+        assert result == "Error: old_text not found in the file.\nNo changes written."
 
     def test_not_found_without_a_close_line(self, tools: CodingTools) -> None:
         """No hint when nothing in the file resembles old_text."""
