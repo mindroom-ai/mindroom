@@ -133,3 +133,6 @@ def test_cached_override_records_are_returned_as_independent_snapshots(tmp_path:
     assert load_cached_override_records(path, is_valid) == {
         "record": {"model": "default", "set_at": "2026-07-09T00:00:00+00:00"},
     }
+    # One record can be read alone, without a copy of the others.
+    assert load_cached_override_records(path, is_valid, only="record")["record"]["model"] == "default"
+    assert load_cached_override_records(path, is_valid, only="other") == {}

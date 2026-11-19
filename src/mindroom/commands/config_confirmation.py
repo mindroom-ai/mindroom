@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 
@@ -173,7 +173,9 @@ def _store_path(runtime_paths: RuntimePaths) -> Path:
 
 
 def _is_stored_change(_event_id: str, record: dict[object, object]) -> bool:
-    return isinstance(record.get("sender"), str) and isinstance(record.get("created_at"), str)
+    with suppress(KeyError, TypeError, ValueError):
+        return isinstance(_PendingConfigChange.from_dict(cast("dict[str, Any]", record)).sender, str)
+    return False
 
 
 def _save_pending_change(
@@ -184,6 +186,9 @@ def _save_pending_change(
     """Save one checkpoint, or forget its preview given None, in the local store and then in memory."""
     path = _store_path(runtime_paths)
     records: dict[str, Any] = load_cached_override_records(path, _is_stored_change)
+    # Previews nobody decided in time leave the store with the next write.
+    for stale in [key for key, record in records.items() if _PendingConfigChange.from_dict(record).is_expired()]:
+        del records[stale]
     if checkpoint is None:
         records.pop(preview_event_id, None)
         _pending_changes.pop(preview_event_id, None)
@@ -203,7 +208,7 @@ def _resolve_pending_change(
     """Return the unexpired pending change of a preview this bot sent to this room, from memory or the local store."""
     pending_change = _pending_changes.get(event_id)
     if pending_change is None:
-        record = load_cached_override_records(_store_path(runtime_paths), _is_stored_change).get(event_id)
+        record = load_cached_override_records(_store_path(runtime_paths), _is_stored_change, event_id).get(event_id)
         if record is None:
             return None
         pending_change = _PendingConfigChange.from_dict(record)

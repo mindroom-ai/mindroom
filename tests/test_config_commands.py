@@ -1912,6 +1912,25 @@ async def test_expired_config_change_is_discarded(tmp_path: Path) -> None:
     assert _stored_pending_changes(runtime_paths) == {}
 
 
+def test_saving_a_preview_prunes_what_nobody_decided_in_time(tmp_path: Path) -> None:
+    """Each write drops the previews nobody decided in time and the rows it cannot read, and keeps decided ones."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    old = datetime.now(UTC) - timedelta(hours=25)
+    rows = {
+        "$expired": replace(_pending_config_change(), created_at=old).to_dict(),
+        "$decided": replace(_pending_config_change(), created_at=old, decision_event_id="$reaction").to_dict(),
+        "$unreadable": {"sender": "@router:example.org", "created_at": "soon"},
+    }
+    path = config_confirmation._store_path(runtime_paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+    with patch.object(config_confirmation, "_pending_changes", {}):
+        config_confirmation._save_pending_change(runtime_paths, "$new", _pending_config_change())
+
+    assert set(_stored_pending_changes(runtime_paths)) == {"$decided", "$new"}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("command", "field_path"),
