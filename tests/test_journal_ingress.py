@@ -4117,6 +4117,183 @@ class _ApprovalWakeReplayView(_FlakyReplayView):
         return page
 
 
+@dataclass
+class _CountingReplayView(_FlakyReplayView):
+    """Count the rows every pending read looks at, and hide chosen events from them."""
+
+    rows_read: int = 0
+    hidden: set[str] = field(default_factory=set)
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        room_id: str | None = None,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        page = await super().pending(
+            limit=limit,
+            room_id=room_id,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
+        self.rows_read += len(page) + page.unreadable_rows
+        return PendingPage(
+            tuple(event for event in page if event.event_id not in self.hidden),
+            resume_after=page.resume_after,
+            reached_end=page.reached_end,
+            unreadable_rows=page.unreadable_rows,
+        )
+
+
+class _HeldSettlement:
+    """One principal's dispatch view whose ignored-source settlement waits to be let through."""
+
+    def __init__(self, inner: PrincipalStore) -> None:
+        self._inner = inner
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401 - a pass-through proxy
+        return getattr(self._inner, name)
+
+    async def settle_many(self, event_ids: tuple[str, ...]) -> tuple[str, ...]:
+        self.entered.set()
+        await self.release.wait()
+        return await self._inner.settle_many(event_ids)
+
+
+class TestInFlightTurnsAreNotReread:
+    """A wake costs what is new, however many turns the bot already has running."""
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event) -> None:
+        # Unprojected: these rows are only ever paged, and there are many of them.
+        await store.admit(_inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE))
+
+    async def test_a_wake_reads_new_work_not_the_turns_already_in_flight(self, alice: PrincipalStore) -> None:
+        """Every running turn is a pending row its owner will hand back by itself.
+
+        Discovery restarted at the front of the backlog on every wake, and the
+        room's lane at the front of the room, so each new event paged through
+        every in-flight turn twice only to skip it: with N turns running and N
+        more events arriving, N squared rows, each one joined and decoded.
+        """
+        in_flight = _BATCH_SIZE + 2
+        wakes = 5
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return not event.event_id.startswith("$busy")
+
+        for index in range(in_flight):
+            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index))
+        store = _CountingReplayView(alice)
+        worker = PendingEventWorker(store=store, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            assert len(worker._deferred) == in_flight
+            store.rows_read = 0
+
+            for index in range(wakes):
+                await self._admit(alice, text_event(f"$new{index}", ts=9_000 + index))
+                await _dispatch_worker_pass(worker)
+
+            assert handled[in_flight:] == [f"$new{index}" for index in range(wakes)]
+            assert len(await alice.pending(limit=in_flight + wakes)) == in_flight
+            # Discovery and the lane each read the new row; nothing reads the turns behind it.
+            assert store.rows_read <= 4 * wakes
+        finally:
+            await worker.stop()
+
+    async def test_work_that_turns_up_behind_in_flight_turns_is_found_by_the_sweep(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """Reading only the tail must not turn into never reading the rest.
+
+        A pending source can become runnable with no admission and no owner to
+        announce it: another agent's write frees a source an approval held. It
+        sits before the scan's tail and before its room's cursor, so the sweep
+        that looks for lost owners also has to send a scan back to the front,
+        and that scan has to rewind the room.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id != "$busy"
+
+        for event_id in ("$freed", "$busy"):
+            await self._admit(alice, text_event(event_id))
+        store = _CountingReplayView(alice, hidden={"$freed"})
+        worker = PendingEventWorker(store=store, handle=handle, deferral_scan_seconds=0.01)
+        worker.start()
+        try:
+            await _eventually(lambda: handled == ["$busy"] and not worker._lanes)
+            store.hidden.clear()
+
+            # The room already admitted a later receipt, so the revisit is paced once.
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: handled == ["$busy", "$freed"])
+        finally:
+            await worker.stop()
+
+    async def test_a_source_being_settled_as_ignored_is_not_read_as_handed_back(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The worker forgets an ignored source once its settlement is durable, not before.
+
+        Released first, the source is pending and owned by nobody for as long
+        as the write takes. A lane that reads the room in that window takes it
+        for a source handed back: it paces the whole room behind a cooldown, or
+        defers the source again to an owner about to let go of it, which the
+        liveness sweep then reports as lost. Every agent that is not addressed
+        ignores every message, so under load each of them did this constantly.
+        """
+        owned = True
+        store = _HeldSettlement(alice)
+
+        async def on_message(_room: nio.MatrixRoom, _event: nio.Event) -> TurnDispatchOutcome:
+            return TurnDispatchOutcome.DEFERRED
+
+        dispatcher = TestDeferralOwnership._dispatcher(cast("PrincipalStore", store))
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_message=cast("Any", on_message),
+            source_has_live_owner=lambda _event_id: owned,
+        )
+        dispatcher.release_turn_replay()
+        worker = dispatcher._worker
+        await self._admit(alice, text_event("$ignored"))
+        try:
+            await _dispatch_worker_pass(worker)
+            assert list(worker._deferred) == ["$ignored"]
+
+            settling = asyncio.create_task(dispatcher.settle_intentionally_ignored_turn_sources(("$ignored",)))
+            await asyncio.wait_for(store.entered.wait(), timeout=5)
+            with capture_logs() as logs:
+                await _dispatch_worker_pass(worker)
+                await _dispatch_worker_pass(worker)
+                assert not worker._room_retries
+
+                store.release.set()
+                await asyncio.wait_for(settling, timeout=5)
+                owned = False
+                assert not worker._deferred
+                await _dispatch_worker_pass(worker)
+            assert [log["event"] for log in logs if log["log_level"] == "warning"] == []
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            store.release.set()
+            await dispatcher.stop()
+
+
 class TestStoreFailuresBelongToTheLane:
     """A lane owns every store call it makes, not only the handler between them."""
 

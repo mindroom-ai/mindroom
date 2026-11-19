@@ -369,9 +369,19 @@ class JournalDispatcher:
         self._release_sources(event_ids)
 
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
-        """Settle turn-backed events that produced no dispatch payload."""
-        self._release_sources(event_ids)
-        self.callbacks.replies_ended(await self.store.settle_many(event_ids))
+        """Settle turn-backed events that produced no dispatch payload.
+
+        The worker forgets them once the settlement is durable, as it does for a
+        delivered turn. Released first, a source is pending and owned by nobody
+        until the write lands, and a lane reading its room meanwhile takes it for
+        one handed back: it paces the room, or defers the source to this owner
+        again, which the liveness sweep then reports as lost.
+        """
+        try:
+            ended_replies = await self.store.settle_many(event_ids)
+        finally:
+            self._release_sources(event_ids)
+        self.callbacks.replies_ended(ended_replies)
 
     def retry_turn_source(self, room_id: str, event_id: str) -> None:
         """Return one undelivered turn source to the worker."""

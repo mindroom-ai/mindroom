@@ -3,6 +3,13 @@
 The journal owns durable work and replay eligibility. Discovery only finds
 rooms: its rotating cursor never decides which event in a room runs next.
 Each room keeps its own page position across bounded passes and cooldowns.
+
+A running turn is a pending row that stays pending until its owner hands it
+back, so neither reader goes over those rows again on every wake. A room's
+lane resumes behind the last row it read, and while turns are in flight
+discovery reads only what was admitted after its last finished scan. What sits
+before either position is reopened by a rewind: a retry, a lost owner, or the
+whole scan the deferral sweep sends discovery back for.
 """
 
 from __future__ import annotations
@@ -50,6 +57,8 @@ class _RoomProgress:
 
     cursor: int | None = None
     rewind_before: int | None = None
+    # Discovery's rewind: the room's next lane starts behind it; a running lane keeps its page.
+    reopen_before: int | None = None
     admitted_through: int = 0
     deferred_count: int = 0
 
@@ -94,6 +103,8 @@ class PendingEventWorker:
     _deferral_scan: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
     _scan_cursor: int | None = field(default=None, init=False, repr=False)
+    # Where the last finished scan ended; None sends the next one over the whole backlog.
+    _scanned_through: int | None = field(default=None, init=False, repr=False)
     _stopped: bool = field(default=False, init=False, repr=False)
     _process_shutdown: bool = field(default=False, init=False, repr=False)
     _stop_generation: int = field(default=0, init=False, repr=False)
@@ -192,7 +203,7 @@ class PendingEventWorker:
         }
         self._ready_rooms.clear()
         self._room_retries.clear()
-        self._scan_cursor = None
+        self._scan_cursor = self._scanned_through = None
         return True
 
     async def stop(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
@@ -215,12 +226,25 @@ class PendingEventWorker:
             if not self.deferral_is_live(event):
                 self._reclaim_deferral(event)
 
-    async def _discover_rooms(self, *, whole_backlog: bool = False) -> tuple[set[str], bool]:
-        """Find rooms without passing global scan slices to their lanes."""
-        rooms: set[str] = set()
+    def _reopen_rooms(self, rooms: dict[str, int]) -> None:
+        """Queue discovered rooms; a lane already past a room's first unowned event goes back for it."""
+        for room_id, first_receipt in rooms.items():
+            self._queue_room(room_id)
+            progress = self._rooms[room_id]
+            previous = progress.reopen_before
+            progress.reopen_before = first_receipt - 1 if previous is None else min(previous, first_receipt - 1)
+
+    async def _discover_rooms(self, *, whole_backlog: bool = False) -> tuple[dict[str, int], bool]:
+        """Find rooms, and each one's first unowned receipt, without passing global scan slices to their lanes."""
+        rooms: dict[str, int] = {}
         origin = None if whole_backlog else self._scan_cursor
-        cursor = origin
+        # New work is admitted behind everything a finished scan saw. While turns are in
+        # flight, the rows before that point are those turns, whose owners announce what
+        # changes, so only the tail is read; without any, the whole backlog is the work.
+        tail_only = not whole_backlog and origin is None and self._scanned_through is not None and bool(self._deferred)
+        cursor = self._scanned_through if tail_only else origin
         wrapped = origin is None
+        tail = cursor
         pages = 0
         while whole_backlog or pages < _MAX_SCAN_PAGES:
             page = await self.store.pending(
@@ -235,16 +259,21 @@ class PendingEventWorker:
                     reached_origin = True
                     break
                 if event.event_id not in self._deferred:
-                    rooms.add(event.room_id)
+                    rooms[event.room_id] = min(event.receipt_order, rooms.get(event.room_id, event.receipt_order))
+            if page.reached_end and not reached_origin:
+                tail = page.resume_after
             if reached_origin or (page.reached_end and wrapped):
                 if not whole_backlog:
-                    self._scan_cursor = None
+                    self._scan_cursor, self._scanned_through = None, tail
                 return rooms, False
             if page.reached_end:
                 cursor, wrapped = None, True
             else:
                 cursor = page.resume_after
-        self._scan_cursor = cursor
+        if tail_only:
+            self._scanned_through = cursor
+        else:
+            self._scan_cursor = cursor
         return rooms, True
 
     async def drain_once(self) -> int:
@@ -256,10 +285,10 @@ class PendingEventWorker:
         if self._stopped or generation != self._stop_generation:
             return 0
         self._queue_lost_owners()
-        rooms.update(self._ready_rooms)
+        self._reopen_rooms(rooms)
         return sum(
             await asyncio.gather(
-                *(self._drain_room(room_id, stop_generation=generation) for room_id in rooms),
+                *(self._drain_room(room_id, stop_generation=generation) for room_id in tuple(self._ready_rooms)),
             ),
         )
 
@@ -301,8 +330,7 @@ class PendingEventWorker:
         if self._stopped:
             return
         self._queue_lost_owners()
-        for room_id in rooms:
-            self._queue_room(room_id)
+        self._reopen_rooms(rooms)
         started = self._start_ready_rooms() or started
         if more_remains:
             if started:
@@ -325,7 +353,10 @@ class PendingEventWorker:
         active = self._lanes.get(room_id)
         if self._stopped or self._room_is_backing_off(room_id) or (active is not None and not active.done()):
             return None
-        self._rooms.setdefault(room_id, _RoomProgress())
+        progress = self._rooms.setdefault(room_id, _RoomProgress())
+        reopen_before, progress.reopen_before = progress.reopen_before, None
+        if reopen_before is not None and progress.cursor is not None:
+            progress.cursor = min(progress.cursor, reopen_before)
         self._ready_rooms.discard(room_id)
         lane = asyncio.create_task(self._run_room(room_id), name=f"pending_event_lane_{room_id}")
         self._lanes[room_id] = lane
@@ -482,7 +513,7 @@ class PendingEventWorker:
                 if self._apply_rewind(progress):
                     continue
                 if page.reached_end:
-                    progress.cursor = None
+                    # The cursor stays behind the last row read: what is before it is owned or done.
                     return _RoomPass(len(seen))
             return _RoomPass(len(seen), more=True)
         except Exception:
@@ -512,6 +543,8 @@ class PendingEventWorker:
             for _ in range(0, len(self._deferred), _BATCH_SIZE):
                 self._queue_lost_owners()
                 await asyncio.sleep(0)
+            # A source can also become runnable with nobody to announce it, so the next scan reads everything.
+            self._scanned_through = None
             self._wake.set()
 
     def _schedule_retry(self) -> None:
