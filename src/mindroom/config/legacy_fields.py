@@ -4,12 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.logging_config import get_logger
-
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
-
-logger = get_logger(__name__)
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -205,13 +201,11 @@ _REJECTED_TOOL_OVERRIDES_BY_TOOL = {
 #   max_file_lines, line_separator, exclude_patterns, all, and expose_base_directory, and include_tools or
 #   exclude_tools naming save_file, read_file_chunk, replace_file_chunk, list_files, search_files, or search_content.
 # Last legacy release: v2026.11.447; replacement: unreleased; file and coding both name the filesystem toolkit.
-# Handling: On an entry authored as file, each switched-off function becomes an exclude_tools entry for its
-#   replacement (read_file only when both read switches are off) unless all turned every function on, delete_file
-#   included, retired names in the filters are renamed, and the settings without a counterpart are dropped with a
-#   warning, so a capability that was off stays off and one that was on stays on.
-# Coverage: tests/test_filesystem_tool_config.py::test_legacy_file_all_turns_every_function_on,
-#   tests/test_filesystem_tool_config.py::test_legacy_file_switches_map_to_exclude_tools,
-#   tests/test_filesystem_tool_config.py::test_legacy_file_filters_are_renamed_and_unmatched_settings_dropped.
+# Handling: Reject each one, whatever its value, on a filesystem entry authored under any of its names in defaults or
+#   on an agent, naming the filesystem setting to write instead. None is translated, so a function that was switched
+#   off never comes back on.
+# Coverage:
+#   tests/test_filesystem_tool_config.py::test_an_old_agno_setting_on_a_file_entry_fails_config_load_naming_its_replacement.
 RETIRED_FILE_FUNCTIONS = {
     "save_file": "write_file",
     "replace_file_chunk": "edit_file",
@@ -220,60 +214,36 @@ RETIRED_FILE_FUNCTIONS = {
     "search_files": "find_files",
     "search_content": "grep",
 }
-_FILE_SWITCHES = {
-    "enable_save_file": "write_file",
-    "enable_replace_file_chunk": "edit_file",
-    "enable_list_files": "ls",
-    "enable_search_files": "find_files",
-    "enable_search_content": "grep",
+_RETIRED_FILE_SETTINGS = {
+    **{
+        f"enable_{old}": f"use `filesystem: {{exclude_tools: [{new}]}}` to switch {new} off"
+        for old, new in {"read_file": "read_file", **RETIRED_FILE_FUNCTIONS}.items()
+    },
+    "all": "use `filesystem: {enable_delete_file: true}` to offer delete_file",
+    **dict.fromkeys(
+        ("max_file_length", "max_file_lines", "line_separator", "exclude_patterns", "expose_base_directory"),
+        "filesystem has no such setting, so remove it",
+    ),
 }
-_DROPPED_FILE_SETTINGS = (
-    "max_file_length",
-    "max_file_lines",
-    "line_separator",
-    "exclude_patterns",
-    "all",
-    "expose_base_directory",
-)
 
 
-def _renamed_functions(value: object) -> object:
-    names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
-    if not isinstance(names, list):
-        return value
-    renamed = [
-        RETIRED_FILE_FUNCTIONS.get(name.strip(), name.strip()) if isinstance(name, str) else name for name in names
-    ]
-    return [name for name in renamed if name != ""]
-
-
-def migrate_legacy_file_overrides(overrides: dict[str, object]) -> dict[str, object]:
-    """Return a ``file`` entry's overrides in the filesystem toolkit's terms, keeping every switched-off function off."""
-    migrated = dict(overrides)
-    reads_off = [migrated.pop(key, None) is False for key in ("enable_read_file", "enable_read_file_chunk")]
-    excluded = [function for key, function in _FILE_SWITCHES.items() if migrated.pop(key, None) is False]
-    if all(reads_off):
-        excluded.append("read_file")
-    if migrated.get("all") is True:
-        excluded = []
-        migrated["enable_delete_file"] = True
+def _retired_file_filter(overrides: Mapping[str, object]) -> tuple[str, str] | None:
     for key in ("include_tools", "exclude_tools"):
-        if key in migrated:
-            migrated[key] = _renamed_functions(migrated[key])
-    if excluded:
-        current = migrated.get("exclude_tools")
-        current = current if isinstance(current, list) else []
-        migrated["exclude_tools"] = [*current, *(name for name in excluded if name not in current)]
-    for key in _DROPPED_FILE_SETTINGS:
-        if key in migrated:
-            del migrated[key]
-            logger.warning("retired_file_tool_setting_dropped", setting=key)
-    return migrated
+        value = overrides.get(key)
+        names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
+        for name in names if isinstance(names, list) else ():
+            if isinstance(name, str) and (new := RETIRED_FILE_FUNCTIONS.get(name.strip())):
+                return f"{key}: {name.strip()}", f"use `filesystem: {{{key}: [{new}]}}`"
+    return None
 
 
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
+    if tool_name == "filesystem":
+        rejected |= _RETIRED_FILE_SETTINGS
+        if (retired := _retired_file_filter(overrides)) is not None:
+            return retired
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)
 
 

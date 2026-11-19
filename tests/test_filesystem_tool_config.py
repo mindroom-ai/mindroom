@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -13,6 +14,7 @@ from mindroom.config.listening import ListenConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.config.personal_agents import GeneratedAgentEdits
+from mindroom.config.resolution import authored_tool_entries
 from mindroom.constants import resolve_runtime_paths
 from mindroom.contacts.store import ContactSide
 from mindroom.custom_tools.script import ScriptTools
@@ -22,6 +24,8 @@ from mindroom.workers.protocol import ExecuteRequest
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 
 def _config(tools: list[Any], **agent: object) -> Config:
@@ -44,122 +48,138 @@ def test_every_name_of_the_toolkit_loads_as_filesystem(name: str) -> None:
     assert _entries([{name: {"defer": True, "initial": True}}]) == [{"filesystem": {"defer": True, "initial": True}}]
 
 
-def test_entries_naming_one_toolkit_merge_at_the_first_position() -> None:
-    """Two spellings merge into the first one's place; defer holds only if both defer, initial if either has it."""
-    assert _entries(["shell", "file", "python", {"coding": {"defer": True, "initial": True}}]) == [
-        "shell",
-        "filesystem",
-        "python",
+def _layered(default_tools: list[Any], agent_tools: list[Any], **agent: object) -> Config:
+    return Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "defaults": {"tools": default_tools},
+            "agents": {"a": {"display_name": "A", "tools": agent_tools, **agent}},
+        },
+    )
+
+
+def _effective(config: Config) -> list[tuple[str, dict[str, object], bool, bool]]:
+    return [
+        (entry.name, dict(entry.tool_config_overrides), entry.defer, entry.initial)
+        for entry in authored_tool_entries(config, "a")
+        if entry.name == "filesystem"
     ]
-    merged = _entries([{"file": {"defer": True}}, {"coding": {"defer": True, "initial": True}}])
-    assert merged == [{"filesystem": {"defer": True, "initial": True}}]
-    assert _entries([{"coding": {"defer": True}}, "filesystem"]) == ["filesystem"]
 
 
-def test_merged_entries_union_their_settings() -> None:
-    """Settings of both entries apply, so a switched-off function stays off."""
-    merged = _entries([{"file": {"enable_save_file": False}}, {"coding": {"enable_delete_file": True}}])
-    assert merged == [{"filesystem": {"exclude_tools": ["write_file"], "enable_delete_file": True}}]
+def test_plain_entries_naming_one_toolkit_keep_the_first_position() -> None:
+    """Two spellings with no settings and the same lazy flags are one entry where the first one stood."""
+    assert _entries(["shell", "file", "python", "coding"]) == ["shell", "filesystem", "python"]
+    both_deferred = [{"file": {"defer": True}}, {"coding": {"defer": True}}]
+    assert _entries(both_deferred) == [{"filesystem": {"defer": True}}]
 
 
-def test_merged_entries_with_different_values_fail_naming_both() -> None:
-    """Two spellings that set one setting differently have no single reading."""
-    with pytest.raises(ValidationError, match="'file' and 'coding' both select filesystem but set exclude_tools"):
-        _config([{"file": {"exclude_tools": ["grep"]}}, {"coding": {"exclude_tools": ["ls"]}}])
+@pytest.mark.parametrize(
+    "tools",
+    [
+        ["file", {"coding": {"defer": True, "initial": True}}],
+        [{"coding": {"defer": True}}, "filesystem"],
+        [{"file": {"exclude_tools": ["write_file"]}}, "coding"],
+        ["filesystem", {"coding": {"enable_delete_file": True}}],
+    ],
+)
+def test_entries_naming_one_toolkit_with_settings_or_other_flags_fail_naming_both(tools: list[Any]) -> None:
+    """Two spellings never merge settings or lazy flags: the config fails and names both entries."""
+    first, second = (entry if isinstance(entry, str) else next(iter(entry)) for entry in tools)
+    with pytest.raises(ValidationError, match=f"'{first}' and '{second}' both select filesystem"):
+        _config(tools)
 
 
 def test_one_spelling_twice_is_still_a_duplicate() -> None:
-    """Only different spellings merge; the same name twice keeps failing as before."""
+    """Only different spellings are one entry; the same name twice keeps failing as before."""
     with pytest.raises(ValidationError, match="Duplicate"):
         _config(["coding", "coding"])
 
 
-def test_defaults_tools_and_agent_tools_layer_across_spellings() -> None:
-    """A defaults entry and an agent entry under other spellings layer like one tool's entries."""
-    config = Config.model_validate(
-        {
-            "models": {"default": {"provider": "openai", "id": "x"}},
-            "defaults": {"tools": [{"file": {"enable_save_file": False}}]},
-            "agents": {"a": {"display_name": "A", "tools": ["coding"]}},
-        },
-    )
-    assert [entry.model_dump() for entry in config.defaults.tools] == [
-        {"filesystem": {"exclude_tools": ["write_file"]}},
-    ]
-    assert [entry.name for entry in config.agents["a"].tools] == ["filesystem"]
+def test_plain_spellings_across_defaults_and_agent_build_one_toolkit() -> None:
+    """A plain defaults entry and a plain agent entry under other spellings are one filesystem toolkit."""
+    assert _effective(_layered(["file"], ["coding", "shell"])) == [("filesystem", {}, False, False)]
 
 
 @pytest.mark.parametrize(
-    ("switch", "excluded"),
+    ("default_tools", "agent_tools"),
     [
-        ("enable_save_file", "write_file"),
-        ("enable_replace_file_chunk", "edit_file"),
-        ("enable_list_files", "ls"),
-        ("enable_search_files", "find_files"),
-        ("enable_search_content", "grep"),
+        ([{"file": {"exclude_tools": ["write_file"]}}], ["coding"]),
+        (["file"], [{"coding": {"exclude_tools": ["grep"]}}]),
+        (["filesystem"], [{"coding": {"defer": True, "initial": True}}]),
     ],
 )
-def test_legacy_file_switches_map_to_exclude_tools(switch: str, excluded: str) -> None:
-    """A function a file entry switched off is excluded from filesystem."""
-    assert _entries([{"file": {switch: False}}]) == [{"filesystem": {"exclude_tools": [excluded]}}]
-    assert _entries([{"file": {switch: True}}]) == ["filesystem"]
+def test_spellings_across_defaults_and_agent_with_settings_or_flags_fail(
+    default_tools: list[Any],
+    agent_tools: list[Any],
+) -> None:
+    """A read-only default never meets an agent entry under another spelling: the config fails naming both."""
+    default_name, agent_name = (
+        next(iter(tools[0])) if isinstance(tools[0], dict) else tools[0] for tools in (default_tools, agent_tools)
+    )
+    with pytest.raises(ValidationError, match=f"'{agent_name}' and '{default_name}' both select filesystem"):
+        _layered(default_tools, agent_tools)
+    without_defaults = _layered(default_tools, agent_tools, include_default_tools=False)
+    assert _effective(without_defaults) == _effective(_layered([], agent_tools))
 
 
-def test_legacy_file_read_switches_exclude_read_file_only_together() -> None:
-    """read_file goes only when both of file's reads were off, since either one read the file."""
-    assert _entries([{"file": {"enable_read_file": False}}]) == ["filesystem"]
-    assert _entries([{"file": {"enable_read_file_chunk": False}}]) == ["filesystem"]
-    both = [{"file": {"enable_read_file": False, "enable_read_file_chunk": False}}]
-    assert _entries(both) == [{"filesystem": {"exclude_tools": ["read_file"]}}]
+def test_one_spelling_across_defaults_and_agent_inherits_as_any_tool_does() -> None:
+    """The same spelling in both layers keeps ordinary inheritance: default settings under the agent's own."""
+    config = _layered([{"file": {"exclude_tools": ["write_file"]}}], [{"file": {"defer": True}}])
+    assert _effective(config) == [("filesystem", {"exclude_tools": ["write_file"]}, True, False)]
 
 
-def test_legacy_file_filters_are_renamed_and_unmatched_settings_dropped() -> None:
-    """Retired function names in the filters become their replacements; settings with no counterpart go."""
-    entry = {
-        "file": {
-            "exclude_tools": "save_file, search_content",
-            "enable_list_files": False,
-            "max_file_length": 10,
-            "max_file_lines": 10,
-            "line_separator": "\n",
-            "exclude_patterns": [],
-            "expose_base_directory": True,
-            "enable_delete_file": True,
-        },
+def _load(runtime_paths: RuntimePaths, entry: object, *, layer: str) -> Config:
+    data: dict[str, Any] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": [entry] if layer == "defaults" else []},
+        "agents": {"a": {"display_name": "A", "tools": [entry] if layer == "agent" else []}},
     }
-    assert _entries([entry]) == [
-        {"filesystem": {"exclude_tools": ["write_file", "grep", "ls"], "enable_delete_file": True}},
-    ]
-    assert _entries([{"file": {"include_tools": ["read_file_chunk", "list_files"]}}]) == [
-        {"filesystem": {"include_tools": ["read_file", "ls"]}},
-    ]
+    return Config.validate_with_runtime(data, runtime_paths)
 
 
-def test_legacy_file_all_turns_every_function_on() -> None:
-    """Agno's ``all`` offered every function, delete included, whatever the switches said."""
-    entry = {"file": {"all": True, "enable_save_file": False, "enable_read_file": False, "exclude_tools": ["ls"]}}
-    assert _entries([entry]) == [{"filesystem": {"exclude_tools": ["ls"], "enable_delete_file": True}}]
-    assert _entries([{"file": {"all": False, "enable_save_file": False}}]) == [
-        {"filesystem": {"exclude_tools": ["write_file"]}},
-    ]
-
-
-def test_mapped_file_settings_load_with_the_runtime_and_coding_never_had_them(tmp_path: Path) -> None:
-    """A mapped file entry passes the registry's checks; Agno's settings on coding, which never took them, fail."""
+@pytest.mark.parametrize("layer", ["defaults", "agent"])
+@pytest.mark.parametrize(
+    ("overrides", "replacement"),
+    [
+        ({"enable_save_file": False}, "filesystem: {exclude_tools: [write_file]}"),
+        ({"enable_replace_file_chunk": None}, "filesystem: {exclude_tools: [edit_file]}"),
+        ({"enable_read_file": True}, "filesystem: {exclude_tools: [read_file]}"),
+        ({"enable_read_file_chunk": False}, "filesystem: {exclude_tools: [read_file]}"),
+        ({"enable_list_files": False}, "filesystem: {exclude_tools: [ls]}"),
+        ({"enable_search_files": False}, "filesystem: {exclude_tools: [find_files]}"),
+        ({"enable_search_content": False}, "filesystem: {exclude_tools: [grep]}"),
+        ({"all": False}, "filesystem: {enable_delete_file: true}"),
+        ({"max_file_length": 10}, "remove"),
+        ({"max_file_lines": 10}, "remove"),
+        ({"line_separator": "\n"}, "remove"),
+        ({"exclude_patterns": []}, "remove"),
+        ({"expose_base_directory": True}, "remove"),
+        ({"exclude_tools": "read_file, save_file"}, "filesystem: {exclude_tools: [write_file]}"),
+        ({"include_tools": ["list_files"]}, "filesystem: {include_tools: [ls]}"),
+    ],
+)
+def test_an_old_agno_setting_on_a_file_entry_fails_config_load_naming_its_replacement(
+    tmp_path: Path,
+    layer: str,
+    overrides: dict[str, object],
+    replacement: str,
+) -> None:
+    """No old setting is translated: whatever its value, the entry fails and says what to write instead."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    setting = next(iter(overrides))
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=rf"filesystem\.{setting}.* was removed; .*{re.escape(replacement)}",
+    ):
+        _load(runtime_paths, {"file": overrides}, layer=layer)
 
-    def load(entry: object) -> Config:
-        data = {"models": {"default": {"provider": "openai", "id": "x"}}, "agents": {"a": {"display_name": "A"}}}
-        data["agents"]["a"]["tools"] = [entry]
-        return Config.validate_with_runtime(data, runtime_paths)
 
-    legacy = {"file": {"enable_save_file": False, "include_tools": "read_file_chunk, save_file, list_files"}}
-    assert load(legacy).agents["a"].tools[0].overrides == {
-        "include_tools": ["read_file", "write_file", "ls"],
-        "exclude_tools": ["write_file"],
-    }
-    with pytest.raises(ConfigRuntimeValidationError, match="enable_save_file"):
-        load({"coding": {"enable_save_file": False}})
+def test_current_filesystem_settings_load_under_every_spelling(tmp_path: Path) -> None:
+    """The toolkit's own settings load on file, coding, and filesystem entries alike."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    overrides = {"exclude_tools": ["write_file"], "enable_delete_file": True}
+    for name in ("file", "coding", "filesystem"):
+        assert _load(runtime_paths, {name: overrides}, layer="agent").agents["a"].tools[0].overrides == overrides
 
 
 def test_tool_name_lists_take_every_spelling() -> None:

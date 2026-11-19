@@ -55,7 +55,7 @@ CAROL = "@carol:localhost"
 DAVE = "@dave:localhost"
 # Bob's power level keeps him from posting; Alice and Carol may post.
 POWER_LEVELS = {"users": {ALICE: 100, CAROL: 10}, "events_default": 10}
-READ_ONLY_FILE = {"file": {"enable_save_file": False, "enable_replace_file_chunk": False}}
+READ_ONLY_FILE = {"file": {"exclude_tools": ["write_file", "edit_file"]}}
 # The functions of each built-in toolkit that change the workspace's files, by writing them or by running code there.
 WRITING_FUNCTIONS = {
     "filesystem": ("write_file", "edit_file", "delete_file"),
@@ -302,8 +302,7 @@ async def test_agent_refuses_a_user_that_is_no_current_agent(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("tools", "files"),
     [
-        ([{"file": {"enable_save_file": False}}], "write"),
-        ([{"file": {"all": True, **READ_ONLY_FILE["file"]}}], "write"),
+        ([{"file": {"exclude_tools": ["write_file"]}}], "write"),
         ([{"file": {"enable_delete_file": True, **READ_ONLY_FILE["file"]}}], "write"),
         ([{"file": READ_ONLY_FILE["file"]}], "read"),
         ([{"file": {"include_tools": ["delete_file"]}}], "none"),

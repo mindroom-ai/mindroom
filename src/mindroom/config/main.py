@@ -70,6 +70,7 @@ from mindroom.config.models import (
     ModelTable,
     RouterConfig,
     ToolConfigEntry,
+    reject_unmergeable_spellings,
 )
 from mindroom.config.personal_agents import (
     PersonalAgentInstance,
@@ -636,6 +637,17 @@ class Config(BaseModel):
             raise ValueError(msg)
         for server_id in self.mcp_servers:
             normalize_mcp_server_id(server_id)
+        return self
+
+    @model_validator(mode="after")
+    def validate_tool_spellings_across_layers(self) -> Config:
+        """Refuse a default and an agent entry that name one toolkit differently unless both are plain."""
+        defaults = {entry.name: entry for entry in self.defaults.tools}
+        for agent_name, agent in self.agents.items():
+            for entry in agent.tools if agent.include_default_tools else ():
+                default = defaults.get(entry.name)
+                if default is not None and default.authored_name != entry.authored_name:
+                    reject_unmergeable_spellings(entry, default, scope=f"agents.{agent_name}.tools and defaults.tools")
         return self
 
     @model_validator(mode="after")

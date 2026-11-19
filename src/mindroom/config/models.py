@@ -8,12 +8,12 @@ from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
-from mindroom.config.legacy_fields import migrate_legacy_file_overrides, reject_legacy_defaults_fields
+from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.tool_aliases import ToolNames, canonical_tool_name
@@ -250,6 +250,13 @@ class ToolConfigEntry(BaseModel):
         default=False,
         description="Send a deferred tool as an ordinary tool on every request; requires defer",
     )
+    # The alias this entry was authored under, kept so two spellings of one toolkit are never read as one entry's layers.
+    _alias: str | None = PrivateAttr(default=None)
+
+    @property
+    def authored_name(self) -> str:
+        """Return the name this entry was authored under, which may be an alias of ``name``."""
+        return self._alias or self.name
 
     @model_validator(mode="before")
     @classmethod
@@ -261,14 +268,11 @@ class ToolConfigEntry(BaseModel):
             return {"name": data}
         if isinstance(data, dict):
             entry_dict = cast("dict[object, object]", data)
-            entry = (
+            return (
                 _coerce_named_tool_entry(entry_dict)
                 if "name" in entry_dict or "overrides" in entry_dict
                 else _coerce_single_key_tool_entry(entry_dict)
             )
-            if entry.get("name") == "file" and isinstance(overrides := entry.get("overrides"), dict):
-                entry["overrides"] = migrate_legacy_file_overrides(cast("dict[str, object]", overrides))
-            return entry
         msg = "Tool entries must be strings or single-key mappings"
         raise ValueError(msg)
 
@@ -306,28 +310,29 @@ def validate_unique_tool_entries(
     *,
     scope_name: str,
 ) -> list[ToolConfigEntry]:
-    """Ensure each tool appears once within one scope, merging entries that name one toolkit by its other names."""
+    """Ensure each tool appears once within one scope, with a toolkit's other names read as its registered name."""
     validate_unique_entries([entry.name for entry in tools], field_name=f"{scope_name} tools")
-    merged: dict[str, tuple[ToolConfigEntry, str]] = {}
+    kept: dict[str, ToolConfigEntry] = {}
     for entry in tools:
         name = canonical_tool_name(entry.name)
-        if name not in merged:
-            merged[name] = (entry if name == entry.name else entry.model_copy(update={"name": name}), entry.name)
-            continue
-        kept, kept_name = merged[name]
-        overrides = dict(kept.overrides)
-        for key, value in entry.overrides.items():
-            if overrides.setdefault(key, value) != value:
-                msg = (
-                    f"{scope_name} tools '{kept_name}' and '{entry.name}' both select {name} but set {key} differently"
-                )
-                raise ValueError(msg)
-        update: dict[str, object] = {"overrides": overrides}
-        if (kept.model_fields_set | entry.model_fields_set) & _TOOL_CONFIG_CONTROL_KEYS:
-            update["defer"] = kept.defer and entry.defer
-            update["initial"] = update["defer"] and (kept.initial or entry.initial)
-        merged[name] = (kept.model_copy(update=update), kept_name)
-    return [entry for entry, _authored in merged.values()]
+        if name in kept:
+            reject_unmergeable_spellings(kept[name], entry, scope=f"{scope_name} tools")
+        elif name == entry.name:
+            kept[name] = entry
+        else:
+            kept[name] = entry.model_copy(update={"name": name})
+            kept[name]._alias = entry.name
+    return list(kept.values())
+
+
+def reject_unmergeable_spellings(first: ToolConfigEntry, other: ToolConfigEntry, *, scope: str) -> None:
+    """Fail unless two entries naming one toolkit by different names are plain and agree on lazy loading."""
+    if first.overrides or other.overrides or (first.defer, first.initial) != (other.defer, other.initial):
+        msg = (
+            f"{scope} '{first.authored_name}' and '{other.authored_name}' both select {first.name}; "
+            f"keep one entry named {first.name} and put its settings and lazy-loading flags there"
+        )
+        raise ValueError(msg)
 
 
 def _validate_compaction_threshold_choice(
