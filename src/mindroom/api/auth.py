@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from mindroom.api.connections_session_cookie import ConnectionsSession
     from mindroom.constants import RuntimePaths
 
+logger = get_logger(__name__)
 router = APIRouter(tags=["auth"])
 
 
@@ -73,8 +74,6 @@ def require_operator_key(request: Request, authorization: str | None) -> None:
     if token is None or not _api_key_matches(token, configured_key):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
-
-logger = get_logger(__name__)
 
 # Host-only by prefix, so sibling tenant subdomains can neither receive nor overwrite it.
 _PLATFORM_SESSION_COOKIE_NAME = "__Host-mindroom_platform_session"

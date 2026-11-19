@@ -7,6 +7,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
@@ -137,6 +138,50 @@ def test_budget_service_rejects_other_service_assertions(
 
     assert response.status_code == 401
     assert response.json() == {"detail": "Invalid budget service JWT"}
+
+
+@pytest.mark.parametrize(
+    ("claims", "expected_log"),
+    [
+        pytest.param(
+            {"type": "user"},
+            {"event": "Service JWT rejected", "failed_check": "type"},
+            id="wrong-type",
+        ),
+        pytest.param(
+            {"sub": "person@example.org"},
+            {"event": "Service JWT rejected", "failed_check": "sub"},
+            id="nonempty-subject",
+        ),
+        pytest.param(
+            {"common_name": "other-client.example.org"},
+            {"event": "Service JWT rejected", "failed_check": "common_name"},
+            id="wrong-client",
+        ),
+        pytest.param(
+            {"exp": 1},
+            {"event": "Trusted upstream JWT rejected", "error": "ExpiredSignatureError"},
+            id="expired",
+        ),
+    ],
+)
+def test_budget_service_rejection_logs_the_failed_check_without_the_token(
+    temp_config_file: Path,
+    tmp_path: Path,
+    budget_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+    claims: dict[str, object],
+    expected_log: dict[str, str],
+) -> None:
+    env, private_key = budget_service_auth
+    client = _client(temp_config_file, tmp_path, env)
+    token = _service_assertion(private_key, **{"aud": _BUDGET_AUDIENCE, "common_name": _BUDGET_CLIENT_ID, **claims})
+
+    with capture_logs() as logs:
+        response = client.get("/api/budgets/service", headers={_ASSERTION_HEADER: token})
+
+    assert response.status_code == 401
+    assert [log for log in logs if expected_log.items() <= log.items()]
+    assert token not in repr(logs)
 
 
 @pytest.mark.parametrize("path", ["/api/budgets", "/api/usage/export", "/api/config/raw"])
