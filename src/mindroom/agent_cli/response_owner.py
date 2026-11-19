@@ -6,7 +6,7 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, cli_turn_owner
+from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, CliCatalogReloadedError, cli_turn_owner
 from mindroom.agent_cli.shell_access import agent_cli_shell_env, minimal_shell_problems
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.approval.tool_owners import authorize_prepared_tool_call, check_prepared_catalog_authority
@@ -14,7 +14,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from mindroom.agent_cli.lifetime import CliTurnLifetime
     from mindroom.agent_loop.build import AgentBuild
@@ -29,6 +29,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_access import ToolKey
 
 __all__ = ["bind_response_owner", "tool_catalog"]
+
+_RELOADED = (
+    "This MindRoom call did not run: the configuration was reloaded after this turn's tools were built. "
+    "A new turn's calls run under the reloaded configuration."
+)
 
 
 def tool_catalog(
@@ -67,11 +72,13 @@ def bind_response_owner(
     output_file_policy: ToolOutputFilePolicy,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    failure_message: Callable[[str], str],
+    reload_ends_run: bool,
 ) -> LiveTurnTools:
     """Register the response's owner and grant on its first attempt, or rebind its catalog after a rebuild.
 
-    The owner runs as the catalog's tool runtime, for the catalog's run.
+    The owner runs as the catalog's tool runtime, for the catalog's run. A config reload that changes what the
+    catalog was built from refuses its calls; with ``reload_ends_run``, a minimal turn's, the first refusal also stops
+    the run after its batch, since no later call of the turn could run.
     """
     runtime = catalog.runtime_context
     assert runtime.orchestrator is not None
@@ -87,16 +94,24 @@ def bind_response_owner(
 
     async def authorize(key: ToolKey, _arguments: dict[str, object]) -> None:
         current = new_owner.catalog
-        # Before binding, so a refused catalog builds no deferred toolkit; dispatch checks again after the bind's awaits.
-        try:
-            check_prepared_catalog_authority(current.runtime_context)
-        except PermissionError as exc:
-            raise PermissionError(failure_message(str(exc))) from exc
+
+        def check_authority() -> None:
+            try:
+                check_prepared_catalog_authority(current.runtime_context)
+            except PermissionError as exc:
+                if reload_ends_run:
+                    new_owner.end_run_for_reload()
+                raise CliCatalogReloadedError(_RELOADED) from exc
+
+        # Before binding, so a refused catalog builds no deferred toolkit.
+        check_authority()
         cache_key = (id(current), key)
         binding = bindings.get(cache_key)
         if binding is None:
             binding = await current.bind(key)
             bindings[cache_key] = binding
+        # Again after the bind's awaits, so the same check in the call below, which runs first, never refuses.
+        check_authority()
         await authorize_prepared_tool_call(binding, expected_worker_target=expected_target)
 
     new_owner = LiveTurnTools(

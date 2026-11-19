@@ -13,6 +13,7 @@ from mindroom.agent_cli.cli_shell_agent import bind_standard_cli
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_calls
 from mindroom.agent_cli.minimal_agent import minimal_attempt, minimal_turn, presented_build
+from mindroom.agent_cli.session import CONFIG_RELOAD_CALL
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
@@ -34,6 +35,7 @@ from mindroom.delegation.lifecycle import (
     delegation_grant,
     note_child_run_id,
     observe_child_event,
+    reload_stopped_child_result,
     running_child_run,
 )
 from mindroom.delegation.state import child_execution_identity
@@ -1158,7 +1160,9 @@ async def run_delegated_child_response(
             sinks=sinks,
             resume=TurnResume(prior_usage=tuple(prior_usage)),
         )
-    return result.text
+    record = None if observation is None else observation.current_record()
+    # A child a config reload stopped hands its caller what its settlement records, not its unfinished text.
+    return (reload_stopped_child_result(child, record) if record is not None else None) or result.text
 
 
 def _with_background_tool_jobs(
@@ -1465,6 +1469,13 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
             return
 
+        control_calls = cli_control_calls(attempt.run_id)
+        stopped = next((call.result for call in control_calls if call.tool_name == CONFIG_RELOAD_CALL), None)
+        if stopped:
+            # The run stopped after the refused call, before the model could answer: the reply ends with why.
+            shown = state.assistant_text
+            state.assistant_text = append_stream_text(shown, stopped, separate=True)
+            yield TextDelta(state.assistant_text[len(shown) :])
         completed_without_output = _stream_completed_without_visible_output(state, record)
         final_status = RunStatus.error if completed_without_output else RunStatus.completed
         final_text = record.content or ""
@@ -1478,7 +1489,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 attempt_run_id=attempt.run_id,
                 usage=record.metrics,
                 tool_executions=tuple(record.tools or ()),
-                control_calls=cli_control_calls(attempt.run_id),
+                # The reload's stop ends the turn, also when a model switch in the same batch asked for another attempt.
+                control_calls=() if stopped else control_calls,
                 completed_tools=tuple(state.completed_tools),
                 build_run_metadata=_attempt_run_metadata_builder(
                     run_context,

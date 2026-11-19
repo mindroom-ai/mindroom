@@ -12,6 +12,7 @@ from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.minimal_agent import bind_minimal_owner, minimal_context_documents, prepare_minimal_catalog
 from mindroom.agent_cli.projection import register_cli_media
+from mindroom.agent_cli.session import CONFIG_RELOAD_CALL
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.approval.tool_owners import validate_approval_tool_owners
@@ -328,8 +329,10 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         original_prompt=continuation.request_body,
         continuation_count=continuation.continuation_count,
     )
-    if decision.limit_message is not None:
-        presentation.append_text(decision.limit_message)
+    # A config reload that refused a call of the recovered command ends the turn, as it ends a live minimal turn.
+    ending = next((call.result for call in controls if call.tool_name == CONFIG_RELOAD_CALL), decision.limit_message)
+    if ending is not None:
+        presentation.append_text(ending)
         if continuation.show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
         return CompletedApprovalRun(response_text=presentation.final_text(), metadata_content={})
