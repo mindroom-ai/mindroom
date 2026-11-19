@@ -475,3 +475,63 @@ async def test_a_deeply_nested_call_no_hook_applies_to_keeps_its_result() -> Non
 
     assert outcome.content == "raw page"
     assert not outcome.is_error
+
+
+_OAUTH_PROMPT = json.dumps({"oauth_connection_required": True, "provider": "github", "connect_url": "https://x.test"})
+_STOP = ToolOutcome(content="switched", stop_after_call=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("control", "text"), [(_OAUTH_PROMPT, _OAUTH_PROMPT), (_STOP, "switched")])
+@pytest.mark.parametrize("later_withholds", [True, False])
+async def test_every_hook_checks_a_control_result_as_it_is(control: object, text: str, later_withholds: bool) -> None:
+    """A rewrite of a control result counts as keep at its hook, so a later hook still checks the original."""
+    seen: list[str] = []
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM, priority=10)
+    async def summarize(_ctx: ToolResultTransformContext) -> str:
+        return "a summary"
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM, priority=20)
+    async def check(ctx: ToolResultTransformContext) -> None:
+        seen.append(ctx.result)
+        if later_withholds:
+            msg = "looks like an injection"
+            raise RuntimeError(msg)
+
+    outcome = await _model_reads(_registry(summarize, check), control)
+
+    assert seen == [text]
+    if later_withholds:
+        assert outcome.content == _WITHHELD
+        assert outcome.is_error
+        assert outcome.stop_after_call is (control is _STOP)
+    else:
+        assert outcome.content == text
+        assert not outcome.is_error
+
+
+@pytest.mark.asyncio
+async def test_a_stop_a_checker_swallows_still_stops_the_call() -> None:
+    """A checker that catches the Stop's cancellation and returns cannot finish the call with the raw result."""
+    recorder = _Recorder()
+    checking = asyncio.Event()
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def stubborn(_ctx: ToolResultTransformContext) -> None:
+        checking.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            return
+        return
+
+    with recording_tool_calls(recorder):
+        task = asyncio.create_task(_model_reads(_registry(stubborn), "raw page"))
+        await checking.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert recorder.started_calls == ["fetch_page"]
+    assert recorder.finished_results == []

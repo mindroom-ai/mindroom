@@ -30,10 +30,12 @@ from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    ToolResultTransformContext,
     default_timeout_ms_for_event,
     hook,
 )
@@ -1053,3 +1055,29 @@ async def test_a_result_that_carries_media_loses_a_given_secret_in_its_text(
     assert recorded == [replace(value, content=masked)]
     assert outcome.content == masked
     assert outcome.is_error is isinstance(value, ToolOutcome)
+
+
+@pytest.mark.asyncio
+async def test_a_result_check_reads_the_masked_result_outside_the_call_s_environment(
+    tmp_path: Path,
+    given: Callable[[str, str], None],
+) -> None:
+    """The check runs after the command, on its masked result, without the variables the command had."""
+    given("PASSPHRASE", "open-sesame-123")
+    seen: list[tuple[str, ToolEnvironment]] = []
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def check(ctx: ToolResultTransformContext) -> None:
+        seen.append((ctx.result, current_tool_environment()))
+
+    shell = _local_shell(tmp_path)
+    command = 'echo "$PASSPHRASE $PLUGIN_VALUE"'
+    outcome = await shell.call(_registry(_shell_environment, check), {"args": ["bash", "-c", command]})
+
+    assert not outcome.is_error, outcome.content
+    [(result, environment)] = seen
+    assert "open-sesame-123" not in result
+    assert REDACTED in result
+    assert "for @alice" in result
+    assert "PASSPHRASE" not in environment.values
+    assert "PLUGIN_VALUE" not in environment.values

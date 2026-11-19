@@ -363,11 +363,18 @@ async def emit_policy(
         _EMIT_DEPTH.reset(token)
 
 
-async def emit_tool_result_transform(registry: HookRegistry, context: ToolResultTransformContext) -> str | None:
+async def emit_tool_result_transform(
+    registry: HookRegistry,
+    context: ToolResultTransformContext,
+    *,
+    rewritable: bool = True,
+) -> str | None:
     """Run tool:result_transform hooks serially in priority order and return the text they leave, failing closed.
 
     Each hook returns a ``str`` to replace the text the hook before it left, or ``None`` to keep it. One that fails,
     times out, or returns anything else, or a run nested too deeply, stops the chain and withholds the result: None.
+    A result that is not ``rewritable`` reaches every hook as itself, and a replacement keeps it. A Stop a hook
+    caught still propagates.
     """
     hooks = _eligible_hooks(registry, EVENT_TOOL_RESULT_TRANSFORM, context)
     if not hooks:
@@ -378,11 +385,15 @@ async def emit_tool_result_transform(registry: HookRegistry, context: ToolResult
         logger.warning("Withheld tool result", **log_kwargs, reason="hooks nested too deeply")
         return None
     token = _EMIT_DEPTH.set(depth + 1)
+    task = asyncio.current_task()
     try:
         text = context.result
         for hook in hooks:
+            cancelling = 0 if task is None else task.cancelling()
             hook_context = _bind_hook_context(registry, hook, replace(context, result=text))
             invocation = await _invoke_hook(hook, hook_context)
+            if task is not None and task.cancelling() > cancelling:
+                raise asyncio.CancelledError
             if not invocation.succeeded or not isinstance(invocation.value, str | None):
                 logger.warning(
                     "Withheld tool result",
@@ -391,7 +402,10 @@ async def emit_tool_result_transform(registry: HookRegistry, context: ToolResult
                     hook_name=hook.hook_name,
                 )
                 return None
-            text = text if invocation.value is None else invocation.value
+            if invocation.value not in (None, text) and not rewritable:
+                logger.info("Kept a control tool result a hook rewrote", **log_kwargs, hook_name=hook.hook_name)
+            elif invocation.value is not None:
+                text = invocation.value
         return text
     finally:
         _EMIT_DEPTH.reset(token)

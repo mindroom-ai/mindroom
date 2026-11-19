@@ -457,13 +457,11 @@ def _checked_results(
         control = stops or is_oauth_connection_required_result(text if isinstance(result, ToolValue) else result)
         context_kwargs = resolved_context.call_hook_context_kwargs(EVENT_TOOL_RESULT_TRANSFORM, arguments)
         context = ToolResultTransformContext(**context_kwargs, tool_name=tool_name, result=text)
-        transformed = await emit_tool_result_transform(resolved_context.hooks.registry, context)
+        transformed = await emit_tool_result_transform(resolved_context.hooks.registry, context, rewritable=not control)
         if transformed is None:
             withheld = _WITHHELD_RESULT_TEMPLATE.format(tool_name=tool_name)
             return ToolOutcome(content=withheld, is_error=True, stop_after_call=stops)
-        if transformed == text or control:
-            if control and transformed != text:
-                logger.info("Kept a control tool result a result-transform hook rewrote", tool_name=tool_name)
+        if transformed == text:
             return result
         return replace(result, content=transformed) if isinstance(result, ToolValue) else transformed
 
@@ -747,19 +745,23 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         await finish("blocked_before_body", timing.result_ready(), error=stopped, blocked=True)
         raise
 
-    # Given secrets are masked before the result-transform hooks see the result, and the record gets what they leave.
-    tool = _without_given_secrets(func, given)
-    if has_transform_hooks:
-        tool = _checked_results(tool, resolved_context, hook_arguments, tool_name)
+    masked = _without_given_secrets(func, given)
+
+    async def tool(**kwargs: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
+        with collected_tool_environment(environment):
+            return await masked(**kwargs)
+
+    # The result-transform hooks check the masked result outside the call's environment, and the record gets what
+    # they leave.
+    recorded = _checked_results(tool, resolved_context, hook_arguments, tool_name) if has_transform_hooks else tool
     tool_body_started_at = time.perf_counter()
     try:
-        with collected_tool_environment(environment):
-            result = await _call_recorded_tool(
-                tool,
-                args,
-                tool_name=tool_name,
-                agent_name=resolved_context.agent_name,
-            )
+        result = await _call_recorded_tool(
+            recorded,
+            args,
+            tool_name=tool_name,
+            agent_name=resolved_context.agent_name,
+        )
     except OAuthConnectionRequired as exc:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         return await answer(oauth_connection_required_payload(exc), "oauth_connection_required")
