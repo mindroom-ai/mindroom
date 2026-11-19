@@ -5,6 +5,8 @@ import Foundation
 @MainActor
 final class DesktopControlStore: ObservableObject {
     typealias Request = (String, [String: Any], Duration) async throws -> [String: Any]
+    /// Makes MindRoom open at login; false when macOS still needs the user's approval.
+    typealias EnableLoginItem = @MainActor () throws -> Bool
 
     static let shared = DesktopControlStore()
 
@@ -38,10 +40,17 @@ final class DesktopControlStore: ObservableObject {
     @Published var fileRoots: [String] = [] { didSet { configurationFieldChanged(\.fileRoots) } }
     @Published var shellEnabled = false { didSet { configurationFieldChanged(\.shellEnabled) } }
     @Published var controlMinutes = 15
+    /// "Full control of this Mac": an app preference naming the pairing that has it. The bridge never saves control.
+    @Published private(set) var fullControlPairing: String? {
+        didSet { defaults.set(fullControlPairing, forKey: "desktopFullControlPairing") }
+    }
+    @Published private(set) var loginItemNeedsApproval = false
 
     @Published private(set) var applications = InstalledApplicationCatalog.applications()
     private let helper: DesktopBridgeProcess
     private let request: Request
+    private let defaults: UserDefaults
+    private let enableLoginItem: EnableLoginItem
     private var subscriptions = Set<AnyCancellable>()
     private var countdownTimer: Timer?
     @Published private var confirmedIdentity: String?
@@ -55,19 +64,28 @@ final class DesktopControlStore: ObservableObject {
     private var pendingOperationCount = 0
     private var pendingSetup: DesktopSetupSnapshot?
 
-    init(helper: DesktopBridgeProcess? = nil, request: Request? = nil) {
+    init(
+        helper: DesktopBridgeProcess? = nil, request: Request? = nil,
+        defaults: UserDefaults = .standard, enableLoginItem: EnableLoginItem? = nil
+    ) {
         let helper = helper ?? DesktopBridgeProcess()
         self.helper = helper
+        self.defaults = defaults
+        self.enableLoginItem = enableLoginItem ?? { try LoginItemController.shared.enable() }
         self.request = request ?? { action, parameters, timeout in
             try await helper.request(action: action, parameters: parameters, timeout: timeout)
         }
+        fullControlPairing = defaults.string(forKey: "desktopFullControlPairing")
         helper.$status
             // The helper publishes on MainActor already. Rescheduling on RunLoop.main stalls
             // approval/status updates while a folder picker runs in modal mode.
             .sink { [weak self] value in
-                self?.status = value
-                self?.hydrateConfiguration(from: value)
-                self?.updateCountdown()
+                guard let self else { return }
+                let cameOnline = value.isBridgeOnline && !self.status.isBridgeOnline
+                self.status = value
+                self.hydrateConfiguration(from: value)
+                self.updateCountdown()
+                self.followFullControl(bridgeCameOnline: cameOnline)
             }
             .store(in: &subscriptions)
         helper.onExit = { [weak self] in
@@ -476,7 +494,71 @@ final class DesktopControlStore: ObservableObject {
     func grantControl() {
         perform("grant_control", parameters: ["duration_seconds": controlMinutes * 60])
     }
-    func revokeControl() { perform("revoke_control", urgent: true) }
+    /// Revoke also turns full control off, so it stays off.
+    func revokeControl() {
+        fullControlPairing = nil
+        perform("revoke_control", urgent: true)
+    }
+
+    var fullControl: Bool { fullControlPairing != nil }
+
+    /// Turning it on saves the primary screen with the apps when it is missing, then starts access;
+    /// turning it off forgets it and ends the live grant.
+    func setFullControl(_ enabled: Bool) {
+        if !enabled {
+            endFullControl()
+        } else if status.savedAppIDs.contains("primary-screen") {
+            beginFullControl(status)
+        } else if status.pairingIdentity != nil, !hasAccessChanges {
+            selectedAppIDs.insert("primary-screen")
+            saveAllowedApplications(completion: { [weak self] saved in self?.beginFullControl(saved) })
+        }
+    }
+
+    /// At launch, full control starts access by itself, so it survives app restarts and reboots.
+    func refreshAtLaunch() {
+        perform("status", completion: { [weak self] result in
+            guard let self, let saved = try? Self.responseStatus(result), self.fullControlApplies(to: saved) else { return }
+            self.beginFullControl(saved)
+        })
+    }
+
+    /// Full control belongs to one pairing whose saved apps include the primary screen, which starts the GUI.
+    private func fullControlApplies(to status: DesktopStatus) -> Bool {
+        fullControl && fullControlPairing == status.pairingIdentity && status.savedAppIDs.contains("primary-screen")
+    }
+
+    /// Remembers full control for this pairing, keeps MindRoom opening at login, and starts access unless something
+    /// such as a missing macOS permission blocks it; the grant follows each time the bridge comes online.
+    private func beginFullControl(_ saved: DesktopStatus) {
+        fullControlPairing = saved.pairingIdentity
+        guard fullControlApplies(to: saved) else { return }
+        if saved.isBridgeOnline {
+            grantFullControl()
+        } else if saved.startBlocker(isBusy: false, hasAccessChanges: false) == nil {
+            perform("start", urgent: true)
+        }
+        loginItemNeedsApproval = (try? enableLoginItem()) != true
+    }
+
+    /// The bridge keeps control only while it runs, so every start for this pairing is followed by a new grant.
+    private func followFullControl(bridgeCameOnline: Bool) {
+        guard fullControl, status.helper.state != "stopped" else { return }
+        if !fullControlApplies(to: status) {
+            endFullControl()
+        } else if bridgeCameOnline {
+            grantFullControl()
+        }
+    }
+
+    private func grantFullControl() {
+        perform("grant_control", parameters: ["until_revoked": true, "scope": "computer"], urgent: true)
+    }
+
+    private func endFullControl() {
+        fullControlPairing = nil
+        if status.authority.controlAvailable { perform("revoke_control", urgent: true) }
+    }
     func requestPermission(_ permission: String) {
         perform("request_permission", parameters: ["permission": permission])
     }
@@ -505,6 +587,7 @@ final class DesktopControlStore: ObservableObject {
             "browser_runtime": status.browser.runtime,
             "browser_extension": status.browser.extensionState,
             "control_available": status.authority.controlAvailable,
+            "full_control": fullControl,
             "last_error_code": (errorCode ?? status.bridge.lastError?.code).map { $0 as Any } ?? NSNull(),
         ]
         let data = try? JSONSerialization.data(withJSONObject: diagnostics, options: [.prettyPrinted, .sortedKeys])

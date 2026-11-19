@@ -202,6 +202,17 @@ extension DesktopStatus {
 
     var savedAppIDs: [String] { config.allowedAppIDs ?? [] }
 
+    /// Names who holds this Mac's connection; the app remembers full control for exactly this pairing.
+    var pairingIdentity: String? {
+        guard hasSavedConnection else { return nil }
+        var parties = [
+            pairing.homeserver, pairing.userID, pairing.deviceID, pairing.controllerFingerprint,
+            config.controllerUserID, config.controllerDeviceID,
+        ].map { $0 ?? "" }
+        parties += (config.allowedRequesterIDs ?? []) + [""] + (config.allowedAgentNames ?? [])
+        return parties.joined(separator: "\u{1F}")
+    }
+
     /// Screen and input permissions matter only for saved apps; folders and shell never need them.
     var needsGUIPermissions: Bool { !savedAppIDs.isEmpty }
 
@@ -248,6 +259,7 @@ extension DesktopStatus {
     func accessModeLabel(controlRemainingSeconds: Int) -> String {
         switch bridge.state {
         case "observe_only", "control":
+            if bridge.state == "control", authority.controlScope == "computer" { return "Full control" }
             let appMode = bridge.state == "control"
                 ? "Control · \(desktopDurationLabel(controlRemainingSeconds))" : "Observe only"
             guard hasSavedLocalAccess else { return appMode }

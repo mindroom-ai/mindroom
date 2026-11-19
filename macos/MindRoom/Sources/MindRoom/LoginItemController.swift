@@ -37,6 +37,12 @@ final class LoginItemController {
         }
     }
 
+    /// Registers MindRoom to open at login; returns false while macOS still needs the user's approval.
+    func enable() throws -> Bool {
+        if !isEnabled { try SMAppService.mainApp.register() }
+        return isEnabled
+    }
+
     func toggle() throws {
         if isEnabled {
             try SMAppService.mainApp.unregister()

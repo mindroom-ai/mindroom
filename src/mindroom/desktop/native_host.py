@@ -200,6 +200,7 @@ class NativeDesktopHost:
                 "control_available": bool(runtime_status.get("control_available", False)),
                 "lease_remaining_seconds": runtime_status.get("lease_remaining_seconds", 0),
                 "lease_expires_at_ms": runtime_status.get("lease_expires_at_ms"),
+                "control_scope": runtime_status.get("control_scope", "saved_apps"),
             },
             "permissions": _permission_status(),
             "shell": runtime_status.get(

@@ -11,7 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         StatusMenuController.shared.start()
         DesktopApprovalWindowController.shared.start()
         MindRoomCommandRunner.shared.refreshStatus()
-        DesktopControlStore.shared.refresh()
+        DesktopControlStore.shared.refreshAtLaunch()
         if AppLaunchPolicy.shouldShowWindow(launchEvent: NSAppleEventManager.shared().currentAppleEvent) {
             AppWindowController.shared.show()
         }

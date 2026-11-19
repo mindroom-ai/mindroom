@@ -210,6 +210,45 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertEqual(value.startActionTitle, "Start Access")
     }
 
+    func testFullControlIsNamedOnlyWhileControlReachesTheComputer() {
+        let saved = status(bridge: "control", helper: "running", config: "ready", apps: ["primary-screen"])
+        XCTAssertEqual(saved.accessModeLabel(controlRemainingSeconds: 125), "Control · 2m 5s")
+        let computer = DesktopStatus(
+            config: saved.config, pairing: saved.pairing, helper: saved.helper, bridge: saved.bridge,
+            authority: DesktopAuthorityStatus(
+                controlAvailable: true, leaseRemainingSeconds: 0, leaseExpiresAtMilliseconds: nil, controlScope: "computer"
+            ),
+            permissions: saved.permissions, browser: saved.browser, apps: saved.apps, capabilities: saved.capabilities
+        )
+
+        XCTAssertEqual(computer.accessModeLabel(controlRemainingSeconds: 0), "Full control")
+    }
+
+    func testPairingIdentityNamesEveryPartyAndExistsOnlyForASavedConnection() {
+        let paired = status(
+            bridge: "stopped", helper: "running", config: "ready", requesterIDs: ["@a:example.org"], agentNames: ["one", "two"]
+        )
+
+        XCTAssertNotNil(paired.pairingIdentity)
+        XCTAssertEqual(paired.pairingIdentity, status(
+            bridge: "control", helper: "running", config: "ready", apps: ["primary-screen"], shellEnabled: true,
+            requesterIDs: ["@a:example.org"], agentNames: ["one", "two"]
+        ).pairingIdentity, "Saved access and the running bridge are not part of who is paired")
+        for other in [
+            status(bridge: "stopped", helper: "running", config: "ready", requesterIDs: ["@a:example.org", "one"], agentNames: ["two"]),
+            status(bridge: "stopped", helper: "running", config: "ready", requesterIDs: ["@a:example.org"], agentNames: ["one"]),
+        ] {
+            XCTAssertNotEqual(other.pairingIdentity, paired.pairingIdentity)
+        }
+        for unpaired in [
+            status(bridge: "stopped", helper: "running", config: "ready", enabled: false),
+            status(bridge: "stopped", helper: "running", config: "ready", session: .missing),
+            status(bridge: "stopped", helper: "running"),
+        ] {
+            XCTAssertNil(unpaired.pairingIdentity)
+        }
+    }
+
     func testPendingShellCommandShowsApprovalState() {
         let request = shellRequest()
         let pending = status(

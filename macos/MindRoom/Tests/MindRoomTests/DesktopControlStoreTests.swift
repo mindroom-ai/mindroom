@@ -945,6 +945,251 @@ final class DesktopControlStoreTests: XCTestCase {
         XCTAssertEqual(requests[5].1 as? [String: Bool], ["until_revoked": true])
     }
 
+    func testFullControlStartsAccessAtLaunchAndGrantsEachTimeTheBridgeComesOnline() async throws {
+        let helper = DesktopBridgeProcess()
+        let defaults = try fullControlDefaults()
+        let stopped = fullControlStatus(bridge: "stopped")
+        defaults.set(stopped.pairingIdentity, forKey: fullControlKey)
+        var requests: [(String, [String: Any])] = []
+        var loginItemRequests = 0
+        let store = DesktopControlStore(
+            helper: helper,
+            request: { action, parameters, _ in
+                requests.append((action, parameters))
+                return try self.response(status: stopped)
+            },
+            defaults: defaults,
+            enableLoginItem: {
+                loginItemRequests += 1
+                return true
+            }
+        )
+        XCTAssertTrue(store.fullControl, "The preference survives an app restart")
+
+        store.refreshAtLaunch()
+        await waitUntilIdle(store)
+        XCTAssertEqual(requests.map(\.0), ["status", "start"])
+        XCTAssertEqual(loginItemRequests, 1)
+        XCTAssertFalse(store.loginItemNeedsApproval)
+
+        try await publish(fullControlStatus(bridge: "observe_only"), through: helper, to: store)
+        await waitUntilIdle(store)
+        XCTAssertEqual(requests.map(\.0), ["status", "start", "grant_control"])
+        XCTAssertEqual(requests[2].1["until_revoked"] as? Bool, true)
+        XCTAssertEqual(requests[2].1["scope"] as? String, "computer")
+        XCTAssertEqual(requests[2].1.count, 2)
+
+        // One running bridge is granted once; Stop Access pauses it, and the next start grants again.
+        try await publish(fullControlStatus(bridge: "control"), through: helper, to: store)
+        try await publish(stopped, through: helper, to: store)
+        await waitUntilIdle(store)
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(store.fullControl)
+        try await publish(fullControlStatus(bridge: "observe_only"), through: helper, to: store)
+        await waitUntilIdle(store)
+        XCTAssertEqual(requests.map(\.0), ["status", "start", "grant_control", "grant_control"])
+    }
+
+    func testLaunchWithoutFullControlOrWithMissingPermissionsNeverStartsAccess() async throws {
+        for (preference, permissions) in [(false, "granted"), (true, "missing")] {
+            let defaults = try fullControlDefaults()
+            let stopped = fullControlStatus(bridge: "stopped", permissions: permissions)
+            if preference { defaults.set(stopped.pairingIdentity, forKey: fullControlKey) }
+            var requests: [String] = []
+            let store = DesktopControlStore(
+                request: { action, _, _ in
+                    requests.append(action)
+                    return try self.response(status: stopped)
+                },
+                defaults: defaults, enableLoginItem: { true }
+            )
+
+            store.refreshAtLaunch()
+            await waitUntilIdle(store)
+
+            XCTAssertEqual(requests, ["status"])
+            XCTAssertEqual(store.fullControl, preference)
+        }
+    }
+
+    func testRevokeAndTheSwitchTurnFullControlOffForGood() async throws {
+        for viaSwitch in [false, true] {
+            let helper = DesktopBridgeProcess()
+            let defaults = try fullControlDefaults()
+            let control = fullControlStatus(bridge: "control")
+            defaults.set(control.pairingIdentity, forKey: fullControlKey)
+            var requests: [String] = []
+            let request: DesktopControlStore.Request = { action, _, _ in
+                requests.append(action)
+                return try self.response(status: control)
+            }
+            let store = DesktopControlStore(helper: helper, request: request, defaults: defaults, enableLoginItem: { true })
+            try await publish(control, through: helper, to: store)
+            await waitUntilIdle(store)
+            XCTAssertEqual(requests, ["grant_control"])
+
+            if viaSwitch { store.setFullControl(false) } else { store.revokeControl() }
+            await waitUntilIdle(store)
+
+            XCTAssertEqual(requests, ["grant_control", "revoke_control"])
+            XCTAssertFalse(store.fullControl)
+            XCTAssertNil(defaults.string(forKey: fullControlKey))
+            try await publish(fullControlStatus(bridge: "stopped"), through: helper, to: store)
+            try await publish(fullControlStatus(bridge: "observe_only"), through: helper, to: store)
+            await waitUntilIdle(store)
+            XCTAssertEqual(requests.count, 2, "A later start grants nothing")
+            XCTAssertFalse(DesktopControlStore(request: request, defaults: defaults).fullControl, "Nor does a relaunch")
+        }
+    }
+
+    func testAnotherPairingOrLosingThePrimaryScreenForgetsFullControl() async throws {
+        let paired = fullControlStatus(bridge: "stopped")
+        let changes = [
+            fullControlStatus(bridge: "stopped", controllerDeviceID: "OTHER-DEVICE"),
+            fullControlStatus(bridge: "stopped", agentNames: ["assistant", "researcher"]),
+            fullControlStatus(bridge: "stopped", userID: "@other:example.org"),
+            fullControlStatus(bridge: "stopped", enabled: false),  // A reconnect waiting for its chat confirmation.
+            fullControlStatus(bridge: "stopped", apps: ["com.example.Editor"]),
+        ]
+        for changed in changes {
+            let helper = DesktopBridgeProcess()
+            let defaults = try fullControlDefaults()
+            defaults.set(paired.pairingIdentity, forKey: fullControlKey)
+            var requests: [String] = []
+            let store = DesktopControlStore(
+                helper: helper,
+                request: { action, _, _ in
+                    requests.append(action)
+                    return try self.response(status: changed)
+                },
+                defaults: defaults, enableLoginItem: { true }
+            )
+            try await publish(paired, through: helper, to: store)
+            XCTAssertTrue(store.fullControl)
+
+            try await publish(changed, through: helper, to: store)
+
+            XCTAssertFalse(store.fullControl)
+            XCTAssertNil(defaults.string(forKey: fullControlKey))
+            // Pairing again with the first agent does not bring it back, and nothing was started or granted.
+            try await publish(paired, through: helper, to: store)
+            store.refreshAtLaunch()
+            await waitUntilIdle(store)
+            XCTAssertFalse(store.fullControl)
+            XCTAssertEqual(requests, ["status"])
+        }
+    }
+
+    func testAStoppedHelperDoesNotForgetFullControl() async throws {
+        let helper = DesktopBridgeProcess()
+        let defaults = try fullControlDefaults()
+        let paired = fullControlStatus(bridge: "stopped")
+        defaults.set(paired.pairingIdentity, forKey: fullControlKey)
+        let store = DesktopControlStore(helper: helper, request: { _, _, _ in [:] }, defaults: defaults, enableLoginItem: { true })
+
+        try await publish(paired, through: helper, to: store)
+        try await publish(.stopped, through: helper, to: store)
+
+        XCTAssertTrue(store.fullControl)
+    }
+
+    func testTurningFullControlOnSavesThePrimaryScreenOpensAtLoginAndStartsAccess() async throws {
+        let helper = DesktopBridgeProcess()
+        let defaults = try fullControlDefaults()
+        let running = fullControlStatus(bridge: "observe_only", apps: ["com.example.Editor"], revision: 4)
+        let saved = fullControlStatus(bridge: "stopped", revision: 5)
+        var requests: [(String, [String: Any])] = []
+        var loginItemRequests = 0
+        let store = DesktopControlStore(
+            helper: helper,
+            request: { action, parameters, _ in
+                requests.append((action, parameters))
+                return try self.response(status: action == "stop" ? running : saved)
+            },
+            defaults: defaults,
+            enableLoginItem: {
+                loginItemRequests += 1
+                return false
+            }
+        )
+        try await publish(running, through: helper, to: store)
+        XCTAssertFalse(store.fullControl)
+        XCTAssertTrue(requests.isEmpty, "A running bridge is granted nothing while the preference is off")
+
+        store.selectedAppIDs.insert("com.example.Draft")
+        store.setFullControl(true)
+        XCTAssertTrue(requests.isEmpty, "Unsaved app choices are never saved by the switch")
+        XCTAssertFalse(store.fullControl)
+        store.discardAppSelectionChanges()
+
+        store.setFullControl(true)
+        await waitUntilIdle(store)
+
+        XCTAssertEqual(requests.map(\.0), ["stop", "set_allowed_apps", "start"])
+        XCTAssertEqual(requests[1].1["allowed_app_ids"] as? [String], ["com.example.Editor", "primary-screen"])
+        XCTAssertEqual(requests[1].1["expected_revision"] as? Int, 4)
+        XCTAssertEqual(defaults.string(forKey: fullControlKey), saved.pairingIdentity)
+        XCTAssertEqual(loginItemRequests, 1)
+        XCTAssertTrue(store.loginItemNeedsApproval)
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testTurningFullControlOnWhileConnectedGrantsWithoutRestartingAccess() async throws {
+        let helper = DesktopBridgeProcess()
+        let defaults = try fullControlDefaults()
+        let running = fullControlStatus(bridge: "observe_only")
+        var requests: [String] = []
+        let store = DesktopControlStore(
+            helper: helper,
+            request: { action, _, _ in
+                requests.append(action)
+                return try self.response(status: running)
+            },
+            defaults: defaults, enableLoginItem: { true }
+        )
+        try await publish(running, through: helper, to: store)
+
+        store.setFullControl(true)
+        await waitUntilIdle(store)
+
+        XCTAssertEqual(requests, ["grant_control"])
+        XCTAssertEqual(defaults.string(forKey: fullControlKey), running.pairingIdentity)
+        XCTAssertTrue(store.diagnosticsText.contains("\"full_control\" : true"))
+    }
+
+    private let fullControlKey = "desktopFullControlPairing"
+
+    /// Returns the app preferences of a first launch; one suite is reused so test runs leave no files behind.
+    private func fullControlDefaults() throws -> UserDefaults {
+        let suite = "DesktopControlStoreTests.fullControl"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
+    /// A connected Mac whose helper runs: the primary screen is saved and macOS permissions are granted unless named.
+    private func fullControlStatus(
+        bridge: String, apps: [String] = ["com.example.Editor", "primary-screen"], revision: Int = 2,
+        controllerDeviceID: String = "DEVICE", agentNames: [String] = ["assistant"],
+        userID: String = "@person:example.org", enabled: Bool = true, permissions: String = "granted"
+    ) -> DesktopStatus {
+        let base = configuredStatus(
+            revision: revision, apps: apps, controllerDeviceID: controllerDeviceID, agentNames: agentNames,
+            homeserver: "https://example.org", userID: userID, enabled: enabled, bridge: bridge
+        )
+        let permission = DesktopPermissionStatus(state: permissions, canRequest: true, recovery: nil)
+        return DesktopStatus(
+            config: base.config, pairing: base.pairing, helper: DesktopHelperStatus(state: "running", version: "test"),
+            bridge: base.bridge,
+            authority: DesktopAuthorityStatus(
+                controlAvailable: bridge == "control", leaseRemainingSeconds: 0, leaseExpiresAtMilliseconds: nil,
+                controlScope: bridge == "control" ? "computer" : "saved_apps"
+            ),
+            permissions: DesktopPermissionsStatus(accessibility: permission, screenRecording: permission),
+            browser: base.browser, apps: base.apps, capabilities: base.capabilities
+        )
+    }
+
     private func shellRequest(id: String, command: String) -> DesktopShellRequest {
         DesktopShellRequest(
             requestID: id, requesterID: "@person:example.org", agentName: "assistant",

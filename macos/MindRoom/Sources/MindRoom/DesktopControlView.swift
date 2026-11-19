@@ -9,6 +9,7 @@ struct DesktopControlView: View {
     @State private var reconnecting = false
     @State private var showDetails = false
     @State private var isGrantConfirmationPresented = false
+    @State private var isFullControlConfirmationPresented = false
     @State private var isReplaceSessionConfirmationPresented = false
     @State private var replaceUsingPassword = false
 
@@ -48,6 +49,20 @@ struct DesktopControlView: View {
             Button("Grant Control for \(store.controlMinutes) Minutes") { store.grantControl() }
             Button("Cancel", role: .cancel) {}
         } message: { Text(savedControlSummary) }
+        .confirmationDialog(
+            "Give your agent full control of this Mac?",
+            isPresented: $isFullControlConfirmationPresented, titleVisibility: .visible
+        ) {
+            Button("Turn On Full Control", role: .destructive) { store.setFullControl(true) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("""
+            \((store.status.config.allowedAgentNames ?? []).joined(separator: ", ")) gets your own authority over every app \
+            on this Mac and the whole screen, including Terminal and browsers signed in as you, until you turn it off. \
+            MindRoom opens at login and turns access on by itself, and the primary screen is added to your saved apps. \
+            Revoke turns it off; Stop Access pauses it until you start access again or MindRoom next opens.
+            """)
+        }
         .confirmationDialog(
             "Replace the saved Matrix session?",
             isPresented: $isReplaceSessionConfirmationPresented, titleVisibility: .visible
@@ -104,6 +119,7 @@ struct DesktopControlView: View {
                     .disabled(store.isBusy || store.status.helper.state == "stopped")
                 }
             }
+            if store.status.hasSavedConnection, !store.needsPairing { fullControlToggle }
             if store.isBusy {
                 HStack { ProgressView().controlSize(.small); Text("Working… Complete any browser sign-in that opens.").font(.callout) }
             }
@@ -116,12 +132,25 @@ struct DesktopControlView: View {
         }
     }
 
+    private var fullControlToggle: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Toggle("Full control of this Mac", isOn: Binding(
+                get: { store.fullControl },
+                set: { if $0 { isFullControlConfirmationPresented = true } else { store.setFullControl(false) } }
+            )).disabled(store.isBusy || store.hasAccessChanges)
+            Text(store.fullControl && store.loginItemNeedsApproval
+                 ? "Allow MindRoom in System Settings > General > Login Items so full control returns after a restart."
+                 : "Lets your agent see and use every app and the screen whenever MindRoom runs, until you turn it off.")
+                .font(.callout).foregroundStyle(.secondary)
+        }
+    }
+
     private var nextActionTitle: String {
         switch nextSection {
         case .setup: store.confirmationCommand.isEmpty ? "Connect Agent" : "Confirm in Chat"
         case .access: "Choose Access"
         case .permissions: "Allow Permissions"
-        case .session: store.status.startActionTitle
+        case .session: store.fullControl ? "Start Full Control" : store.status.startActionTitle
         }
     }
 
@@ -137,6 +166,7 @@ struct DesktopControlView: View {
         case .access: return "Next: choose which apps, read-only folders, or shell commands your agent may use, and save."
         case .permissions: return "Next: allow macOS permissions for your selected apps."
         case .session:
+            if store.fullControl { return "Ready. Start full control when you want your agent to use every app and the screen." }
             return store.status.hasSavedLocalAccess
                 ? "Ready. Start access when you want your agent to use what you saved."
                 : "Ready. Start observation when you want your agent to see your selected apps."
@@ -361,6 +391,8 @@ struct DesktopControlView: View {
             if let blocker = startBlocker, !store.status.canStopBridge {
                 Text(blocker.message)
                 if let destination = blocker.destination { Button("Review \(destination.title)") { show(destination) } }
+            } else if !store.status.canStopBridge, store.fullControl {
+                Text("Start Full Control above to let your agent see and use every app and the screen with your authority until you turn it off.")
             } else if !store.status.canStopBridge {
                 Text(store.status.hasSavedLocalAccess
                      ? "Start Access above to let your agent use what you saved. Each shell command still waits for your approval, and app control stays off until you grant it."
@@ -386,7 +418,9 @@ struct DesktopControlView: View {
                     Button("Revoke Now", role: .destructive) { store.revokeControl() }
                         .disabled(!store.status.authority.controlAvailable)
                 }
-                Text("Control applies only to the saved apps and expires automatically. Revoke it at any time.")
+                Text(store.fullControl
+                     ? "Full control covers every app and the screen without expiring. Revoke ends it and turns it off."
+                     : "Control applies only to the saved apps and expires automatically. Revoke it at any time.")
                     .font(.callout).foregroundStyle(.secondary)
             }.padding(.top, 8)
         }
