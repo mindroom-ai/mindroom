@@ -9928,7 +9928,8 @@ class TestHotQueriesAreIndexCovered:
 
         A plan entered on the primary key's room prefix and filtered down to the thread, which ordering the rows by
         `logical_event_id` makes SQLite choose, still says SEARCH, so the scan and temporary sort test passes while
-        every export pass reads the whole room once per thread.
+        every export pass reads the whole room once per thread. The thread's rows also come from an index alone: a
+        table row of a long message spills into overflow pages, which SQLite walks to reach `refresh_token`.
         """
         database = _plan_database(tmp_path / "fingerprint-plan.db")
         steps: list[str] = []
@@ -9960,6 +9961,7 @@ class TestHotQueriesAreIndexCovered:
         assert any("thread_id=?" in step for step in visible), steps
         assert any("logical_event_id=?" in step for step in visible), steps
         assert all("thread_id=?" in step or "logical_event_id=?" in step for step in visible), steps
+        assert any("COVERING INDEX" in step and "thread_id=?" in step for step in visible), steps
         assert not any(marker in step for step in steps for marker in ("SCAN ", "TEMP B-TREE")), steps
 
     async def test_per_event_lookups_seek_their_own_column_instead_of_walking_the_room(self, tmp_path: Path) -> None:

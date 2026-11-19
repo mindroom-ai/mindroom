@@ -27,16 +27,19 @@ from mindroom.agent_cli.protocol import (
     ToolSearchOperation,
 )
 from mindroom.agent_cli.session import (
+    CONFIG_RELOAD_CALL,
+    RELOAD_STOPPED,
     CliAuthenticationError,
     CliBashWindowRequiredError,
     CliCallConflictError,
+    CliCatalogReloadedError,
     CliOperationError,
     TurnToolBridge,
 )
 from mindroom.agent_cli.shell_contract import bound_agent_cli_shell_env
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown
-from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReportedCall, ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import (
@@ -60,7 +63,6 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.session import CliTurnOwner
     from mindroom.agent_cli.shell_contract import AgentCliShellEnv
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.llm.events import ReportedCall
     from mindroom.llm.runs import RunRequirement
     from mindroom.tool_system.agent_tool_calls import (
         PreparedAgentToolBinding,
@@ -387,7 +389,11 @@ class LiveTurnTools(TurnToolBridge):
             self.close_for_shutdown = self._is_shutdown()
             request_task_cancel(task, process_shutdown=self.close_for_shutdown)
 
-        return await wait_for_future_until_complete(task, on_cancel=cancel)
+        try:
+            return await wait_for_future_until_complete(task, on_cancel=cancel)
+        except CliCatalogReloadedError as exc:
+            # The refused call never ran; a minimal turn's run stops at this batch.
+            return ToolOutcome(content=str(exc), stop_after_call=bool(self.control_calls), is_error=True)
 
     async def _execute_bash(self, key: ToolKey, arguments: dict[str, object], call_id: str) -> ToolOutcome:
         """Checkpoint exact provider history before any binding, hook or shell IO."""
@@ -742,7 +748,7 @@ class LiveTurnTools(TurnToolBridge):
         except _StaleAttemptError as exc:
             status = "cancelled"
             result = str(exc)
-        except UnknownToolError as exc:
+        except (UnknownToolError, CliCatalogReloadedError) as exc:
             result = str(exc)
         except (ValueError, PermissionError):
             result = "Tool is unavailable or arguments are invalid"
@@ -776,6 +782,13 @@ class LiveTurnTools(TurnToolBridge):
                         "outcome": {"error": "Tool result projection failed; execution status is retained"},
                     },
                 )
+
+    def end_run_for_reload(self) -> None:
+        """Stop the attempt's run after its batch and refuse its later calls: a config reload refused one."""
+        self.control_calls.append(ReportedCall("config-reload", CONFIG_RELOAD_CALL, None, RELOAD_STOPPED))
+        if (record := self.catalog.record) is not None:
+            # Stored with the run, so whoever settles it later, as recovery after a restart does, reads why it ended.
+            record.metadata = {**(record.metadata or {}), CONFIG_RELOAD_CALL: RELOAD_STOPPED}
 
     async def retire_binding(self) -> None:
         """Retire this attempt while retaining receipts and the response grant.

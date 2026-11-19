@@ -807,6 +807,27 @@ async def test_tool_calls_ride_in_frames_until_the_checkpoint(tmp_path: Path, fr
     assert _terminal(records)["io.mindroom.tool_trace"]["events"][0]["type"] == "tool_call_completed"
 
 
+@pytest.mark.asyncio
+async def test_a_failed_call_says_so_in_frames_and_the_final_event(tmp_path: Path, frames: _Frames) -> None:
+    """A client draws a failed call as failed from its entry, live and once the reply ends."""
+    records, edits = _records(), _Edits()
+    started = ReportedCall(tool_call_id="call-1", tool_name="schedule", tool_args={})
+    failed = ReportedCall(
+        tool_call_id="call-1",
+        tool_name="schedule",
+        tool_args={},
+        result="Missing when",
+        is_error=True,
+    )
+    stream = _stream("Scheduling", 0.05, ToolStarted(started), 0.05, ToolCompleted(failed), 0.05, " done", 0.05)
+    await _run(_config(tmp_path), stream, records, edits)
+
+    entries = [state[0] for state in _tool_states(frames.sent) if state]
+    assert "is_error" not in entries[0]
+    assert entries[-1]["is_error"] is True
+    assert _terminal(records)["io.mindroom.tool_trace"]["events"][0]["is_error"] is True
+
+
 def _tool_states(sent: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     """The tools document each frame left, applying snapshots and tools deltas in order."""
     tools: list[dict[str, Any]] = []

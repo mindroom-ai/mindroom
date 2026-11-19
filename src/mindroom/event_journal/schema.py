@@ -737,6 +737,13 @@ _INDEXES = (
     ON visible_messages (principal_id, room_id, revision_event_id)
     """,
     """
+    -- An export pass reads every thread's fingerprint, mostly to find it
+    -- unchanged. From the table, each row costs a page of its own, plus every
+    -- overflow page of its content on the way to `refresh_token`.
+    CREATE INDEX IF NOT EXISTS visible_messages_fingerprint
+    ON visible_messages (principal_id, room_id, thread_id, logical_event_id, revision_event_id, refresh_token)
+    """,
+    """
     -- A redaction deletes the prompts of the revision it names, so its cost must
     -- not grow with how many questions a principal holds.
     CREATE INDEX IF NOT EXISTS interactive_questions_revision

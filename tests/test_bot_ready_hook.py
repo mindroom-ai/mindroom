@@ -218,7 +218,7 @@ def _history_loss_admission(room_id: str) -> IngestionRecordAdmission:
 
 async def _complete_frame(bot: AgentBot) -> None:
     """Drive runtime side effects through the durable completion owner."""
-    await bot._on_ingestion_frame_completion()
+    await bot._on_ingestion_frame_completion(True)
 
 
 @pytest.mark.asyncio
