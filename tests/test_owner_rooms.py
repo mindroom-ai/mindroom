@@ -307,7 +307,8 @@ async def test_router_updates_rooms_on_config_change(
 async def test_room_setup_without_owner_creates_nothing_and_says_so_once(tmp_path: Path) -> None:
     """Without a running owner account, room setup creates and administers no room, and agents still join theirs."""
     config = _bind_runtime_paths(
-        Config(agents={"agent1": AgentConfig(display_name="Agent 1", rooms=["room1"])}), tmp_path
+        Config(agents={"agent1": AgentConfig(display_name="Agent 1", rooms=["room1"])}),
+        tmp_path,
     )
     agent = MagicMock(agent_name="agent1", ensure_rooms=AsyncMock())
     refresh = AsyncMock()
