@@ -347,12 +347,13 @@ export function EgressServiceItem({
   useEffect(() => {
     if (
       signInNext?.name !== service.name ||
-      !service.separate_account ||
+      !(service.separate_account || signInNext.toolsAccount) ||
       oauth?.provider !== signInNext.provider
     )
       return;
     onSignInOpened?.();
-    if (canConnect) askReuse("read");
+    if (canConnect || (signInNext.toolsAccount && canUseAccount))
+      askReuse("read");
   });
   // Everything but the action that makes the service work, which is a button of its own.
   const actions: RowAction[] = [

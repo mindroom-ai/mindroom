@@ -52,9 +52,10 @@ export interface ServiceEditing {
   addAccount?: (service: EgressCredentialService) => (() => void) | null;
   /**
    * A service just saved with an account of its own, and that account's login: its row asks to sign in once the
-   * listing shows it with that login, not while the row it replaces still shows.
+   * listing shows it with that login, not while the row it replaces still shows. With `toolsAccount`, a service
+   * just added to use the tools' account asks to let commands use it, or to connect it first.
    */
-  signInNext?: { name: string; provider: string } | null;
+  signInNext?: { name: string; provider: string; toolsAccount?: boolean } | null;
   /** Called once that row has asked, so it asks only once. */
   onSignInOpened?: () => void;
 }

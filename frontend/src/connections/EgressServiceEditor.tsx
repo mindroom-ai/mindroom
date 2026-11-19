@@ -79,6 +79,7 @@ import type {
   AuthoredEgressService,
   EgressCredentialService,
   EgressValidation,
+  EgressOAuthLogin,
   EgressOAuthProviderOption,
   EgressPreset,
   EgressPresetCatalog,
@@ -149,12 +150,16 @@ export interface EgressServiceEditorProps {
    * was typed, is saved too.
    */
   onSave: (name: string, service: AuthoredEgressService) => Promise<void>;
+  /** The caller's own logins a new service that takes a key can use instead; personal page only. */
+  logins?: readonly EgressOAuthLogin[];
   /**
    * Called after a save that gives the service an account of its own it has
    * not signed in to, with that account's login as the form resolved it, so
    * the page can ask to sign in next. Leave it out where nothing signs in.
+   * With `toolsAccount`, the new service uses one of `logins` instead of a
+   * key, and the page asks next to let commands use it.
    */
-  onSignIn?: (name: string, provider: string) => void;
+  onSignIn?: (name: string, provider: string, toolsAccount?: boolean) => void;
   /**
    * Save the API key typed in the form for the service of that name, called
    * after `onSave` succeeds and only when a key was typed. Without it the form
@@ -190,6 +195,7 @@ export function EgressServiceEditor({
   scopeAgents = [],
   loadPresets,
   saveWarning = null,
+  logins = [],
   onDirtyChange,
   onSave,
   onSignIn,
@@ -398,6 +404,53 @@ export function EgressServiceEditor({
     !limiting && offersSeparateAccount(form, options, preset);
   const takesKey = !limiting && !choosesAccount;
   const toolsAccount = toolsAccountUse(login, agentServices, name);
+  // A new service that would take a key offers the caller's own login of its
+  // preset first, chosen when it is connected, until a token is picked.
+  const offeredLogin =
+    !editing && saveKey && takesKey
+      ? logins.find((option) => option.provider === login)
+      : undefined;
+  const [pasteKey, setPasteKey] = useState<boolean | null>(null);
+  const usesLogin =
+    offeredLogin !== undefined && !(pasteKey ?? !offeredLogin.connected);
+  const loginOption = (use: boolean, label: string, note?: string) => (
+    <div>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${id}-login`}
+          className="mt-0.5 h-4 w-4"
+          checked={usesLogin === use}
+          disabled={disabled}
+          onChange={() => setPasteKey(!use)}
+        />
+        {label}
+      </label>
+      {note && use === usesLogin && (
+        <p className="pl-6 text-xs text-muted-foreground">{note}</p>
+      )}
+    </div>
+  );
+  const loginChoice = offeredLogin && (
+    <div
+      role="radiogroup"
+      aria-label="Account or key"
+      className="max-w-md space-y-1"
+    >
+      {offeredLogin.connected
+        ? loginOption(
+            true,
+            `Use your connected ${offeredLogin.display_name} account${offeredLogin.account_label ? ` (${offeredLogin.account_label})` : ""}`,
+            "You confirm right after saving.",
+          )
+        : loginOption(
+            true,
+            `Connect your ${offeredLogin.display_name} account`,
+            "You sign in right after saving.",
+          )}
+      {loginOption(false, "Paste a token instead")}
+    </div>
+  );
   const signsIn = signsInAfterSave(form, initial, presets);
   // What a save removes from the service as listed: its own connected
   // account, on a switch to the tools' account or to another login, and its
@@ -564,6 +617,7 @@ export function EgressServiceEditor({
         const login = serviceLogin(current, presetOf(presets, current.preset));
         if (login && signsInAfterSave(current, initial, presets))
           onSignIn?.(current.name, login);
+        if (usesLogin) onSignIn?.(current.name, offeredLogin.provider, true);
         setSavedSignature(signature);
       }
     } catch (cause) {
@@ -573,7 +627,7 @@ export function EgressServiceEditor({
       setBusy(null);
       return;
     }
-    if (takesKey && saveKey && apiKey.trim() !== "") {
+    if (takesKey && !usesLogin && saveKey && apiKey.trim() !== "") {
       try {
         await saveKey(apiKey, current.name);
       } catch (cause) {
@@ -658,6 +712,7 @@ export function EgressServiceEditor({
             </p>
           ))}
           {preset && accountChoice}
+          {loginChoice}
           {/* Without the Account field, the save still removes the own account. */}
           {!choosesAccount && disconnects && (
             <p className="text-xs text-muted-foreground">
@@ -701,7 +756,7 @@ export function EgressServiceEditor({
           />
         )}
       </Field>
-      {saveKey && takesKey && (
+      {saveKey && takesKey && !usesLogin && (
         <Field
           label="API key"
           id={`${id}-key`}
@@ -855,7 +910,7 @@ export function EgressServiceEditor({
             "Save all changes"
           ) : limiting ? (
             "Save limit"
-          ) : signsIn ? (
+          ) : signsIn || (usesLogin && !offeredLogin.connected) ? (
             "Save and sign in"
           ) : (
             "Save service"

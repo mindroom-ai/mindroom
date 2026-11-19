@@ -317,10 +317,9 @@ function AgentSection({
   const [editorDirty, setEditorDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [signInNext, setSignInNext] = useState<{
-    name: string;
-    provider: string;
-  } | null>(null);
+  const [signInNext, setSignInNext] = useState<ServiceEditing["signInNext"]>(
+    null,
+  );
   const operation = useRef<AbortController | null>(null);
 
   useEffect(() => () => operation.current?.abort(), []);
@@ -415,6 +414,50 @@ function AgentSection({
     else void edit(service);
   };
 
+  // A service added from a preset takes its next free name.
+  const freeName = (presetId: string) =>
+    firstFreeName(presetId, [
+      ...agent.services.map((service) => service.name),
+      ...agent.inactive_services.map((service) => service.name),
+    ]);
+  // The caller's own logins connected for the tools that no service of this
+  // personal agent has yet, an ignored one of the preset's names included.
+  const logins =
+    agent.can_manage && !agent.shared ? (agent.oauth_logins ?? []) : [];
+  const suggestions = logins.flatMap((login) => {
+    const preset = catalog?.presets.find(
+      (option) => option.oauth_provider === login.provider,
+    );
+    if (!preset || !login.connected) return [];
+    const taken =
+      agent.services.some(
+        (service) => service.oauth?.provider === login.provider,
+      ) ||
+      agent.inactive_services.some((service) =>
+        new RegExp(`^${preset.id}(-\\d+)?$`).test(service.name),
+      );
+    return taken ? [] : [{ login, preset }];
+  });
+  // Use it adds the preset's service, whose row then asks to let commands use the account.
+  const addLogin = (presetId: string, provider: string) => {
+    setError(null);
+    const name = freeName(presetId);
+    write(
+      servicePath(agent.agent_name, name),
+      "PUT",
+      { preset: presetId },
+      { "If-None-Match": "*" },
+    ).then(
+      (counts) => {
+        if (!counts) return;
+        onChanged();
+        setSignInNext({ name, provider, toolsAccount: true });
+      },
+      (cause) =>
+        setError(errorText(cause, "Could not add the service. Try again.")),
+    );
+  };
+
   const pendingEdit = editor?.pendingEdit;
   const serviceEditing: ServiceEditing = {
     editableSource: "user",
@@ -454,10 +497,7 @@ function AgentSection({
         login &&
         catalog?.presets.find((option) => option.oauth_provider === login.id);
       if (!preset) return null;
-      const name = firstFreeName(preset.id, [
-        ...agent.services.map((service) => service.name),
-        ...agent.inactive_services.map((service) => service.name),
-      ]);
+      const name = freeName(preset.id);
       return () => {
         setError(null);
         write(servicePath(agent.agent_name, name), "PUT", {
@@ -556,7 +596,10 @@ function AgentSection({
             onDirtyChange={setEditorDirty}
             onSave={save}
             // A service that gets an account of its own signs in to it next, from its row.
-            onSignIn={(name, provider) => setSignInNext({ name, provider })}
+            logins={logins}
+            onSignIn={(name, provider, toolsAccount) =>
+              setSignInNext({ name, provider, toolsAccount })
+            }
             saveKey={saveKey}
             onDelete={
               editor.kind === "edit" ? () => remove(editor.name) : undefined
@@ -565,6 +608,28 @@ function AgentSection({
           />
         </div>
       )}
+      {suggestions.map(({ login, preset }) => (
+        <div
+          key={login.provider}
+          className="flex flex-wrap items-center gap-3 border-t border-border/60 px-5 py-3"
+        >
+          <p className="text-sm text-muted-foreground">
+            Your {login.display_name} account
+            {login.account_label ? ` ${login.account_label}` : ""} is connected
+            for MindRoom's tools. Let this agent's commands use it too.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-auto"
+            disabled={saving || editor !== null}
+            aria-label={`Use your ${login.display_name} account for ${agent.agent_display_name}`}
+            onClick={() => addLogin(preset.id, login.provider)}
+          >
+            Use it
+          </Button>
+        </div>
+      ))}
       {agent.services.length || agent.inactive_services.length ? (
         <EgressServiceTable label={`Services for ${agent.agent_display_name}`}>
           {groups.map((group) => (

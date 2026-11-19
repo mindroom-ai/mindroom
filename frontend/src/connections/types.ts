@@ -223,6 +223,16 @@ export interface EgressCredentialAgent {
   can_manage: boolean;
   services: EgressCredentialService[];
   inactive_services: EgressInactiveService[];
+  /** The presets' logins of the caller's own that a new service could use; only on a personal agent they manage, absent from older servers. */
+  oauth_logins?: EgressOAuthLogin[];
+}
+
+/** A login of the caller's, connected for the agent's tools or ready to connect. */
+export interface EgressOAuthLogin {
+  provider: string;
+  display_name: string;
+  connected: boolean;
+  account_label: string | null;
 }
 
 export interface EgressCredentialList {
