@@ -3045,3 +3045,98 @@ async def test_shutdown_during_active_drain_cancels_reload(
     # The reload task should have been cancelled
     assert task.done()
     orchestrator.config_reload.apply_update_plan.assert_not_awaited()
+
+
+def _owner_reload_config(rooms: list[str], *, display_name: str = "General") -> Config:
+    """Return a config with no root Space whose `general` agent lists ``rooms`` and whose `other` agent lists none.
+
+    `general` answers the members of the room it is asked in, so its room list is no reply grant.
+    """
+    access = {"current_room_members": True, "members_of_rooms": []}
+    return _runtime_bound_config(
+        Config.model_validate(
+            {
+                "agents": {
+                    "general": {"display_name": display_name, "rooms": rooms, "access": access},
+                    "other": {"display_name": "Other"},
+                },
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "matrix_space": {"enabled": False},
+            },
+        ),
+    )
+
+
+async def _reload_with_bots(
+    current_config: Config,
+    new_config: Config,
+    entities: Iterable[str],
+) -> tuple[_MultiAgentOrchestrator, dict[str, AsyncMock], MagicMock]:
+    """Reload a running runtime from one config to another; return it, its first bots, and the whole-index fence."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), config=current_config)
+    orchestrator.running = True
+    bots = {
+        name: AsyncMock(
+            spec=AgentBot,
+            agent_name=name,
+            running=True,
+            pending_response_owner_count=0,
+            pending_response_phase_counts={},
+            deferred_stop_phase=None,
+            deferred_stop_required=False,
+        )
+        for name in entities
+    }
+    install_bots(orchestrator, bots)
+    with (
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator.fleet, "create", new=AsyncMock()),
+        patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as fence_every_room,
+    ):
+        await orchestrator.config_reload._update_config()
+    return orchestrator, bots, fence_every_room
+
+
+def test_adding_first_room_starts_owner() -> None:
+    """A reload that configures the first room starts the owner, and nothing else."""
+    plan = build_config_update_plan(
+        current_config=_owner_reload_config([]),
+        new_config=_owner_reload_config(["lobby"]),
+        bots={"general": MagicMock(), "other": MagicMock()},
+    )
+
+    assert plan.start == {ROUTER_AGENT_NAME}
+    assert (plan.remove, plan.stop) == (frozenset(), frozenset())
+
+
+@pytest.mark.asyncio
+async def test_removing_last_room_stops_owner_without_fencing_other_rooms() -> None:
+    """A reload that removes the last room stops the owner, which keeps its rooms, and fences no other room."""
+    orchestrator, bots, fence_every_room = await _reload_with_bots(
+        _owner_reload_config(["lobby"]),
+        _owner_reload_config([]),
+        (ROUTER_AGENT_NAME, "general", "other"),
+    )
+
+    owner = bots[ROUTER_AGENT_NAME]
+    owner.stop.assert_awaited_once()
+    owner.leave_rooms.assert_not_awaited()
+    assert set(orchestrator.agent_bots) == {"general", "other"}
+    bots["other"].stop.assert_not_awaited()
+    fence_every_room.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_replacing_an_agent_unreadies_only_rooms_it_observes() -> None:
+    """A reload that replaces one agent stops only its bot, whose stop unreadies its own rooms; no room is fenced whole."""
+    orchestrator, bots, fence_every_room = await _reload_with_bots(
+        _owner_reload_config(["lobby"]),
+        _owner_reload_config(["lobby"], display_name="Generalist"),
+        (ROUTER_AGENT_NAME, "general", "other"),
+    )
+
+    bots["general"].stop.assert_awaited_once()
+    assert set(orchestrator.agent_bots) == {ROUTER_AGENT_NAME, "other"}
+    bots[ROUTER_AGENT_NAME].stop.assert_not_awaited()
+    fence_every_room.assert_not_called()

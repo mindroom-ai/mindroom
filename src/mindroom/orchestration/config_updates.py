@@ -126,16 +126,18 @@ _TEAM_LIVE_FIELDS = frozenset(
 class ConfigUpdatePlan:
     """Everything one config reload changes, decided in one place.
 
-    ``restart``, ``start``, and ``remove`` are disjoint: an entity whose bot
+    ``restart``, ``start``, ``remove``, and ``stop`` are disjoint: an entity whose bot
     exists and stays configured may restart, a configured entity without a bot
     starts, and a bot whose entity is no longer configured is removed, never
-    restarted, so its removal still finds the bot it must stop.
+    restarted, so its removal still finds the bot it must stop. The owner account
+    the config no longer needs only stops: it keeps its account and its rooms.
     """
 
     new_config: Config
     restart: frozenset[str] = frozenset()
     start: frozenset[str] = frozenset()
     remove: frozenset[str] = frozenset()
+    stop: frozenset[str] = frozenset()
     reconcile_rooms: frozenset[str] = frozenset()
     live_updated: frozenset[str] = frozenset()
     plugin_changes: tuple[str, ...] = ()
@@ -159,7 +161,7 @@ class ConfigUpdatePlan:
         replaces config that responses read live, so it can publish while they run.
         """
         return self.reply_authorization_changed or bool(
-            self.restart or self.start or self.remove or self.reconcile_rooms,
+            self.restart or self.start or self.remove or self.stop or self.reconcile_rooms,
         )
 
 
@@ -513,7 +515,8 @@ def build_config_update_plan(
 
     restart &= kept_entities
     start = configured_entities - existing_entities
-    remove = existing_entities - configured_entities
+    stop = (existing_entities - configured_entities) & {ROUTER_AGENT_NAME}
+    remove = existing_entities - configured_entities - stop
     if start:
         logger.info("new_entities_will_start", entities=sorted(start))
     if remove:
@@ -524,6 +527,7 @@ def build_config_update_plan(
         restart=frozenset(restart),
         start=frozenset(start),
         remove=frozenset(remove),
+        stop=frozenset(stop),
         reconcile_rooms=frozenset(
             _entities_with_room_changes(
                 current_config,
