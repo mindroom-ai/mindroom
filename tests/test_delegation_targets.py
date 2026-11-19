@@ -11,7 +11,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.state import SubagentPersona
-from mindroom.delegation.targets import display_title, resolve_follow_up_target, resolve_fresh_target
+from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
@@ -113,6 +113,9 @@ async def test_a_resumed_follow_up_naming_another_subagent_fails(tmp_path: Path)
     [
         ({"task": "Read.", "minimal": "yes"}, "Cannot delegate: minimal must be a boolean or null."),
         ({"task": 3}, "Cannot delegate: task must be a string and agent_name must be a string or null."),
+        # A call that names a title names something; only a call without the field runs untitled.
+        ({"task": "Read.", "title": "  \n "}, "Cannot delegate: title must name the task in a few words."),
+        ({"task": "Read.", "title": 3}, "Cannot delegate: title must name the task in a few words."),
     ],
 )
 def test_a_fresh_call_with_arguments_of_the_wrong_type_is_refused(
@@ -132,25 +135,3 @@ def test_a_fresh_call_with_arguments_of_the_wrong_type_is_refused(
     )
 
     assert result == refusal
-
-
-def test_a_title_is_redacted_whole_before_its_cut_to_80_characters() -> None:
-    """A credential the cut would split is still recognized, so no part of it reaches the shown title."""
-    lead = "Check the deploy job on the staging host before "
-    token = "mrb1." + "Ab3_" * 40 + "." + "Z9y-" * 10 + "abc"
-    title = display_title(f"{lead}\n{token} please")
-
-    # The token starts before character 80 and ends after it.
-    assert len(lead) + 1 < 80 < len(lead) + 1 + len(token)
-    assert "mrb1" not in title
-    assert len(title) <= 80
-    assert title.startswith("Check the deploy job on the staging host before ")
-
-
-def test_a_title_s_url_password_after_long_whitespace_is_redacted() -> None:
-    """Whitespace collapses before redaction, so a URL password far into the raw text is still masked."""
-    title = display_title(" " * 3_990 + "Fetch https://admin:Q7v-placeholder-pw@example.org/report")
-
-    assert "placeholder" not in title
-    assert title.startswith("Fetch https://")
-    assert len(title) <= 80

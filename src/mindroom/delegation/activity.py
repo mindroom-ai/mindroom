@@ -90,7 +90,7 @@ class SubagentSnapshot:
     usage: Mapping[str, int | float] | None = None
     # Set on the failed end a turn gets when a shutdown stops its attempt, which its job may continue with a later turn.
     interrupted_by_restart: bool = False
-    # What the call that started the sub-agent named it, redacted when the call was resolved; empty for none.
+    # What the call that started the sub-agent named it, on one line of at most 80 characters, redacted; empty for none.
     title: str = ""
 
 
@@ -100,6 +100,11 @@ type SubagentSink = Callable[[SubagentSnapshot], None]
 def _clip(text: str, limit: int) -> str:
     """Return the redacted head of ``text``, at most ``limit`` characters, redacting only a head with a margin past it."""
     return redact_sensitive_text(text[: limit + _REDACTION_MARGIN])[:limit]
+
+
+def display_title(title: str) -> str:
+    """Return ``title`` on one line of at most 80 characters, redacted by the bounded redactor before it is cut."""
+    return redact_sensitive_text(" ".join(title.split()), max_length=80) if title else ""
 
 
 def _cut_preview(preview: str | None) -> tuple[str | None, bool]:
@@ -202,7 +207,8 @@ class _SubagentActivity:
             model_name=child.model_name,
             source="workflow" if is_workflow else "delegate",
             task=_clip(child.task, _MAX_TASK_CHARACTERS),
-            title=child.title,
+            # The child may come from stored metadata a worker could write, so its title is sanitized here.
+            title=display_title(child.title),
             thread_id=identity.resolved_thread_id or identity.thread_id,
             started_at=now,
         )

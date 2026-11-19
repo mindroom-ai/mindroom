@@ -21,7 +21,6 @@ from mindroom.delegation.recovery import load_settled_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT
 from mindroom.delegation.workers import dedicated_worker_refusal
-from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -46,7 +45,7 @@ class DelegationTarget:
     agent_name: str
     task: str
     previous_child: DelegationChild | None = None
-    # What people watching the run see it as: one line, at most 80 characters; empty when the call named none.
+    # What people watching the run see it as, as the call named it; empty when it named none.
     title: str = ""
     agent_mode: AgentMode = "standard"
     persona: SubagentPersona | None = None
@@ -164,11 +163,11 @@ def resolve_fresh_target(
     ``cap`` is the persona of the authored subagent making the call, if any.
     """
     child_name, task, minimal = args.get("agent_name"), args.get("task"), args.get("minimal")
-    model = cast("str | None", args.get("model"))
+    model, title = cast("str | None", args.get("model")), args.get("title")
     if child_name is None:
         child_name = caller_name
-    if minimal is not None and not isinstance(minimal, bool):
-        return "Cannot delegate: minimal must be a boolean or null."
+    if refusal := _option_refusal(minimal, title):
+        return refusal
     if not isinstance(child_name, str) or not isinstance(task, str):
         return "Cannot delegate: task must be a string and agent_name must be a string or null."
     if retained is not None:
@@ -207,11 +206,10 @@ def resolve_fresh_target(
     if isinstance(request, str):
         return request
     dedicated_worker, resource_profile = worker
-    title = args.get("title")
     return DelegationTarget(
         child_name,
         task,
-        title=display_title(title) if isinstance(title, str) else "",
+        title=cast("str | None", title) or "",
         agent_mode=request.agent_mode,
         persona=request.persona,
         model=request.model,
@@ -220,9 +218,13 @@ def resolve_fresh_target(
     )
 
 
-def display_title(title: str) -> str:
-    """Return ``title`` on one line of at most 80 characters, redacted by the bounded redactor before it is cut."""
-    return redact_sensitive_text(" ".join(title.split()), max_length=80)
+def _option_refusal(minimal: object, title: object) -> str | None:
+    """Say why a call's ``minimal`` or ``title`` is unusable; a call stored before the title, or a direct one, has none."""
+    if minimal is not None and not isinstance(minimal, bool):
+        return "Cannot delegate: minimal must be a boolean or null."
+    if title is not None and (not isinstance(title, str) or not title.strip()):
+        return "Cannot delegate: title must name the task in a few words."
+    return None
 
 
 def _dedicated_worker_request(

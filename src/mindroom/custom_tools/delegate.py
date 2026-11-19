@@ -108,8 +108,9 @@ class DelegateTools(Toolkit):
         }
         description = self._build_run_subagent_description()
         properties = {name: value for name, value in function.parameters["properties"].items() if name not in hidden}
+        # Models always name the run with a string; only a call without one, such as one stored before it, runs untitled.
+        properties["title"] = {"type": "string", "description": properties["title"]["description"]}
         parameters = closed_parameters(self.run_subagent, {**function.parameters, "properties": properties})
-        # Models always name the run; a call without a title, such as one stored before it, still runs.
         parameters["required"] = [*parameters["required"], "title"]
         return replace(function, description=description, parameters=parameters)
 
@@ -239,7 +240,7 @@ class DelegateTools(Toolkit):
         dedicated_worker: bool = False,
         resource_profile: ScriptResourceProfileName | None = None,
         *,
-        title: str = "",
+        title: str | None = None,
     ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 
