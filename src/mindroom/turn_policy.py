@@ -62,6 +62,9 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
 
+# Ends the saved owner of a command that addressed MindRoom itself, which `router.access` gates on every replay.
+_UNTARGETED = " untargeted"
+
 
 @dataclass(frozen=True)
 class ResponseAction:
@@ -565,6 +568,7 @@ class TurnPolicy:
         the reply mode and the thread, where `router.access` admits the requester.
         Bots can differ on this while a join or a thread reaches them, so the first to decide saves the owner and
         every bot follows the saved one, on each replay too.
+        A bot that finds no owner itself still runs a command saved as aimed at it, never one that addressed MindRoom.
         """
         config = self.deps.runtime.config
         me = self.deps.matrix_id
@@ -585,11 +589,13 @@ class TurnPolicy:
             if len(aimed_at) != 1:
                 aimed_at = candidates if self._routing_admits(requester_user_id, room.room_id) else []
         owner = self._select_response_owner(aimed_at)
-        if owner is None:
-            return False
         journal = self.deps.runtime.orchestrator.event_journal_store()
-        saved = await journal.claim_room_event(room.room_id, source_event_id, "command", owner.full_id)
-        return saved == me.full_id and me in (owner, *candidates)
+        if owner is None:
+            saved = await journal.room_event_owner(room.room_id, source_event_id, "command")
+            return saved == me.full_id and me in candidates
+        claim = owner.full_id + (_UNTARGETED if aimed_at is candidates else "")
+        saved = await journal.claim_room_event(room.room_id, source_event_id, "command", claim)
+        return saved.removesuffix(_UNTARGETED) == me.full_id and me in (owner, *candidates)
 
     async def owns_command(
         self,

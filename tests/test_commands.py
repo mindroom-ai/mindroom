@@ -910,7 +910,12 @@ def _claims() -> EventJournalStore:
     async def claim_room_event(*key_and_owner: str) -> str:
         return saved.setdefault(key_and_owner[:3], key_and_owner[3])
 
-    return cast("EventJournalStore", SimpleNamespace(claim_room_event=claim_room_event))
+    async def room_event_owner(*key: str) -> str | None:
+        return saved.get(key)
+
+    return cast(
+        "EventJournalStore", SimpleNamespace(claim_room_event=claim_room_event, room_event_owner=room_event_owner)
+    )
 
 
 def _shared_room(config: Config, *entity_names: str) -> dict[str, nio.MatrixRoom]:
@@ -1032,3 +1037,26 @@ async def test_router_access_denies_untargeted_command(tmp_path: Path) -> None:
 
     assert await _command_owners(config, "!help", rooms) == []
     assert await _command_owners(config, "!help @research", rooms, mention) == ["research"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_saved_owner_runs_a_targeted_command_without_a_fresh_proposal(tmp_path: Path) -> None:
+    """The saved owner runs its copy though its own thread read names nobody, unless `router.access` was revoked."""
+    denying = _router_access_denies_everyone(tmp_path)
+    rooms = _shared_room(denying, "general", "research")
+    general = {"general": rooms["general"]}
+    replies = [
+        make_visible_message(sender=_SENDER, body="please help"),
+        make_visible_message(sender=_entity_id(denying, "general").full_id, body="sure"),
+    ]
+    in_thread = _context(thread_id="$thread:localhost", thread_history=replies)
+    degraded = _context(thread_id="$thread:localhost")
+    targeted, untargeted = _claims(), _claims()
+
+    assert await _command_owners(denying, "!help", {"research": rooms["research"]}, in_thread, targeted) == []
+    assert await _command_owners(denying, "!help", rooms, degraded, targeted) == ["general"]
+    assert await _command_owners(denying, "!help", rooms, degraded) == []
+    admitting = bind_runtime_paths(denying.model_copy(update={"router": RouterConfig()}), runtime_paths_for(denying))
+    assert await _command_owners(admitting, "!help", rooms, None, untargeted) == ["general"]
+    assert await _command_owners(denying, "!help", general, degraded, untargeted) == []

@@ -24,9 +24,15 @@ def claim(transaction: Transaction, room_id: str, event_id: str, purpose: str, o
         """,
         (room_id, event_id, purpose, owner, now_ns),
     )
+    saved = saved_owner(transaction, room_id, event_id, purpose)
+    assert saved is not None
+    return saved
+
+
+def saved_owner(transaction: Transaction, room_id: str, event_id: str, purpose: str) -> str | None:
+    """Return the owner saved for one room event's purpose."""
     row = transaction.fetchone(
         "SELECT owner FROM room_event_claims WHERE room_id = ? AND event_id = ? AND purpose = ?",
         (room_id, event_id, purpose),
     )
-    assert row is not None
-    return str(row["owner"])
+    return None if row is None else str(row["owner"])

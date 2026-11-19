@@ -10291,6 +10291,8 @@ async def test_claim_room_event_first_writer_wins(journal_store: EventJournalSto
     assert await journal_store.claim_room_event(_CLAIM_ROOM, "$e1", "member_joined", "beta") == "alpha"
     assert await journal_store.claim_room_event(_CLAIM_ROOM, "$e1", "member_left", "beta") == "beta"
     assert await journal_store.claim_room_event("!other:localhost", "$e1", "member_joined", "gamma") == "gamma"
+    assert await journal_store.room_event_owner(_CLAIM_ROOM, "$e1", "member_joined") == "alpha"
+    assert await journal_store.room_event_owner(_CLAIM_ROOM, "$e2", "member_joined") is None
 
 
 @pytest.mark.asyncio
