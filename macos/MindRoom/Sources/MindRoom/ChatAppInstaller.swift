@@ -73,7 +73,7 @@ struct ChatAppInstaller {
         progress("Downloading MindRoom Chat…")
         try await download(source, image)
         progress("Checking MindRoom Chat…")
-        // `diskutil image attach` replaces this from macOS 15, but macOS 14 has only hdiutil.
+        // macOS 27 points to `diskutil image attach` instead; macOS 14, which this app supports, has hdiutil.
         try check(run("/usr/bin/hdiutil", ["attach", image.path, "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", mount.path]))
         attached = true
         guard let app = try files.contentsOfDirectory(at: mount, includingPropertiesForKeys: nil)

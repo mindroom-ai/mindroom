@@ -54,6 +54,13 @@ HTTPS sites and HTTP loopback development sites are supported.
 Sign in once in the app: existing browser cookies are not imported.
 Use **Open in Browser** when you prefer your browser or a sign-in provider requires it.
 
+Overview and the menu bar offer **Install MindRoom Chat**, the separate Mac Catalyst chat app (`chat.mindroom.app`).
+An existing copy from any source is found by bundle identifier through Launch Services and only opened.
+Otherwise the app takes the newest published `mindroom-ai/mindroom-chat` release that has `MindRoom-Chat.dmg` (older releases: `MindRoom.dmg`), mounts it read-only, and copies the app to a hidden staging name in `/Applications`, or `~/Applications` when that is not writable.
+The staged copy must satisfy `ChatAppSignature.requirement` (Developer ID, team `DNA6966LGZ`, identifier `chat.mindroom.app`, notarized, revocation checked) before it is renamed to `MindRoom Chat.app`; an existing bundle is never replaced.
+The image is detached and temporary files are removed on every path, and MindRoom never updates the chat app, which updates itself.
+Set `MINDROOM_CHAT_INSTALL_E2E_DIR` to an empty folder to run the opt-in test that installs the real release there.
+
 With the local-agent service running, **Open Dashboard** opens its dashboard inside the app.
 The private native-helper action `dashboard_configuration` rereads `MINDROOM_URL` and `MINDROOM_API_KEY` from the config-adjacent `.env`, preserving explicit process-environment overrides.
 The default dashboard URL is `http://127.0.0.1:8765`.

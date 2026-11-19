@@ -35,6 +35,16 @@ The default chat website is `https://chat.mindroom.chat`; for a self-hosted clie
 Use **Open in Browser** to use your browser session or a sign-in provider that requires a browser.
 **Reload** returns to the configured chat website, or reloads the approval page while you connect local agents.
 
+## Install MindRoom Chat
+
+MindRoom Chat is the separate chat app for the Mac, with voice messages, Quick Capture, and its own updates.
+On **Overview**, select **Install MindRoom Chat**, or choose **Install MindRoom Chat…** from the menu bar.
+MindRoom downloads the newest release from GitHub, checks that it is the notarized MindRoom Chat signed by MindRoom, and copies it to `/Applications/MindRoom Chat.app`, or to `~/Applications` when you cannot write to `/Applications`.
+It then opens the app, and the button and menu item change to **Open MindRoom Chat**.
+If MindRoom Chat is already on this Mac, from the Mac App Store, Homebrew, or a disk image, MindRoom opens that copy and installs nothing.
+MindRoom never replaces or updates MindRoom Chat; the app updates itself.
+The **Chat** section keeps working with or without it.
+
 ## Set Up Local Agents
 
 **Local agents** has four numbered steps, each with its own status.

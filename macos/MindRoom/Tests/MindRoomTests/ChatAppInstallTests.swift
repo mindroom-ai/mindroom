@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import XCTest
 @testable import MindRoom
 
@@ -60,13 +61,28 @@ final class ChatAppInstallTests: XCTestCase {
 
     // MARK: Verification
 
+    /// A runnable bundle that claims to be MindRoom Chat.
+    private func impostor(_ name: String) throws -> URL {
+        let app = folder.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: app.appendingPathComponent("Contents/MacOS/Chat").path)
+        let info = #"<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>chat.mindroom.app</string>"#
+            + "<key>CFBundleExecutable</key><string>Chat</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"
+        try Data(info.utf8).write(to: app.appendingPathComponent("Contents/Info.plist"))
+        return app
+    }
+
     func testRefusesUnsignedAndForeignApps() throws {
-        let unsigned = folder.appendingPathComponent("Fake.app")
-        try FileManager.default.createDirectory(at: unsigned.appendingPathComponent("Contents"), withIntermediateDirectories: true)
-        try Data(#"<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>chat.mindroom.app</string></dict></plist>"#.utf8)
-            .write(to: unsigned.appendingPathComponent("Contents/Info.plist"))
-        // Calculator is validly signed and notarization-exempt, but not MindRoom Chat.
-        for app in [unsigned, URL(fileURLWithPath: "/System/Applications/Calculator.app")] {
+        let unsigned = try impostor("Unsigned.app")
+        // The right identifier with an intact signature, from a signer that is not MindRoom.
+        let selfSigned = try impostor("SelfSigned.app")
+        let codesign = MindRoomCommandProcess().run(MindRoomCommandInvocation(
+            executableURL: URL(fileURLWithPath: "/usr/bin/codesign"),
+            arguments: ["--force", "--sign", "-", "--identifier", "chat.mindroom.app", selfSigned.path], environment: [:]
+        ))
+        XCTAssertTrue(codesign.isSuccess, codesign.output)
+        // Calculator is validly signed by Apple, but not MindRoom Chat.
+        for app in [unsigned, selfSigned, URL(fileURLWithPath: "/System/Applications/Calculator.app")] {
             XCTAssertThrowsError(try ChatAppSignature.verify(app), app.path) { error in
                 guard case ChatAppInstallError.untrusted = error else { return XCTFail("\(error)") }
             }
@@ -229,6 +245,114 @@ final class ChatAppInstallTests: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: installer.destination.path))
         XCTAssertEqual(try leftovers(tools), [])
+    }
+
+    // MARK: Store and menu
+
+    @MainActor
+    private func finished(_ store: ChatAppStore) async {
+        let done = expectation(description: "Install finished")
+        let subscription = store.$progress.filter { $0 == nil }.prefix(1).sink { _ in done.fulfill() }
+        await fulfillment(of: [done], timeout: 5)
+        withExtendedLifetime(subscription) {}
+    }
+
+    @MainActor
+    func testOpensAnInstalledCopyWithoutInstalling() throws {
+        // A copy from any source counts, under whatever name it has.
+        let existing = folder.appendingPathComponent("Elsewhere/MindRoom.app")
+        try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
+        var opened: [URL] = []
+        var installer = try installer(FakeTools())
+        installer.fetch = { _ in XCTFail("Installed although a copy exists"); return Data() }
+        let store = ChatAppStore(installer: installer, locate: { existing }, open: { opened.append($0) })
+
+        XCTAssertEqual(store.installedURL, existing)
+        store.openOrInstall()
+
+        XCTAssertEqual(opened, [existing])
+        XCTAssertNil(store.progress)
+        // Launch Services can name a copy that was since removed.
+        try FileManager.default.removeItem(at: existing)
+        store.refresh()
+        XCTAssertNil(store.installedURL)
+    }
+
+    @MainActor
+    func testInstallsThenOpensWhenMissing() async throws {
+        let tools = FakeTools()
+        var opened: [String] = []
+        let store = ChatAppStore(installer: try installer(tools), locate: { nil }, open: { opened.append($0.lastPathComponent) })
+        XCTAssertNil(store.installedURL)
+
+        store.openOrInstall()
+        XCTAssertNotNil(store.progress)
+        store.openOrInstall()
+        await finished(store)
+
+        XCTAssertEqual(opened, ["MindRoom Chat.app"])
+        XCTAssertEqual(tools.calls.filter { $0 == "hdiutil attach" }.count, 1, "A second click starts no second install")
+        XCTAssertNil(store.error)
+        // Launch Services may not know the fresh copy yet.
+        store.refresh()
+        XCTAssertEqual(store.installedURL?.lastPathComponent, "MindRoom Chat.app")
+    }
+
+    @MainActor
+    func testFailedInstallShowsTheReasonAndCanBeRetried() async throws {
+        var refuse = true
+        var opened = 0
+        let installer = try installer(FakeTools()) { _ in
+            if refuse { throw ChatAppInstallError.untrusted("not ours") }
+        }
+        let store = ChatAppStore(installer: installer, locate: { nil }, open: { _ in opened += 1 })
+
+        store.openOrInstall()
+        await finished(store)
+
+        XCTAssertEqual(store.error, ChatAppInstallError.untrusted("not ours").errorDescription)
+        XCTAssertTrue(store.error?.contains("was not installed") == true)
+        XCTAssertNil(store.installedURL)
+        XCTAssertEqual(opened, 0)
+
+        refuse = false
+        store.openOrInstall()
+        XCTAssertNil(store.error)
+        await finished(store)
+        XCTAssertNotNil(store.installedURL)
+        XCTAssertEqual(opened, 1)
+    }
+
+    @MainActor
+    func testMenuInstallsWhenMissingAndOpensWhenPresent() async throws {
+        var opened = 0
+        let store = ChatAppStore(installer: try installer(FakeTools()), locate: { nil }, open: { _ in opened += 1 })
+        let controller = StatusMenuController(
+            runner: MindRoomCommandRunner(processRunner: { _, _ in CommandResult(exitCode: 0, output: "") }),
+            desktop: DesktopControlStore(), chatApp: store
+        )
+        var shown: [AppSection?] = []
+        controller.showWindow = { shown.append($0) }
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+        let install = try XCTUnwrap(menu.items.first { $0.title == "Install MindRoom Chat…" })
+        XCTAssertFalse(menu.items.contains { $0.title == "Open MindRoom Chat" })
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(install.action), to: install.target, from: install))
+        // Progress shows on Overview, so installing from the menu is never silent.
+        XCTAssertEqual(shown, [.overview])
+
+        controller.menuNeedsUpdate(menu)
+        XCTAssertEqual(menu.items.first { $0.title == "Installing MindRoom Chat…" }?.isEnabled, false)
+        await finished(store)
+        XCTAssertEqual(opened, 1)
+
+        controller.menuNeedsUpdate(menu)
+        let open = try XCTUnwrap(menu.items.first { $0.title == "Open MindRoom Chat" })
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(open.action), to: open.target, from: open))
+        XCTAssertEqual(opened, 2)
+        XCTAssertEqual(shown, [.overview], "Opening the installed app leaves MindRoom's window alone")
+        XCTAssertNotNil(menu.items.first { $0.title == "Open Chat" }, "The embedded chat stays")
     }
 
     /// Opt-in: the real release, image, copy, and signature check, into a folder standing in for /Applications.

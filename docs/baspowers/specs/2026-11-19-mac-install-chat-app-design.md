@@ -96,7 +96,7 @@ Verifying the staged copy rather than the mounted image means the bytes that are
 2. If the target already exists, stop with "… already exists" before any download. Nothing is ever overwritten.
 3. Download the image into a fresh folder under the temporary directory.
 4. `hdiutil attach <image> -readonly -nobrowse -noautoopen -mountpoint <temp>/image`.
-   `hdiutil` warns on macOS 27 that `diskutil image attach` replaces it, but that verb does not exist on macOS 14, which MindRoom supports.
+   `hdiutil` warns on macOS 27 that `diskutil image attach` replaces it, but MindRoom supports macOS 14, where only `hdiutil` is sure to exist.
 5. `ditto` the image's `.app` to `<target folder>/.MindRoom Chat.installing`, a hidden name without `.app` so Launch Services ignores it; a leftover from a killed install is removed first.
 6. Verify the staged copy (above).
 7. Rename it to the target. A rename fails rather than replaces, which keeps rule 2 true if something appeared meanwhile.
@@ -120,7 +120,7 @@ No tap change belongs to this pull request.
 Unit tests (XCTest, `macos/MindRoom/Tests/MindRoomTests/ChatAppInstallTests.swift`):
 
 - release picking: newest release with an image wins; drafts, prereleases, releases without an image, and assets that are not `uploaded` are skipped; `MindRoom-Chat.dmg` beats `MindRoom.dmg` in one release; the old name alone still works; a list that is not a list or a URL outside the repository's downloads gives nothing;
-- verification decision: an unsigned bundle and a validly signed app of another developer (`/System/Applications/Calculator.app`) are both refused;
+- verification decision: an unsigned bundle, a bundle with the right identifier signed by someone else (ad hoc), and a validly signed app of another developer (`/System/Applications/Calculator.app`) are all refused; the team and `notarized` clauses have no negative test, because that needs a notarized app of another team;
 - install target: `/Applications` when writable, `~/Applications` otherwise;
 - install flow with a fake tool runner: a verified app lands at the target and the image is detached and temporary files are gone; a refused app is not installed and the same cleanup happens; an existing target stops the install before any network request;
 - store and menu: open when present, install then open when missing, menu titles for both states.
