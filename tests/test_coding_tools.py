@@ -33,6 +33,7 @@ from mindroom.path_safety import (
 )
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.tool_schema import tool_parameters, validated_entrypoint
 from mindroom.tools.file import file_tools
 
@@ -279,6 +280,38 @@ class TestEditFile:
         assert result == "Error: edits[1] and edits[2] overlap. Merge them into one edit.\nNo changes written."
         assert (tmp_base / "overlap.py").read_text() == "alpha beta gamma\n"
 
+    def test_overlap_with_replace_all_says_to_drop_the_other_edit(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An edit inside a replace_all edit's matches is named as already covered."""
+        (tmp_base / "cfg.py").write_text("import os\n\n\ndef get_cfg(path=None):\n    return get_cfg\n")
+        result = tools.edit_file(
+            "cfg.py",
+            [
+                {"old_text": "def get_cfg(path=None):", "new_text": "def load_config(path=None):"},
+                {"old_text": "get_cfg", "new_text": "load_config", "replace_all": True},
+            ],
+        )
+        assert result == (
+            "Error: edits[1] (replace_all) already replaces the text edits[0] targets at line 4. "
+            "Drop edits[0], or merge them into one edit.\nNo changes written."
+        )
+
+    def test_replace_all_of_self_overlapping_text_goes_left_to_right(self, tools: CodingTools, tmp_base: Path) -> None:
+        """replace_all replaces non-overlapping matches from left to right, as str.replace does."""
+        (tmp_base / "a.txt").write_text("aaa\n")
+        result = tools.edit_file("a.txt", [{"old_text": "aa", "new_text": "b", "replace_all": True}])
+        assert result == "Applied 1 edit to a.txt: line 1."
+        assert (tmp_base / "a.txt").read_text() == "aaa\n".replace("aa", "b")
+
+    def test_identity_edit_is_not_reported(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An edit that changes nothing in a multi-edit call is left out of the reported lines."""
+        (tmp_base / "id.py").write_text("one\ntwo\nthree\n")
+        result = tools.edit_file(
+            "id.py",
+            [{"old_text": "one", "new_text": "one"}, {"old_text": "three", "new_text": "3"}],
+        )
+        assert result == "Applied 2 edits to id.py: line 3."
+        assert (tmp_base / "id.py").read_text() == "one\ntwo\n3\n"
+
     def test_one_failing_edit_writes_nothing(self, tools: CodingTools, tmp_base: Path) -> None:
         """All edits apply or none does."""
         result = tools.edit_file(
@@ -295,6 +328,41 @@ class TestEditFile:
         result = tools.edit_file("calc.py", _one("\ndef compute_totals(items):\n    pass\n", "x"))
         assert result == (
             "Error: old_text not found in the file.\nClosest line 4: def compute_total(items):\nNo changes written."
+        )
+
+    def test_not_found_names_up_to_three_close_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Several near lines are listed in file order, so the meant one is among them."""
+        body = "".join(f"# filler line {i}\n" for i in range(17))
+        body += "def fetch(url, timeout=30, headers=None):\n    pass\n\n\n\n\ndef fetch_json(url, timeout=30):\n"
+        (tmp_base / "net.py").write_text(body)
+        result = tools.edit_file("net.py", _one("def fetch(url: str, timeout: int = 30) -> str:", "x"))
+        assert result == (
+            "Error: old_text not found in the file.\nClosest lines: 18: def fetch(url, timeout=30, headers=None):"
+            " | 24: def fetch_json(url, timeout=30):\nNo changes written."
+        )
+
+    def test_not_found_but_new_text_present(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An edit whose new_text is already in the file is named as maybe applied."""
+        (tmp_base / "app.ini").write_text("[server]\nhost = 0.0.0.0\nport = 9090\n")
+        result = tools.edit_file("app.ini", _one("port = 8080", "port = 9090"))
+        assert result == (
+            "Error: old_text not found in the file, but its new_text is already at line 3; "
+            "this edit may already be applied.\nNo changes written."
+        )
+
+    @pytest.mark.parametrize(
+        "old_text",
+        [" [server]\n host = 0.0.0.0\n port = 8080", "1| [server]\n2| host = 0.0.0.0\n3| port = 8080"],
+    )
+    def test_not_found_with_read_file_prefix(self, tools: CodingTools, tmp_base: Path, old_text: str) -> None:
+        """An old_text copied with read_file's gutter is told to drop it."""
+        (tmp_base / "app.ini").write_text("[server]\nhost = 0.0.0.0\nport = 8080\n")
+        result = tools.edit_file(
+            "app.ini", [{"old_text": "host", "new_text": "h"}, {"old_text": old_text, "new_text": "z"}]
+        )
+        assert result == (
+            "Error: edits[1] not found in the file; don't copy read_file's \"N| \" line-number prefix."
+            "\nNo changes written."
         )
 
     def test_not_found_without_a_close_line(self, tools: CodingTools) -> None:
@@ -327,6 +395,17 @@ class TestEditFile:
         assert tools.edit_file("hello.py", json.dumps(_one("print('hi')", "print('hey')"))).startswith("Applied 1 edit")
         assert (tmp_base / "hello.py").read_text() == "print('hey')\nprint('world')\n"
 
+    def test_edits_as_a_broken_json_string(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A string that is no JSON is named as the problem, before the debris it left in other keys."""
+        edits = '[{"old_text">def upload(client, key, data):\n    retries = 3'
+        result = validated_entrypoint(tools.edit_file)(path="hello.py", edits=edits, new_text="x")
+        assert result == (
+            "Error: edits must be a JSON array, but it arrived as a string that is not valid JSON "
+            "(it starts '[{\"old_text\">def upload(client'). "
+            'Send edits as an array: edits=[{"old_text": "...", "new_text": "..."}].\nNo changes written.'
+        )
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
+
     def test_legacy_flat_call_still_applies(self, tools: CodingTools, tmp_base: Path) -> None:
         """A call with the old flat old_text and new_text arguments works, though the schema no longer shows them."""
         result = validated_entrypoint(tools.edit_file)(
@@ -351,6 +430,19 @@ class TestEditFile:
         items = parameters["properties"]["edits"]["items"]
         assert list(items["properties"]) == ["old_text", "new_text", "replace_all"]
         assert items["required"] == ["old_text", "new_text"]
+
+    def test_offered_schema_requires_edits(self, tools: CodingTools) -> None:
+        """The model is told edits is required and non-empty, though the old flat call still runs."""
+        derived = ToolFunction(
+            name="edit_file",
+            description="",
+            parameters=tool_parameters(tools.edit_file),
+            entrypoint=tools.edit_file,
+        )
+        parameters = tools.offered_function(derived).parameters
+        assert parameters["required"] == ["path", "edits"]
+        assert parameters["properties"]["edits"]["minItems"] == 1
+        assert "minItems" not in derived.parameters["properties"]["edits"]
 
     def test_crlf_and_bom_survive(self, tools: CodingTools, tmp_base: Path) -> None:
         """Line endings and a byte order mark stay as they were."""
