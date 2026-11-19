@@ -3497,6 +3497,7 @@ visibility = [
     "mindroom.listening.service",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.orchestrator",
+    "mindroom.plugin_http",
     "mindroom.reply_turn.inbox",
     "mindroom.response_runner",
     "mindroom.slack.delivery",
