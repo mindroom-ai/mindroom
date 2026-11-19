@@ -9966,7 +9966,7 @@ class TestHotQueriesAreIndexCovered:
         """Each lookup the journal writer runs per event is entered on the column it matches, not the room prefix.
 
         Entered on the room or principal prefix alone, the plan still says SEARCH while every call reads each row of
-        the room, payload included; a deployment with 21 agents spent half its journal time there.
+        the room, payload included.
         """
         database = _plan_database(tmp_path / "lookup-plan.db")
         steps: list[str] = []
