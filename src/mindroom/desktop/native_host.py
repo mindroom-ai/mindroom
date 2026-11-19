@@ -52,7 +52,6 @@ _IMMEDIATE_NATIVE_ACTIONS = frozenset(
         "status",
         "dashboard_configuration",
         "revoke_control",
-        "reset_emergency_stop",
         "decide_shell",
         "grant_shell",
         "revoke_shell",
@@ -69,7 +68,6 @@ class _NativeBridgeRuntimeProtocol(Protocol):
     def status(self) -> dict[str, object]: ...
     def grant_control(self, duration_seconds: int) -> dict[str, object]: ...
     def revoke_control(self) -> dict[str, object]: ...
-    def reset_emergency_stop(self) -> dict[str, object]: ...
     def decide_shell(
         self,
         command_id: str,
@@ -196,7 +194,6 @@ class NativeDesktopHost:
                 "control_available": bool(runtime_status.get("control_available", False)),
                 "lease_remaining_seconds": runtime_status.get("lease_remaining_seconds", 0),
                 "lease_expires_at_ms": runtime_status.get("lease_expires_at_ms"),
-                "emergency_stop_latched": bool(runtime_status.get("emergency_stop_latched", False)),
             },
             "permissions": _permission_status(),
             "shell": runtime_status.get(
@@ -471,13 +468,6 @@ class NativeDesktopHost:
             _expect_keys(parameters, set())
             self._require_runtime().revoke_control()
             return {"status": self.status()}
-        if action == "reset_emergency_stop":
-            _expect_keys(parameters, set())
-            try:
-                self._require_runtime().reset_emergency_stop()
-            except ValueError as exc:
-                raise NativeProtocolError("control_denied", str(exc)) from exc
-            return {"status": self.status()}
         if action == "decide_shell":
             _expect_keys(
                 parameters,
@@ -675,7 +665,6 @@ class NativeBridgeRuntime:
                 "control_available": False,
                 "lease_remaining_seconds": 0,
                 "lease_expires_at_ms": None,
-                "emergency_stop_latched": False,
                 "active_action": None,
                 "last_error": NativeProtocolError(
                     "internal_error",
@@ -694,10 +683,6 @@ class NativeBridgeRuntime:
     def revoke_control(self) -> dict[str, object]:
         """Revoke new local control actions."""
         return self._required_bridge().revoke_local_control()
-
-    def reset_emergency_stop(self) -> dict[str, object]:
-        """Reset the local emergency latch while idle."""
-        return self._required_bridge().reset_local_emergency_stop()
 
     def decide_shell(
         self,

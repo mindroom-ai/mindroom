@@ -49,7 +49,7 @@ from mindroom.desktop.protocol import (
     desktop_observation_mode,
     event_content,
 )
-from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider, DesktopProviderError
+from mindroom.desktop.provider import DesktopProvider, DesktopProviderError
 from mindroom.desktop.reply_fitting import leftmost_fitting, response_metrics, success_response
 from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.desktop.shell_actions import caller_shell_status, execute_shell, shell_status
@@ -184,7 +184,6 @@ class DesktopBridge:
     _stopped: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _accepting: bool = field(default=True, init=False)
     _active_action: str | None = field(default=None, init=False)
-    _control_revoked: bool = field(default=False, init=False)
     _control_lease_deadline: float | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
@@ -476,13 +475,12 @@ class DesktopBridge:
         if type(duration_seconds) is not int or not 60 <= duration_seconds <= 3600:
             msg = "Local control duration must be between 60 and 3600 seconds."
             raise ValueError(msg)
-        if not self._accepting or self._control_revoked:
-            msg = "Restart or reset the stopped bridge before granting control."
+        if not self._accepting:
+            msg = "Restart the stopped bridge before granting control."
             raise ValueError(msg)
         if self.provider is None:
             msg = "Desktop GUI is unavailable."
             raise ValueError(msg)
-        self.provider.check_emergency_stop()
         self.policy = replace(
             self.policy,
             allow_control=True,
@@ -495,19 +493,6 @@ class DesktopBridge:
         """Revoke new input immediately without repeating or interrupting active actions."""
         self.policy = replace(self.policy, allow_control=False, control_lease_expires_at_ms=None)
         self._control_lease_deadline = None
-        return self.local_status()
-
-    def reset_local_emergency_stop(self) -> dict[str, object]:
-        """Clear a local emergency latch only while idle and away from the fail-safe."""
-        if self._in_flight:
-            msg = "Wait for the active desktop action before resetting emergency stop."
-            raise ValueError(msg)
-        if self.provider is None:
-            msg = "Desktop GUI is unavailable."
-            raise ValueError(msg)
-        self.provider.check_emergency_stop()
-        self.revoke_local_control()
-        self._control_revoked = False
         return self.local_status()
 
     async def stop(self) -> None:
@@ -618,9 +603,6 @@ class DesktopBridge:
     async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:
         try:
             return await self._execute(command)
-        except DesktopEmergencyStopError as exc:
-            self._control_revoked = True
-            return self._error_response(command, str(exc))
         except (AccessibilityActionOutcomeUnknownError, PlaywrightActionOutcomeUnknownError) as exc:
             return self._unknown_control_response(command, reason=str(exc))
         except (
@@ -742,8 +724,6 @@ class DesktopBridge:
     def _control_policy_error(self) -> str | None:
         if not self.policy.allow_control:
             return "Desktop control is disabled; this bridge is observe-only."
-        if self._control_revoked:
-            return "Desktop emergency stop is latched; restart the bridge locally before granting control again."
         if not self._control_available():
             return "Local desktop control lease has expired."
         return None
@@ -770,8 +750,6 @@ class DesktopBridge:
             return None
         if not self.policy.allow_control:
             return "Desktop control is disabled; this bridge is observe-only."
-        if self._control_revoked:
-            return "Desktop emergency stop is latched; restart the bridge locally before granting control again."
         if not self._control_available():
             return "Local desktop control lease has expired."
         return None
@@ -790,11 +768,9 @@ class DesktopBridge:
             if self.browser_provider is None:
                 msg = "Playwright browser extension support is disabled on this desktop bridge."
                 raise DesktopProtocolError(msg)
-            if command.action == "browser_control":
-                if self.provider is None:
-                    msg = "Desktop GUI is unavailable for browser control."
-                    raise DesktopProtocolError(msg)
-                await asyncio.to_thread(self.provider.check_emergency_stop)
+            if command.action == "browser_control" and self.provider is None:
+                msg = "Desktop GUI is unavailable for browser control."
+                raise DesktopProtocolError(msg)
             browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
             return _Execution(browser_result.payload, browser_image=browser_result.image)
         if command.action == "status":
@@ -895,7 +871,6 @@ class DesktopBridge:
         status: dict[str, object] = {
             "gui_mode": "control" if control_available else "observe_only",
             "control_available": control_available,
-            "emergency_stop_latched": self._control_revoked,
             "allowed_app_count": len(self.policy.allowed_app_ids),
             "browser_enabled": self.policy.browser_enabled,
             "gui_available": self.provider is not None,
@@ -910,7 +885,6 @@ class DesktopBridge:
         lease_expires_at_ms = self.policy.control_lease_expires_at_ms
         return (
             self.policy.allow_control
-            and not self._control_revoked
             and lease_expires_at_ms is not None
             and self.clock() * 1000 < lease_expires_at_ms
             and self._control_lease_deadline is not None
