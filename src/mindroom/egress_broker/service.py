@@ -551,7 +551,9 @@ async def serve_egress_broker(
         else:
             _active.runtime = service.runtime
             logger.info(
-                "egress_broker_started", host=settings.host, url=service.runtime and service.runtime.primary_url
+                "egress_broker_started",
+                host=settings.host,
+                url=service.runtime and service.runtime.primary_url,
             )
         yield
     finally:
