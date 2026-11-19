@@ -2487,7 +2487,6 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
         ),
         patch.object(orchestrator._rooms, "setup", side_effect=blocked_setup),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()),
         patch.object(orchestrator.fleet, "start_sync", side_effect=start_sync),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
     ):
@@ -2603,7 +2602,6 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
         ),
         patch.object(orchestrator._rooms, "setup", side_effect=blocked_setup),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()),
         patch.object(orchestrator.fleet, "start_sync", side_effect=start_sync),
         patch("mindroom.orchestration.config_lifecycle.asyncio.to_thread", side_effect=blocked_config_load),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),

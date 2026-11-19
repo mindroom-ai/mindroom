@@ -234,15 +234,12 @@ class ApprovalStore(PrincipalRows):
             grant_id=grant_id,
         )
 
-    async def retire_approval_card(self, *, delivery_id: str, without_edit: bool = False) -> bool:
-        """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit.
+    async def retire_approval_card(self, *, delivery_id: str) -> bool:
+        """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit."""
+        return await self._write(approval_cards.retire, delivery_id=delivery_id)
 
-        ``without_edit`` retires one whose sender no longer exists to edit it.
-        """
-        return await self._write(approval_cards.retire, delivery_id=delivery_id, without_edit=without_edit)
-
-    async def approval_card_sender(self, *, delivery_id: str) -> str | None:
-        """Return the entity whose account sends and edits a card; None for a card the router sent before upgrade."""
+    async def approval_card_sender(self, *, delivery_id: str) -> tuple[str | None, str] | None:
+        """Return a card's sender principal, None for a card the router sent before upgrade, with its room."""
         return await self._read(approval_cards.sender_of, delivery_id=delivery_id)
 
     async def remember_terminal_approval_alias(self, *, room_id: str, card_event_id: str, delivery_id: str) -> None:
@@ -412,6 +409,10 @@ class ApprovalStore(PrincipalRows):
             thread_id=thread_id,
             payload=payload,
         )
+
+    async def unavailable_notice_principal(self, approval_id: str) -> str | None:
+        """Return the principal whose account began one approval's unavailable-owner notice, None before any did."""
+        return await self._read(approval_continuations.unavailable_notice_principal, approval_id)
 
     async def discard_unavailable_approval_continuation(
         self,

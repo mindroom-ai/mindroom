@@ -471,7 +471,7 @@ class _MultiAgentOrchestrator:
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
-            bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
+            bots=lambda: self.agent_bots,
             room_poster=self.room_poster,
             cards=self._approval_cards,
         )
@@ -623,9 +623,9 @@ class _MultiAgentOrchestrator:
         finally:
             self.response_admission_gate.release()
 
-    def _approval_cards(self) -> ApprovalDeliveryView | None:
-        """Return the one principal that keeps every approval's books; None before the Matrix accounts are prepared."""
-        return approval_card_store(self.event_journal_store, self.config, self.runtime_paths)
+    def _approval_cards(self) -> ApprovalDeliveryView:
+        """Return the one principal that keeps every approval's books, whichever account sends a card."""
+        return approval_card_store(self.event_journal_store, self.runtime_paths)
 
     def _bind_started_runtime_support_services(self) -> None:
         """Bind current runtime support objects needed by live callbacks."""
@@ -1064,8 +1064,6 @@ class _MultiAgentOrchestrator:
         """Handle bot-ready notifications through the public runtime protocol."""
         if bot.agent_name == ROUTER_AGENT_NAME:
             self._router_reply_memberships_live_sync_ready.set()
-        if bot.agent_name == ROUTER_AGENT_NAME and bot.running and bot.client is not None:
-            await self._approval_recovery.mark_router_ready()
         if self.config.personal_agent_instance(bot.agent_name) is not None:
             for observer in self.agent_bots.values():
                 observer.personal_room_target_ready()

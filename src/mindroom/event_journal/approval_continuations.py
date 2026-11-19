@@ -99,6 +99,16 @@ def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> 
     return f"approval-unavailable:{approval_id}:{membership_epoch}"
 
 
+def unavailable_notice_principal(transaction: Transaction, _principal_id: str, approval_id: str) -> str | None:
+    """Return the principal that first enqueued one approval's unavailable-owner notice, whoever posts for the room now."""
+    prefix = _unavailable_notice_delivery_id(approval_id, 0)[:-1]
+    row = transaction.fetchone(
+        "SELECT principal_id FROM matrix_delivery_outbox WHERE substr(delivery_id, 1, ?) = ? ORDER BY created_at_ns",
+        (len(prefix), prefix),
+    )
+    return None if row is None else str(row["principal_id"])
+
+
 def enqueue_unavailable_notice(
     transaction: Transaction,
     principal_id: str,

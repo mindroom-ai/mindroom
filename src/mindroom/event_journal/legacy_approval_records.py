@@ -59,6 +59,15 @@ def upgrade_approval_records(transaction: Transaction, inspector: SchemaInspecto
     """Convert an earlier release's approval tables to one row per call and card, inside the schema transaction."""
     tables = inspector.tables()
     if not any(table in tables for table in _DROPPED_TABLES):
+        # LEGACY_COMPAT: Approval cards the router sent, stored without a sender.
+        # Legacy format: approval_cards rows with no sender_principal_id column; the router sent and edited every card.
+        # Last legacy release: v2026.11.385; replacement: the next release records the principal that sends each card.
+        # Handling: the column is added, NULL on every stored card; a NULL sender is the router account wherever a card
+        # is sent, edited or verified, and the first startup expires each such pending card.
+        # Coverage: tests/test_legacy_approval_records.py::test_pending_router_card_is_ended_once_at_upgrade,
+        # tests/test_legacy_approval_records.py::test_the_sender_column_is_added_to_a_current_card_table.
+        if "approval_cards" in tables and "sender_principal_id" not in inspector.columns("approval_cards"):
+            transaction.execute("ALTER TABLE approval_cards ADD COLUMN sender_principal_id TEXT")
         return
     legacy = _Legacy.load(transaction, tables)
     for table in (*_DROPPED_TABLES, *_REPLACED_TABLES):

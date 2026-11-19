@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -23,6 +24,7 @@ from mindroom.approval.manager import (
     ApprovalManager,
     _ApprovalStartupSweep,
     _build_event_arguments,
+    approval_card_store,
     get_approval_store,
     initialize_approval_store,
 )
@@ -360,7 +362,8 @@ async def test_changed_device_recovery_finds_the_exact_terminal_approval_edit() 
         approval_room_ids=frozenset({claimed.room_id}),
     )
     transport = approval_transport_for_test(lambda name: router if name == "router" else None)
-    recovered = await transport.resolve_approval_delivery(claimed)
+    _send, resolve_delivered, _device_id = await transport.pinned_delivery(claimed.delivery_id)
+    recovered = await resolve_delivered(claimed)
 
     assert recovered == "$approval-edit"
     client.room_messages.assert_awaited_once()
@@ -399,10 +402,10 @@ async def test_action_delivery_resolver_reads_the_exact_router_card() -> None:
 @pytest.mark.asyncio
 async def test_action_delivery_resolver_abstains_when_no_bot_reads_the_room() -> None:
     """A room no running bot is in holds no card to verify, so an ordinary reply goes on as text."""
-    client = MagicMock(user_id="@mindroom_code:localhost", room_get_event=AsyncMock())
-    code = MagicMock(agent_name="code", running=True, client=client, approval_room_ids=frozenset())
+    client = MagicMock(user_id="@mindroom_code:localhost", room_get_event=AsyncMock(), rooms={})
+    code = MagicMock(agent_name="code", running=True, client=client)
     transport = approval_transport.ApprovalMatrixTransport(
-        bot_provider=lambda name: code if name == "code" else None,
+        bots=lambda: {"code": code},
         room_poster=lambda _room_id: None,
         cards=lambda: None,
     )
@@ -411,20 +414,35 @@ async def test_action_delivery_resolver_abstains_when_no_bot_reads_the_room() ->
     client.room_get_event.assert_not_awaited()
 
 
-def test_human_gate_has_no_router_denial(tmp_path: Path) -> None:
-    """A room the router is not in asks the approver, as every room does."""
-    router = MagicMock(agent_name="router", running=True, client=MagicMock(), approval_room_ids=frozenset({"!room:a"}))
-    runtime_paths = test_runtime_paths(tmp_path)
-    initialize_approval_store(
-        runtime_paths,
-        transport=approval_transport.ApprovalMatrixTransport(
-            bot_provider=lambda name: router if name == "router" else None,
-            room_poster=lambda _room_id: None,
-            cards=lambda: None,
-        ),
-        cards=None,
-        recovery=None,
+def test_approval_principal_needs_no_prepared_owner_account(tmp_path: Path) -> None:
+    """The principal that keeps the approval books is named without any Matrix account on disk."""
+    journal = MagicMock()
+
+    approval_card_store(lambda: journal, test_runtime_paths(tmp_path))
+
+    (principal_id,) = journal.principal.call_args.args
+    assert re.fullmatch(r"router@@mindroom_router(_\w+)?:[\w.]+", principal_id)
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_runs_without_the_owner_account() -> None:
+    """Startup card recovery waits for runtime support only, not for an owner account's first sync."""
+    recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock())
+    manager = MagicMock(
+        recover_cards_on_startup=AsyncMock(return_value=_ApprovalStartupSweep(discarded=0, failed=0)),
+        expire_cards=AsyncMock(return_value=[]),
     )
+    recovery.bind(manager)
+
+    await recovery.mark_startup_runtime_support_ready()
+
+    manager.recover_cards_on_startup.assert_awaited_once()
+
+
+def test_human_gate_has_no_router_denial(tmp_path: Path) -> None:
+    """A room no router is in asks the approver, as every room does."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    initialize_approval_store_for_test(runtime_paths)
 
     gate = human_gate(runtime_paths, approver_id="@alice:localhost", room_id="!personal:a", thread_id=None)
 
@@ -971,7 +989,6 @@ async def test_startup_unavailable_cleanup_scans_owners_while_card_recovery_rema
         journal_provider=lambda: None,
     )
     recovery.manager = MagicMock()
-    recovery._startup_router_ready_for_cleanup = True
     recovery._startup_runtime_support_ready_for_cleanup = True
 
     with (
@@ -2088,7 +2105,6 @@ def test_get_approval_store_returns_initialized_store(tmp_path: Path) -> None:
 async def test_manager_owns_recovery_across_bootstrap_rebind_and_shutdown(tmp_path: Path) -> None:
     """Early readiness survives binding, and shutdown cancels the same recovery task."""
     recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock())
-    await recovery.mark_router_ready()
     await recovery.mark_startup_runtime_support_ready()
     assert not recovery._startup_cleanup_done
     assert recovery._startup_cleanup_retry is None

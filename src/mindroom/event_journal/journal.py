@@ -739,14 +739,14 @@ def _advance_membership_epoch(
               SELECT 1 FROM approval_cards AS cards
               WHERE cards.principal_id = delivery.principal_id
                 AND cards.delivery_id = delivery.delivery_id
-                AND cards.kind = 'request'
+                AND (cards.kind = 'request' OR cards.sender_principal_id IS NOT NULL)
           )
         """,
         (principal_id, room_id),
     )
-    # Approval cards are authored by the router principal, while the paused
+    # Approval cards are kept by the bookkeeping principal, while the paused
     # run belongs to the responding entity principal. Decide its calls and keep
-    # the router's terminal Matrix edit debt before this fence removes it.
+    # the cards' terminal Matrix edit debt before this fence removes it.
     approval_cards.expire_for_departed_responder(
         transaction,
         principal_id,

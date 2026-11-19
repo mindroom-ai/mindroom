@@ -183,7 +183,7 @@ def reserve(
         return False
     epoch = transaction.fetchone(
         "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
-        (principal_id, binding.room_id),
+        (card.sender_principal_id or principal_id, binding.room_id),
     )
     transaction.execute(
         """
@@ -325,7 +325,7 @@ def claim(
         raise ValueError(msg)
     if not membership_state.claim_membership_epoch(
         transaction,
-        principal_id,
+        receipt.sender_principal_id or principal_id,
         room_id=call.room_id,
         expected_membership_epoch=int(row["membership_epoch"]),
     ):
@@ -358,7 +358,7 @@ def claim(
         room_id=call.room_id,
         thread_id=call.thread_id,
         membership_epoch=int(row["membership_epoch"]),
-        sender_entity=receipt.sender_entity,
+        sender_principal_id=receipt.sender_principal_id,
         payload=approval_cards.terminal_content(
             receipt.payload,
             status="approved",

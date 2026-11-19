@@ -116,7 +116,6 @@ Matrix sync callback
 | `event_journal/turn_rows.py` | Turn state as rows, agent-scoped: lookups, narrow writes, the one reshape that forms a new source tuple, the agent's redaction record and the eligibility guard every write checks, delivery binding, and retention |
 | `event_journal/legacy_turn_rows.py` | One-time conversion of `turn_records` blobs, journal redaction tombstones, and the pre-journal JSON ledger into turn rows |
 | `event_journal/legacy_approval_failures.py` | One-time conversion of the free-text failure reasons failing approval continuations stored into their failure kind and detail |
-| `event_journal/legacy_approval_senders.py` | One-time addition of the sender column to approval cards the router sent before cards recorded their sender |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish; silent schedule triggers and hidden routes run as messages |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |

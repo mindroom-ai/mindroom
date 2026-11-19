@@ -268,7 +268,7 @@ def _manager(
     store: EventJournalStore,
     sent: list[MatrixDelivery],
     *,
-    sender_in_room: bool = True,
+    sender_gone: bool = False,
 ) -> ApprovalManager:
     async def send(delivery: MatrixDelivery) -> str:
         sent.append(delivery)
@@ -278,7 +278,8 @@ def _manager(
         test_runtime_paths(tmp_path),
         send_approval_delivery=send,
         cards=store.principal(_ROUTER),
-        sender_bot=lambda _entity_name, _room_id: object() if sender_in_room else None,
+        sender_bot=lambda _sender, _room_id: object(),
+        sender_gone=sender_gone,
         sender_device_id=AsyncMock(return_value="DEVICE"),
     )
 
@@ -760,15 +761,17 @@ async def test_pending_router_card_is_ended_once_at_upgrade(
     tmp_path: Path,
     router_in_room: bool,
 ) -> None:
-    """A card the router sent before upgrade expires at the first startup, edited only where the router still is."""
+    """A card the router sent before upgrade expires at the first startup, edited only while a router bot exists."""
     store = recorded_journal("01_waiting_card_acknowledged.sql").open()
     sent: list[MatrixDelivery] = []
-    manager = _manager(tmp_path, store, sent, sender_in_room=router_in_room)
+    manager = _manager(tmp_path, store, sent, sender_gone=not router_in_room)
     recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock())
     recovery.bind(manager)
     try:
         approvals = store.principal(_ROUTER).approvals
-        assert await approvals.approval_card_sender(delivery_id="waiting") is None
+        pending = await approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
+        assert isinstance(pending, ApprovalCardView)
+        assert await approvals.approval_card_sender(delivery_id=pending.delivery_id) == (None, _ROOM)
 
         assert await recovery.end_cards_without_sender() == 1
 
@@ -787,7 +790,7 @@ async def test_grants_survive_upgrade(recorded_journal: Callable[[str], _Journal
     """Ending the router's pending cards at upgrade leaves every timed grant as it was."""
     journal = recorded_journal("13_timed_grants.sql")
     store = journal.open()
-    manager = _manager(tmp_path, store, [], sender_in_room=False)
+    manager = _manager(tmp_path, store, [], sender_gone=True)
     recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock())
     recovery.bind(manager)
     try:
@@ -806,3 +809,20 @@ async def test_grants_survive_upgrade(recorded_journal: Callable[[str], _Journal
     finally:
         await manager.shutdown()
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_sender_column_is_added_to_a_current_card_table(tmp_path: Path) -> None:
+    """A journal whose card table predates the sender column gets it, once, and keeps its cards."""
+    path = tmp_path / "journal.db"
+    await EventJournalStore.open_sqlite(path).close()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("ALTER TABLE approval_cards DROP COLUMN sender_principal_id")
+        connection.commit()
+
+    for _ in range(2):
+        await EventJournalStore.open_sqlite(path).close()
+
+    with closing(sqlite3.connect(path)) as connection:
+        columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(approval_cards)")]
+    assert columns.count("sender_principal_id") == 1

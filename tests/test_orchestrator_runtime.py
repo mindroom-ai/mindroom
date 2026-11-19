@@ -255,7 +255,7 @@ def _serving_runtime(runtime_paths: RuntimePaths, script_runtime: object | None 
 @contextmanager
 def _mock_approval_recovery(orchestrator: _MultiAgentOrchestrator, **kwargs: object) -> Iterator[AsyncMock]:
     recovery = AsyncMock(**kwargs)
-    manager = MagicMock(recover_cards_on_startup=recovery, expire_cards_without_sender=AsyncMock(return_value=0))
+    manager = MagicMock(recover_cards_on_startup=recovery, expire_cards=AsyncMock(return_value=[]))
     with (
         patch.object(orchestrator._approval_recovery, "manager", manager),
         patch("mindroom.orchestrator.initialize_approval_store", return_value=manager),
@@ -3442,34 +3442,6 @@ class TestMultiAgentOrchestrator:
         recover_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_approval_recovery_waits_for_router_ready_before_startup_recovery(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Runtime support readiness alone must not discard startup approval cards before router first sync."""
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=MagicMock())
-        orchestrator.config.tool_approval.timeout_days = 7.0
-        orchestrator.config.tool_approval.rules = [SimpleNamespace(timeout_days=10.0)]
-
-        bot = MagicMock()
-        bot.agent_name = "router"
-        bot.running = True
-        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-        install_bots(orchestrator, {"router": bot})
-
-        with _mock_approval_recovery(
-            orchestrator,
-            return_value=_ApprovalStartupSweep(discarded=1, failed=0),
-        ) as recover_approval_cards_on_startup:
-            orchestrator._approval_recovery.reset_startup_cleanup_gate()
-            await orchestrator._approval_recovery.mark_startup_runtime_support_ready()
-            recover_approval_cards_on_startup.assert_not_awaited()
-
-            await orchestrator.handle_bot_ready(bot)
-
-        recover_approval_cards_on_startup.assert_awaited_once_with()
-
-    @pytest.mark.asyncio
     async def test_approval_recovery_concurrent_startup_gates_discard_once(
         self,
         tmp_path: Path,
@@ -4202,8 +4174,7 @@ class TestMultiAgentOrchestrator:
         router_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
 
         responder_bot.first_sync_complete = True
-        with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
-            await orchestrator.handle_bot_ready(responder_bot)
+        await orchestrator.handle_bot_ready(responder_bot)
         assert await wait_for_background_tasks(
             timeout=SETTLE_TIMEOUT_SECONDS,
             owner=orchestrator.turn_recovery.task_owner,
@@ -4356,17 +4327,16 @@ class TestMultiAgentOrchestrator:
         router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_turns)
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
-        with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
-            ready_task = asyncio.create_task(orchestrator.handle_bot_ready(router_bot))
-            try:
-                await recovery_started.wait()
-                assert ready_task.done()
-                recovery_task = orchestrator.turn_recovery._task
-                assert recovery_task is not None
-                assert not recovery_task.done()
-            finally:
-                release_recovery.set()
-                await ready_task
+        ready_task = asyncio.create_task(orchestrator.handle_bot_ready(router_bot))
+        try:
+            await recovery_started.wait()
+            assert ready_task.done()
+            recovery_task = orchestrator.turn_recovery._task
+            assert recovery_task is not None
+            assert not recovery_task.done()
+        finally:
+            release_recovery.set()
+            await ready_task
 
         assert await wait_for_background_tasks(
             timeout=SETTLE_TIMEOUT_SECONDS,
@@ -4587,8 +4557,7 @@ class TestMultiAgentOrchestrator:
 
         team_bot.recover_pending_turn_journal_events.assert_not_awaited()
         member_bot.first_sync_complete = True
-        with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
-            await orchestrator.handle_bot_ready(member_bot)
+        await orchestrator.handle_bot_ready(member_bot)
         assert await wait_for_background_tasks(
             timeout=SETTLE_TIMEOUT_SECONDS,
             owner=orchestrator.turn_recovery.task_owner,
@@ -5252,6 +5221,8 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=current_config)
         record_opened_event_journal(current_config.event_journal, runtime_paths=runtime_paths)
         plan = ConfigUpdatePlan(new_config=new_config, reply_authorization_changed=True)
+        # The journal this test names is never opened, so nothing holds the approval cards.
+        orchestrator._approval_cards = MagicMock(return_value=None)
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),

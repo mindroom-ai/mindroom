@@ -15,7 +15,7 @@ from weakref import WeakValueDictionary
 
 from mindroom.approval.events import card_approvable
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
+from mindroom.entity_resolution import owner_matrix_id
 from mindroom.event_journal import (
     SCHEDULED_APPROVAL_WINDOW_NS,
     TIMEOUT_REASON,
@@ -52,7 +52,6 @@ if TYPE_CHECKING:
     from mindroom.approval.recovery import ApprovalRecovery
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.approval.transport import ApprovalMatrixTransport
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import (
         ApprovalDeliveryView,
@@ -595,7 +594,7 @@ class ApprovalManager:
             approver_user_id=approver_user_id,
             approvable=card_approvable(prepared),
             grant_operation=grant_operation,
-            sender_entity=sender_entity,
+            sender_principal_id=self.transport.responder_principal_id(sender_entity),
         )
 
     async def settle_background_approval(
@@ -668,18 +667,19 @@ class ApprovalManager:
         self._ensure_deadline_sweep()
 
     async def _worker(self, delivery_id: str | None = None) -> MatrixDeliveryWorker:
-        """Return the worker that sends one card as its sender's device; without a card, one that walks the outbox."""
+        """Return the worker pinned to the client of one card's sender; without a card, one that only walks the outbox."""
         if self.cards is None:
             raise ToolApprovalTransportError(RUNTIME_NOT_READY_REASON)
+        send, resolve_delivered, device_id = await self.transport.pinned_delivery(delivery_id)
         return MatrixDeliveryWorker(
             store=self.cards,
-            send=self.transport.send_approval_delivery,
+            send=send,
             event_type=_EVENT_TYPE,
             resend_after_reconciliation_miss=lambda delivery: (
                 delivery.payload.get("status") == "approved" and delivery.payload.get("approvable") is False
             ),
-            sending_device_id=None if delivery_id is None else await self.transport.sender_device_id(delivery_id),
-            resolve_delivered=self.transport.resolve_approval_delivery,
+            sending_device_id=device_id,
+            resolve_delivered=resolve_delivered,
             delivery_locks=self._delivery_locks,
         )
 
@@ -960,34 +960,24 @@ class ApprovalManager:
         # already retired is delivered too.
         return await self.cards.approvals.retire_approval_card(delivery_id=delivery_id)
 
-    async def expire_continuation_cards(
-        self,
-        continuation_id: str,
-        reason: str,
-        *,
-        edit_optional: bool = False,
-    ) -> bool:
-        """Expire every card of one failed continuation with its failure's reason; see ``_expire_card``."""
-        if self.cards is None:
-            return False
-        complete = True
-        for room_id in await self.cards.approvals.pending_approval_room_ids():
-            async for card in self._pending_cards(self.cards, room_id):
-                if card.owner_kind == "reply" and card.call.owner_id == continuation_id:
-                    complete = await self._expire_card(card, reason, edit_optional=edit_optional) and complete
-        return complete
+    async def expire_continuation_cards(self, continuation_id: str, reason: str) -> bool:
+        """Enqueue and flush expiry for every card owned by one failed continuation, with its failure's reason."""
+        owned = await self.expire_cards(
+            lambda card: card.owner_kind == "reply" and card.call.owner_id == continuation_id,
+            reason,
+        )
+        return self.cards is not None and all(owned)
 
-    async def expire_cards_without_sender(self, reason: str) -> int:
-        """Expire every live card that records no sender; return how many were still undecided."""
+    async def expire_cards(self, matches: Callable[[ApprovalCardView], bool], reason: str) -> list[bool]:
+        """Expire every live card that matches, with ``reason``; return whether each one retired."""
         if self.cards is None:
-            return 0
-        ended = 0
-        for room_id in await self.cards.approvals.pending_approval_room_ids():
-            async for card in self._pending_cards(self.cards, room_id):
-                if card.sender_entity is None:
-                    ended += not card.decided
-                    await self._expire_card(card, reason, edit_optional=True)
-        return ended
+            return []
+        return [
+            await self._expire_stored(card, reason=reason)
+            for room_id in await self.cards.approvals.pending_approval_room_ids()
+            async for card in self._pending_cards(self.cards, room_id)
+            if matches(card)
+        ]
 
     @staticmethod
     async def _pending_cards(cards: ApprovalDeliveryView, room_id: str) -> AsyncIterator[ApprovalCardView]:
@@ -1034,27 +1024,6 @@ class ApprovalManager:
             ],
         )
 
-    async def _expire_card(self, card: ApprovalCardView, reason: str, *, edit_optional: bool) -> bool:
-        """Expire one card and deliver its terminal edit; ``edit_optional`` retires it unedited when its sender is gone."""
-        if not edit_optional or self._sender_ready(card):
-            return await self._expire_stored(card, reason=reason)
-        assert self.cards is not None
-        if not card.decided:
-            recorded = await self.cards.approvals.resolve_approval_call(
-                card.call,
-                requested_status="expired",
-                reason=reason,
-            )
-            if recorded.recorded and recorded.continuation_ready:
-                await self._wake_continuation(recorded)
-        logger.warning(
-            "approval_card_ended_without_edit",
-            delivery_id=card.delivery_id,
-            room_id=card.room_id,
-            sender_entity=card.sender_entity,
-        )
-        return await self.cards.approvals.retire_approval_card(delivery_id=card.delivery_id, without_edit=True)
-
     async def _expire_stored(self, card: ApprovalCardView, *, reason: str = TIMEOUT_REASON) -> bool:
         if self.cards is None:
             return False
@@ -1069,8 +1038,6 @@ class ApprovalManager:
             )
             if recorded.recorded and recorded.continuation_ready:
                 await self._wake_continuation(recorded)
-            return False
-        if not self._sender_ready(card):
             return False
         if card.decided:
             return await self._flush_card_delivery(card.delivery_id, card.card_event_id, room_id=card.room_id)
@@ -1215,7 +1182,7 @@ class ApprovalManager:
 
     def _sender_ready(self, card: ApprovalCardView) -> bool:
         """Return whether the account that sent a card runs in its room, without which the card is not acted on."""
-        return self.transport.sender_bot(card.sender_entity, card.room_id) is not None
+        return self.transport.sender_bot(card.sender_principal_id, card.room_id) is not None
 
     @staticmethod
     def _pending_event_content(
@@ -1270,21 +1237,9 @@ class ApprovalManager:
         return status, reason, False
 
 
-def approval_card_store(
-    journal: Callable[[], EventJournalStore],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> ApprovalDeliveryView | None:
-    """Return the one principal that keeps every approval's calls, cards and grants, whichever account sends a card.
-
-    It is the principal the router account had when it sent every card, so grants and decided calls stay where they
-    are; None before the Matrix accounts are prepared, when no card is recoverable yet.
-    """
-    try:
-        router_id = entity_identity_registry(config, runtime_paths).current_ids[ROUTER_AGENT_NAME]
-    except MissingManagedEntityAccountError:
-        return None
-    return journal().principal(journal_principal_id(ROUTER_AGENT_NAME, router_id.full_id))
+def approval_card_store(journal: Callable[[], EventJournalStore], runtime_paths: RuntimePaths) -> ApprovalDeliveryView:
+    """Return the principal that keeps every approval's books: the router account's, which needs no prepared account."""
+    return journal().principal(journal_principal_id(ROUTER_AGENT_NAME, owner_matrix_id(runtime_paths)))
 
 
 def get_approval_store() -> ApprovalManager | None:

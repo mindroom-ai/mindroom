@@ -2046,7 +2046,11 @@ class TestAgentBot(AgentBotTestBase):
         dispatched: list[str] = []
         not_found = nio.RoomGetEventError("not found", status_code="M_NOT_FOUND")
         reader = (
-            MagicMock(running=True, client=MagicMock(room_get_event=AsyncMock(return_value=not_found)))
+            MagicMock(
+                running=True,
+                client=MagicMock(room_get_event=AsyncMock(return_value=not_found)),
+                approval_room_ids=frozenset({"!test:localhost"}),
+            )
             if room_has_reader
             else None
         )

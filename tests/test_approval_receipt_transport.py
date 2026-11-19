@@ -1,14 +1,16 @@
 """The asking account sends and edits its approval cards, and large argument evidence stays usable."""
 
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+import pytest_asyncio
 
-from mindroom.approval.manager import ApprovalManager
+from mindroom.approval.manager import ApprovalManager, ToolApprovalTransportError, UnverifiableApprovalCardError
 from mindroom.approval.transport import ApprovalMatrixTransport, _offload_oversized_full_arguments
 from mindroom.event_journal import (
     ApprovalCardReservation,
@@ -18,23 +20,28 @@ from mindroom.event_journal import (
     EventJournalStore,
     MatrixDelivery,
 )
+from mindroom.event_journal.matrix_delivery import PermanentDeliveryError
 from mindroom.matrix.large_messages import content_fits_normal_event
 from tests.conftest import approval_manager_for_test, test_runtime_paths
+from tests.journal_membership_helpers import admit_room_membership
 
 _ROOM = "!room:example.org"
 _CARD_TYPE = "io.mindroom.tool_approval"
+_CODE = "code@@mindroom_code:example.org"
+_BOOKS = "router@@mindroom_router:example.org"
 
 
-def _bot(name: str) -> MagicMock:
-    """Return a running bot of one entity that is in the room."""
+def _bot(name: str, *, device: str | None = None) -> MagicMock:
+    """Return a running bot of one entity whose own client is joined to the room, which it was never invited to."""
     client = MagicMock(spec=nio.AsyncClient)
     client.user_id = f"@mindroom_{name}:example.org"
-    client.device_id = f"{name}-device"
+    client.device_id = device or f"{name}-device"
+    client.rooms = {_ROOM: MagicMock()}
     return MagicMock(
         agent_name=name,
         running=True,
         client=client,
-        approval_room_ids=frozenset({_ROOM}),
+        approval_room_ids=frozenset(),
         latest_thread_event_id_if_needed=AsyncMock(return_value=None),
     )
 
@@ -46,12 +53,14 @@ def _transport(
 ) -> ApprovalMatrixTransport:
     """Return the transport over these bots, reading each card's sender from ``senders`` or from ``cards``."""
     if cards is None:
-        cards = MagicMock()
+        known = senders or {}
+        cards = MagicMock(principal_id=_BOOKS)
         cards.approvals.approval_card_sender = AsyncMock(
-            side_effect=lambda *, delivery_id: (senders or {})[delivery_id]
+            side_effect=lambda *, delivery_id: (known[delivery_id], _ROOM) if delivery_id in known else None,
         )
+        cards.approvals.unavailable_notice_principal = AsyncMock(return_value=None)
     return ApprovalMatrixTransport(
-        bot_provider=bots.get,
+        bots=lambda: bots,
         room_poster=lambda _room_id: next(iter(bots.values()), None),
         cards=lambda: cards,
     )
@@ -75,7 +84,7 @@ def _delivery(*, edits_event_id: str | None = None) -> MatrixDelivery:
 
 @pytest.fixture
 def sending_clients(monkeypatch: pytest.MonkeyPatch) -> list[nio.AsyncClient]:
-    """Accept every send and return the client each one went through."""
+    """Accept every send to a room the client may send to, and return the client each one went through."""
     used: list[nio.AsyncClient] = []
 
     async def send(client: nio.AsyncClient, room_id: str, *_event: object, **_options: object) -> nio.RoomSendResponse:
@@ -83,28 +92,53 @@ def sending_clients(monkeypatch: pytest.MonkeyPatch) -> list[nio.AsyncClient]:
         return nio.RoomSendResponse(f"$event-{len(used)}", room_id)
 
     monkeypatch.setattr("mindroom.approval.transport.send_room_event_result", send)
+    monkeypatch.setattr("mindroom.approval.transport.can_send_to_encrypted_room", lambda *_args, **_options: True)
     return used
 
 
 @pytest.mark.asyncio
-async def test_card_is_sent_by_asking_agent(sending_clients: list[nio.AsyncClient]) -> None:
-    """The bot of the entity a card records sends it, with another bot in the room."""
+@pytest.mark.parametrize("edits_event_id", [None, "$card"])
+async def test_card_is_sent_by_asking_agent(sending_clients: list[nio.AsyncClient], edits_event_id: str | None) -> None:
+    """The bot of the account a card records sends the card and its terminal edit, with another bot in the room."""
     bots = {"other": _bot("other"), "code": _bot("code")}
 
-    await _transport(bots, {"card-1": "code"}).send_approval_delivery(_delivery())
+    send, _resolve, device_id = await _transport(bots, {"card-1": _CODE}).pinned_delivery("card-1")
+    await send(_delivery(edits_event_id=edits_event_id))
 
     assert sending_clients == [bots["code"].client]
+    assert device_id == "code-device"
 
 
 @pytest.mark.asyncio
-async def test_terminal_edit_goes_through_card_sender(sending_clients: list[nio.AsyncClient]) -> None:
-    """Only the account that sent a card edits it."""
-    bots = {"other": _bot("other"), "code": _bot("code")}
+async def test_delivery_goes_out_through_the_client_pinned_with_its_device(
+    sending_clients: list[nio.AsyncClient],
+) -> None:
+    """A client that replaces the sender's after the device was named for the claim does not send the delivery."""
+    bots = {"code": _bot("code", device="device-a")}
+    pinned = bots["code"].client
 
-    await _transport(bots, {"card-1": "code"}).send_approval_delivery(_delivery(edits_event_id="$card"))
+    send, _resolve, device_id = await _transport(bots, {"card-1": _CODE}).pinned_delivery("card-1")
+    bots["code"] = _bot("code", device="device-b")
+    await send(_delivery())
 
-    assert sending_clients == [bots["code"].client]
-    bots["other"].client.room_send.assert_not_called()
+    assert (device_id, sending_clients) == ("device-a", [pinned])
+
+
+@pytest.mark.asyncio
+async def test_sender_outside_the_room_pins_nothing_and_a_removed_sender_refuses_for_good() -> None:
+    """A sender whose client is not joined defers the delivery; one whose bot is gone ends it."""
+    bots = {"code": _bot("code")}
+    bots["code"].client.rooms = {}
+    transport = _transport(bots, {"card-1": _CODE})
+
+    assert transport.sender_bot(_CODE, _ROOM) is None
+    with pytest.raises(ToolApprovalTransportError, match="not ready"):
+        await transport.pinned_delivery("card-1")
+
+    del bots["code"]
+    send, _resolve, _device_id = await transport.pinned_delivery("card-1")
+    with pytest.raises(PermanentDeliveryError):
+        await send(_delivery())
 
 
 @pytest.mark.asyncio
@@ -116,7 +150,11 @@ async def test_team_turn_card_is_sent_by_team_account(tmp_path: Path) -> None:
         prepared_for.append(sender_entity)
         return content
 
-    manager = approval_manager_for_test(test_runtime_paths(tmp_path), prepare_approval_event=prepare)
+    manager = approval_manager_for_test(
+        test_runtime_paths(tmp_path),
+        prepare_approval_event=prepare,
+        responder_principal_id=lambda entity: f"{entity}@@mindroom_{entity}:example.org",
+    )
     card = await manager.prepare_reply_card(
         approval_id="card-1",
         continuation_id="card-1",
@@ -136,25 +174,27 @@ async def test_team_turn_card_is_sent_by_team_account(tmp_path: Path) -> None:
     )
 
     assert card is not None
-    assert card.sender_entity == "research_team"
+    assert card.sender_principal_id == "research_team@@mindroom_research_team:example.org"
     assert prepared_for == ["research_team"]
 
 
-def _reservation(sender_entity: str | None) -> ApprovalCardReservation:
+def _reservation(delivery_id: str = "card-1", tool_call_id: str = "call-1") -> ApprovalCardReservation:
     return ApprovalCardReservation(
-        delivery_id="card-1",
-        tool_call_id="call-1",
+        delivery_id=delivery_id,
+        tool_call_id=tool_call_id,
         event_type=_CARD_TYPE,
-        payload={"approval_id": "card-1", "body": "Approval required"},
+        payload={"approval_id": delivery_id, "body": "Approval required"},
         approver_user_id="@alice:example.org",
         approvable=True,
-        sender_entity=sender_entity,
+        sender_principal_id=_CODE,
     )
 
 
-async def _reserve_card(cards: ApprovalDeliveryView, sender_entity: str | None) -> CallKey:
-    call = CallKey.detached("run-1", "call-1")
-    assert await cards.approvals.reserve_detached_card(
+async def _reserve_card(cards: ApprovalDeliveryView, card: ApprovalCardReservation | None = None) -> CallKey | None:
+    """Reserve one detached card the code agent sends; None when the room refuses it."""
+    card = card or _reservation()
+    call = CallKey.detached("run-1", card.tool_call_id)
+    reserved = await cards.approvals.reserve_detached_card(
         call=call,
         owner_kind="script",
         tool_name="shell",
@@ -163,22 +203,205 @@ async def _reserve_card(cards: ApprovalDeliveryView, sender_entity: str | None) 
         room_id=_ROOM,
         thread_id=None,
         expires_at_ns=time.time_ns() + 3_600_000_000_000,
-        card=_reservation(sender_entity),
+        card=card,
     )
-    return call
+    return call if reserved else None
+
+
+@pytest_asyncio.fixture
+async def journal(tmp_path: Path) -> AsyncIterator[EventJournalStore]:
+    """Open a fresh journal and close it after the test."""
+    store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    yield store
+    await store.close()
 
 
 @pytest.mark.asyncio
-async def test_card_row_records_sender_entity(tmp_path: Path) -> None:
-    """The card row keeps the entity that sends the card."""
-    journal = EventJournalStore.open_sqlite(tmp_path / "journal.db")
-    try:
-        cards = journal.principal("router@shared")
-        await _reserve_card(cards, "code")
+async def test_card_row_records_sender_entity(journal: EventJournalStore) -> None:
+    """The card row keeps the principal of the account that sends the card."""
+    cards = journal.principal(_BOOKS)
+    await _reserve_card(cards)
 
-        assert await cards.approvals.approval_card_sender(delivery_id="card-1") == "code"
+    assert await cards.approvals.approval_card_sender(delivery_id="card-1") == (_CODE, _ROOM)
+    assert await cards.approvals.approval_card_sender(delivery_id="unknown") is None
+
+
+def _card_event(sender: str) -> MagicMock:
+    """Return the room's answer for a card event one account sent."""
+    response = MagicMock(spec=nio.RoomGetEventResponse)
+    response.event = SimpleNamespace(
+        event_id="$card",
+        sender=sender,
+        source={"type": _CARD_TYPE, "room_id": _ROOM, "content": {"approval_id": "card-1"}},
+    )
+    return response
+
+
+@pytest.mark.asyncio
+async def test_click_on_card_from_other_account_is_rejected() -> None:
+    """A card event counts only when the account of the card's recorded sender sent it."""
+    bots = {"other": _bot("other"), "code": _bot("code")}
+    transport = _transport(bots, {"card-1": _CODE})
+    reader = bots["other"].client
+
+    reader.room_get_event = AsyncMock(return_value=_card_event("@mindroom_other:example.org"))
+    assert await transport.resolve_approval_action_delivery(_ROOM, "$card") is None
+
+    reader.room_get_event = AsyncMock(return_value=_card_event("@mindroom_code:example.org"))
+    assert await transport.resolve_approval_action_delivery(_ROOM, "$card") == "card-1"
+
+
+@pytest.mark.asyncio
+async def test_click_is_verified_by_the_sender_when_another_account_cannot_read_the_card() -> None:
+    """An account that joined after the card cannot read it; the click still counts when the sender can."""
+    forbidden = nio.RoomGetEventError("forbidden", status_code="M_FORBIDDEN")
+    bots = {"other": _bot("other"), "code": _bot("code")}
+    bots["other"].client.room_get_event = AsyncMock(return_value=forbidden)
+    bots["code"].client.room_get_event = AsyncMock(return_value=_card_event("@mindroom_code:example.org"))
+    transport = _transport(bots, {"card-1": _CODE})
+
+    assert await transport.resolve_approval_action_delivery(_ROOM, "$card") == "card-1"
+
+    bots["code"].client.room_get_event = AsyncMock(return_value=forbidden)
+    with pytest.raises(UnverifiableApprovalCardError):
+        await transport.resolve_approval_action_delivery(_ROOM, "$card")
+
+
+@pytest.mark.asyncio
+async def test_approval_works_in_room_with_one_agent_and_no_owner(sending_clients: list[nio.AsyncClient]) -> None:
+    """One agent alone in a room it was never invited to, as its personal room, prepares and sends its own card."""
+    bots = {"code": _bot("code")}
+    transport = _transport(bots, {"card-1": _CODE})
+    content = {"approval_id": "card-1", "body": "Approval required"}
+
+    assert await transport.prepare_approval_event(_ROOM, None, content, "code") == content
+    send, _resolve, _device_id = await transport.pinned_delivery("card-1")
+    assert await send(_delivery()) == "$event-1"
+    assert sending_clients == [bots["code"].client]
+
+
+def _manager(tmp_path: Path, bots: dict[str, MagicMock], cards: ApprovalDeliveryView) -> ApprovalManager:
+    return ApprovalManager(test_runtime_paths(tmp_path), transport=_transport(bots, cards=cards), cards=cards)
+
+
+@pytest.mark.asyncio
+async def test_restart_edits_card_through_its_recorded_sender(
+    tmp_path: Path,
+    journal: EventJournalStore,
+    sending_clients: list[nio.AsyncClient],
+) -> None:
+    """After a restart the terminal edit of a decided card goes out through the account that sent the card."""
+    cards = journal.principal(_BOOKS)
+    before = {"other": _bot("other"), "code": _bot("code")}
+    after = {"other": _bot("other"), "code": _bot("code", device="code-device-2")}
+    managers = [_manager(tmp_path, bots, cards) for bots in (before, after)]
+    try:
+        call = await _reserve_card(cards)
+        assert call is not None
+        assert (await managers[0].recover_cards_on_startup()).complete
+        await managers[0].shutdown()
+        await cards.approvals.resolve_approval_call(call, requested_status="denied", reason="No.")
+
+        assert (await managers[1].recover_cards_on_startup()).complete
+
+        assert sending_clients == [before["code"].client, after["code"].client]
     finally:
-        await journal.close()
+        for manager in managers:
+            await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_recovery_without_the_senders_client_leaves_a_fresh_card_unattempted(
+    tmp_path: Path,
+    journal: EventJournalStore,
+    sending_clients: list[nio.AsyncClient],
+) -> None:
+    """A card whose sender is still starting is not claimed, so it is sent whole once the sender runs."""
+    cards = journal.principal(_BOOKS)
+    bots = {"code": _bot("code")}
+    bots["code"].running = False
+    manager = _manager(tmp_path, bots, cards)
+    try:
+        await _reserve_card(cards)
+
+        assert not (await manager.recover_cards_on_startup()).complete
+
+        initial = await cards.load_matrix_delivery(delivery_id="card-1", stage=DeliveryStage.INITIAL)
+        assert initial is not None
+        assert not initial.attempted
+        bots["code"].running = True
+        assert (await manager.recover_cards_on_startup()).complete
+        assert sending_clients == [bots["code"].client]
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_notice_keeps_its_first_poster(
+    journal: EventJournalStore,
+    sending_clients: list[nio.AsyncClient],
+) -> None:
+    """A retry after the room's poster changed reuses the notice the first poster sent and posts no second one."""
+    bots = {"code": _bot("code"), "other": _bot("other")}
+    for name, bot in bots.items():
+        bot.journal_principal.return_value = journal.principal(f"{name}@@mindroom_{name}:example.org")
+    posters = iter([bots["code"], bots["other"]])
+    transport = ApprovalMatrixTransport(
+        bots=lambda: bots,
+        room_poster=lambda _room_id: next(posters),
+        cards=lambda: journal.principal(_BOOKS),
+    )
+    paused = SimpleNamespace(approval_id="approval-1", room_id=_ROOM, thread_id=None, response_event_id="$reply")
+
+    first = await transport.deliver_unavailable_notice(paused, "Requesting agent 'gone' is no longer available.")
+    again = await transport.deliver_unavailable_notice(paused, "Requesting agent 'gone' is no longer available.")
+
+    assert first is not None
+    assert again is not None
+    assert (first.principal_id, again.principal_id) == (_CODE, _CODE)
+    assert sending_clients == [bots["code"].client]
+
+
+@pytest.mark.asyncio
+async def test_owner_departure_leaves_another_accounts_cards_alone(journal: EventJournalStore) -> None:
+    """The owner account leaving a room decides no card an agent sent there and refuses none after it."""
+    books = journal.principal(_BOOKS)
+    await admit_room_membership(journal.principal(_CODE), _ROOM, "join")
+    await admit_room_membership(books, _ROOM, "join")
+    call = await _reserve_card(books)
+    assert call is not None
+
+    await admit_room_membership(books, _ROOM, "leave")
+
+    assert await books.approvals.detached_decision(call) is None
+    pending = await books.approvals.pending_approval_cards(room_id=_ROOM, limit=10)
+    assert [(card.delivery_id, card.current) for card in pending] == [("card-1", True)]
+    assert await books.approvals.pending_approval_room_ids() == (_ROOM,)
+    assert await _reserve_card(books, _reservation("card-2", "call-2")) is not None
+    acknowledged = await books.acknowledge_matrix_delivery(
+        delivery_id="card-1",
+        stage=DeliveryStage.INITIAL,
+        event_id="$card",
+        delivered_projections=(),
+    )
+    assert acknowledged.settled_event_id == "$card"
+
+
+@pytest.mark.asyncio
+async def test_sender_departure_denies_its_own_cards(journal: EventJournalStore) -> None:
+    """The agent that sent a card leaving the room denies the card and refuses its next one."""
+    books = journal.principal(_BOOKS)
+    code = journal.principal(_CODE)
+    await admit_room_membership(code, _ROOM, "join")
+    call = await _reserve_card(books)
+    assert call is not None
+
+    await admit_room_membership(code, _ROOM, "leave")
+
+    decision = await books.approvals.detached_decision(call)
+    assert decision is not None
+    assert decision.status == "denied"
+    assert await _reserve_card(books, _reservation("card-2", "call-2")) is None
 
 
 @pytest.mark.asyncio
@@ -217,73 +440,3 @@ async def test_timed_card_offloads_complete_arguments_before_receipt_enrichment(
     assert "full_arguments_url" not in prepared
     assert prepared["approvable"] is True
     assert content_fits_normal_event({**prepared, "approval_provenance": {"evidence": "x" * 4_000}})
-
-
-def _card_event(sender: str) -> MagicMock:
-    """Return the room's answer for a card event one account sent."""
-    response = MagicMock(spec=nio.RoomGetEventResponse)
-    response.event = SimpleNamespace(
-        event_id="$card",
-        sender=sender,
-        source={"type": _CARD_TYPE, "room_id": _ROOM, "content": {"approval_id": "card-1"}},
-    )
-    return response
-
-
-@pytest.mark.asyncio
-async def test_click_on_card_from_other_account_is_rejected() -> None:
-    """A card event counts only when the account of the card's recorded sender sent it."""
-    bots = {"other": _bot("other"), "code": _bot("code")}
-    transport = _transport(bots, {"card-1": "code"})
-    reader = bots["other"].client
-
-    reader.room_get_event = AsyncMock(return_value=_card_event("@mindroom_other:example.org"))
-    assert await transport.resolve_approval_action_delivery(_ROOM, "$card") is None
-
-    reader.room_get_event = AsyncMock(return_value=_card_event("@mindroom_code:example.org"))
-    assert await transport.resolve_approval_action_delivery(_ROOM, "$card") == "card-1"
-
-
-@pytest.mark.asyncio
-async def test_approval_works_in_room_with_one_agent_and_no_owner(
-    sending_clients: list[nio.AsyncClient],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One agent alone in a room prepares and sends its own card."""
-    monkeypatch.setattr("mindroom.approval.transport.can_send_to_encrypted_room", lambda *_args, **_options: True)
-    bots = {"code": _bot("code")}
-    transport = _transport(bots, {"card-1": "code"})
-    content = {"approval_id": "card-1", "body": "Approval required"}
-
-    assert await transport.prepare_approval_event(_ROOM, None, content, "code") == content
-    assert await transport.send_approval_delivery(_delivery()) == "$event-1"
-    assert sending_clients == [bots["code"].client]
-
-
-@pytest.mark.asyncio
-async def test_restart_edits_card_through_its_recorded_sender(
-    tmp_path: Path,
-    sending_clients: list[nio.AsyncClient],
-) -> None:
-    """After a restart the terminal edit of a decided card goes out through the account that sent the card."""
-    journal = EventJournalStore.open_sqlite(tmp_path / "journal.db")
-    cards = journal.principal("router@shared")
-    before = {"other": _bot("other"), "code": _bot("code")}
-    after = {"other": _bot("other"), "code": _bot("code")}
-    managers = [
-        ApprovalManager(test_runtime_paths(tmp_path), transport=_transport(bots, cards=cards), cards=cards)
-        for bots in (before, after)
-    ]
-    try:
-        call = await _reserve_card(cards, "code")
-        assert (await managers[0].recover_cards_on_startup()).complete
-        await managers[0].shutdown()
-        await cards.approvals.resolve_approval_call(call, requested_status="denied", reason="No.")
-
-        assert (await managers[1].recover_cards_on_startup()).complete
-
-        assert sending_clients == [before["code"].client, after["code"].client]
-    finally:
-        for manager in managers:
-            await manager.shutdown()
-        await journal.close()

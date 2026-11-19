@@ -658,9 +658,14 @@ def claim_active_delivery_ownership(
     room_id, membership_epoch = ownership
     if expected_room_id is not None and room_id != expected_room_id:
         return None
+    # An approval card's delivery belongs to the membership of the account that sends it.
+    sender = transaction.fetchone(
+        "SELECT sender_principal_id AS sender FROM approval_cards WHERE principal_id = ? AND delivery_id = ?",
+        (principal_id, delivery_id),
+    )
     membership_is_current = claim_membership_epoch(
         transaction,
-        principal_id,
+        principal_id if sender is None or sender["sender"] is None else str(sender["sender"]),
         room_id=room_id,
         expected_membership_epoch=membership_epoch,
     )

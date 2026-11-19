@@ -549,7 +549,8 @@ async def test_republished_receipt_aliases_remain_terminal(
                 {
                     "event_id": event_id,
                     "room_id": room_id,
-                    "sender": "@other:test" if event_id == "$untrusted-receipt" else "@router:test",
+                    # The account of the receipt's sender, whose journal principal is "agent@code".
+                    "sender": "@other:test" if event_id == "$untrusted-receipt" else "code",
                     "origin_server_ts": 1000,
                     "type": "io.mindroom.tool_approval",
                     "content": {
@@ -565,7 +566,7 @@ async def test_republished_receipt_aliases_remain_terminal(
             approval_room_ids=frozenset({"!room:test"}),
             client=MagicMock(user_id="@router:test", room_get_event=AsyncMock(side_effect=get_event)),
         )
-        transport = approval_transport_for_test(lambda name: router if name == "router" else None)
+        transport = approval_transport_for_test(lambda name: router if name == "router" else None, cards=owner)
         manager.transport.resolve_approval_action_delivery = transport.resolve_approval_action_delivery
         for event_id in ("$untrusted-receipt", "$unknown-delivery"):
             result = await handle_card_response_for_test(
@@ -1195,6 +1196,10 @@ async def test_grant_maintenance_releases_inactive_payload_but_keeps_identity(
         else:
             await admit_room_membership(journal.principal(terminal), "!room:test", "leave")
         await manager.recover_cards_on_startup()
+        if terminal == "router@shared":
+            # The owner account leaving the room ends no grant that an agent's card began.
+            assert '"command": "first"' in await _grant_payload(journal, grant.grant_id)
+            return
         assert await _grant_payload(journal, grant.grant_id) == ""
         assert await owner.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card) == grant
         assert (
@@ -2048,7 +2053,7 @@ async def test_a_click_on_a_card_whose_membership_is_fenced_is_not_consumed(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """While the router's membership of the room is fenced for departure, its cards decide nothing."""
+    """While the membership of the account that sent a card is fenced for departure, the card decides nothing."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     try:
@@ -2056,7 +2061,7 @@ async def test_a_click_on_a_card_whose_membership_is_fenced_is_not_consumed(
         await journal.backend.write(
             lambda transaction: transaction.execute(
                 "UPDATE room_membership SET departure_fenced = 1 WHERE principal_id = ? AND room_id = ?",
-                ("router@shared", "!room:test"),
+                ("agent@code", "!room:test"),
             ),
         )
         view = await journal.principal("router@shared").approvals.approval_card(
