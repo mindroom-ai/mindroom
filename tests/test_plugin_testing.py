@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.plugin_api import config_plugins, entity_directory
+from mindroom.plugin_api import ROUTER_AGENT_NAME, config_plugins, entity_directory
 from mindroom.plugin_testing import LoadedPlugin, TurnRefused, load_plugin
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ def test_route_answers_a_signed_in_member_only(plugin: LoadedPlugin) -> None:
     assert alice.get(f"{ROUTES}/hello").status_code == 401
 
 
-def test_a_route_posts_as_the_router_and_streams_to_a_member(plugin: LoadedPlugin) -> None:
+def test_a_route_posts_as_the_rooms_poster_and_streams_to_a_member(plugin: LoadedPlugin) -> None:
     """`RoomMessenger` posts land in the room's `sent`, a relay to a person is refused, and a stream ends at sign-out.
 
     A client keeps working after a `with` block of its own, and its streams still end when its user signs out.
@@ -108,17 +108,32 @@ def test_a_route_reads_the_room_as_set_up(plugin: LoadedPlugin) -> None:
 
 
 def test_a_room_is_direct_as_running_agents_tell_and_no_load_sees_another_ones_answer(tmp_path: Path) -> None:
-    """A room its members joined as a direct message is one, as is one member alone with the router; loads never share."""
+    """A room its members joined as a direct message is one, as is one person alone with an agent; loads never share."""
     cases = [
         ({ALICE: "Alice", BOB: "Bob"}, True, True),
         ({ALICE: "Alice", BOB: "Bob"}, False, False),
         ({ALICE: "Alice"}, False, True),
     ]
-    for index, (members, direct, expected) in enumerate(cases):
+    for index, (people, direct, expected) in enumerate(cases):
         with load_plugin(EXAMPLE, tmp_path / str(index), config=CONFIG, settings=SETTINGS) as plugin:
-            plugin.add_room(ROOM, members=members, direct=direct)
+            directory = entity_directory(plugin.config, plugin.runtime_paths)
+            (helper,) = (user for user, entity in directory.items() if entity.name == "helper")
+            plugin.add_room(ROOM, members={**people, helper: "Helper"}, direct=direct)
 
             assert plugin.client(ALICE).get(f"{ROUTES}/about").json()["direct"] is expected
+
+
+def test_a_rooms_bots_are_the_entities_among_its_members_and_no_owner_runs_unasked(plugin: LoadedPlugin) -> None:
+    """Beside the kit's own reader, the bots are the agents rooms list as members, and the owner only once one lists it."""
+    ids = {entity.name: user for user, entity in entity_directory(plugin.config, plugin.runtime_paths).items()}
+
+    plugin.add_room(ROOM, members={ALICE: "Alice", ids["helper"]: "Helper"})
+    without_owner = set(plugin._bots)
+    plugin.add_room("!owned:example.org", members={ALICE: "Alice", ids[ROUTER_AGENT_NAME]: "MindRoom"})
+
+    assert without_owner == {"", "helper"}
+    assert set(plugin._bots) == {"", "helper", ROUTER_AGENT_NAME}
+    assert list(plugin._bots[ROUTER_AGENT_NAME].client.rooms) == ["!owned:example.org"]
 
 
 @pytest.mark.asyncio
@@ -190,7 +205,7 @@ async def test_a_member_of_a_room_never_added_with_its_key_is_refused(tmp_path: 
 @pytest.mark.asyncio
 async def test_adding_a_grant_room_again_changes_whom_it_admits(tmp_path: Path) -> None:
     """Who joined or left a room the agent's grant names counts from the next decision, whatever other rooms exist."""
-    # Another agent's room the test never adds keeps the grants unresolved, as a room the router has not joined does.
+    # Another agent's room the test never adds keeps the grants unresolved, as a room no bot has joined does.
     config = {"agents": {**HOST_CONFIG["agents"], "other": {"display_name": "Other", "rooms": ["dev"]}}}
     public = "!public:example.org"
     with load_plugin(EXAMPLE, tmp_path, config=config, settings=SETTINGS) as plugin:
