@@ -1052,7 +1052,9 @@ async def test_startup_welcome_reaches_matrix_once_nio_accepts_sends_to_the_room
         "joined_before_startup": [json.dumps({"next_batch": "initial"}).encode(), _rooms_frame("joined", [ROOM])],
     }[ordering]
     synced = asyncio.Semaphore(0)
-    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=lambda _receipt_new: synced.release()))
+    monkeypatch.setattr(
+        bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=lambda _receipt_new: synced.release())
+    )
     config = DurableSyncConfig(sync_filter=bot_module._SYNC_FILTER) if ordering == "join_before_first_sync" else None
     async with _owned_session(bot, config) as session:
         assert bot.client is not None
