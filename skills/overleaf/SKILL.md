@@ -34,8 +34,8 @@ The main file is usually `main.tex`; otherwise it is the `.tex` file with `\docu
 
 ## Edit and push
 
-1. Edit the `.tex`, `.bib`, and other source files with your file tools.
-2. Pull first: `git pull --rebase origin master`.
+1. Pull first, before you edit: `git pull --rebase origin master`.
+2. Edit the `.tex`, `.bib`, and other source files with your file tools.
 3. Stage only the files you changed: `git add <files>`. Never `git add -A` after a compile.
 4. `git commit -m "<what you changed>"`. If git asks who you are, set it for this folder only:
    `git config user.name "<your name>"` and `git config user.email "<your name>@mindroom.invalid"`.
