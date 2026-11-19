@@ -265,7 +265,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
-| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#environment-variables) egress broker; setting it turns Agent Keys on, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; off)_ |
+| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#environment-variables) egress broker for workers; `off` turns Agent Keys off, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; a loopback broker for shell calls in the primary)_ |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway and Agent CLI routes | `false` |

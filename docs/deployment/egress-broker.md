@@ -55,6 +55,7 @@ Keys and accounts can only be entered while the broker is on.
 While it is on, the request log and CA download routes return 409 when the broker is not running.
 
 Running MindRoom with `--no-api` disables the broker along with the API.
+Without a port, the broker is also off when it cannot run: with `--no-api`, where nobody could answer a key request, and when the primary's `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` names a proxy the broker cannot follow, which it never dials around. MindRoom logs a warning and keeps running; a broker that fails to bind its loopback port is logged the same way. With a set port, these stop startup instead.
 
 ### Service rules
 
@@ -243,6 +244,7 @@ On the personal page, users who can manage the agent get **Limit to repositories
 The broker refuses private addresses, so by default worker calls through it cannot reach your LAN or your Tailscale network.
 `shell` calls that run in the primary process are the exception: they can reach any address directly, so the guard would protect nothing and only break Home Assistant, a NAS, or Ollama.
 The broker dials private, unique-local, and Tailscale addresses for them as if every range were listed, and still refuses loopback, link-local, and cloud metadata addresses.
+It also resolves `*.local` names for them, such as `homeassistant.local`, and checks the addresses they resolve to by the same rule.
 The token of each call says which kind it is, signed by the broker, so a worker cannot claim the primary's rule.
 List the ranges worker calls may reach in `private_networks`:
 

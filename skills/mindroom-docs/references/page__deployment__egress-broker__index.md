@@ -23,17 +23,21 @@ The TTL applies to new requests: an expired token gets 407 on every new request,
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
 That includes LAN and Tailscale addresses and names that resolve to them, unless [`private_networks`](#private-networks) lists them.
 Without that, a command that needs one can bypass the broker, for example with `curl --noproxy '*'`, where the worker's network allows direct connections.
+A `shell` call that runs in the primary process can always bypass the broker that way, so the broker does not refuse private addresses for it; see [Private networks](#private-networks).
 
 ## Configuration
 
 ### Environment variables
 
-Set these on the primary runtime to enable the broker:
+The broker is on by default.
+With none of these set, it listens on `127.0.0.1` on a free port the system picks, and only `shell` calls that run in the primary process use it: no worker-facing URL is known, so worker-routed calls get no broker environment.
+The port is picked at each start, so two MindRoom instances on one machine never collide; nothing outside the primary needs to know it.
+Set the port and URL to serve workers too:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MINDROOM_EGRESS_BROKER_PORT` | Yes (when using the broker) | Unset (broker disabled) | Port the broker listens on, such as 8768; when unset the broker stays off |
-| `MINDROOM_EGRESS_BROKER_HOST` | No | `0.0.0.0` | Bind address for the broker listener |
+| `MINDROOM_EGRESS_BROKER_PORT` | Yes (to serve workers) | Unset (loopback broker for primary shells) | Port the broker listens on, such as 8768; `off` or `0` turns the broker off |
+| `MINDROOM_EGRESS_BROKER_HOST` | No | `0.0.0.0` (`127.0.0.1` when the port is unset) | Bind address for the broker listener; used only when the port is set |
 | `MINDROOM_EGRESS_BROKER_URL` | Yes (when port is set) | None | Worker-facing first hop, such as `http://host.docker.internal:8768` for Docker workers or `http://squid:3128` in an approved-egress chain |
 | `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` | No | `604800` (7 days) | How long each minted worker token remains valid |
 
@@ -42,11 +46,12 @@ Its CA variables (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_
 Every tool gets the same files, and their system roots are the file the primary's exported `SSL_CERT_FILE` names when one is set, otherwise OpenSSL's default file or certifi, so a tool that used roots of its own before, such as Python Requests with certifi, trusts these instead.
 On macOS, Go programs such as `gh` verify certificates with the system keychain and ignore these variables, so from a primary shell there they do not trust the broker CA.
 
-When `MINDROOM_EGRESS_BROKER_PORT` is unset, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
-Keys and accounts can only be entered while the port is set.
-With the port set, the request log and CA download routes return 409 while the broker is not running.
+With `MINDROOM_EGRESS_BROKER_PORT=off`, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
+Keys and accounts can only be entered while the broker is on.
+While it is on, the request log and CA download routes return 409 when the broker is not running.
 
 Running MindRoom with `--no-api` disables the broker along with the API.
+Without a port, the broker is also off when it cannot run: with `--no-api`, where nobody could answer a key request, and when the primary's `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` names a proxy the broker cannot follow, which it never dials around. MindRoom logs a warning and keeps running; a broker that fails to bind its loopback port is logged the same way. With a set port, these stop startup instead.
 
 ### Service rules
 
@@ -233,7 +238,11 @@ On the personal page, users who can manage the agent get **Limit to repositories
 ### Private networks
 
 The broker refuses private addresses, so by default worker calls through it cannot reach your LAN or your Tailscale network.
-List the ranges agents may reach in `private_networks`:
+`shell` calls that run in the primary process are the exception: they can reach any address directly, so the guard would protect nothing and only break Home Assistant, a NAS, or Ollama.
+The broker dials private, unique-local, and Tailscale addresses for them as if every range were listed, and still refuses loopback, link-local, and cloud metadata addresses.
+It also resolves `*.local` names for them, such as `homeassistant.local`, and checks the addresses they resolve to by the same rule.
+The token of each call says which kind it is, signed by the broker, so a worker cannot claim the primary's rule.
+List the ranges worker calls may reach in `private_networks`:
 
 ```yaml
 egress_broker:
