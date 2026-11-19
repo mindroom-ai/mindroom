@@ -597,7 +597,7 @@ async def test_worker_path_tool_file_swapped_for_link_after_the_check_is_refused
         lambda file_tool, _coding: file_tool.read_file("doc.txt"),
         lambda file_tool, _coding: file_tool.delete_file("doc.txt"),
         lambda _file, coding_tool: coding_tool.write_file("notes/new.txt", "new notes"),
-        lambda _file, coding_tool: coding_tool.edit_file("doc.txt", "contract", "changed"),
+        lambda _file, coding_tool: coding_tool.edit_file("doc.txt", [{"old_text": "contract", "new_text": "changed"}]),
     ],
     ids=["file:save_file", "file:read_file", "file:delete_file", "coding:write_file", "coding:edit_file"],
 )

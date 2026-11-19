@@ -442,7 +442,7 @@ async def check_for_injection(ctx: ToolResultTransformContext) -> str | None:
   - progress a tool streams while it runs, such as a worker's progress in the reply's live tool frames;
   - a delegated agent's answer to the agent that delegated to it; the delegated agent's own tool calls are checked.
 - `call_tool` in [`mindroom.plugin_testing`](plugins.md#testing-plugins) runs these hooks as a call does.
-- A plugin that uses `tool:result_transform` states `"mindroom_plugin_api": "1.31"` in its manifest, so an older MindRoom skips it with a clear reason.
+- A plugin that uses `tool:result_transform` states `"mindroom_plugin_api": "1.32"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 ## Custom events
 

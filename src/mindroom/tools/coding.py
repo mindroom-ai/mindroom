@@ -26,7 +26,11 @@ if TYPE_CHECKING:
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#coding",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.AGENT,
-    managed_init_args=(ToolManagedInitArg.FILE_ACCESS, ToolManagedInitArg.SHARED_DIRECTORY_ROOTS),
+    managed_init_args=(
+        ToolManagedInitArg.FILE_ACCESS,
+        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS,
+        ToolManagedInitArg.IN_SANDBOX_REQUEST,
+    ),
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,

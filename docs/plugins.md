@@ -253,7 +253,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.31",
+  "mindroom_plugin_api": "1.32",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -558,6 +558,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 | `SHARED_DIRECTORY_ROOTS` | `shared_directory_roots` | A function that returns the [shared directories](tools/execution-and-coding.md#shared_directories) the tool can reach where it runs, each with its `path` and whether it is `writable`: in the primary process the constructing agent's, or none when tools run in dedicated workers or through the sandbox proxy, and in a worker every directory it mounts (see [Access by deployment](tools/execution-and-coding.md#access-by-deployment)); call it on each use, since the agent can join or leave one while it replies |
+| `IN_SANDBOX_REQUEST` | `in_sandbox_request` | `True` only when a sandbox runner builds the tool for the request it executes, `False` everywhere else; a plugin that requests it states `"mindroom_plugin_api": "1.31"` |
 
 ```python
 from mindroom.plugin_api import (
