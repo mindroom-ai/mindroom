@@ -394,9 +394,10 @@ async def _verified_trusted_upstream_jwt_claims(
         if isinstance(exc, jwt.PyJWKClientConnectionError):
             # PyJWT refuses JWKS redirects, so a URL that redirects never yields keys.
             redirected = isinstance(exc.__cause__, HTTPError) and 300 <= exc.__cause__.code < 400
+            # Name the setting, not its value: the URL may carry a credential in its query string.
             logger.warning(
                 "Trusted upstream JWKS fetch failed",
-                jwks_url=jwt_client.uri,
+                setting="MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
                 reason="redirect refused; configure the direct JWKS URL" if redirected else "unreachable",
             )
         # PyJWT messages can quote unverified header text such as `kid`, so log only the class and a missing claim.

@@ -30,7 +30,7 @@ class _JwksServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                if self.path == "/moved":
+                if self.path.partition("?")[0] == "/moved":
                     self.send_response(302)
                     self.send_header("Location", "/jwks")
                     self.end_headers()
@@ -95,10 +95,10 @@ def test_a_rotated_key_verifies_at_once(jwks_server: _JwksServer) -> None:
 
 
 def test_a_redirecting_jwks_url_is_refused_and_named_in_the_log(jwks_server: _JwksServer) -> None:
-    """A JWKS URL that redirects fails closed, and the log names the URL and asks for the direct one."""
+    """A JWKS URL that redirects fails closed; the log names the setting, asks for the direct URL, and hides the URL."""
     key = trusted_upstream_jwt_key()
     jwks_server.jwks = trusted_upstream_jwks(key)
-    moved = f"{jwks_server.base_url}/moved"
+    moved = f"{jwks_server.base_url}/moved?token=sentinel-jwks-secret"
 
     with capture_logs() as logs, pytest.raises(HTTPException) as error:
         _verify(_client(moved), trusted_upstream_jwt(key))
@@ -109,8 +109,9 @@ def test_a_redirecting_jwks_url_is_refused_and_named_in_the_log(jwks_server: _Jw
     assert fetch_failures == [
         {
             "event": "Trusted upstream JWKS fetch failed",
-            "jwks_url": moved,
+            "setting": "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
             "reason": "redirect refused; configure the direct JWKS URL",
             "log_level": "warning",
         },
     ]
+    assert "sentinel-jwks-secret" not in repr(logs)
