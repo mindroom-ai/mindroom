@@ -1388,7 +1388,7 @@ class AgentBot:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
         self._personal_room_lifecycle.schedule_reconciliation()
 
-        if not self._orchestrator_ready_handled:
+        if self._first_sync_done and not self._orchestrator_ready_handled:
             await self.orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
 
@@ -1512,16 +1512,20 @@ class AgentBot:
         if call_manager is not None:
             await call_manager.on_room_event(room, event)
 
-    async def _on_ingestion_frame_completion(self) -> None:
-        """Publish one fully settled source frame to the bot runtime."""
-        first_sync_response = not self._first_sync_done
+    async def _on_ingestion_frame_completion(self, receipt_new: bool) -> None:
+        """Publish one fully settled source frame to the bot runtime.
+
+        A completion an earlier process already admitted is replayed after a restart before any new
+        response arrives, so it does not complete this generation's first sync.
+        """
+        first_sync_response = receipt_new and not self._first_sync_done
         self._mark_sync_progress()
         if not self._accepting_work:
             return
         client = self.client
         if client is not None:
             await self._room_lifecycle.observe_trusted_sync_rooms(client.rooms)
-        self._first_sync_done = True
+        self._first_sync_done = self._first_sync_done or receipt_new
         await self._run_sync_response_side_effects(
             first_sync_response=first_sync_response,
         )
