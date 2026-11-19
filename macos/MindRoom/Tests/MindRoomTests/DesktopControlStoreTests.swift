@@ -951,25 +951,21 @@ final class DesktopControlStoreTests: XCTestCase {
         let stopped = fullControlStatus(bridge: "stopped")
         defaults.set(stopped.pairingIdentity, forKey: fullControlKey)
         var requests: [(String, [String: Any])] = []
-        var loginItemRequests = 0
+        let login = FakeLoginItem()
         let store = DesktopControlStore(
             helper: helper,
             request: { action, parameters, _ in
                 requests.append((action, parameters))
                 return try self.response(status: stopped)
             },
-            defaults: defaults,
-            enableLoginItem: {
-                loginItemRequests += 1
-                return true
-            }
+            defaults: defaults, loginItem: login.item
         )
         XCTAssertTrue(store.fullControl, "The preference survives an app restart")
 
         store.refreshAtLaunch()
         await waitUntilIdle(store)
         XCTAssertEqual(requests.map(\.0), ["status", "start"])
-        XCTAssertEqual(loginItemRequests, 1)
+        XCTAssertEqual(login.changes, [true])
         XCTAssertFalse(store.loginItemNeedsApproval)
 
         try await publish(fullControlStatus(bridge: "observe_only"), through: helper, to: store)
@@ -1001,7 +997,7 @@ final class DesktopControlStoreTests: XCTestCase {
                     requests.append(action)
                     return try self.response(status: stopped)
                 },
-                defaults: defaults, enableLoginItem: { true }
+                defaults: defaults, loginItem: FakeLoginItem().item
             )
 
             store.refreshAtLaunch()
@@ -1023,13 +1019,14 @@ final class DesktopControlStoreTests: XCTestCase {
                 requests.append(action)
                 return try self.response(status: control)
             }
-            let store = DesktopControlStore(helper: helper, request: request, defaults: defaults, enableLoginItem: { true })
+            let store = DesktopControlStore(helper: helper, request: request, defaults: defaults, loginItem: FakeLoginItem().item)
             try await publish(control, through: helper, to: store)
             await waitUntilIdle(store)
             XCTAssertEqual(requests, ["grant_control"])
 
-            if viaSwitch { store.setFullControl(false) } else { store.revokeControl() }
+            if viaSwitch { store.turnOffFullControl() } else { store.revokeControl() }
             await waitUntilIdle(store)
+            await waitFor { requests.count == 2 }
 
             XCTAssertEqual(requests, ["grant_control", "revoke_control"])
             XCTAssertFalse(store.fullControl)
@@ -1062,12 +1059,13 @@ final class DesktopControlStoreTests: XCTestCase {
                     requests.append(action)
                     return try self.response(status: changed)
                 },
-                defaults: defaults, enableLoginItem: { true }
+                defaults: defaults, loginItem: FakeLoginItem().item
             )
             try await publish(paired, through: helper, to: store)
             XCTAssertTrue(store.fullControl)
 
             try await publish(changed, through: helper, to: store)
+            await waitFor { !requests.isEmpty }
 
             XCTAssertFalse(store.fullControl)
             XCTAssertNil(defaults.string(forKey: fullControlKey))
@@ -1076,7 +1074,7 @@ final class DesktopControlStoreTests: XCTestCase {
             store.refreshAtLaunch()
             await waitUntilIdle(store)
             XCTAssertFalse(store.fullControl)
-            XCTAssertEqual(requests, ["status"])
+            XCTAssertEqual(requests, ["revoke_control", "status"], "Forgetting it always revokes, whatever status says")
         }
     }
 
@@ -1085,7 +1083,7 @@ final class DesktopControlStoreTests: XCTestCase {
         let defaults = try fullControlDefaults()
         let paired = fullControlStatus(bridge: "stopped")
         defaults.set(paired.pairingIdentity, forKey: fullControlKey)
-        let store = DesktopControlStore(helper: helper, request: { _, _, _ in [:] }, defaults: defaults, enableLoginItem: { true })
+        let store = DesktopControlStore(helper: helper, request: { _, _, _ in [:] }, defaults: defaults, loginItem: FakeLoginItem().item)
 
         try await publish(paired, through: helper, to: store)
         try await publish(.stopped, through: helper, to: store)
@@ -1098,38 +1096,35 @@ final class DesktopControlStoreTests: XCTestCase {
         let defaults = try fullControlDefaults()
         let running = fullControlStatus(bridge: "observe_only", apps: ["com.example.Editor"], revision: 4)
         let saved = fullControlStatus(bridge: "stopped", revision: 5)
+        let approved = try XCTUnwrap(running.pairingIdentity)
         var requests: [(String, [String: Any])] = []
-        var loginItemRequests = 0
+        let login = FakeLoginItem(approves: false)
         let store = DesktopControlStore(
             helper: helper,
             request: { action, parameters, _ in
                 requests.append((action, parameters))
                 return try self.response(status: action == "stop" ? running : saved)
             },
-            defaults: defaults,
-            enableLoginItem: {
-                loginItemRequests += 1
-                return false
-            }
+            defaults: defaults, loginItem: login.item
         )
         try await publish(running, through: helper, to: store)
         XCTAssertFalse(store.fullControl)
         XCTAssertTrue(requests.isEmpty, "A running bridge is granted nothing while the preference is off")
 
         store.selectedAppIDs.insert("com.example.Draft")
-        store.setFullControl(true)
+        store.turnOnFullControl(approved: approved)
         XCTAssertTrue(requests.isEmpty, "Unsaved app choices are never saved by the switch")
         XCTAssertFalse(store.fullControl)
         store.discardAppSelectionChanges()
 
-        store.setFullControl(true)
+        store.turnOnFullControl(approved: approved)
         await waitUntilIdle(store)
 
         XCTAssertEqual(requests.map(\.0), ["stop", "set_allowed_apps", "start"])
         XCTAssertEqual(requests[1].1["allowed_app_ids"] as? [String], ["com.example.Editor", "primary-screen"])
         XCTAssertEqual(requests[1].1["expected_revision"] as? Int, 4)
         XCTAssertEqual(defaults.string(forKey: fullControlKey), saved.pairingIdentity)
-        XCTAssertEqual(loginItemRequests, 1)
+        XCTAssertEqual(login.changes, [true])
         XCTAssertTrue(store.loginItemNeedsApproval)
         XCTAssertNil(store.errorMessage)
     }
@@ -1145,11 +1140,12 @@ final class DesktopControlStoreTests: XCTestCase {
                 requests.append(action)
                 return try self.response(status: running)
             },
-            defaults: defaults, enableLoginItem: { true }
+            defaults: defaults, loginItem: FakeLoginItem().item
         )
         try await publish(running, through: helper, to: store)
+        let approved = try XCTUnwrap(running.pairingIdentity)
 
-        store.setFullControl(true)
+        store.turnOnFullControl(approved: approved)
         await waitUntilIdle(store)
 
         XCTAssertEqual(requests, ["grant_control"])
@@ -1157,7 +1153,110 @@ final class DesktopControlStoreTests: XCTestCase {
         XCTAssertTrue(store.diagnosticsText.contains("\"full_control\" : true"))
     }
 
+    func testAGrantThatLandsAfterFullControlWasTurnedOffIsRevoked() async throws {
+        for viaSwitch in [false, true] {
+            let helper = DesktopBridgeProcess()
+            let defaults = try fullControlDefaults()
+            let online = fullControlStatus(bridge: "observe_only")
+            defaults.set(online.pairingIdentity, forKey: fullControlKey)
+            var requests: [String] = []
+            var releaseGrant: CheckedContinuation<Void, Never>?
+            let store = DesktopControlStore(
+                helper: helper,
+                request: { action, _, _ in
+                    requests.append(action)
+                    if action == "grant_control" { await withCheckedContinuation { releaseGrant = $0 } }
+                    return try self.response(status: online)
+                },
+                defaults: defaults, loginItem: FakeLoginItem().item
+            )
+            try await publish(online, through: helper, to: store)
+            await waitFor { releaseGrant != nil }
+            XCTAssertEqual(requests, ["grant_control"], "The grant waits in the helper")
+
+            // No control is published yet, and the withdrawal is sent all the same.
+            if viaSwitch { store.turnOffFullControl() } else { store.revokeControl() }
+            await waitFor { requests.count == 2 }
+            XCTAssertEqual(requests, ["grant_control", "revoke_control"])
+            releaseGrant?.resume()
+            await waitUntilIdle(store)
+            await waitFor { requests.count == 3 }
+
+            XCTAssertEqual(requests, ["grant_control", "revoke_control", "revoke_control"], "The late grant ends revoked")
+            XCTAssertFalse(store.fullControl)
+        }
+    }
+
+    func testTurningFullControlOffRemovesOnlyTheLoginItemItAdded() async throws {
+        for alreadyOpensAtLogin in [false, true] {
+            let helper = DesktopBridgeProcess()
+            let defaults = try fullControlDefaults()
+            let running = fullControlStatus(bridge: "observe_only")
+            let approved = try XCTUnwrap(running.pairingIdentity)
+            let login = FakeLoginItem(enabled: alreadyOpensAtLogin)
+            let request: DesktopControlStore.Request = { _, _, _ in try self.response(status: running) }
+            let store = DesktopControlStore(helper: helper, request: request, defaults: defaults, loginItem: login.item)
+            try await publish(running, through: helper, to: store)
+
+            store.turnOnFullControl(approved: approved)
+            await waitUntilIdle(store)
+            XCTAssertTrue(login.enabled)
+            XCTAssertEqual(login.changes, alreadyOpensAtLogin ? [] : [true])
+
+            // A relaunch still knows whether full control added the login item.
+            let relaunched = DesktopControlStore(request: request, defaults: defaults, loginItem: login.item)
+            XCTAssertTrue(relaunched.fullControl)
+            relaunched.revokeControl()
+            await waitUntilIdle(relaunched)
+
+            XCTAssertEqual(login.enabled, alreadyOpensAtLogin, "An independently chosen login item stays")
+            XCTAssertEqual(login.changes, alreadyOpensAtLogin ? [] : [true, false])
+        }
+    }
+
+    func testFullControlIsRefusedWhenTheConnectionChangedSinceItsConfirmation() async throws {
+        let helper = DesktopBridgeProcess()
+        let defaults = try fullControlDefaults()
+        let shown = fullControlStatus(bridge: "stopped", apps: ["com.example.Editor"], revision: 4)
+        let other = fullControlStatus(bridge: "stopped", revision: 5, agentNames: ["assistant", "researcher"])
+        let approved = try XCTUnwrap(shown.pairingIdentity)
+        var requests: [String] = []
+        let login = FakeLoginItem()
+        let store = DesktopControlStore(
+            helper: helper,
+            request: { action, _, _ in
+                requests.append(action)
+                return try self.response(status: other)
+            },
+            defaults: defaults, loginItem: login.item
+        )
+        let refusal = "The connection changed, so full control was not turned on. Review it and try again."
+
+        // Saving the primary screen answers for another pairing: nothing is adopted, started, or registered.
+        try await publish(shown, through: helper, to: store)
+        store.turnOnFullControl(approved: approved)
+        await waitUntilIdle(store)
+        XCTAssertEqual(requests, ["set_allowed_apps"])
+        XCTAssertEqual(store.errorMessage, refusal)
+
+        // The connection changed while the confirmation was open.
+        try await publish(other, through: helper, to: store)
+        store.turnOnFullControl(approved: approved)
+        await waitUntilIdle(store)
+        XCTAssertEqual(requests, ["set_allowed_apps"])
+        XCTAssertEqual(store.errorMessage, refusal)
+
+        XCTAssertFalse(store.fullControl)
+        XCTAssertNil(defaults.string(forKey: fullControlKey))
+        XCTAssertTrue(login.changes.isEmpty)
+    }
+
     private let fullControlKey = "desktopFullControlPairing"
+
+    /// A quiet revoke is not a store operation, so tests wait for its request instead of for idleness.
+    private func waitFor(_ condition: () -> Bool) async {
+        for _ in 0 ..< 500 where !condition() { await Task.yield() }
+    }
 
     /// Returns the app preferences of a first launch; one suite is reused so test runs leave no files behind.
     private func fullControlDefaults() throws -> UserDefaults {
@@ -1280,6 +1379,29 @@ final class DesktopControlStoreTests: XCTestCase {
         DesktopBrowserStatus(
             configured: true, executablePath: executable, userDataDirectory: profile,
             runtime: "available", extensionState: "disconnected", reconnectTokenConfigured: false, lastError: nil
+        )
+    }
+}
+
+/// Stands in for the system login item; macOS can leave a registration waiting for the user's approval.
+@MainActor
+private final class FakeLoginItem {
+    var enabled: Bool
+    let approves: Bool
+    var changes: [Bool] = []
+
+    init(enabled: Bool = false, approves: Bool = true) {
+        self.enabled = enabled
+        self.approves = approves
+    }
+
+    var item: LoginItem {
+        LoginItem(
+            isEnabled: { self.enabled },
+            setEnabled: { enabled in
+                self.changes.append(enabled)
+                self.enabled = enabled && self.approves
+            }
         )
     }
 }

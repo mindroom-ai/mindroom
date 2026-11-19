@@ -10,6 +10,7 @@ struct DesktopControlView: View {
     @State private var showDetails = false
     @State private var isGrantConfirmationPresented = false
     @State private var isFullControlConfirmationPresented = false
+    @State private var fullControlApproval: String?
     @State private var isReplaceSessionConfirmationPresented = false
     @State private var replaceUsingPassword = false
 
@@ -53,7 +54,9 @@ struct DesktopControlView: View {
             "Give your agent full control of this Mac?",
             isPresented: $isFullControlConfirmationPresented, titleVisibility: .visible
         ) {
-            Button("Turn On Full Control", role: .destructive) { store.setFullControl(true) }
+            Button("Turn On Full Control", role: .destructive) {
+                if let fullControlApproval { store.turnOnFullControl(approved: fullControlApproval) }
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("""
@@ -61,6 +64,8 @@ struct DesktopControlView: View {
             on this Mac and the whole screen, including Terminal and browsers signed in as you, until you turn it off. \
             MindRoom opens at login and turns access on by itself, and the primary screen is added to your saved apps. \
             Revoke turns it off; Stop Access pauses it until you start access again or MindRoom next opens.
+
+            \(savedPairingSummary)
             """)
         }
         .confirmationDialog(
@@ -136,7 +141,12 @@ struct DesktopControlView: View {
         VStack(alignment: .leading, spacing: 3) {
             Toggle("Full control of this Mac", isOn: Binding(
                 get: { store.fullControl },
-                set: { if $0 { isFullControlConfirmationPresented = true } else { store.setFullControl(false) } }
+                set: { enabled in
+                    guard enabled else { return store.turnOffFullControl() }
+                    // The confirmation is for exactly the connection shown when it opened.
+                    fullControlApproval = store.status.pairingIdentity
+                    isFullControlConfirmationPresented = true
+                }
             )).disabled(store.isBusy || store.hasAccessChanges)
             Text(store.fullControl && store.loginItemNeedsApproval
                  ? "Allow MindRoom in System Settings > General > Login Items so full control returns after a restart."
@@ -450,12 +460,18 @@ struct DesktopControlView: View {
         }
     }
 
-    private var savedControlSummary: String {
+    private var savedPairingSummary: String {
         """
         Controller: \(store.status.config.controllerUserID ?? "") · \(store.status.config.controllerDeviceID ?? "")
         Fingerprint: \(store.status.pairing.controllerFingerprint ?? "")
         Requester: \((store.status.config.allowedRequesterIDs ?? []).joined(separator: ", "))
         Agent: \((store.status.config.allowedAgentNames ?? []).joined(separator: ", "))
+        """
+    }
+
+    private var savedControlSummary: String {
+        """
+        \(savedPairingSummary)
         Applications: \((store.status.config.allowedAppIDs ?? []).joined(separator: ", "))
         Duration: \(store.controlMinutes) minutes
         """
