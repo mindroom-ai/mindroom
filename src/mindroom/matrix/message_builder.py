@@ -138,17 +138,6 @@ _SUPPORTED_BLOCK_END_TAG_PATTERN = re.compile(
 )
 _HR_BLOCK_TAG_PATTERN = re.compile(r"^[ ]{0,3}<hr\b[^<>]*/?>\s*$", re.IGNORECASE)
 _FENCE_OPEN_PATTERN = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
-# markdown-it's HTML grammar (markdown_it/common/html_re.py): an open tag (name in group 1), a close tag (group 2),
-# a comment, processing instruction, declaration or CDATA section, so quoted values and comments are consumed whole.
-_HTML_ATTRIBUTE = r"""(?:\s+[a-zA-Z_:][a-zA-Z0-9:._-]*(?:\s*=\s*(?:[^"'=<>`\x00-\x20]+|'[^']*'|"[^"]*"))?)"""
-_HTML_CONSTRUCT_PATTERN = re.compile(
-    rf"<([A-Za-z][A-Za-z0-9-]*){_HTML_ATTRIBUTE}*\s*/?>|</([A-Za-z][A-Za-z0-9-]*)\s*>"
-    r"|<!---?>|<!--(?:[^-]|-[^-]|--[^>])*-->|<[?][\s\S]*?[?]>|<![A-Za-z][^>]*>|<!\[CDATA\[[\s\S]*?\]\]>",
-)
-# The sanitizer's HTML parser reads all text after one of these tags as raw text.
-_RAW_TEXT_TAGS = frozenset(
-    {"script", "style", "title", "textarea", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"},
-)
 
 
 def _count_repeated_characters(text: str, start_index: int, character: str) -> int:
@@ -367,6 +356,12 @@ class _FormattedBodyHtmlSanitizer(HTMLParser):
     def get_html(self) -> str:
         return "".join(self._parts)
 
+    def set_cdata_mode(self, elem: str, *, escapable: bool = False) -> None:
+        """Parse on after a raw ``<title>``, ``<script>`` and the like, which it escapes as any disallowed tag.
+
+        ``HTMLParser`` would read all text after one as raw text, escaping the rest of the message.
+        """
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
         starttag_text = self.get_starttag_text() or ""
@@ -460,12 +455,6 @@ def _render_preserved_math_block(
     return f"<div>{escape(content)}</div>\n"
 
 
-def _escape_raw_text_tag(construct: re.Match[str]) -> str:
-    """Escape a raw-text tag from the rendered HTML; every other HTML construct passes unchanged."""
-    name = construct.group(1) or construct.group(2)
-    return escape(construct.group()) if name and name.lower() in _RAW_TEXT_TAGS else construct.group()
-
-
 def _decline_line_at_end_of_input(rule: Callable[[StateBlock, int, int, bool], bool]) -> Callable[..., bool]:
     """Return the block rule declining a line that starts at the end of the input instead of indexing past it."""
 
@@ -519,7 +508,7 @@ def markdown_to_html(text: str) -> str:
     escaped_text = _escape_html_block_openers(normalized_input)
     normalized_text = _normalize_supported_block_html_boundaries(escaped_text)
     html_text: str = _MARKDOWN_RENDERER.render(normalized_text)
-    return _sanitize_formatted_body_html(_HTML_CONSTRUCT_PATTERN.sub(_escape_raw_text_tag, html_text))
+    return _sanitize_formatted_body_html(html_text)
 
 
 def opens_with_markdown_block(text: str) -> bool:

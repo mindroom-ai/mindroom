@@ -235,12 +235,21 @@ def test_unsupported_tags_escaped() -> None:
             'See <img src="mxc://example.org/image" alt="<title excerpt"> then **bold**',
             '<p>See <img src="mxc://example.org/image" alt="&lt;title excerpt"> then <strong>bold</strong></p>\n',
         ),
+        (
+            """<p><img 1=2 src="mxc://example.org/image" alt="<title name='&amp;'>"></p>""",
+            '<p><img src="mxc://example.org/image" alt="&lt;title name=&#x27;&amp;&#x27;&gt;"></p>',
+        ),
     ],
-    ids=["comment", "quoted-attribute"],
+    ids=["comment", "quoted-attribute", "attribute-markdown-it-rejects"],
 )
 def test_a_raw_text_tag_name_inside_other_html_is_not_a_tag(md: str, html: str) -> None:
     """A ``<title`` inside a comment or a quoted attribute value is left to the sanitizer, as on main."""
     assert markdown_to_html(md) == html
+
+
+def test_unterminated_processing_instructions_render_as_on_main() -> None:
+    """Many unterminated processing instructions in block HTML stay escaped text."""
+    assert markdown_to_html("<p>" + "<? note " * 4000 + "</p>") == "<p>" + "&lt;? note " * 4000 + "&lt;/p&gt;"
 
 
 def test_tag_followed_by_long_whitespace_renders_within_a_cpu_budget() -> None:
