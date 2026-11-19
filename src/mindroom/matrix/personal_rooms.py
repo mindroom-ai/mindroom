@@ -19,7 +19,6 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
 from mindroom.entity_resolution import (
-    owner_matrix_id,
     persisted_owner_matrix_id,
     prepared_entity_names_by_user_id,
 )
@@ -543,11 +542,8 @@ class PersonalRoomService:
         """Return whether one member is a configured router, agent, or team account.
 
         Not the internal service account, which a person may sign in to, and
-        not a bridge account, which relays people. Nor the owner's generated ID
-        while no owner account is persisted: anyone may register that name.
+        not a bridge account, which relays people.
         """
-        if persisted_owner_matrix_id(self.runtime_paths) is None and user_id == owner_matrix_id(self.runtime_paths):
-            return False
         return is_managed_entity_id(user_id, self.runtime.config, self.runtime_paths)
 
     async def _remove_guests(

@@ -38,6 +38,7 @@ from mindroom.session_storage.types import ConversationSession
 from tests.budget_helpers import set_month_spend
 from tests.conftest import persist_session
 from tests.identity_helpers import fixture_entity_matrix_id
+from tests.matrix_state_helpers import persist_owner_account
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -669,6 +670,7 @@ async def test_a_reply_counts_for_the_person_a_scan_charges(tmp_path: Path, monk
     config = _config().model_copy(update={"bot_accounts": [BRIDGE_BOT]})
     monitor, scans, _current = await _started(tmp_path, monkeypatch, {}, config)
     paths = monitor.runtime_paths
+    persist_owner_account(paths)
     router = fixture_entity_matrix_id(ROUTER_AGENT_NAME, config.get_domain(paths), paths).full_id
     assert budget_user_id(router, config, paths) is None
 
