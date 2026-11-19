@@ -120,7 +120,6 @@ def test_legacy_file_filters_are_renamed_and_unmatched_settings_dropped() -> Non
             "max_file_lines": 10,
             "line_separator": "\n",
             "exclude_patterns": [],
-            "all": True,
             "expose_base_directory": True,
             "enable_delete_file": True,
         },
@@ -130,6 +129,15 @@ def test_legacy_file_filters_are_renamed_and_unmatched_settings_dropped() -> Non
     ]
     assert _entries([{"file": {"include_tools": ["read_file_chunk", "list_files"]}}]) == [
         {"filesystem": {"include_tools": ["read_file", "ls"]}},
+    ]
+
+
+def test_legacy_file_all_turns_every_function_on() -> None:
+    """Agno's ``all`` offered every function, delete included, whatever the switches said."""
+    entry = {"file": {"all": True, "enable_save_file": False, "enable_read_file": False, "exclude_tools": ["ls"]}}
+    assert _entries([entry]) == [{"filesystem": {"exclude_tools": ["ls"], "enable_delete_file": True}}]
+    assert _entries([{"file": {"all": False, "enable_save_file": False}}]) == [
+        {"filesystem": {"exclude_tools": ["write_file"]}},
     ]
 
 

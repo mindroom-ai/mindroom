@@ -204,11 +204,11 @@ def test_listing_leaves_out_removed_contacts_and_shows_only_an_active_room(porta
 def test_listing_says_what_each_tool_a_contact_may_use_reaches(portal: dict[str, Any]) -> None:
     """Each choice says whether it runs code, is not confined to the agent's files, reaches them, or neither."""
     choices = {choice["name"]: choice for choice in _get(portal, "alice")["agents"][0]["tool_choices"]}
-    assert set(choices) == {"calculator", "shell", "file", "duckdb", "google_drive"}
+    assert set(choices) == {"calculator", "shell", "filesystem", "duckdb", "google_drive"}
     assert {name: choice["reach"] for name, choice in choices.items()} == {
         "calculator": "none",
         "shell": "code",
-        "file": "files",
+        "filesystem": "files",
         "duckdb": "unconfined",
         "google_drive": "files",
     }
@@ -228,7 +228,7 @@ def test_tools_of_an_agent_with_unrestricted_file_access_are_not_confined(portal
     payload["personal_agents"]["mind"]["agent"]["file_access"] = "unrestricted"
     publish_api_payload(main.app, payload)
     choices = {choice["name"]: choice["reach"] for choice in _get(portal, "alice")["agents"][0]["tool_choices"]}
-    assert (choices["file"], choices["shell"], choices["calculator"]) == ("unconfined", "code", "none")
+    assert (choices["filesystem"], choices["shell"], choices["calculator"]) == ("unconfined", "code", "none")
 
 
 def test_a_tool_served_by_a_shared_service_account_names_no_account_of_the_owner(
@@ -271,7 +271,7 @@ def test_update_refuses_tools_a_contact_may_not_use(portal: dict[str, Any]) -> N
     response = _post(portal, "bob", "ab/update", {"tools": ["scheduler"]})
     assert response.status_code == 409
     assert response.json()["detail"].startswith("Not among the tools a contact may use: scheduler")
-    assert read_contacts(portal["paths"]).contacts[0].target_side.tools == ["calculator", "file"]
+    assert read_contacts(portal["paths"]).contacts[0].target_side.tools == ["calculator", "filesystem"]
 
 
 @pytest.mark.parametrize("action", ["accept", "decline", "update", "remove"])

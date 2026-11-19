@@ -206,9 +206,11 @@ _REJECTED_TOOL_OVERRIDES_BY_TOOL = {
 #   exclude_tools naming save_file, read_file_chunk, replace_file_chunk, list_files, search_files, or search_content.
 # Last legacy release: v2026.11.447; replacement: unreleased; file and coding both name the filesystem toolkit.
 # Handling: On an entry authored as file, each switched-off function becomes an exclude_tools entry for its
-#   replacement (read_file only when both read switches are off), retired names in the filters are renamed, and the
-#   settings without a counterpart are dropped with a warning, so a capability that was off stays off.
-# Coverage: tests/test_filesystem_tool_config.py::test_legacy_file_switches_map_to_exclude_tools,
+#   replacement (read_file only when both read switches are off) unless all turned every function on, delete_file
+#   included, retired names in the filters are renamed, and the settings without a counterpart are dropped with a
+#   warning, so a capability that was off stays off and one that was on stays on.
+# Coverage: tests/test_filesystem_tool_config.py::test_legacy_file_all_turns_every_function_on,
+#   tests/test_filesystem_tool_config.py::test_legacy_file_switches_map_to_exclude_tools,
 #   tests/test_filesystem_tool_config.py::test_legacy_file_filters_are_renamed_and_unmatched_settings_dropped.
 RETIRED_FILE_FUNCTIONS = {
     "save_file": "write_file",
@@ -252,6 +254,9 @@ def migrate_legacy_file_overrides(overrides: dict[str, object]) -> dict[str, obj
     excluded = [function for key, function in _FILE_SWITCHES.items() if migrated.pop(key, None) is False]
     if all(reads_off):
         excluded.append("read_file")
+    if migrated.get("all") is True:
+        excluded = []
+        migrated["enable_delete_file"] = True
     for key in ("include_tools", "exclude_tools"):
         if key in migrated:
             migrated[key] = _renamed_functions(migrated[key])
