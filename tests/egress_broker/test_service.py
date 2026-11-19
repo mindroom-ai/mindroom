@@ -1016,6 +1016,7 @@ async def test_unused_all_proxy_does_not_stop_startup(
         pytest.param({"http_proxy": "http://proxy:3128"}, "", True, False, id="default-http-proxy-only"),
         pytest.param({"ALL_PROXY": "socks5://x:1080"}, "", True, False, id="default-socks"),
         pytest.param({}, "HTTPS_PROXY=http://user:hunter2@proxy:3128\n", True, False, id="default-dotenv-proxy"),
+        pytest.param({}, "Https_Proxy=http://proxy:3128\n", True, False, id="default-dotenv-mixed-case-proxy"),
         # Without the API nobody can answer a key card, so the default broker and its tool stay off.
         pytest.param({}, "", False, False, id="default-no-api"),
         # An explicit port keeps its loud refusal at startup and its warning without the API.

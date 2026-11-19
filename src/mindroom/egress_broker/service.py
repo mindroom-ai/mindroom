@@ -88,7 +88,7 @@ _DEFAULT_HOST = "0.0.0.0"  # noqa: S104 - workers reach the broker over the cont
 # only IPv6 here, so it is reached on `::1`, never `127.0.0.1`.
 _WILDCARD_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}  # noqa: S104
 _DEFAULT_TOKEN_TTL_SECONDS = 604800
-_PROXY_NAMES = ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+_PROXY_NAMES = frozenset({"http_proxy", "https_proxy", "all_proxy"})
 _STOP_TIMEOUT_SECONDS = 5.0
 # OAuth lookups can wait up to a token endpoint's deadline, so they get a small pool of their own: a stalled
 # provider holds at most these threads, never the loop's default executor that key lookups, audit writes, and
@@ -580,7 +580,9 @@ def turn_off_unusable_default_broker(runtime_paths: RuntimePaths, *, api: bool) 
     if not egress_broker_enabled(runtime_paths) or not _default_port(runtime_paths):
         return runtime_paths
     if api:
-        proxy = next((name for name in _PROXY_NAMES if runtime_paths.env_value(name) or os.getenv(name)), None)
+        # Python and curl read these names in any case, so the guard does too.
+        layers = (os.environ, runtime_paths.process_env, runtime_paths.env_file_values)
+        proxy = next((n for layer in layers for n, v in layer.items() if n.lower() in _PROXY_NAMES and v), None)
         if proxy is None:
             return runtime_paths
         logger.warning("egress_broker_default_off", reason=f"{proxy} is set; set a broker port to use one")
