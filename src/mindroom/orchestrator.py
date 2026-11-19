@@ -53,7 +53,7 @@ from mindroom.hooks import (
     HookRegistryLifetime,
     HookRegistryState,
     emit,
-    emit_service_bot_ready,
+    service_bot_ready_emission,
     service_hook_bindings,
 )
 from mindroom.integrations import bind_integrations, unbind_integrations
@@ -1140,7 +1140,8 @@ class _MultiAgentOrchestrator:
                 check_embedder_health(config, self.runtime_paths, reason="startup"),
                 name="embedder_startup_health_check",
             )
-            # The wait above holds no apply lock; a replacement that began during it finishes before this.
+            # The wait above holds no apply lock; a replacement that began during it finishes before this, and
+            # none begins until startup acknowledged, reopened admission and captured the service's ready hooks.
             async with apply_lock:
                 if runtime_shutdown_event.is_set():
                     return
@@ -1148,11 +1149,12 @@ class _MultiAgentOrchestrator:
                 set_runtime_ready()
                 self._runtime_ready_event.set()
                 self.turn_recovery.schedule()
+                emit_service_bot_ready = service_bot_ready_emission(self)
         # Stay alive until explicit shutdown. Hot reload replaces the fleet's sync
         # tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
-        if not runtime_shutdown_event.is_set():
-            await emit_service_bot_ready(self)
+        if emit_service_bot_ready is not None and not runtime_shutdown_event.is_set():
+            await emit_service_bot_ready()
         await runtime_shutdown_event.wait()
 
     async def _wait_for_first_syncs(self, runtime_shutdown_event: asyncio.Event, started_bots: list[AgentBot]) -> bool:

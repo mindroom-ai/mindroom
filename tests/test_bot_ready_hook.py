@@ -35,8 +35,8 @@ from mindroom.hooks import (
     EVENT_BOT_READY,
     AgentLifecycleContext,
     HookRegistry,
-    emit_service_bot_ready,
     hook,
+    service_bot_ready_emission,
 )
 from mindroom.matrix.durable_ingestion import validate_ingestion_batch
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
@@ -1523,6 +1523,13 @@ def _two_bot_runtime(tmp_path: Path) -> tuple[ReadyRuntime, AgentBot, AgentBot]:
     return orchestrator, code, general
 
 
+async def _emit_service_bot_ready(orchestrator: ReadyRuntime) -> None:
+    """Capture and emit the runtime's one service bot:ready, which a hook listens for."""
+    emission = service_bot_ready_emission(orchestrator)
+    assert emission is not None
+    await emission()
+
+
 @pytest.mark.asyncio
 async def test_service_bot_ready_fires_once_per_start(tmp_path: Path) -> None:
     """A service-scoped bot:ready hook runs on the runtime's one emission, and on no bot's own bot:ready."""
@@ -1542,7 +1549,7 @@ async def test_service_bot_ready_fires_once_per_start(tmp_path: Path) -> None:
     )
 
     await code._emit_agent_lifecycle_event(EVENT_BOT_READY)
-    await emit_service_bot_ready(orchestrator)
+    await _emit_service_bot_ready(orchestrator)
     await general._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
     assert calls == [("agent", "code"), ("service", ROUTER_AGENT_NAME), ("agent", "general")]
@@ -1563,7 +1570,7 @@ async def test_service_context_lists_union_of_joined_rooms(tmp_path: Path) -> No
 
     orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
-    await emit_service_bot_ready(orchestrator)
+    await _emit_service_bot_ready(orchestrator)
 
     [ctx] = captured
     assert (ctx.entity_name, ctx.entity_type) == (ROUTER_AGENT_NAME, "router")

@@ -7,6 +7,7 @@ import time
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
@@ -51,6 +52,8 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.runtime_protocols import OrchestratorRuntime
 
     from .registry import HookRegistry
@@ -313,10 +316,14 @@ async def emit(
         _EMIT_DEPTH.reset(token)
 
 
-async def emit_service_bot_ready(orchestrator: OrchestratorRuntime) -> None:
-    """Emit the runtime's one ``bot:ready`` for service-scoped hooks: the router entity, with the rooms bots joined."""
+def service_bot_ready_emission(orchestrator: OrchestratorRuntime) -> Callable[[], Awaitable[None]] | None:
+    """Capture the runtime's one ``bot:ready`` for service-scoped hooks: the router entity, with the rooms bots joined.
+
+    The hooks, config and joined rooms are this call's, so a replacement that begins before the result is called
+    changes nothing the hooks see. None when no hook listens.
+    """
     if not orchestrator.hook_registry_state.registry.has_hooks(EVENT_BOT_READY):
-        return
+        return None
     bindings = orchestrator.service_hook_bindings()
     joined = (room_id for bot in orchestrator.agent_bots.values() if bot.client for room_id in bot.client.rooms)
     context = AgentLifecycleContext(
@@ -332,7 +339,7 @@ async def emit_service_bot_ready(orchestrator: OrchestratorRuntime) -> None:
         matrix_user_id=owner_matrix_id(orchestrator.runtime_paths),
         joined_room_ids=tuple(dict.fromkeys(joined)),
     )
-    await emit(bindings.registry, EVENT_BOT_READY, context, service=True)
+    return partial(emit, bindings.registry, EVENT_BOT_READY, context, service=True)
 
 
 async def emit_gate(

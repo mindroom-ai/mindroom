@@ -7400,7 +7400,7 @@ expose = [
     "emit_final_response_transform",
     "emit_gate",
     "emit_policy",
-    "emit_service_bot_ready",
+    "service_bot_ready_emission",
     "emit_transform",
     "get_hook_metadata",
     "hook",

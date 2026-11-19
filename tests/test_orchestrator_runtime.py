@@ -60,8 +60,11 @@ from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.heap_probe import start_heap_tasks
 from mindroom.hooks import (
+    EVENT_BOT_READY,
+    AgentLifecycleContext,
     ConfigReloadedContext,
     HookRegistry,
+    hook,
 )
 from mindroom.matrix import client_session
 from mindroom.matrix.client_session import PermanentMatrixStartupError
@@ -105,6 +108,7 @@ from mindroom.workers.backend import WorkerBackendError
 from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
+    _hook_plugin,
     _mock_managed_bot,
     _run_orchestrator_start_until_ready,
     _runtime_bound_config,
@@ -6118,7 +6122,7 @@ async def test_shutdown_while_startup_waits_for_the_apply_lock_reports_no_readin
         _matrix_free_startup(orchestrator),
         patch.object(orchestrator.agent_reply_memberships, "needs_refresh", return_value=False),
         patch("mindroom.orchestrator.set_runtime_ready") as ready,
-        patch("mindroom.orchestrator.emit_service_bot_ready", new=AsyncMock()) as service_ready,
+        patch("mindroom.orchestrator.service_bot_ready_emission") as service_ready,
     ):
         apply = asyncio.create_task(
             orchestrator.config_reload.apply_with_response_admission(
@@ -6139,7 +6143,7 @@ async def test_shutdown_while_startup_waits_for_the_apply_lock_reports_no_readin
         await orchestrator.stop()
 
     ready.assert_not_called()
-    service_ready.assert_not_awaited()
+    service_ready.assert_not_called()
     assert orchestrator.config_reload.fully_applied_config is None
 
 
@@ -6177,6 +6181,57 @@ async def test_startup_never_retries_a_bot_a_reload_started_during_the_first_syn
         await asyncio.wait_for(runtime, SETTLE_TIMEOUT_SECONDS)
 
     successor.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_service_ready_hook_sees_the_runtime_startup_published_not_a_reload_mid_apply(tmp_path: Path) -> None:
+    """The service bot:ready is captured with startup's acknowledgement; a reload that begins after it changes nothing."""
+    orchestrator, startup_config, general = _startup_waiting_for_first_sync(tmp_path)
+    general.first_sync_complete = True
+    general.client.rooms = {"!startup:localhost": MagicMock()}
+    reload_config = _runtime_bound_config(Config(server_emoji={"enabled": True}), tmp_path)
+    seen: list[tuple[Config, tuple[str, ...]]] = []
+    finalized, mid_apply, publish_room_state, ran = (asyncio.Event() for _ in range(4))
+
+    @hook(EVENT_BOT_READY, scope="service")
+    async def on_ready(ctx: AgentLifecycleContext) -> None:
+        seen.append((ctx.config, ctx.joined_room_ids))
+        ran.set()
+
+    orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("test-plugin", [on_ready])])
+
+    async def hold_room_state() -> None:
+        finalized.set()
+        await publish_room_state.wait()
+
+    async def reload_mid_apply() -> None:
+        # The reload published its config and stopped the bot it replaces, whose successor has not started.
+        orchestrator.config = reload_config
+        general.client.rooms = {}
+        mid_apply.set()
+        await ran.wait()
+
+    with (
+        _matrix_free_startup(orchestrator),
+        patch.object(orchestrator.config_reload, "after_reload", new=hold_room_state),
+    ):
+        runtime = asyncio.create_task(orchestrator.start())
+        await asyncio.wait_for(finalized.wait(), SETTLE_TIMEOUT_SECONDS)
+        assert not orchestrator.response_admission_gate.closed
+        reload = asyncio.create_task(
+            orchestrator.config_reload.apply_with_response_admission(
+                reload_mid_apply,
+                operation_name="test",
+                request_is_current=lambda: True,
+            ),
+        )
+        await asyncio.wait_for(mid_apply.wait(), SETTLE_TIMEOUT_SECONDS)
+        publish_room_state.set()
+        await asyncio.wait_for(reload, SETTLE_TIMEOUT_SECONDS)
+        await orchestrator.stop()
+        await asyncio.wait_for(runtime, SETTLE_TIMEOUT_SECONDS)
+
+    assert seen == [(startup_config, ("!startup:localhost",))]
 
 
 @pytest.mark.asyncio

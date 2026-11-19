@@ -212,7 +212,12 @@ class ConfigReloadLifecycle:
         return not self._cancelled and not self.is_running() and self._fully_applied_config is None
 
     def startup_published(self, config: Config) -> None:
-        """Acknowledge startup's config, and reload at once if its files changed since startup loaded them."""
+        """Acknowledge startup's config and reopen admission, under the apply lock.
+
+        Reload at once if the config's files changed since startup loaded them.
+        """
+        self.response_admission_gate.startup_hold = False
+        self.response_admission_gate.reopen()
         if self._fully_applied_config is not None:
             # A reload that ran while startup waited for first syncs keeps the last-good and incomplete records.
             return
@@ -472,9 +477,11 @@ class ConfigReloadLifecycle:
         try:
             yield self._response_admission_apply_lock
         finally:
-            async with self._response_admission_apply_lock:
-                gate.startup_hold = False
-                gate.reopen()
+            if gate.startup_hold:
+                # Startup ended unpublished.
+                async with self._response_admission_apply_lock:
+                    gate.startup_hold = False
+                    gate.reopen()
         await self.after_reload()
 
     async def apply_with_response_admission(
