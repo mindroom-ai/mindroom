@@ -188,7 +188,8 @@ def test_agent_accept_invites_supports_user_patterns(policy: list[str]) -> None:
 def test_accept_invites_loads_with_deprecation_warning(tmp_path: Path, value: object) -> None:
     """An old `router.accept_invites` loads, warns once per load, and lets the owner account accept nothing."""
     config = bind_runtime_paths(
-        Config.model_validate({"router": {"accept_invites": value}}), test_runtime_paths(tmp_path),
+        Config.model_validate({"router": {"accept_invites": value}}),
+        test_runtime_paths(tmp_path),
     )
     unset = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
 

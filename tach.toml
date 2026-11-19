@@ -935,7 +935,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.agent_descriptions"
-depends_on = ["mindroom.constants", "mindroom.tool_system.agent_tools"]
+depends_on = ["mindroom.tool_system.agent_tools"]
 visibility = [
     "mindroom.agents",
     "mindroom.custom_tools.delegate",
@@ -6309,7 +6309,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.managed_room_notice"
 depends_on = [
-    "mindroom.constants",
     "mindroom.entity_resolution",
 ]
 
