@@ -2102,7 +2102,6 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
         pytest.param({"bot_accounts": ["@bridge:localhost"]}, True, id="bot-accounts"),
         pytest.param({"room_defaults": {"invite_users": ["@alice:localhost"]}}, True, id="room-defaults"),
         pytest.param({"router": {"access": {"users": ["@alice:localhost"]}}}, True, id="router-access"),
-        pytest.param({"router": {"accept_invites": False}}, True, id="router-invites"),
         pytest.param({"external_trigger_policy": {"enabled": False}}, True, id="trigger-policy"),
     ],
 )

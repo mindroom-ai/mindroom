@@ -390,7 +390,6 @@ def _reply_authorization_inputs_changed(config: Config, new_config: Config) -> b
         or config.room_defaults != new_config.room_defaults
         or config.rooms != new_config.rooms
         or config.router.access != new_config.router.access
-        or config.router.accept_invites != new_config.router.accept_invites
         or config.personal_rooms != new_config.personal_rooms
         or config.external_trigger_policy != new_config.external_trigger_policy
     )

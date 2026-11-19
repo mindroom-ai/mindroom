@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.access_policy import resolve_responder_access, resolve_room_policy
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.invited_rooms_store import is_inviter_allowed, should_accept_invites
+from mindroom.orchestration.config_warnings import warn_about_config_risks
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_room_list_override_replaces_default() -> None:
@@ -159,11 +168,10 @@ def test_router_access_users_preserve_omitted_current_room_default() -> None:
         ["@*:trusted.example.com"],
     ],
 )
-def test_router_and_agent_accept_invites_support_user_patterns(policy: list[str]) -> None:
+def test_agent_accept_invites_supports_user_patterns(policy: list[str]) -> None:
     """Invitation policy must support exact IDs, wildcards, and an empty deny list."""
     config = Config.model_validate(
         {
-            "router": {"accept_invites": policy},
             "agents": {
                 "research": {
                     "display_name": "Research",
@@ -173,8 +181,46 @@ def test_router_and_agent_accept_invites_support_user_patterns(policy: list[str]
         },
     )
 
-    assert config.router.accept_invites == policy
     assert config.agents["research"].accept_invites == policy
+
+
+@pytest.mark.parametrize("value", [True, False, ["@owner:example.com"]])
+def test_accept_invites_loads_with_deprecation_warning(tmp_path: Path, value: object) -> None:
+    """An old `router.accept_invites` loads, warns once per load, and lets the owner account accept nothing."""
+    config = bind_runtime_paths(
+        Config.model_validate({"router": {"accept_invites": value}}), test_runtime_paths(tmp_path),
+    )
+    unset = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+
+    def warnings(loaded: Config) -> list[str]:
+        with capture_logs() as logs:
+            warn_about_config_risks(loaded, runtime_paths_for(loaded))
+        return [entry["event"] for entry in logs if "accept_invites" in entry["event"]]
+
+    assert len(warnings(config)) == 1
+    assert warnings(unset) == []
+    assert not should_accept_invites(config, ROUTER_AGENT_NAME)
+    assert not is_inviter_allowed(config, runtime_paths_for(config), ROUTER_AGENT_NAME, "@owner:example.com")
+
+
+def test_live_shape_router_section_loads() -> None:
+    """The `router:` section live configs carry keeps loading, with access, model and judgment unchanged."""
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "router": {
+                "model": "default",
+                "judgment": {"provider": "typesafe", "threshold": 0.8},
+                "access": {"users": ["@owner:example.com"], "current_room_members": False},
+                "accept_invites": True,
+            },
+        },
+    )
+
+    assert config.router.model == "default"
+    assert config.router.judgment is not None
+    assert config.router.access is not None
+    assert (config.router.access.users, config.router.access.current_room_members) == (["@owner:example.com"], False)
 
 
 @pytest.mark.parametrize(

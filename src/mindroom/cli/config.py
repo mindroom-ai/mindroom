@@ -1306,7 +1306,6 @@ agents:
 
 router:
   model: {router_model}
-  accept_invites: true
 {mindroom_user_block}
 administrators:
   # MindRoom Chat pairing writes the paired owner's Matrix user ID here.

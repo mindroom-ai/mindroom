@@ -187,9 +187,7 @@ def forget_invited_room(path: Path, room_id: str) -> None:
 
 
 def _invite_acceptance_policy(config: Config, agent_name: str) -> InviteAcceptancePolicy | None:
-    if agent_name == ROUTER_AGENT_NAME:
-        return config.router.accept_invites
-
+    """Return an agent's or a team's invitation rule; the owner account has none and accepts no invite."""
     agent_config = config.agents.get(agent_name)
     if agent_config is not None:
         return agent_config.accept_invites
@@ -230,4 +228,6 @@ def invited_room_entity_names(config: Config) -> tuple[str, ...]:
 
 def should_persist_invited_rooms(config: Config, agent_name: str) -> bool:
     """Return whether one entity should keep accepted invited rooms across restarts."""
-    return should_accept_invites(config, agent_name)
+    # The owner account accepts no invites, yet keeps the rooms its file lists: those the router joined by invite
+    # before it was demoted, and those a hook's `matrix_admin.retain_room` adds.
+    return agent_name == ROUTER_AGENT_NAME or should_accept_invites(config, agent_name)

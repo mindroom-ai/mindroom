@@ -45,7 +45,7 @@ from tests.matrix_state_helpers import save_matrix_state
 from tests.test_bot_ready_hook import _agent_bot
 from tests.test_durable_ingestion_admission import ROOM, Session
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
-from tests.test_room_invites import _handle_invite, _live_router_invite_scenario, _pending_room_invites
+from tests.test_room_invites import _INVITEE, _handle_invite, _live_invite_scenario, _pending_room_invites
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
@@ -446,7 +446,7 @@ async def test_failed_durable_join_retains_pending_invitation(
     status: int,
 ) -> None:
     """An ambiguous HTTP failure must retain both the invitation and decrypt fence."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    config, bot, room, event = _live_invite_scenario(tmp_path)
     bot.change_local_membership = AgentBot.change_local_membership.__get__(bot)
     bot._room_lifecycle.deps = replace(bot._room_lifecycle.deps, change_membership=bot.change_local_membership)
     async with _owned_session(bot) as session:
@@ -454,7 +454,7 @@ async def test_failed_durable_join_retains_pending_invitation(
         session._transport.request = AsyncMock(side_effect=HttpError(status))
         with pytest.raises(RuntimeError, match="Failed to join invited room"):
             await _handle_invite(bot, room, event)
-        assert room.room_id in _pending_room_invites(config, ROUTER_AGENT_NAME)
+        assert room.room_id in _pending_room_invites(config, _INVITEE)
         assert bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
 
 
@@ -468,9 +468,9 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
     replacement: str | None,
 ) -> None:
     """A queued join cannot use an invitation withdrawn or replaced while it waited."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    config, bot, room, event = _live_invite_scenario(tmp_path)
     assert room.inviter is not None
-    config.router.accept_invites = [room.inviter]
+    config.agents[_INVITEE].accept_invites = [room.inviter]
     reached = asyncio.Event()
     release = asyncio.Event()
 
@@ -526,7 +526,7 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
     policy_allows_recovery: bool,
 ) -> None:
     """An accepted join survives unfinished app work and startup room cleanup."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    config, bot, room, event = _live_invite_scenario(tmp_path)
     bot._room_lifecycle.deps = replace(
         bot._room_lifecycle.deps,
         change_membership=AgentBot.change_local_membership.__get__(bot),
@@ -544,7 +544,7 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
         assert room.room_id in bot.client.rooms
         assert room.room_id not in bot.client.invited_rooms
 
-    config.router.accept_invites = policy_allows_recovery
+    config.agents[_INVITEE].accept_invites = policy_allows_recovery
     bot._room_lifecycle = BotRoomLifecycle(bot._room_lifecycle.deps)
     room_setup = AsyncMock()
     monkeypatch.setattr(bot._room_lifecycle, "_room_joined", room_setup)
@@ -560,7 +560,7 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
         await bot._room_lifecycle.reconcile_pending_invites()
         assert (room.room_id in bot._room_lifecycle.invited_room_ids()) is policy_allows_recovery
         assert room_setup.await_count == int(policy_allows_recovery)
-        assert (room.room_id not in _pending_room_invites(config, ROUTER_AGENT_NAME)) is policy_allows_recovery
+        assert (room.room_id not in _pending_room_invites(config, _INVITEE)) is policy_allows_recovery
         request.assert_not_awaited()
 
 
@@ -570,7 +570,7 @@ async def test_invite_completion_keeps_a_replacement_pending_inviter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Finishing one invitation's room setup must not erase a later invitation's durable work."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    config, bot, room, event = _live_invite_scenario(tmp_path)
     bot._room_lifecycle.deps = replace(
         bot._room_lifecycle.deps,
         change_membership=AgentBot.change_local_membership.__get__(bot),
@@ -585,7 +585,7 @@ async def test_invite_completion_keeps_a_replacement_pending_inviter(
     async with _owned_session(bot) as session, _syncing(bot, session):
         bot.client.invited_rooms[room.room_id] = room
         await _handle_invite(bot, room, event)
-        assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {room.room_id: replacement}
+        assert _pending_room_invites(config, _INVITEE) == {room.room_id: replacement}
 
 
 @pytest.mark.asyncio

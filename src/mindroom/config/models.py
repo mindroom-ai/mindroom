@@ -940,7 +940,7 @@ class ModelConfig(BaseModel):
 
 
 class RouterConfig(BaseModel):
-    """Configuration for the router system."""
+    """Configuration for routing and for the MindRoom owner account."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -953,12 +953,16 @@ class RouterConfig(BaseModel):
         default=None,
         description="Optional System One or OpenAI Decisions responder selection before the LLM router",
     )
-    accept_invites: InviteAcceptancePolicy = Field(
-        default=True,
-        description=(
-            "true accepts every room invite to the router, false accepts none, and a list accepts only "
-            "invites from matching inviter Matrix IDs or glob patterns"
-        ),
+    # LEGACY_COMPAT: `router.accept_invites` in a config file.
+    # Legacy format: `accept_invites: true|false|[patterns]` under `router:`, which chose the invites the router took.
+    # Last legacy release: every release before the router-free change ships, v2026.11.411 the newest when written,
+    #   honors it; replacement: unreleased, the owner account accepts no invites, so nothing replaces the field.
+    # Handling: the field still validates so such configs load; a set value logs one deprecation warning at load
+    #   and on reload (`orchestration/config_warnings.py`) and changes nothing.
+    # Coverage: tests/test_access_schema.py::test_accept_invites_loads_with_deprecation_warning
+    accept_invites: InviteAcceptancePolicy | None = Field(
+        default=None,
+        description="Deprecated and ignored: the MindRoom owner account accepts no room invites",
     )
     access: ResponderAccessConfig | None = Field(
         default=None,

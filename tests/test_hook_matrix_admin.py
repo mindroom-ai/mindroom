@@ -617,18 +617,12 @@ def test_hook_matrix_admin_retention_surfaces_storage_failure(tmp_path: Path) ->
     assert load_invited_rooms(invited_rooms_path(runtime_paths, ROUTER_AGENT_NAME)) == set()
 
 
-@pytest.mark.parametrize(("managed", "accept_invites"), [(False, True), (True, False)])
-def test_hook_matrix_admin_retention_respects_entity_policy(
-    tmp_path: Path,
-    managed: bool,
-    accept_invites: bool,
-) -> None:
-    """Retention cannot enroll unmanaged accounts or override disabled invites."""
+def test_hook_matrix_admin_retention_never_enrolls_an_unmanaged_account(tmp_path: Path) -> None:
+    """Retention cannot enroll an account MindRoom does not manage."""
     config = _private_room_config(tmp_path)
-    config.router.accept_invites = accept_invites
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.user_id = entity_ids(config, runtime_paths)[ROUTER_AGENT_NAME].full_id if managed else "@outsider:localhost"
+    client.user_id = "@outsider:localhost"
     admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
 
     admin.retain_room("!private:localhost")
