@@ -110,7 +110,8 @@ Verifying the staged copy rather than the mounted image means the bytes that are
 ### Install (85%)
 
 1. Target: `/Applications/MindRoom Chat.app` when this user can write to `/Applications` and that folder is trusted, else `~/Applications/MindRoom Chat.app` (the folder is created with mode `0755`) under the same rule, else the install is refused with "… is not a folder that only you and this Mac's administrators can change." before anything is downloaded.
-   A folder is trusted when it is a real folder (not a link) owned by root or this user, not writable by others, and group-writable only for the admin group (gid 80), as a standard `/Applications` is.
+   A folder is trusted when it is a real folder (not a link) owned by root or this user, not writable by others, group-writable only for the admin group (gid 80), and without an access control list, as a standard `/Applications` is.
+   The list's entries are not read: any list, or a failure to tell that there is none, makes the folder untrusted.
    The isolation of the staged copy rests on this: mode `0700` protects what is inside the staging folder, and only a trusted parent protects the staging folder's own name.
    The installed name is always `MindRoom Chat.app`, also for older images that hold `MindRoom.app`, which is the menu bar app's own name.
 2. If a copy is detected or the target already exists, stop with "… already exists" before any download. Nothing is ever overwritten.
@@ -154,10 +155,10 @@ Unit tests (XCTest, `macos/MindRoom/Tests/MindRoomTests/ChatAppInstallTests.swif
 - existing copies: an unsigned and an ad hoc signed bundle with the chat app's identifier are never opened (the real check), and a launch failure is reported;
 - redirects are followed only to the GitHub hosts over HTTPS; a failed detach is retried by device and keeps the mount folder;
 - store and menu: open when present, install then open when missing, menu titles for both states;
-- trust: a standard `/Applications` is trusted; folders writable by others or by a group other than admin, missing folders, and links are not; an untrusted Applications folder is skipped for the home one, and with both untrusted nothing is downloaded;
+- trust: a standard `/Applications` is trusted; folders writable by others or by a group other than admin, folders with an access control list (an allow or a deny entry, added with `chmod +a`), missing folders, and links are not; an untrusted Applications folder is skipped for the home one, and with both untrusted nothing is downloaded;
 - tools: one that ignores the request to stop is killed and reported within the limit; one whose child keeps the output open returns at once; a stopped attach is detached by mount point and its folder goes only after that succeeds; with the real `hdiutil`, an attach reported as failed after mounting is detached.
 
-Not unit-tested: the exclusive rename against a racing writer, an image that is attached but not mounted when `hdiutil` is stopped, `kSecCSRestrictSymlinks` against a signed bundle with a bad link, and the Mac App Store branch against an App Store build.
+Not unit-tested: the exclusive rename against a racing writer, an access control list that cannot be read, an image that is attached but not mounted when `hdiutil` is stopped, `kSecCSRestrictSymlinks` against a signed bundle with a bad link, and the Mac App Store branch against an App Store build.
 
 Real flow: an opt-in test (`MINDROOM_CHAT_INSTALL_E2E_DIR=<folder>`) runs the real installer against GitHub and the real signature check, with that folder standing in for `/Applications`.
 It is run on a Mac (the MacBook M5) before the pull request and proves download, mount, copy, verification, and bundle identifier of the result.
@@ -181,7 +182,7 @@ Budget: at most 300 net product Swift lines for the first build; the review roun
 - Force-quitting MindRoom mid-install leaves the temporary folder, possibly a mounted, hidden image until restart, and a hidden `.MindRoomChatInstall-…` folder in the target folder, which nothing removes.
 - The install needs the network twice (GitHub API, download). It asks for a revocation check, but macOS does not promise to refuse when Apple's revocation service cannot be reached.
 - `/Applications` is writable by every administrator of the Mac by design; MindRoom does not refuse it for that. The private staging folder and the exclusive rename protect the copy until it is in place, not afterwards.
-- The trust rule reads owner, group, and mode. An access control list that lets another account write to the folder is not seen.
+- The trust rule fails closed on access control lists: a folder with any entry is not used, also when the entry only denies something, as the `everyone deny delete` entry on macOS's own home folders does. Remove the list (`chmod -N`) to install there.
 - Between the signature check of an existing copy and Launch Services opening it, the same user could still swap the bundle; macOS offers no way to open the bytes that were checked.
 - GitHub's unauthenticated API allows 60 requests per hour per address; over that the card says no download was found.
 - Launch Services decides what "installed" means, so a stray copy in an unusual folder (a backup, a build folder) counts as installed and is what **Open MindRoom Chat** opens, if its signature passes.

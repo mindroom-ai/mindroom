@@ -213,6 +213,35 @@ final class ChatAppInstallTests: XCTestCase {
         XCTAssertFalse(ChatAppInstaller.isTrusted(link), "A link can be pointed elsewhere")
     }
 
+    private func chmod(_ arguments: String..., on folder: URL) {
+        let result = ChatAppInstaller.runTool("/bin/chmod", arguments + [folder.path])
+        XCTAssertTrue(result.isSuccess, result.output)
+    }
+
+    func testTrustsNoFolderWithAnAccessControlList() throws {
+        let applications = try installer(FakeTools()).applications
+        XCTAssertTrue(ChatAppInstaller.isTrusted(applications))
+        // An entry can grant what the mode denies. Entries are not read: any one of them is enough.
+        for entry in ["everyone allow add_file,add_subdirectory,delete_child", "everyone deny delete"] {
+            chmod("+a", entry, on: applications)
+            XCTAssertFalse(ChatAppInstaller.isTrusted(applications), entry)
+            chmod("-N", on: applications)
+            XCTAssertTrue(ChatAppInstaller.isTrusted(applications), "Without its list the folder is trusted again")
+        }
+    }
+
+    func testSkipsAnApplicationsFolderWithAnAccessControlList() async throws {
+        let tools = FakeTools()
+        let installer = try installer(tools)
+        chmod("+a", "everyone allow add_file,add_subdirectory,delete_child", on: installer.applications)
+
+        let installed = try await installer.install { _ in }
+
+        XCTAssertEqual(installed.path, folder.appendingPathComponent("home/Applications/MindRoom Chat.app").path)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: installer.applications.path), [], "Nothing is staged there either")
+        XCTAssertEqual(try leftovers(tools), [])
+    }
+
     func testSkipsAnApplicationsFolderThatOthersCanChange() async throws {
         let tools = FakeTools()
         var installer = try installer(tools)

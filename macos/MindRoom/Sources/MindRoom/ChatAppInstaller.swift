@@ -69,6 +69,11 @@ struct ChatAppInstaller {
     static func isTrusted(_ folder: URL) -> Bool {
         var info = stat()
         guard lstat(folder.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return false }
+        // An access control list can grant what the mode denies. Its entries are not read: any list, or not
+        // being able to tell that there is none (which reads as ENOENT), makes the folder untrusted.
+        let (list, error) = folder.path.withCString { (acl_get_file($0, ACL_TYPE_EXTENDED), errno) }
+        if let list { acl_free(UnsafeMutableRawPointer(list)) }
+        guard list == nil, error == ENOENT else { return false }
         return (info.st_uid == 0 || info.st_uid == getuid()) && info.st_mode & S_IWOTH == 0
             && (info.st_mode & S_IWGRP == 0 || info.st_gid == 80)
     }
