@@ -356,6 +356,91 @@ async def test_a_capped_job_does_not_hold_back_a_later_one(tmp_path: Path) -> No
         await runtime.shutdown()
 
 
+_SEND = "mindroom.orchestration.tool_job_runtime.send_message_result"
+
+
+async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) -> None:
+    """Jobs only the limit holds post one notice per held set, which a restart sends again as the same transaction."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    key = _key(job_owner())
+    last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            await _ended(runtime, "capped", BackgroundOutcome("completed", "a"), source_event_id=last)
+            await _ended(runtime, "cancelled", BackgroundOutcome("cancelled"), source_event_id=last)
+            await coordinator._admit_follow_ups(runtime)
+            await coordinator._admit_follow_ups(runtime)
+            bot.admit_job_follow_up.assert_not_awaited()
+            send.assert_awaited_once()
+            client, room_id, content = send.await_args.args
+            assert (client, room_id) == (bot.client, key.room_id)
+            assert content["msgtype"] == "m.notice"
+            assert content["m.relates_to"]["event_id"] == key.thread_id
+            assert content["body"] == (
+                "⏸️ 1 background job finished while I was paused after 20 automatic follow-ups. "
+                "Reply here to let me continue."
+            )
+            transaction_id = send.await_args.kwargs["transaction_id"]
+            await job_coordinator(tmp_path, runtime, bot)._admit_follow_ups(runtime)
+            assert send.await_count == 2
+            assert send.await_args.kwargs["transaction_id"] == transaction_id
+            await _ended(runtime, "capped_2", BackgroundOutcome("failed", "b"), source_event_id=last)
+            await coordinator._admit_follow_ups(runtime)
+            assert send.await_count == 3
+            assert send.await_args.args[2]["body"].startswith("⏸️ 2 background jobs finished")
+            assert send.await_args.kwargs["transaction_id"] != transaction_id
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_human_reply_collects_held_jobs_and_ends_their_notice(tmp_path: Path) -> None:
+    """A reply that collects held jobs leaves no notice to repeat; a job a human message started gets a follow-up."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    key = _key(job_owner())
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            await _ended(
+                runtime,
+                "capped",
+                BackgroundOutcome("completed", "a"),
+                source_event_id=_follow_up_event_id(key, [], _FOLLOW_UP_LIMIT),
+            )
+            await coordinator._admit_follow_ups(runtime)
+            send.assert_awaited_once()
+            collected = await runtime.wait("capped", owner=job_owner(), depth=0, timeout=0)
+            await runtime.acknowledge_wait("capped", collected.claim)
+            await _ended(runtime, "fresh", BackgroundOutcome("completed", "b"), source_event_id="$human")
+            await coordinator._admit_follow_ups(runtime)
+            send.assert_awaited_once()
+            bot.admit_job_follow_up.assert_awaited_once()
+            assert _follow_up_streak(bot.admit_job_follow_up.await_args.args[1]) == 1
+    finally:
+        await runtime.shutdown()
+
+
+async def test_no_notice_while_a_follow_up_reports_the_jobs(tmp_path: Path) -> None:
+    """Below the limit, and beside a job a follow-up reports, whose turn hears of the held one too, nothing is posted."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    key = _key(job_owner())
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            before = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT - 1)
+            await _ended(runtime, "below", BackgroundOutcome("completed", "a"), source_event_id=before)
+            last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+            await _ended(runtime, "capped", BackgroundOutcome("completed", "b"), source_event_id=last)
+            await coordinator._admit_follow_ups(runtime)
+            bot.admit_job_follow_up.assert_awaited_once()
+            send.assert_not_awaited()
+    finally:
+        await runtime.shutdown()
+
+
 async def test_an_admitted_follow_up_is_not_admitted_again(tmp_path: Path) -> None:
     """Later passes over the same ended jobs leave the journal alone."""
     runtime = await tool_job_runtime(tmp_path)
