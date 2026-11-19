@@ -18,7 +18,7 @@ from mindroom.llm.request_context import with_request_headers
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
-from mindroom.providers.openai.adapter_common import SDKClients, request_settings, untyped_sdk_call
+from mindroom.providers.openai.adapter_common import SDKClients, request_settings, with_large_fields_untyped
 from mindroom.providers.openai.chat_wire import (
     SDK_OPTION_KEYS,
     ChatStream,
@@ -170,9 +170,9 @@ class ChatAdapter:
             await request.on_send(sdk_request_body(kwargs, SDK_OPTION_KEYS))
             # Made as the request goes out: its reasoning's start is the send.
             accumulator = ChatStream(self.wire)
-            # Azure routes by the typed ``model``; the empty typed ``messages`` gives way to the body's.
-            call = untyped_sdk_call(kwargs, SDK_OPTION_KEYS, model=kwargs["model"], messages=(), stream=True)
-            sdk_stream = await client.chat.completions.create(**call)
+            sdk_stream = await client.chat.completions.create(
+                **with_large_fields_untyped(kwargs, ("messages", "tools")),
+            )
             # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK
             # stops decoding at the sentinel, so a body decoded to its end never sent one.
             body = _WatchedBody(cast("httpx2.AsyncByteStream", sdk_stream.response.stream))
