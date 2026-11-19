@@ -489,8 +489,8 @@ async def test_every_hook_checks_a_control_result_as_it_is(control: object, text
     seen: list[str] = []
 
     @hook(EVENT_TOOL_RESULT_TRANSFORM, priority=10)
-    async def summarize(_ctx: ToolResultTransformContext) -> str:
-        return "a summary"
+    async def mark(ctx: ToolResultTransformContext) -> str:
+        return f"[untrusted] {ctx.result}"
 
     @hook(EVENT_TOOL_RESULT_TRANSFORM, priority=20)
     async def check(ctx: ToolResultTransformContext) -> None:
@@ -499,7 +499,7 @@ async def test_every_hook_checks_a_control_result_as_it_is(control: object, text
             msg = "looks like an injection"
             raise RuntimeError(msg)
 
-    outcome = await _model_reads(_registry(summarize, check), control)
+    outcome = await _model_reads(_registry(mark, check), control)
 
     assert seen == [text]
     if later_withholds:
@@ -509,6 +509,22 @@ async def test_every_hook_checks_a_control_result_as_it_is(control: object, text
     else:
         assert outcome.content == text
         assert not outcome.is_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control", [_OAUTH_PROMPT, json.loads(_OAUTH_PROMPT), _STOP])
+async def test_a_hook_that_takes_a_control_result_s_text_out_withholds_it(control: object) -> None:
+    """A replacement without the control result's text means the hook wants it gone, so the result is withheld."""
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def remove(ctx: ToolResultTransformContext) -> str:
+        return f"The output of {ctx.tool_name} was removed."
+
+    outcome = await _model_reads(_registry(remove), control)
+
+    assert outcome.content == _WITHHELD
+    assert outcome.is_error
+    assert outcome.stop_after_call is (control is _STOP)
 
 
 @pytest.mark.asyncio

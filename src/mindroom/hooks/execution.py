@@ -373,8 +373,8 @@ async def emit_tool_result_transform(
 
     Each hook returns a ``str`` to replace the text the hook before it left, or ``None`` to keep it. One that fails,
     times out, or returns anything else, or a run nested too deeply, stops the chain and withholds the result: None.
-    A result that is not ``rewritable`` reaches every hook as itself, and a replacement keeps it. A Stop a hook
-    caught still propagates.
+    A result that is not ``rewritable`` reaches every hook as itself; a replacement that contains it keeps it, and any
+    other replacement withholds it. A Stop a hook caught still propagates.
     """
     hooks = _eligible_hooks(registry, EVENT_TOOL_RESULT_TRANSFORM, context)
     if not hooks:
@@ -394,7 +394,10 @@ async def emit_tool_result_transform(
             invocation = await _invoke_hook(hook, hook_context)
             if task is not None and task.cancelling() > cancelling:
                 raise asyncio.CancelledError
-            if not invocation.succeeded or not isinstance(invocation.value, str | None):
+            value = invocation.value
+            # A hook that took a control result's text out wants it gone; it cannot be rewritten, so it is withheld.
+            removed = not rewritable and isinstance(value, str) and text not in value
+            if not invocation.succeeded or not isinstance(value, str | None) or removed:
                 logger.warning(
                     "Withheld tool result",
                     **log_kwargs,
@@ -402,10 +405,10 @@ async def emit_tool_result_transform(
                     hook_name=hook.hook_name,
                 )
                 return None
-            if invocation.value not in (None, text) and not rewritable:
+            if value not in (None, text) and not rewritable:
                 logger.info("Kept a control tool result a hook rewrote", **log_kwargs, hook_name=hook.hook_name)
-            elif invocation.value is not None:
-                text = invocation.value
+            elif value is not None:
+                text = value
         return text
     finally:
         _EMIT_DEPTH.reset(token)

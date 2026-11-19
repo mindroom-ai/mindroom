@@ -423,7 +423,8 @@ async def check_for_injection(ctx: ToolResultTransformContext) -> str | None:
 - What the hooks leave is what the model, the reply's record of the call (which an interrupted reply replays to its next attempt), the tool-call log, and `tool:after_call` hooks read.
   The hooks run after the call's shell commands, outside the environment they had, on the result with given secrets masked.
   A Stop while a hook runs leaves no result recorded, even when the hook catches it.
-- A control result, an OAuth connection prompt a tool returned or a `ToolOutcome` with `stop_after_call` such as an immediate model switch, is read by MindRoom after the call, so a hook can keep or withhold it but not rewrite it: a replacement keeps the original, and every hook checks the original.
+- A control result, an OAuth connection prompt a tool returned or a `ToolOutcome` with `stop_after_call` such as an immediate model switch, is read by MindRoom after the call, so a hook can keep or withhold it but not rewrite it: a replacement that still contains the original text keeps the original, any other replacement withholds the result, and every hook checks the original.
+  Text that only looks like an OAuth prompt is treated as one, so a marker added to it is dropped; a hook that must not let such text through removes it or raises.
   A withheld result that stopped the run still stops it.
 - The hooks fail closed: a hook that raises, times out, or returns anything other than a `str` or `None` stops the chain, and the model reads a failed result, `The result of <tool> was withheld because a result check failed.`, without the tool's text or media.
   MindRoom logs a `Withheld tool result` warning with the tool, agent, plugin, and hook name.
