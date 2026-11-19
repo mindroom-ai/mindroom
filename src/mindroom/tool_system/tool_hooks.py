@@ -433,25 +433,18 @@ async def _emit_after_call(
 
 async def _transformed_result(
     result: _ToolHookResult,
-    *,
     resolved_context: _ResolvedToolContext,
     arguments: dict[str, Any],
     tool_name: str,
 ) -> _ToolHookResult:
-    """Return ``result`` with the text the model reads as the result-transform hooks leave it.
+    """Return ``result`` with the text the model reads as the result-transform hooks leave it, or a withheld notice.
 
-    A value with media keeps its media and flags, any other value the hooks left alone stays itself, and one whose
-    text they replaced becomes that text. A failed check withholds the whole result behind a failed notice.
+    A value with media keeps its media and flags; any other value stays itself unless a hook replaced its text.
     """
     text = result.content if isinstance(result, ToolValue) else str(result)
-    transformed = await emit_tool_result_transform(
-        resolved_context.hooks.registry,
-        ToolResultTransformContext(
-            **resolved_context.call_hook_context_kwargs(EVENT_TOOL_RESULT_TRANSFORM, arguments),
-            tool_name=tool_name,
-            result=text,
-        ),
-    )
+    kwargs = resolved_context.call_hook_context_kwargs(EVENT_TOOL_RESULT_TRANSFORM, arguments)
+    context = ToolResultTransformContext(**kwargs, tool_name=tool_name, result=text)
+    transformed = await emit_tool_result_transform(resolved_context.hooks.registry, context)
     if transformed is None:
         return ToolOutcome(content=_WITHHELD_RESULT_TEMPLATE.format(tool_name=tool_name), is_error=True)
     if transformed == text:
@@ -676,12 +669,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     async def answer(result: _ToolHookResult, outcome: str) -> _ToolHookResult:
         # Only a successful result reaches the result-transform hooks; what they leave is what everything after reads.
         if outcome == "success" and has_transform_hooks:
-            result = await _transformed_result(
-                result,
-                resolved_context=resolved_context,
-                arguments=hook_arguments,
-                tool_name=tool_name,
-            )
+            result = await _transformed_result(result, resolved_context, hook_arguments, tool_name)
             outcome = "result_withheld" if _answered_failure(result) else outcome
         ready = timing.result_ready()
         _record_answer(tool_name, args, result, ready, resolved_context)

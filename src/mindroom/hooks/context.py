@@ -779,7 +779,6 @@ class ToolResultTransformContext(HookContext):
     session_id: str | None
     result: str
     message_received_depth: int = 0
-    # Whether the reply the call runs in shows it.
     shown: bool = False
 
 

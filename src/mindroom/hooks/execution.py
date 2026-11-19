@@ -361,21 +361,15 @@ async def emit_policy(
 
 
 async def emit_tool_result_transform(registry: HookRegistry, context: ToolResultTransformContext) -> str | None:
-    """Run tool:result_transform hooks serially in priority order and return the text the model reads, failing closed.
+    """Run tool:result_transform hooks serially in priority order and return the text they leave, failing closed.
 
-    Each hook sees the text the hook before it left: it returns a ``str`` to replace it or ``None`` to keep it.
-    A hook that fails, times out, or returns anything else withholds the result, as does a run nested too deeply:
-    the chain stops and this returns None.
+    Each hook returns a ``str`` to replace the text the hook before it left, or ``None`` to keep it. One that fails,
+    times out, or returns anything else, or a run nested too deeply, stops the chain and withholds the result: None.
     """
     log_kwargs = {"tool_name": context.tool_name, "agent_name": context.agent_name}
     depth = _EMIT_DEPTH.get()
     if depth >= _MAX_EMIT_DEPTH:
-        logger.warning(
-            "Withheld tool result",
-            **log_kwargs,
-            reason="hooks nested too deeply",
-            max_depth=_MAX_EMIT_DEPTH,
-        )
+        logger.warning("Withheld tool result", **log_kwargs, reason="hooks nested too deeply")
         return None
     token = _EMIT_DEPTH.set(depth + 1)
     try:
