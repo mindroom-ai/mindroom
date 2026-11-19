@@ -266,7 +266,8 @@ class StewardDuties:
 
     async def _emit_member_joined(self, join: RoomMemberJoin) -> None:
         """Emit room:member_joined for one live human Matrix room join, where this bot holds the event's claim."""
-        if not await self._claims(join.room_id, join.event_id, EVENT_ROOM_MEMBER_JOINED):
+        orchestrator, name = self.deps.runtime.orchestrator, self.deps.hook_context.agent_name
+        if not await runs_room_hooks(orchestrator, name, join.room_id, EVENT_ROOM_MEMBER_JOINED, join.event_id):
             return
         await self.deps.personal_rooms.baseline_join(join)
         if self.deps.hook_context.registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
@@ -274,13 +275,9 @@ class StewardDuties:
 
     async def _emit_member_left(self, leave: RoomMemberLeave) -> None:
         """Emit room:member_left for one live human Matrix room self-leave, where this bot holds the event's claim."""
-        if await self._claims(leave.room_id, leave.event_id, EVENT_ROOM_MEMBER_LEFT):
+        orchestrator, name = self.deps.runtime.orchestrator, self.deps.hook_context.agent_name
+        if await runs_room_hooks(orchestrator, name, leave.room_id, EVENT_ROOM_MEMBER_LEFT, leave.event_id):
             await self._emit_member_change(EVENT_ROOM_MEMBER_LEFT, RoomMemberLeftContext, leave)
-
-    async def _claims(self, room_id: str, event_id: str, event_name: str) -> bool:
-        """Return whether this bot holds the membership event's claim, the one its room-scoped hooks run under."""
-        name = self.deps.hook_context.agent_name
-        return await runs_room_hooks(self.deps.runtime.orchestrator, name, room_id, event_name, event_id)
 
     async def _emit_member_change(
         self,
