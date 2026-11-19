@@ -54,8 +54,9 @@ class ToolTraceEntry:
     member_id: str | None = field(default=None, compare=False)
     parent_bash_call_id: str | None = field(default=None, compare=False)
     toolkit_name: str | None = field(default=None, compare=False)
-    # Whether the completed call failed, as its run recorded it, so an interrupted replay and a client can say so. The
-    # reply's records keep it, and public Matrix metadata carries it on a failed completed call only.
+    # Whether the completed call did not succeed, as its run recorded it: it errored, was refused or denied, or was
+    # cancelled or interrupted. An interrupted replay and a client say so; the result preview says why. The reply's
+    # records keep it, and public Matrix metadata carries it as ``is_error: true`` on such a completed call only.
     is_error: bool = field(default=False, compare=False)
     # The call as its tool event reported it, with its full arguments and result, which an interrupted replay renders.
     # Never serialized, so Matrix metadata and the reply's records keep only the previews, and a restored entry has none.

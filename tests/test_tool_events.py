@@ -21,6 +21,7 @@ from mindroom.tool_system.events import (
     ensure_visible_tool_marker_spacing,
     format_tool_combined,
     format_tool_completed_event,
+    message_tool_trace,
     serialize_tool_trace,
     with_stored_calls,
 )
@@ -728,8 +729,8 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
     assert restored[0].member_id == "general"
 
 
-def test_public_tool_trace_says_only_a_failed_completed_call_failed() -> None:
-    """Matrix clients read a call's failure from ``is_error``, which a call that worked or still runs never carries."""
+def test_public_tool_trace_marks_only_a_completed_call_that_did_not_succeed() -> None:
+    """Matrix clients read ``is_error``, which a call that worked or still runs never carries, and read it back."""
     failed = ToolTraceEntry(
         type="tool_call_completed",
         tool_name="schedule",
@@ -743,7 +744,10 @@ def test_public_tool_trace_says_only_a_failed_completed_call_failed() -> None:
 
     assert payload is not None
     events = payload[_TOOL_TRACE_KEY]["events"]
-    assert [event.get("is_error") for event in events] == [True, None, None]
+    assert events[0]["is_error"] is True
+    assert "is_error" not in events[1]
+    assert "is_error" not in events[2]
+    assert [entry.is_error for entry in message_tool_trace(payload) or []] == [True, False, False]
     assert serialize_tool_trace([worked]) == (
         {"type": "tool_call_completed", "tool_name": "read_file", "result_preview": "notes"},
     )
