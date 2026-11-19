@@ -8495,6 +8495,7 @@ depends_on = [
     "mindroom.turn_model",
     "mindroom.tool_system.registry",
     "mindroom.delegation.cost",
+    "mindroom.tool_jobs.control",
 ]
 visibility = [
     "mindroom.ai",
@@ -9180,6 +9181,7 @@ path = "mindroom.tool_jobs.control"
 depends_on = []
 visibility = [
     "mindroom.delegation.execution",
+    "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
     "mindroom.tool_jobs.runtime",
     "mindroom.response_lifecycle",

@@ -460,17 +460,19 @@ async def test_the_frames_say_a_restart_cut_a_turn_short_and_not_that_its_contin
 
 
 @pytest.mark.asyncio
-async def test_a_restart_whose_settlement_fails_still_ends_the_cut_short_turns_frames_cancelled(
+@pytest.mark.parametrize("stop", ["settlement_raises", "teardown_without_settlement"])
+async def test_a_shutdown_that_does_not_settle_the_turn_still_ends_its_frames_once_as_interrupted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    stop: str,
 ) -> None:
-    """A shutdown that cannot settle the turn it stopped still ends its feed, as cancelled, instead of leaving it running."""
+    """The cut-short turn's exit ends its feed itself, so no settlement that fails or never runs leaves it running."""
     snapshots: list[Any] = []
     ended = asyncio.Event()
 
     def sink(snapshot: Any) -> None:  # noqa: ANN401
         snapshots.append(snapshot)
-        if snapshot.status in TERMINAL_CHILD_STATUSES:
+        if snapshot.delegation_id == snapshots[0].delegation_id and snapshot.status in TERMINAL_CHILD_STATUSES:
             ended.set()
 
     async def unreadable(*_args: object) -> None:
@@ -484,20 +486,27 @@ async def test_a_restart_whose_settlement_fails_still_ends_the_cut_short_turns_f
         try:
             await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
             await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
-            monkeypatch.setattr(delegation_recovery, "read_child_run", unreadable)
-            await conversation.restart()
+            if stop == "settlement_raises":
+                monkeypatch.setattr(delegation_recovery, "read_child_run", unreadable)
+                await conversation.restart()
+            else:
+                # The loop's teardown cancels the job's task and no settlement runs, nor any later process's recovery.
+                monkeypatch.setattr(delegation_execution, "interrupt_stopped_child", _leave_child)
+                tasks = [entry.task for entry in conversation.runtime._entries.values() if entry.task is not None]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             await asyncio.wait_for(ended.wait(), JOB_TEST_TIMEOUT)
         finally:
             monkeypatch.undo()
             await conversation.close()
 
-    [terminal] = [snapshot for snapshot in snapshots if snapshot.status in TERMINAL_CHILD_STATUSES]
-    assert (terminal.status, terminal.result_preview, terminal.interrupted_by_restart) == (
-        "cancelled",
-        "Delegation cancelled.",
-        False,
-    )
-    assert ActivityFeed.find(terminal.delegation_id) is None
+    cut_short = snapshots[0].delegation_id
+    ends = [s for s in snapshots if s.delegation_id == cut_short and s.status in TERMINAL_CHILD_STATUSES]
+    assert [(s.status, s.result_preview, s.interrupted_by_restart) for s in ends] == [
+        ("failed", RESTART_INTERRUPTION_REASON, True),
+    ]
+    assert ActivityFeed.find(cut_short) is None
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,6 @@ import asyncio
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.delegation.activity import ActivityFeed
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.hooks import after_delegation
@@ -148,7 +147,6 @@ async def _recover_subagent_turn(child: DelegationChild, *, config: Config, runt
         runtime_paths=runtime_paths,
         reason=RESTART_INTERRUPTION_REASON,
         status="failed",
-        restart=True,
     )
 
 
@@ -165,19 +163,13 @@ async def interrupt_stopped_child(
     keeps that turn as the restart left it, for a follow-up to continue.
     """
     shutdown = job_stopped_by_shutdown()
-    try:
-        await interrupt_child(
-            child,
-            config=config,
-            runtime_paths=runtime_paths,
-            reason=RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
-            status="failed" if shutdown else "cancelled",
-            restart=shutdown,
-        )
-    finally:
-        # A settlement that failed left the feed its attempt's exit kept open for it (`_publish_exit`); it ends cancelled.
-        if shutdown and (feed := ActivityFeed.find(child.delegation_id)) is not None:
-            feed.status("cancelled", result=cancel_reason)
+    await interrupt_child(
+        child,
+        config=config,
+        runtime_paths=runtime_paths,
+        reason=RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
+        status="failed" if shutdown else "cancelled",
+    )
     if not shutdown and interrupted_by_restart(child):
         child.status, child.result = "cancelled", cancel_reason
 
@@ -189,9 +181,8 @@ async def interrupt_child(
     runtime_paths: RuntimePaths,
     reason: str,
     status: Literal["cancelled", "failed"] = "cancelled",
-    restart: bool = False,
 ) -> None:
-    """Settle retained descendants and preserve any already completed child outcome; restart when a restart stopped it."""
+    """Settle retained descendants and preserve any already completed child outcome."""
     retained = await load_retained_subagent_turn(child, runtime_paths)
     if retained is not None:
         child.run_id = retained.run_id
@@ -234,14 +225,7 @@ async def interrupt_child(
         # The save runs in the parent's context; the child's run keeps its own stored cost, not the parent's.
         with receiving_subagent_cost(SubagentCost()):
             await run_session_storage_operation(partial(_child_storage, child, config, runtime_paths), persist)
-    await finish_child_turn(
-        child,
-        config=config,
-        runtime_paths=runtime_paths,
-        status=status,
-        reason=reason,
-        restart=restart,
-    )
+    await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
 
 
 async def _cancel_delegations(

@@ -33,7 +33,12 @@ from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.personas import caller_toolkit_names, self_only_refusal
 from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, child_execution_identity
+from mindroom.delegation.state import (
+    RESTART_INTERRUPTION_REASON,
+    TERMINAL_CHILD_STATUSES,
+    DelegationChild,
+    child_execution_identity,
+)
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.delegation.workers import child_placement
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
@@ -296,25 +301,19 @@ async def finish_child_turn(
     runtime_paths: RuntimePaths,
     status: DelegationTerminalStatus | None = None,
     reason: str | None = None,
-    restart: bool = False,
 ) -> str:
     """Settle an interruption without overwriting an already retained terminal outcome.
 
     A child interrupted outside its run, such as one whose job was cancelled while it waited for an approval, is
     published with this outcome; one whose run already published its end has no feed left.
     """
-    # Only a turn a restart's settlement ends here is published as interrupted by it.
-    restart = restart and status is not None and child.status not in TERMINAL_CHILD_STATUSES
     if status is not None and child.status not in TERMINAL_CHILD_STATUSES:
         child.status = status
         child.result = reason
     if child.status not in TERMINAL_CHILD_STATUSES:
         msg = f"Cannot finish active delegation: {child.delegation_id}"
         raise ValueError(msg)
-    _publish(
-        child.delegation_id,
-        lambda feed: feed.status(child.status, result=child.result, interrupted_by_restart=restart),
-    )
+    _publish(child.delegation_id, lambda feed: feed.status(child.status, result=child.result))
     await update_subagent_turn(child, runtime_paths)
     if not child.record_locator:
         return ""
@@ -438,8 +437,11 @@ def _publish_exit(child: DelegationChild, *, cancelled: bool, reason: str) -> No
     if child.status == "paused" or child.status in TERMINAL_CHILD_STATUSES:
         _publish(child.delegation_id, lambda feed: feed.status(child.status, result=child.result))
     elif cancelled and job_stopped_by_shutdown():
-        # The restart's settlement (`interrupt_stopped_child`) publishes how it ended, as interrupted by the restart.
-        return
+        # A restart or shutdown cut it short, which its job may continue; published here, as no later settlement may run.
+        _publish(
+            child.delegation_id,
+            lambda feed: feed.status("failed", result=RESTART_INTERRUPTION_REASON, interrupted_by_restart=True),
+        )
     else:
         _publish(child.delegation_id, lambda feed: feed.status("cancelled" if cancelled else "failed", result=reason))
 
