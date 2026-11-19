@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
+from mindroom.constants import CONVERSATION_CONTENT_KEY
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.continuation import continued_subagent_job
@@ -45,6 +46,8 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
+
+    import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -138,7 +141,7 @@ class ToolJobRuntimeCoordinator:
     _initialized: bool = field(default=False, init=False)
     _journal: EventJournalStore | None = field(default=None, init=False)
     _publisher: JobStatePublisher = field(default_factory=JobStatePublisher, init=False)
-    # Follow-ups this process admitted, and held-jobs notices it sent, for jobs still waiting, which later passes leave alone.
+    # Follow-ups this process admitted for jobs still waiting to be reported, which later passes leave alone.
     _admitted_follow_ups: set[str] = field(default_factory=set, init=False)
 
     async def initialize(self) -> None:
@@ -464,54 +467,47 @@ class ToolJobRuntimeCoordinator:
         """
         due: set[str] = set()
         for key, group in _follow_up_candidates(runtime.retained_jobs()).items():
+            # Jobs an admitted follow-up already reports need no access check again, nor do jobs nothing reports.
             candidates = follow_up_jobs(group)
-            if not candidates:
-                if (held := held_jobs(group)) and (notice_id := await self._notice_held_jobs(runtime, key, held)):
-                    due.add(notice_id)
+            if candidates and (follow_up_id := next_follow_up_id(key, candidates)) in self._admitted_follow_ups:
+                due.add(follow_up_id)
                 continue
-            # Jobs an admitted follow-up already reports need no access check again.
-            follow_up_id = next_follow_up_id(key, candidates)
-            if follow_up_id not in self._admitted_follow_ups:
-                jobs = follow_up_jobs(await runtime.ended_jobs(key))
-                bot = self.bot_provider(key.recipient)
-                if not jobs or bot is None:
-                    continue
+            if not candidates and not held_jobs(group):
+                continue
+            # The jobs the requester may still access decide between a follow-up and a notice of jobs the limit holds.
+            ended = await runtime.ended_jobs(key)
+            if (bot := self.bot_provider(key.recipient)) is None:
+                continue
+            if jobs := follow_up_jobs(ended):
                 follow_up_id = next_follow_up_id(key, jobs)
                 if follow_up_id not in self._admitted_follow_ups:
                     await bot.admit_job_follow_up(key, follow_up_id)
                     self._admitted_follow_ups.add(follow_up_id)
-            due.add(follow_up_id)
+                due.add(follow_up_id)
+            elif (held := held_jobs(ended)) and bot.client is not None:
+                await self._notice_held_jobs(runtime, bot.client, key, held)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
 
     async def _notice_held_jobs(
         self,
         runtime: ToolJobRuntime,
+        client: nio.AsyncClient,
         key: ConversationKey,
         held: tuple[BackgroundJob, ...],
-    ) -> str | None:
-        """Tell the conversation once, as its agent's notice, that the limit holds jobs; return the notice's ID."""
-        notice_id, _text = held_notice(key, held)
-        if notice_id in self._admitted_follow_ups:
-            return notice_id
-        # As for a follow-up, only jobs the requester may still access count.
-        held = held_jobs(await runtime.ended_jobs(key))
-        bot = self.bot_provider(key.recipient)
-        if not held or bot is None or bot.client is None:
-            return None
-        notice_id, text = held_notice(key, held)
-        if notice_id not in self._admitted_follow_ups:
-            content = build_message_content(
-                text,
-                thread_event_id=key.thread_id,
-                latest_thread_event_id=key.thread_id,
-                extra_content={"msgtype": "m.notice"},
-            )
-            # An `m.notice` starts no turn, and a restart that sends it again reuses its transaction, which posts once.
-            if not await send_message_result(bot.client, key.room_id, content, transaction_id=notice_id):
-                return None
-            self._admitted_follow_ups.add(notice_id)
-        return notice_id
+    ) -> None:
+        """Tell the conversation, as its agent's notice, that the limit holds ``held``, and save on the jobs it was told."""
+        txn_id, text = held_notice(key, held)
+        # An m.notice starts no turn; as a conversation a room-level one is listed, and a room-mode reply keeps its key.
+        content = build_message_content(
+            text,
+            thread_event_id=key.thread_id,
+            latest_thread_event_id=key.thread_id,
+            extra_content={"msgtype": "m.notice", CONVERSATION_CONTENT_KEY: True},
+        )
+        # A failed send is retried on a later pass as the same transaction, which a delivered one does not post twice.
+        if await send_message_result(client, key.room_id, content, operation="send_job_hold", transaction_id=txn_id):
+            await runtime.note_held_notice(held)
 
     async def _expire_ended_jobs(self) -> None:
         """Keep ended jobs for the retention period and as long as response or approval work owns them."""

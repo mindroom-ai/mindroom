@@ -9216,6 +9216,7 @@ depends_on = [
     "mindroom.delegation.continuation",
     "mindroom.tool_system.runtime_context",
     "mindroom.matrix.client_delivery",
+    "mindroom.constants",
 ]
 visibility = [
     "mindroom.orchestrator",

@@ -360,7 +360,7 @@ _SEND = "mindroom.orchestration.tool_job_runtime.send_message_result"
 
 
 async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) -> None:
-    """Jobs only the limit holds post one notice per held set, which a restart sends again as the same transaction."""
+    """Jobs only the limit holds post one notice, which their records keep, so a restart does not post it again."""
     runtime = await tool_job_runtime(tmp_path)
     bot = _admitting_bot()
     coordinator = job_coordinator(tmp_path, runtime, bot)
@@ -376,21 +376,62 @@ async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) 
             send.assert_awaited_once()
             client, room_id, content = send.await_args.args
             assert (client, room_id) == (bot.client, key.room_id)
+            assert send.await_args.kwargs["operation"] == "send_job_hold"
             assert content["msgtype"] == "m.notice"
             assert content["m.relates_to"]["event_id"] == key.thread_id
             assert content["body"] == (
                 "⏸️ 1 background job finished while I was paused after 20 automatic follow-ups. "
                 "Reply here to let me continue."
             )
-            transaction_id = send.await_args.kwargs["transaction_id"]
+            # A restart whose homeserver forgot the transaction finds the notice in the jobs' records.
+            await runtime.shutdown()
+            runtime = await tool_job_runtime(tmp_path)
+            await runtime.recover()
             await job_coordinator(tmp_path, runtime, bot)._admit_follow_ups(runtime)
-            assert send.await_count == 2
-            assert send.await_args.kwargs["transaction_id"] == transaction_id
-            await _ended(runtime, "capped_2", BackgroundOutcome("failed", "b"), source_event_id=last)
+            send.assert_awaited_once()
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_room_level_hold_is_a_conversation_notice(tmp_path: Path) -> None:
+    """Outside a thread the notice is marked as a conversation, so thread lists show it, and counts every held job."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    owner = replace(job_owner(), resolved_thread_id=None)
+    last = _follow_up_event_id(_key(owner), [], _FOLLOW_UP_LIMIT)
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            for job_id in ("capped_a", "capped_b"):
+                await _ended(runtime, job_id, BackgroundOutcome("completed", "a"), owner=owner, source_event_id=last)
             await coordinator._admit_follow_ups(runtime)
-            assert send.await_count == 3
-            assert send.await_args.args[2]["body"].startswith("⏸️ 2 background jobs finished")
-            assert send.await_args.kwargs["transaction_id"] != transaction_id
+            content = send.await_args.args[2]
+            assert "m.relates_to" not in content
+            assert content["io.mindroom.conversation"] is True
+            assert content["body"].startswith("⏸️ 2 background jobs finished")
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_job_the_requester_may_not_access_does_not_hide_the_notice(tmp_path: Path) -> None:
+    """A below-limit job whose grant is gone is reported to nobody and leaves the held job's notice to be sent."""
+    allowed = True
+    runtime = await tool_job_runtime(
+        tmp_path,
+        grant=lambda job: "allowed" if allowed or job.job_id == "capped" else "denied",
+    )
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    key = _key(job_owner())
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+            await _ended(runtime, "capped", BackgroundOutcome("completed", "a"), source_event_id=last)
+            await _ended(runtime, "denied", BackgroundOutcome("completed", "b"), source_event_id="$human")
+            allowed = False
+            await coordinator._admit_follow_ups(runtime)
+            bot.admit_job_follow_up.assert_not_awaited()
+            send.assert_awaited_once()
     finally:
         await runtime.shutdown()
 

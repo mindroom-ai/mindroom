@@ -38,7 +38,7 @@ from mindroom.tool_system.progress import cap_progress, tool_progress_reporter
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import SavedToolJob, ToolJobStore
@@ -136,6 +136,8 @@ class BackgroundJob:
     has_result_payload: bool = False
     # Whether a parent run saved the outcome as its tool result.
     consumed: bool = False
+    # Whether its conversation was told that the follow-up limit holds it for a human message.
+    held_noticed: bool = False
     # Whether the call that started it saved the outcome as its own result, so it never became a job to list.
     returned_inline: bool = False
     # The reply whose call started it, whose Stop refuses the job every later approval, and the Stop that reply had
@@ -955,6 +957,14 @@ class ToolJobRuntime:
             returned_inline = entry.job.returned_inline or returned_inline
             await self._publish(entry, _updated(entry.job, consumed=True, returned_inline=returned_inline))
             entry.claim = None
+
+    async def note_held_notice(self, jobs: Iterable[BackgroundJob]) -> None:
+        """Save that the conversation was told the follow-up limit holds ``jobs``, so no restart tells it again."""
+        async with self._lock:
+            self._ensure_open()
+            for job in jobs:
+                if (entry := self._entries.get(job.job_id)) is not None:
+                    await self._publish(entry, _updated(entry.job, held_noticed=True))
 
     async def request_cancel(self, job_id: str) -> None:
         """Ask a live job to stop without waiting for it to settle, for a cancel its caller already authorized."""
