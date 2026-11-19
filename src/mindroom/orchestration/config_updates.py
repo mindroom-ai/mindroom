@@ -150,7 +150,6 @@ class ConfigUpdatePlan:
     responder_access_changed: bool = False
     # Room-membership grant inputs changed, so every room-backed grant is revoked until the router refreshes.
     reply_membership_policy_changed: bool = False
-    router_invite_policy_changed: bool = False
 
     @property
     def requires_response_drain(self) -> bool:
@@ -545,5 +544,4 @@ def build_config_update_plan(
         reply_authorization_changed=_reply_authorization_inputs_changed(current_config, new_config),
         responder_access_changed=_responder_access_changed(current_config, new_config),
         reply_membership_policy_changed=agent_reply_membership_policy_changed(current_config, new_config),
-        router_invite_policy_changed=current_config.router.accept_invites != new_config.router.accept_invites,
     )

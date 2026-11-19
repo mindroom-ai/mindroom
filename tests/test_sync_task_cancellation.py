@@ -2385,11 +2385,10 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
-        patch.object(orchestrator, "_start_router_bot", new=AsyncMock(return_value=router_bot)),
         patch.object(
             orchestrator.fleet,
             "try_start",
-            new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[router_bot, general_bot])),
         ),
         patch.object(orchestrator._rooms, "setup", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
@@ -2413,10 +2412,10 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
 
 @pytest.mark.asyncio
-async def test_start_runtime_publishes_after_router_sync_without_waiting_for_room_setup(  # noqa: PLR0915
+async def test_start_runtime_publishes_after_every_first_sync_without_waiting_for_room_setup(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
-    """Semantic work waits for the router's grant refresh, not for startup room setup."""
+    """Semantic work waits for every started bot's first sync and the grant refresh, not for startup room setup."""
     config = MagicMock(
         spec=Config,
         source_fingerprint=None,
@@ -2438,7 +2437,7 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
     router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
     router_bot.schedule_reply_authorized_call_revocation = MagicMock()
     router_bot.release_pending_turn_journal_replay = MagicMock()
-    router_bot.first_sync_complete = True
+    router_bot.first_sync_complete = False
 
     general_bot = _shutdown_bot_mock()
     general_bot.agent_name = "general"
@@ -2449,7 +2448,7 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
     general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
     general_bot.schedule_reply_authorized_call_revocation = MagicMock()
     general_bot.release_pending_turn_journal_replay = MagicMock()
-    general_bot.first_sync_complete = True
+    general_bot.first_sync_complete = False
 
     install_bots(orchestrator, {"router": router_bot, "general": general_bot})
     # The config is a mock, so no Matrix account names the principal that keeps the approval cards.
@@ -2479,11 +2478,10 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
-        patch.object(orchestrator, "_start_router_bot", new=AsyncMock(return_value=router_bot)),
         patch.object(
             orchestrator.fleet,
             "try_start",
-            new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[router_bot, general_bot])),
         ),
         patch.object(orchestrator._rooms, "setup", side_effect=blocked_setup),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
@@ -2499,16 +2497,16 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
             assert orchestrator.response_admission_gate.closed
             assert not orchestrator.response_admission_gate.close_if_idle()
 
-            # Another responder's first frame cannot publish semantic callbacks
-            # before the router's first frame has rebuilt reply grants.
-            await orchestrator.handle_bot_ready(general_bot)
+            # One bot's first frame cannot publish semantic callbacks
+            # before every started bot's first frame has let the reply grants be rebuilt.
+            general_bot.first_sync_complete = True
             with pytest.raises(TimeoutError):
-                await asyncio.wait_for(runtime_ready.wait(), timeout=0.05)
+                await asyncio.wait_for(runtime_ready.wait(), timeout=0.2)
             router_bot.release_pending_turn_journal_replay.assert_not_called()
             general_bot.release_pending_turn_journal_replay.assert_not_called()
             assert orchestrator.response_admission_gate.closed
 
-            await orchestrator.handle_bot_ready(router_bot)
+            router_bot.first_sync_complete = True
             await asyncio.wait_for(runtime_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             await asyncio.sleep(0)
 
@@ -2594,11 +2592,10 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
-        patch.object(orchestrator, "_start_router_bot", new=AsyncMock(return_value=router_bot)),
         patch.object(
             orchestrator.fleet,
             "try_start",
-            new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[router_bot, general_bot])),
         ),
         patch.object(orchestrator._rooms, "setup", side_effect=blocked_setup),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
@@ -2774,29 +2771,6 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
 
     assert first_maintenance_task.cancelled()
     assert setup_calls == [[router_bot, old_bot], [router_bot, new_bot]]
-
-
-def test_running_startup_maintenance_bots_returns_router_first(tmp_path: Path) -> None:
-    """Startup maintenance replay should keep router before other running bots."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=Config())
-
-    router_bot = MagicMock()
-    router_bot.running = True
-    general_bot = MagicMock()
-    general_bot.running = True
-    stopped_bot = MagicMock()
-    stopped_bot.running = False
-
-    install_bots(
-        orchestrator,
-        {
-            "general": general_bot,
-            "stopped": stopped_bot,
-            "router": router_bot,
-        },
-    )
-
-    assert orchestrator._running_startup_maintenance_bots() == [router_bot, general_bot]
 
 
 @pytest.mark.asyncio
