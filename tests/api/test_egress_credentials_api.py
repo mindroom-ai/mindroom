@@ -3251,6 +3251,30 @@ def test_adding_a_service_never_replaces_one_of_the_same_name(egress_portal: dic
     )
 
 
+@pytest.mark.parametrize("entry", ["inactive", "listed-late"])
+def test_an_add_of_any_stored_name_is_a_412_before_anything_changes(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+) -> None:
+    """An inactive entry, or one stored after the route read the listing, refuses an Add as well, and keeps its key."""
+    portal = egress_portal
+    if entry == "inactive":
+        _store_raw_entries(portal, {"notes": {"rules": []}})
+    else:
+        assert _put_service(portal, "alice", "personal", "notes").status_code == 204
+        monkeypatch.setattr(egress_credentials, "load_user_services", lambda *_args: {})
+    secrets.save_secret(get_runtime_credentials_manager(portal["paths"]), _scope_target(portal), "notes", "kept")
+    headers = {**portal["headers"]["alice"], "If-None-Match": "*"}
+
+    added = portal["client"].put(_service_url("personal", "notes"), json=_NOTES, headers=headers)
+
+    assert (added.status_code, added.json()["detail"]) == (412, "You already have a service with this name")
+    assert (
+        secrets.load_secret(get_runtime_credentials_manager(portal["paths"]), _scope_target(portal), "notes") == "kept"
+    )
+
+
 # --- Inactive entries ---
 
 

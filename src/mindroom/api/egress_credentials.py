@@ -65,11 +65,13 @@ from mindroom.egress_broker.user_services import (
     InactiveUserService,
     ServiceSource,
     UserServiceConflictError,
+    consistent_read,
     delete_user_service,
     inactive_user_services,
     load_user_services,
     save_user_service,
     service_source,
+    stored_user_service_names,
     user_service_hosts_error,
 )
 from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking, resolve_oauth_credential_context
@@ -552,29 +554,29 @@ def put_user_service(
             f"{provider.display_name} accounts belong to each user, not to one agent; leave oauth_separate_account off"
         )
         raise _unprocessable(msg)
-    stored = load_user_services(agent.manager, agent.target).get(name)
-    only_new = if_none_match == "*"
-    if only_new and stored is not None:
-        raise HTTPException(412, "You already have a service with this name", headers=CONNECTIONS_HEADERS)
-    same_own_account = (
-        stored is not None and stored.oauth_separate_account and stored.oauth_provider == service.oauth_provider
-    )
-    if service.oauth_separate_account and not same_own_account:
-        # A delete that could not remove an own account, such as one while a config service shadowed the name, left
-        # it behind; it goes before the service can use it.
-        _remove_account(request, agent, name, service, by=requester_id)
-    try:
-        save_user_service(
-            agent.manager,
-            agent.target,
-            name,
-            service,
-            config_services=operator.services,
-            oauth_providers=providers.keys(),
-            only_new=only_new,
+    # No other service write lands between an Add's check of the name, the account cleanup, and the save.
+    with consistent_read():
+        if if_none_match == "*" and name in stored_user_service_names(agent.manager, agent.target):
+            raise HTTPException(412, "You already have a service with this name", headers=CONNECTIONS_HEADERS)
+        stored = load_user_services(agent.manager, agent.target).get(name)
+        same_own_account = (
+            stored is not None and stored.oauth_separate_account and stored.oauth_provider == service.oauth_provider
         )
-    except ValueError as exc:
-        raise _unprocessable(str(exc)) from exc
+        if service.oauth_separate_account and not same_own_account:
+            # A delete that could not remove an own account, such as one while a config service shadowed the name,
+            # left it behind; it goes before the service can use it.
+            _remove_account(request, agent, name, service, by=requester_id)
+        try:
+            save_user_service(
+                agent.manager,
+                agent.target,
+                name,
+                service,
+                config_services=operator.services,
+                oauth_providers=providers.keys(),
+            )
+        except ValueError as exc:
+            raise _unprocessable(str(exc)) from exc
     if (
         stored is not None
         and stored.oauth_separate_account

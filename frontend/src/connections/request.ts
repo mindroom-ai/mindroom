@@ -16,8 +16,8 @@ export interface RequestErrorMessages {
   forbiddenDetail?: boolean;
 }
 
-// Conflicts, oversized bodies, and invalid bodies explain themselves.
-const USER_FACING_DETAIL_STATUSES = new Set([409, 413, 422]);
+// Conflicts, failed preconditions, oversized bodies, and invalid bodies explain themselves.
+const USER_FACING_DETAIL_STATUSES = new Set([409, 412, 413, 422]);
 
 /**
  * Read an error `detail` that is either a string or FastAPI's list of

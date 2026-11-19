@@ -650,6 +650,38 @@ describe("egress services on the personal page", () => {
       ]);
     });
 
+    it("adds only once: a change saved after its own create replaces it, whatever the list says", async () => {
+      let keyAttempts = 0;
+      mutation = (_method, path) =>
+        !path.startsWith(SERVICES) && keyAttempts++ === 0
+          ? json({ detail: "The key vault is read-only" }, 409)
+          : new Response(null, { status: 204 });
+      const putHeaders = () =>
+        vi
+          .mocked(fetch)
+          .mock.calls.filter(
+            ([input, options]) =>
+              options?.method === "PUT" && String(input).startsWith(SERVICES),
+          )
+          .map(
+            ([, options]) =>
+              (options?.headers as Record<string, string>)["If-None-Match"],
+          );
+      await renderPage();
+      await openAdd();
+      // The list has not caught up with this editor's own create.
+      fillOpenAi("sk-secret");
+      await screen.findByRole("alert");
+      fireEvent.click(screen.getByRole("button", { name: "More options" }));
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: "Changed" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+      await waitFor(() => expect(putHeaders()).toHaveLength(2));
+      expect(putHeaders()).toEqual(["*", undefined]);
+    });
+
     it("sets a key while editing a service", async () => {
       await renderPage();
       fireEvent.click(await rowAction("Edit service for My API"));

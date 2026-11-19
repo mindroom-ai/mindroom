@@ -71,6 +71,7 @@ __all__ = [
     "save_user_service",
     "service_source",
     "services_for_agent",
+    "stored_user_service_names",
     "user_service_hosts_error",
     "user_service_hosts_not_allowed",
 ]
@@ -147,6 +148,11 @@ def load_user_services(manager: CredentialsManager, target: ResolvedWorkerTarget
             service = service.model_copy(update={"oauth_provider": None, "oauth_separate_account": False})
         services[name] = service
     return services
+
+
+def stored_user_service_names(manager: CredentialsManager, target: ResolvedWorkerTarget | None) -> set[str]:
+    """Return the name of every entry the scope stores, inactive ones included."""
+    return set(_stored_services(manager, target))
 
 
 def inactive_user_services(

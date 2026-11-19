@@ -381,16 +381,16 @@ function AgentSection({
 
   // The editor stays open after the service is written: it saves the key next
   // and closes through `onClose`, so a key that fails can be reported there.
-  // An Add only creates: it never replaces a service of that name, nor takes its key.
+  // An Add only creates until its own create succeeded: it never replaces a
+  // service of that name, nor takes its key, whatever the listing shows.
+  const created = useRef<EditorState | null>(null);
   const save = async (name: string, service: AuthoredEgressService) => {
-    const adding =
-      editor?.kind === "add" &&
-      !agent.services.some((row) => row.name === name);
+    const adding = editor?.kind === "add" && created.current !== editor;
     const headers = adding ? { "If-None-Match": "*" } : undefined;
-    if (
-      await write(servicePath(agent.agent_name, name), "PUT", service, headers)
-    )
-      onChanged();
+    const path = servicePath(agent.agent_name, name);
+    if (!(await write(path, "PUT", service, headers))) return;
+    if (adding) created.current = editor;
+    onChanged();
   };
 
   const saveKey = async (secret: string, name: string) => {
