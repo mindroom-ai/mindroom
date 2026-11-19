@@ -295,7 +295,7 @@ class TestEditFile:
             ],
         )
         assert result == (
-            "Error: edits[0] and edits[1] overlap at line 4 (a replace_all edit already changes every match). "
+            "Error: edits[0] and edits[1] overlap at line 4 (a replace_all edit replaces every match of its old_text). "
             "Merge them into one edit, or make old_text more specific.\nNo changes written."
         )
 
@@ -310,9 +310,15 @@ class TestEditFile:
             ],
         )
         assert result == (
-            "Error: edits[0] and edits[1] overlap at line 1 (a replace_all edit already changes every match). "
+            "Error: edits[0] and edits[1] overlap at line 1 (a replace_all edit replaces every match of its old_text). "
             "Merge them into one edit, or make old_text more specific.\nNo changes written."
         )
+
+    def test_deeply_nested_string_edits_is_reported_not_raised(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A string edits too deeply nested to decode gets the not-valid-JSON error instead of raising."""
+        result = tools.edit_file("hello.py", "[" * 100_000)
+        assert result.startswith("Error: edits must be a JSON array, but it arrived as a string that is not valid JSON")
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
 
     def test_overlap_line_is_numbered_as_read_file_numbers_lines(self, tools: CodingTools, tmp_base: Path) -> None:
         """A file whose lines end in a lone CR names the overlap's line as read_file would."""

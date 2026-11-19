@@ -460,7 +460,7 @@ def _edits_argument(edits: object, legacy: dict[str, object]) -> list[_Edit] | s
     if isinstance(edits, str) and edits.strip():
         try:
             edits = json.loads(edits)
-        except ValueError:
+        except (ValueError, RecursionError):
             return (
                 "edits must be a JSON array, but it arrived as a string that is not valid JSON "
                 f"(it starts {edits[:30]!r}). Send edits as an array: {_EDITS_SHAPE.removeprefix('Pass ')}"
@@ -502,7 +502,7 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
     for (first, first_index), (second, second_index) in itertools.pairwise(spans):
         if second.start < first.end:
             low, high = sorted((first_index, second_index))
-            covers = " (a replace_all edit already changes every match)" * (
+            covers = " (a replace_all edit replaces every match of its old_text)" * (
                 edits[low].replace_all or edits[high].replace_all
             )
             return (
