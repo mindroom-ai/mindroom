@@ -30,13 +30,23 @@ git clone https://git.overleaf.com/<project_id> overleaf-<project_id>
 cd overleaf-<project_id>
 ```
 
+If the service you use has `source: user` in `list_egress_credentials`, name it on every request, or a service of
+the administrator's on the same host may win. Clone with the header instead, which the folder then keeps for pulls
+and pushes:
+
+```bash
+git clone -c 'http.https://git.overleaf.com/.extraHeader=X-Agent-Keys-Service: <service name>' https://git.overleaf.com/<project_id> overleaf-<project_id>
+```
+
+Never send this header for a service without `source: user`: the broker then refuses the request.
+
 The main file is usually `main.tex`; otherwise it is the `.tex` file with `\documentclass`.
 
 ## Edit and push
 
 1. Pull first, before you edit: `git pull --rebase origin master`.
 2. Edit the `.tex`, `.bib`, and other source files with your file tools.
-3. Stage only the files you changed: `git add <files>`. Never `git add -A` after a compile.
+3. Stage only the files you changed: `git add <files>`. Never `git add -A`.
 4. `git commit -m "<what you changed>"`. If git asks who you are, set it for this folder only:
    `git config user.name "<your name>"` and `git config user.email "<your name>@mindroom.invalid"`.
 5. `git push origin master`.
@@ -45,17 +55,12 @@ Overleaf has only the `master` branch. Never force push; Overleaf refuses it any
 A push is rejected when someone changed the project in Overleaf meanwhile: run `git pull --rebase origin master` and push once more.
 If the rebase stops on a conflict, or the second push is rejected too, stop and tell the user which files conflict.
 
-## Compile (optional)
+## Compile
 
-If `latexmk` is installed (`command -v latexmk`), check that the document builds:
-
-```bash
-latexmk -pdf -interaction=nonstopmode -halt-on-error main.tex
-```
-
-Read the end of the `.log` file for the first error. Without `latexmk`, ask the user to recompile in Overleaf.
-Never commit build outputs: `*.aux`, `*.log`, `*.out`, `*.toc`, `*.bbl`, `*.blg`, `*.fls`, `*.fdb_latexmk`, `*.synctex.gz`, and the `.pdf`.
-Run `latexmk -c` to remove them before you commit.
+Do not compile the project in your shell: `latexmk` (also `latexmk -c`) runs a project's `latexmkrc`, which is code
+anyone with edit access can write, and your shell can reach the user's keys.
+After you push, ask the user to recompile in Overleaf and to tell you the first error, if any.
+Never commit build outputs such as `*.aux`, `*.log`, or a `.pdf`.
 
 ## When it fails
 
@@ -63,8 +68,11 @@ Run `latexmk -c` to remove them before you commit.
   the token is missing, expired, or revoked, or the account has no premium plan.
   Check `list_egress_credentials`; if the service shows `configured: false`, ask with `request_secret` as above.
   If it shows `configured: true`, the token is wrong or expired: ask the user to create a new one and call `request_secret` again.
-- `403` or `404` / `repository not found`: the project id is wrong, or the token's account cannot open the project.
-  Ask the user for the project link and to check they are a collaborator.
+- A refusal from Agent Keys (a JSON body with an `error` such as `credential_not_configured` or
+  `service_not_matched`) is not a project problem: follow its `message`, check `list_egress_credentials`, and use
+  `request_secret` for a missing key.
+- Otherwise `403` or `404` / `repository not found`: the project id is wrong, or the token's account cannot open
+  the project. Ask the user for the project link and to check they are a collaborator.
 - A push refused for a large file or a file name: Overleaf limits file sizes and some names; tell the user which file.
 - Self-hosted Overleaf (Server Pro) uses its own host, not `git.overleaf.com`.
   The user adds a **Custom** service on the Agent Keys page for that host, with basic auth and username `git`.
