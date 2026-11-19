@@ -28,6 +28,7 @@ from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     EnrichmentCachePolicy,
     EnrichmentItem,
     TurnOutcome,
@@ -765,6 +766,23 @@ class ToolAfterCallContext(HookContext):
 
 
 @dataclass(slots=True, kw_only=True)
+class ToolResultTransformContext(HookContext):
+    """Context passed to tool:result_transform hooks: ``result`` is the text the model reads for a successful call."""
+
+    event_name: str = EVENT_TOOL_RESULT_TRANSFORM
+    tool_name: str
+    arguments: dict[str, Any]
+    agent_name: str
+    room_id: str | None
+    thread_id: str | None
+    requester_id: str | None
+    session_id: str | None
+    result: str
+    message_received_depth: int = 0
+    shown: bool = False
+
+
+@dataclass(slots=True, kw_only=True)
 class ToolEnvironmentContext(HookContext):
     """Context passed to tool:environment hook callbacks, which change the environment of the call's shell commands."""
 
@@ -857,7 +875,13 @@ class ContactBeforeSendContext(HookContext):
 
 
 # The contexts of hooks that run during one of an agent's tool calls, which name its agent, room, and requester.
-CallHookContext = ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext | ContactBeforeSendContext
+CallHookContext = (
+    ToolBeforeCallContext
+    | ToolAfterCallContext
+    | ToolResultTransformContext
+    | ToolEnvironmentContext
+    | ContactBeforeSendContext
+)
 
 
 def _check_env_name(name: str) -> None:

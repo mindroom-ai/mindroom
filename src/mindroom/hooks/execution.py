@@ -35,11 +35,13 @@ from .context import (
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    ToolResultTransformContext,
     message_envelope_for_hook_context,
 )
 from .types import (
     EVENT_MESSAGE_RECEIVED,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     EnrichmentItem,
     RegisteredHook,
     default_timeout_ms_for_event,
@@ -160,7 +162,10 @@ def _bind_hook_context(
         "logger": _context_logger(hook),
         "_hook_registry_snapshot": registry,
     }
-    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
+    if isinstance(
+        context,
+        ToolBeforeCallContext | ToolAfterCallContext | ToolResultTransformContext | ToolEnvironmentContext,
+    ):
         replacement_kwargs["arguments"] = deepcopy(context.arguments)
     if isinstance(context, ToolAfterCallContext):
         replacement_kwargs["result"] = _snapshot_tool_observer_value(context.result)
@@ -193,8 +198,11 @@ async def _invoke_hook(hook: RegisteredHook, context: HookContext) -> _HookInvoc
     timeout_seconds = _effective_timeout_ms(hook) / 1000
     started_at = time.monotonic()
     try:
-        async with asyncio.timeout(timeout_seconds):
+        async with asyncio.timeout(timeout_seconds) as deadline:
             result = await hook.callback(context)
+        if deadline.expired():
+            # The hook caught the cancellation its deadline sent and returned anyway, so it timed out.
+            raise TimeoutError  # noqa: TRY301
     except asyncio.CancelledError:
         raise
     except (Exception, SystemExit) as error:
@@ -351,6 +359,57 @@ async def emit_policy(
             context.feedback = hook_context.feedback
             if context.verdict != "send":
                 return
+    finally:
+        _EMIT_DEPTH.reset(token)
+
+
+async def emit_tool_result_transform(
+    registry: HookRegistry,
+    context: ToolResultTransformContext,
+    *,
+    rewritable: bool = True,
+) -> str | None:
+    """Run tool:result_transform hooks serially in priority order and return the text they leave, failing closed.
+
+    Each hook returns a ``str`` to replace the text the hook before it left, or ``None`` to keep it. One that fails,
+    times out, or returns anything else, or a run nested too deeply, stops the chain and withholds the result: None.
+    A result that is not ``rewritable`` reaches every hook as itself; a replacement that contains it keeps it, and any
+    other replacement withholds it. A Stop a hook caught still propagates.
+    """
+    hooks = _eligible_hooks(registry, EVENT_TOOL_RESULT_TRANSFORM, context)
+    if not hooks:
+        return context.result
+    log_kwargs = {"tool_name": context.tool_name, "agent_name": context.agent_name}
+    depth = _EMIT_DEPTH.get()
+    if depth >= _MAX_EMIT_DEPTH:
+        logger.warning("Withheld tool result", **log_kwargs, reason="hooks nested too deeply")
+        return None
+    token = _EMIT_DEPTH.set(depth + 1)
+    task = asyncio.current_task()
+    try:
+        text = context.result
+        for hook in hooks:
+            cancelling = 0 if task is None else task.cancelling()
+            hook_context = _bind_hook_context(registry, hook, replace(context, result=text))
+            invocation = await _invoke_hook(hook, hook_context)
+            if task is not None and task.cancelling() > cancelling:
+                raise asyncio.CancelledError
+            value = invocation.value
+            # A hook that took a control result's text out wants it gone; it cannot be rewritten, so it is withheld.
+            removed = not rewritable and isinstance(value, str) and text not in value
+            if not invocation.succeeded or not isinstance(value, str | None) or removed:
+                logger.warning(
+                    "Withheld tool result",
+                    **log_kwargs,
+                    plugin_name=hook.plugin_name,
+                    hook_name=hook.hook_name,
+                )
+                return None
+            if value not in (None, text) and not rewritable:
+                logger.info("Kept a control tool result a hook rewrote", **log_kwargs, hook_name=hook.hook_name)
+            elif value is not None:
+                text = value
+        return text
     finally:
         _EMIT_DEPTH.reset(token)
 

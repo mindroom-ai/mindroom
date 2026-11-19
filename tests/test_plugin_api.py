@@ -48,6 +48,7 @@ _EXPORTS = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "EVENT_TOOL_RESULT_TRANSFORM",
     "EVENT_TURN_ENDED",
     "EVENT_TURN_PAUSED",
     "EVENT_TURN_RESUMED",
@@ -116,6 +117,7 @@ _EXPORTS = [
     "ToolExecutionTarget",
     "ToolFileAccess",
     "ToolManagedInitArg",
+    "ToolResultTransformContext",
     "ToolRuntimeContext",
     "ToolStatus",
     "ToolTraceEntry",
@@ -288,6 +290,10 @@ _SIGNATURES = {
     "ToolEnvironmentContext": (
         f"({_TOOL_HOOK}, function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, "
         "message_received_depth, declined, decline_reason)"
+    ),
+    "ToolResultTransformContext": (
+        f"({_TOOL_HOOK}, tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, result, "
+        "message_received_depth, shown)"
     ),
     "ToolRuntimeContext": (
         "(agent_name, target, requester_id, client, config, runtime_paths, plugins, conversation_reader, relations, "
@@ -570,6 +576,7 @@ _CONSTANTS = {
     "EVENT_TOOL_AFTER_CALL": "tool:after_call",
     "EVENT_TOOL_BEFORE_CALL": "tool:before_call",
     "EVENT_TOOL_ENVIRONMENT": "tool:environment",
+    "EVENT_TOOL_RESULT_TRANSFORM": "tool:result_transform",
     "EVENT_TURN_ENDED": "turn:ended",
     "EVENT_TURN_PAUSED": "turn:paused",
     "EVENT_TURN_RESUMED": "turn:resumed",
@@ -660,7 +667,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 31), "003079a56e95ac21e30361d2a14fe8e7740715667f5cbbc4a06b15d277b0fb1a")
+_PINNED_VERSION = ((1, 32), "a910ec60d2e0c1059aec1febb8760c7ede8b631ae9465ab637c12a53c0d36c8c")
 
 
 def _is_enum(obj: object) -> bool:
