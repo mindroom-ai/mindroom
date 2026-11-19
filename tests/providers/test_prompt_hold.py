@@ -238,7 +238,6 @@ async def test_each_update_states_the_whole_difference_and_a_revert_withdraws_th
 @pytest.mark.parametrize(
     "trigger",
     [
-        "turn_context",
         "tools",
         "deferred_tools",
         "model",
@@ -258,9 +257,7 @@ async def test_a_request_whose_anchors_or_route_no_longer_match_is_sent_as_built
     second, sent = await conversation.told()
     assert len(_updates(sent)) == 1
     third = [*_system(_B), *second[2:], _answer(), _user("three")]
-    if trigger == "turn_context":
-        third[1] = Message(role="system", content="Today is Thursday.")
-    elif trigger == "tools":
+    if trigger == "tools":
         conversation.tools = (ToolSpec(name="add", description=None, parameters={}, strict=None),)
     elif trigger == "deferred_tools":
         # The same definitions, one of them now left off the request until a tool search loads it.
@@ -320,28 +317,45 @@ async def test_a_change_that_cannot_follow_a_user_message_restarts_the_hold(conv
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("nested", ["", "### /notes/archive\nArchive starts here.\n"])
-async def test_a_prompt_that_inlines_a_memory_file_is_never_told_as_an_update(
+async def test_a_prompt_that_inlines_a_memory_file_is_told_as_an_update_like_any_other(
     nested: str,
     conversation: _Conversation,
 ) -> None:
-    """Any change to a prompt that preloads a ``MEMORY.md`` sends the current prompt, whatever headings the file holds.
-
-    An update quotes the lines around a change and is sent again, so it would keep a memory the user asked to forget.
-    """
+    """A ``MEMORY.md`` preloaded into the prompt is no special case, whatever headings the file holds."""
     fact = "The door code is 4711."
     memory = f"<your_role>\n### /agent/MEMORY.md\n# Memory\n{nested}Fact one.\n</your_role>\n\n- Be brief."
     first = [*_system(memory), _user("one")]
     await conversation.send(first)
     added = [*_system(memory.replace("Fact one.", f"Fact one.\n{fact}")), *first[2:], _answer(), _user("two")]
-    assert await conversation.send(added) == added
-    forgotten = [*_system(memory), *added[2:], _answer(), _user("three")]
-    assert await conversation.send(forgotten) == forgotten
-    # Nor is a rule beside the file, nor a file that the prompt starts or stops preloading.
-    edited = [*_system(memory.replace("brief", "thorough")), *forgotten[2:], _answer(), _user("four")]
-    assert await conversation.send(edited) == edited
-    dropped = [*_system("- Be thorough."), *edited[2:], _answer(), _user("five")]
-    assert await conversation.send(dropped) == dropped
-    assert fact not in conversation.path.read_text(encoding="utf-8")
+    sent = await conversation.send(added)
+    assert (sent[0].content, _shape(sent)[-1]) == (memory, "update")
+    assert f"+{fact}" in _updates(sent)[0].splitlines()
+    edited = [*_system(memory.replace("brief", "thorough")), *added[2:], _answer(), _user("three")]
+    sent = await conversation.send(edited)
+    assert (sent[0].content, _shape(sent)[-1]) == (memory, "update")
+    assert {"-- Be brief.", "+- Be thorough."} <= set(_updates(sent)[-1].splitlines())
+
+
+@pytest.mark.asyncio
+async def test_a_changed_turn_system_message_is_told_like_the_first_and_a_changed_count_restarts_the_hold(
+    conversation: _Conversation,
+) -> None:
+    """The leading system messages are diffed as one text: one update tells a change to either of them."""
+    second, _sent = await conversation.told()
+    third = [*_system(_B, "Today is Thursday."), *second[2:], _answer(), _user("three")]
+    sent = await conversation.send(third)
+    assert [message.content for message in sent[:2]] == [_A, _TURN]
+    told = _updates(sent)[-1].splitlines()
+    assert {
+        "-- End every reply with AMBER.",
+        "+- End every reply with VIOLET.",
+        f"-{_TURN}",
+        "+Today is Thursday.",
+    } <= {*told}
+    # A prompt that gains or loses a system message is sent as built.
+    fewer = [third[0], *third[2:], _answer(), _user("four")]
+    assert await conversation.send(fewer) == fewer
+    assert conversation.state()["updates"] == []
 
 
 def _applied(held: str, update: str) -> str:

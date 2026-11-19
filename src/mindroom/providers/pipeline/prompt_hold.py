@@ -3,15 +3,16 @@
 The system prompt leads every request, so a changed one makes the provider read the whole conversation again. A
 request that names its conversation's hold (``ModelRequest.prompt_hold``) to a route that takes a system prompt
 update (``Capabilities.system_updates``) is therefore sent the system prompt the conversation last sent, and a change
-to its stable first system message, such as an edited ``AGENTS.md``, as a system prompt update: a system message
-after the newest user message, which every later request sends again in the same place.
+to its leading system messages, read as one text, such as an edited ``AGENTS.md`` or ``MEMORY.md``, as a system prompt
+update: a system message after the newest user message, which every later request sends again in the same place. So
+a line deleted from the prompt, such as a forgotten memory, stays quoted in the update until the hold starts over.
 
 One rule decides it, here and nowhere else: a request is sent the held prompt and its updates only if the file was
-written for the same model and tools, was used within the cache lifetime, holds the request's other system messages,
-and every anchor it stores (the digest of the first message, and of the messages before each update) matches the
-request's messages. Any other request is sent exactly as it was built, and the hold starts over from it. So a request
-whose conversation a compaction or a history limit rewrote sends its own prompt, and one that replays the same
-messages, such as a retry or a resumed run, sends the same held prompt and updates.
+written for the same model and tools, was used within the cache lifetime, holds as many system messages as the
+request, and every anchor it stores (the digest of the first message, and of the messages before each update)
+matches the request's messages. Any other request is sent exactly as it was built, and the hold starts over from it.
+So a request whose conversation a compaction or a history limit rewrote sends its own prompt, and one that replays
+the same messages, such as a retry or a resumed run, sends the same held prompt and updates.
 
 Only a conversation's own turns write its file. A run that only reads it (``ModelRequest.prompt_hold_pin``), such
 as a skill review's fork or an approval resumed after its turn, is sent what the file held at its first request
@@ -101,14 +102,10 @@ def _update_text(held: str, fresh: str) -> str | None:
     numbers, whose hunks quote each change with the lines around it and are split by a bare ``@@`` line. Every
     hunk's old side stands exactly once in ``held``, and in the text the hunks above it made of ``held``, so the
     update and ``held`` give ``fresh`` and no other text, read either way; a change that cannot be told so is not told.
-    Nor is any change to a prompt that inlines a ``MEMORY.md``, whose every preloaded file follows a heading of its
-    path: an update quotes lines and is sent again, so it would keep a memory the user asked to forget.
     """
     if held == fresh:
         return _UPDATE_WITHDRAWN
     old, new = held.split("\n"), fresh.split("\n")
-    if any(line.startswith("### ") and line.lower().endswith("/memory.md") for line in (*old, *new)):
-        return None
     body: list[str] = []
     for group in SequenceMatcher(None, old, new, autojunk=False).get_grouped_opcodes(_CONTEXT_LINES):
         before = old[group[0][1] : group[-1][2]]
@@ -171,13 +168,13 @@ def _read(path: Path, now: float) -> _State | None:
 
 def _continued(state: _State, route: object, system: Sequence[Message], rest: Sequence[Message]) -> _Plan | None:
     """Return the plan of a request that continues the hold ``state``, or None when the hold must start over."""
-    fresh = [message.content for message in system]
     held, updates = state["system"], state["updates"]
+    fresh = "\n\n".join(message.content for message in system)
     lengths = [length for length, _, _ in updates]
     first, *anchors = _anchors(rest, [1, *lengths])
     if (
         state["route"] != route
-        or held[1:] != fresh[1:]
+        or len(held) != len(system)
         or first is None
         or first != state["first"]
         or any(
@@ -186,14 +183,14 @@ def _continued(state: _State, route: object, system: Sequence[Message], rest: Se
         )
     ):
         return None
-    if fresh[0] != state["current"]:
+    if fresh != state["current"]:
         # It is told after the newest user message, which no earlier update follows, or not at all.
-        text = _update_text(held[0], fresh[0]) if len(updates) < _MAX_UPDATES else None
+        text = _update_text("\n\n".join(held), fresh) if len(updates) < _MAX_UPDATES else None
         anchor = _anchors(rest, [len(rest)])[0]
         if text is None or anchor is None or not _may_stand(rest, len(rest)) or len(rest) <= max(lengths, default=0):
             return None
         updates = [*updates, [len(rest), anchor, text]]
-        state = {**state, "current": fresh[0], "updates": updates}
+        state = {**state, "current": fresh, "updates": updates}
     sent = [
         message if message.content == text else replace(message, content=text) for message, text in zip(system, held)
     ]
@@ -248,7 +245,7 @@ def _plan(inner: ModelProvider, request: ModelRequest, state: _State | None) -> 
     if request.prompt_hold_pin is not None:
         return None
     first = _anchors(rest, [1])[0]
-    return messages, {"route": route, "system": texts, "current": texts[0], "first": first, "updates": []}
+    return messages, {"route": route, "system": texts, "current": "\n\n".join(texts), "first": first, "updates": []}
 
 
 def _identities(inner: ModelProvider, request: ModelRequest, sent: ModelRequest) -> list[str | None]:

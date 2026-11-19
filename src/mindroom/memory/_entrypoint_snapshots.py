@@ -97,7 +97,8 @@ def stable_entrypoint_preamble(
     past a cap; its header is compared too, so an edited prompt override loads again.
     A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
     anyway, and the turn after one costs only its compacted history.
-    An edited or deleted line loads at once, so a memory the user asked to forget is not shown again.
+    An edited or deleted line loads at once. A route that holds the system prompt tells that as a system prompt
+    update, which quotes a deleted line until the hold starts over (``providers/pipeline/prompt_hold.py``).
     Comparing the file keeps a memory file the turn does not read out of it.
     ``now`` is wall-clock seconds, so idle times count across restarts. Turns of one agent take the store's lock in
     turn, so two that start a conversation together send one preamble.
