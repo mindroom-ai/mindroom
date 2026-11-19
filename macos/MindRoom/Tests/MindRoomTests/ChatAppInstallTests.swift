@@ -163,7 +163,7 @@ final class ChatAppInstallTests: XCTestCase {
 
     private func installer(_ tools: FakeTools, verify: @escaping (URL) throws -> Void = { _ in }) throws -> ChatAppInstaller {
         let applications = folder.appendingPathComponent("Applications")
-        try FileManager.default.createDirectory(at: applications, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: applications, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
         let list = try JSONSerialization.data(withJSONObject: [release("v1", assets: [("MindRoom.dmg", "uploaded")])])
         return ChatAppInstaller(
             applications: applications, home: folder.appendingPathComponent("home"),
@@ -192,6 +192,127 @@ final class ChatAppInstallTests: XCTestCase {
         XCTAssertEqual(installer.destination.path, folder.appendingPathComponent("Applications/MindRoom Chat.app").path)
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: installer.applications.path)
         XCTAssertEqual(installer.destination.path, folder.appendingPathComponent("home/Applications/MindRoom Chat.app").path)
+    }
+
+    func testTrustsOnlyFoldersThatOthersCannotChange() throws {
+        // A standard /Applications: root's, writable by the admin group.
+        XCTAssertTrue(ChatAppInstaller.isTrusted(URL(fileURLWithPath: "/Applications")))
+        XCTAssertFalse(ChatAppInstaller.isTrusted(URL(fileURLWithPath: "/private/tmp")), "Writable by everyone")
+        XCTAssertFalse(ChatAppInstaller.isTrusted(folder.appendingPathComponent("missing")))
+        let applications = try installer(FakeTools()).applications
+        for (mode, trusted) in [(0o755, true), (0o700, true), (0o757, false), (0o777, false), (0o1777, false)] {
+            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: applications.path)
+            XCTAssertEqual(ChatAppInstaller.isTrusted(applications), trusted, String(mode, radix: 8))
+        }
+        // Group-writable is trusted only for the admin group, which a temporary folder never has.
+        try FileManager.default.setAttributes([.posixPermissions: 0o775], ofItemAtPath: applications.path)
+        let group = try XCTUnwrap(try FileManager.default.attributesOfItem(atPath: applications.path)[.groupOwnerAccountID] as? Int)
+        XCTAssertEqual(ChatAppInstaller.isTrusted(applications), group == 80)
+        let link = folder.appendingPathComponent("Link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: URL(fileURLWithPath: "/Applications"))
+        XCTAssertFalse(ChatAppInstaller.isTrusted(link), "A link can be pointed elsewhere")
+    }
+
+    func testSkipsAnApplicationsFolderThatOthersCanChange() async throws {
+        let tools = FakeTools()
+        var installer = try installer(tools)
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: installer.applications.path)
+
+        let installed = try await installer.install { _ in }
+
+        XCTAssertEqual(installed.path, folder.appendingPathComponent("home/Applications/MindRoom Chat.app").path)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: installer.applications.path), [], "Nothing is staged there either")
+
+        // With the home folder open to others as well, there is nowhere to install.
+        try FileManager.default.removeItem(at: installed)
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: installed.deletingLastPathComponent().path)
+        var fetched = false
+        installer.fetch = { _ in fetched = true; return Data() }
+        tools.calls = []
+        do {
+            _ = try await installer.install { _ in }
+            XCTFail("Installed into a folder that others can change")
+        } catch {
+            let parent = installed.deletingLastPathComponent().path
+            XCTAssertEqual(error as? ChatAppInstallError, .failed("\(parent) is not a folder that only you and this Mac's administrators can change."))
+        }
+        XCTAssertFalse(fetched, "Nothing is downloaded")
+        XCTAssertEqual(tools.calls, [])
+        XCTAssertEqual(try leftovers(tools), [])
+    }
+
+    func testStopsAToolThatDoesNotFinish() throws {
+        // Ignores the request to stop, so only the kill ends it.
+        var started = Date()
+        let pidFile = folder.appendingPathComponent("pid")
+        let stuck = ChatAppInstaller.runTool("/bin/sh", ["-c", "trap '' TERM; echo $$ > '\(pidFile.path)'; sleep 20; echo late"], limit: 0.5, grace: 0.5)
+        XCTAssertEqual(stuck, CommandResult(exitCode: 124, output: "sh did not finish in time."))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        let pid = try XCTUnwrap(Int32(try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        for _ in 0 ..< 40 where kill(pid, 0) == 0 { usleep(50000) }
+        XCTAssertNotEqual(kill(pid, 0), 0, "The tool was killed")
+        // A child that keeps the output open does not hold the wait.
+        started = Date()
+        let detached = ChatAppInstaller.runTool("/bin/sh", ["-c", "sleep 20 & echo done; exit 3"])
+        XCTAssertEqual(detached, CommandResult(exitCode: 3, output: "done\n"))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        XCTAssertEqual(ChatAppInstaller.runTool("/nonexistent/tool", []).exitCode, 127)
+    }
+
+    func testStoppedAttachIsDetachedBeforeItsFolderGoes() async throws {
+        for detachFails in [false, true] {
+            let tools = FakeTools()
+            tools.detachFails = detachFails
+            var installer = try installer(tools)
+            // hdiutil was stopped at its time limit: the image may be attached all the same.
+            installer.run = { tool, arguments in
+                arguments[0] == "attach" ? CommandResult(exitCode: 124, output: "hdiutil did not finish in time.") : tools.run(tool, arguments)
+            }
+
+            do {
+                _ = try await installer.install { _ in }
+                XCTFail("Installed from an image that did not attach")
+            } catch {
+                XCTAssertEqual(error as? ChatAppInstallError, .failed("hdiutil did not finish in time."))
+            }
+
+            let work = try XCTUnwrap(tools.downloadFolder)
+            let mount = work.appendingPathComponent("image").path
+            XCTAssertEqual(tools.detached, detachFails ? [mount, mount] : [mount])
+            XCTAssertEqual(FileManager.default.fileExists(atPath: work.path), detachFails, "The folder goes only after a confirmed detach")
+            try? FileManager.default.removeItem(at: work)
+        }
+    }
+
+    /// With the real hdiutil: an attach that reports failure after mounting is found by its mount point.
+    func testFailedAttachThatMountedIsDetached() async throws {
+        let tools = FakeTools()
+        var installer = try installer(tools)
+        installer.download = { _, file in
+            tools.downloadFolder = file.deletingLastPathComponent()
+            let created = ChatAppInstaller.runTool("/usr/bin/hdiutil", ["create", "-size", "4m", "-fs", "HFS+", "-volname", "MindRoomChatTest", file.path])
+            XCTAssertTrue(created.isSuccess, created.output)
+        }
+        var attached = false
+        installer.run = { tool, arguments in
+            let result = ChatAppInstaller.runTool(tool, arguments)
+            guard arguments[0] == "attach" else { return result }
+            XCTAssertTrue(result.isSuccess, result.output)
+            attached = ChatAppInstaller.runTool("/sbin/mount", []).output.contains(tools.downloadFolder!.lastPathComponent)
+            return CommandResult(exitCode: 1, output: "attach failed")
+        }
+
+        do {
+            _ = try await installer.install { _ in }
+            XCTFail("Installed from an image whose attach failed")
+        } catch {
+            XCTAssertEqual(error as? ChatAppInstallError, .failed("attach failed"))
+        }
+
+        XCTAssertTrue(attached, "The image was mounted")
+        let mounted = ChatAppInstaller.runTool("/sbin/mount", []).output
+        XCTAssertFalse(mounted.contains(try XCTUnwrap(tools.downloadFolder).lastPathComponent), "The image is detached")
+        XCTAssertEqual(try leftovers(tools), [])
     }
 
     func testInstallsVerifiedAppAndCleansUp() async throws {
@@ -573,14 +694,16 @@ final class ChatAppInstallTests: XCTestCase {
             throw XCTSkip("Set MINDROOM_CHAT_INSTALL_E2E_DIR to an empty folder to install the real MindRoom Chat there.")
         }
         // Only into an existing, empty, writable folder: nothing here may reach the real ~/Applications.
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target), [])
+        guard (try? FileManager.default.contentsOfDirectory(atPath: target)) == [] else {
+            return XCTFail("\(target) must be an existing, empty folder; nothing was installed.")
+        }
         var installer = ChatAppInstaller()
         installer.applications = URL(fileURLWithPath: target)
         installer.home = folder.appendingPathComponent("home")
         // This Mac's own copy must neither stop the test nor be touched by it.
         installer.locate = { nil }
         guard installer.destination.path == "\(target)/MindRoom Chat.app" else {
-            return XCTFail("\(target) is not writable; nothing was installed.")
+            return XCTFail("\(target) is not writable by you alone; nothing was installed.")
         }
         var stages: [String] = []
 

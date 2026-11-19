@@ -40,6 +40,7 @@ Use **Open in Browser** to use your browser session or a sign-in provider that r
 MindRoom Chat is the separate chat app for the Mac, with voice messages, Quick Capture, and its own updates.
 On **Overview**, select **Install MindRoom Chat**, or choose **Install MindRoom Chat…** from the menu bar.
 MindRoom downloads the newest release from GitHub, checks that it is the notarized MindRoom Chat signed by MindRoom, and copies it to `/Applications/MindRoom Chat.app`, or to `~/Applications` when you cannot write to `/Applications`.
+It installs only into a folder that just you and this Mac's administrators can change.
 It then opens the app, and the button and menu item change to **Open MindRoom Chat**.
 If MindRoom Chat is already on this Mac, from the Mac App Store, Homebrew, or a disk image, MindRoom opens that copy and installs nothing.
 MindRoom checks the copy's signature first; if **Overview** says a copy was not opened because it is not the MindRoom Chat that MindRoom publishes, remove the app at the path it names and install again.

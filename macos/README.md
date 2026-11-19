@@ -59,6 +59,8 @@ An existing copy from any source is found by bundle identifier through Launch Se
 It is opened only when that bundle satisfies `ChatAppSignature.installedRequirement` (the app's designated requirement: the Mac App Store build, or the Developer ID build of team `DNA6966LGZ`); otherwise Overview says why it was not opened.
 Without a copy, the app takes the newest published `mindroom-ai/mindroom-chat` release that has `MindRoom-Chat.dmg` (older releases: `MindRoom.dmg`), following redirects only to GitHub's hosts, and mounts it read-only.
 The image's app must be a real folder, not a link; it is copied into a staging folder of this install's own (mode `0700`, hidden) in `/Applications`, or `~/Applications` when that is not writable.
+Either folder is used only when it is owned by root or the user, not writable by others, and group-writable only for the admin group; otherwise the install is refused.
+`hdiutil` and `ditto` are stopped, then killed, after five minutes.
 The staged copy must satisfy `ChatAppSignature.requirement` (Developer ID, team `DNA6966LGZ`, identifier `chat.mindroom.app`, notarized, no links out of the bundle, revocation check requested) before one exclusive rename makes it `MindRoom Chat.app`; an existing bundle is never replaced, and a copy that appeared during the download stops the install.
 The image is detached by device and temporary files are removed on every path, and MindRoom never updates the chat app, which updates itself.
 Set `MINDROOM_CHAT_INSTALL_E2E_DIR` to an empty folder to run the opt-in test that installs the real release there.

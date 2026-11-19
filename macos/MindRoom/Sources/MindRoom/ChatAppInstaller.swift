@@ -38,15 +38,40 @@ struct ChatAppInstaller {
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ChatAppInstallError.noRelease }
         try FileManager.default.moveItem(at: temporary, to: file)
     }
-    var run: (_ tool: String, _ arguments: [String]) -> CommandResult = { tool, arguments in
-        let process = MindRoomCommandProcess()
-        // A hung tool must not hold the install, and with it quitting, for good.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 300) { process.cancel() }
-        return process.run(MindRoomCommandInvocation(
-            executableURL: URL(fileURLWithPath: tool), arguments: arguments, environment: [:]
-        ))
-    }
+    var run: (_ tool: String, _ arguments: [String]) -> CommandResult = { ChatAppInstaller.runTool($0, $1) }
     var verify: (URL) throws -> Void = ChatAppSignature.verify
+
+    /// Runs a tool for at most `limit` seconds, then stops it (exit code 124): a hung tool must not hold the install,
+    /// and with it quitting, for good. Output goes to a file, so a child that keeps a pipe open cannot hold it either.
+    static func runTool(_ tool: String, _ arguments: [String], limit: TimeInterval = 300, grace: TimeInterval = 5) -> CommandResult {
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("MindRoomChatInstall-\(UUID().uuidString).log")
+        FileManager.default.createFile(atPath: output.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: output) }
+        let process = Process()
+        let exited = DispatchSemaphore(value: 0)
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle(forWritingAtPath: output.path)
+        process.standardError = process.standardOutput
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return CommandResult(exitCode: 127, output: error.localizedDescription) }
+        guard exited.wait(timeout: .now() + limit) == .timedOut else {
+            return CommandResult(exitCode: process.terminationStatus, output: String(decoding: (try? Data(contentsOf: output)) ?? Data(), as: UTF8.self))
+        }
+        process.terminate()
+        if exited.wait(timeout: .now() + grace) == .timedOut { kill(process.processIdentifier, SIGKILL) }
+        return CommandResult(exitCode: 124, output: "\(URL(fileURLWithPath: tool).lastPathComponent) did not finish in time.")
+    }
+
+    /// Whether only root, this user, and this Mac's administrators (group 80) can change `folder`, as with a standard
+    /// `/Applications`. Anyone else who can write there could swap the copy's folder before the copy is in place.
+    static func isTrusted(_ folder: URL) -> Bool {
+        var info = stat()
+        guard lstat(folder.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return false }
+        return (info.st_uid == 0 || info.st_uid == getuid()) && info.st_mode & S_IWOTH == 0
+            && (info.st_mode & S_IWGRP == 0 || info.st_gid == 80)
+    }
 
     /// A MindRoom Chat that is already on this Mac, from any source (disk image, Homebrew, App
     /// Store): they share the bundle identifier. Launch Services can miss a copy, so the places
@@ -62,17 +87,20 @@ struct ChatAppInstaller {
         return ([locate()].compactMap { $0 } + known).first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
-    /// `/Applications` when this user can write there, else `~/Applications`. Always under the chat
-    /// app's own name: older images hold it as `MindRoom.app`, the name of this app.
+    /// `/Applications` when this user can write there and it is trusted, else `~/Applications`. Always under the
+    /// chat app's own name: older images hold it as `MindRoom.app`, the name of this app.
     var destination: URL {
-        let writable = FileManager.default.isWritableFile(atPath: applications.path)
+        let writable = FileManager.default.isWritableFile(atPath: applications.path) && Self.isTrusted(applications)
         return (writable ? applications : home.appendingPathComponent("Applications")).appendingPathComponent(Self.appName)
     }
 
     func install(progress: @escaping (String) -> Void) async throws -> URL {
         let files = FileManager.default
         let destination = destination
+        let parent = destination.deletingLastPathComponent()
         try refuseExistingCopy(at: destination)
+        try files.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        guard Self.isTrusted(parent) else { throw ChatAppInstallError.failed("\(parent.path) is not a folder that only you and this Mac's administrators can change.") }
         progress("Finding the newest MindRoom Chat…")
         guard let source = ChatAppRelease.downloadURL(fromReleaseList: try await fetch(ChatAppRelease.listURL)) else {
             throw ChatAppInstallError.noRelease
@@ -82,7 +110,7 @@ struct ChatAppInstaller {
         let mount = work.appendingPathComponent("image")
         // This install's own folder on the destination's volume, closed to other users, so nothing changes the copy
         // between its check and its move into place. No `.app`: the unchecked copy is no application to anything.
-        let stage = destination.deletingLastPathComponent().appendingPathComponent(".MindRoomChatInstall-\(UUID().uuidString)")
+        let stage = parent.appendingPathComponent(".MindRoomChatInstall-\(UUID().uuidString)")
         let staged = stage.appendingPathComponent("MindRoom Chat")
         var device: String?
         defer {
@@ -94,7 +122,6 @@ struct ChatAppInstaller {
             try? files.removeItem(at: stage)
         }
         try files.createDirectory(at: mount, withIntermediateDirectories: true)
-        try files.createDirectory(at: stage.deletingLastPathComponent(), withIntermediateDirectories: true)
         try files.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
 
         progress("Downloading MindRoom Chat…")
@@ -102,8 +129,11 @@ struct ChatAppInstaller {
         progress("Checking MindRoom Chat…")
         // macOS 27 points to `diskutil image attach` instead; macOS 14, which this app supports, has hdiutil.
         let attach = run("/usr/bin/hdiutil", ["attach", image.path, "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", mount.path])
+        // A failed attach can leave the image mounted, and a stopped one may have: then the work folder stays unless a detach succeeds.
+        let volume = { (url: URL) in (try? files.attributesOfItem(atPath: url.path))?[.systemNumber] as? Int }
+        device = attach.output.split(whereSeparator: \.isWhitespace).first { $0.hasPrefix("/dev/disk") }.map(String.init)
+            ?? (attach.exitCode == 124 || volume(mount) != volume(work) ? mount.path : nil)
         try check(attach)
-        device = attach.output.split(whereSeparator: \.isWhitespace).first { $0.hasPrefix("/dev/disk") }.map(String.init) ?? mount.path
         // Only a real folder of the image: ditto would follow a link to somewhere else.
         guard let app = try files.contentsOfDirectory(at: mount, includingPropertiesForKeys: [.isDirectoryKey])
             .first(where: { $0.pathExtension == "app" }),
