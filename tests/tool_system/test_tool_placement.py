@@ -174,7 +174,12 @@ def test_a_selective_env_list_naming_filesystem_by_an_alias_still_routes_it(tmp_
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
         process_env=_env(
-            "selective", f"shell,{listed}", "http://sandbox-runner:8765", "static_runner", unsafe=False, runner=False
+            "selective",
+            f"shell,{listed}",
+            "http://sandbox-runner:8765",
+            "static_runner",
+            unsafe=False,
+            runner=False,
         ),
     )
     assert _placement(runtime_paths, "filesystem", None) == "1"

@@ -1200,7 +1200,10 @@ class TestConsolidatedConfigManager:
         cm = _config_manager(config_path)
 
         created = cm.manage_agent(
-            operation="create", agent_name="coder", display_name="Coder", tools=["coding", "file"]
+            operation="create",
+            agent_name="coder",
+            display_name="Coder",
+            tools=["coding", "file"],
         )
         updated = cm.manage_agent(operation="update", agent_name="reader", tools=["file", "calculator"])
 
