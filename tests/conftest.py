@@ -78,6 +78,7 @@ import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools.shell as shell_tool_module
 from mindroom import ai as mindroom_ai
+from mindroom import logging_config
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.approval.manager import (
@@ -3759,6 +3760,8 @@ def _isolate_structlog_configuration(
 ) -> Generator[None]:
     """Silence incidental logs and prevent global logging configuration leaks."""
     _configure_quiet_structlog()
+    # A headless run turns on library logging for the whole process, which would hide every later test's logs.
+    monkeypatch.setattr(logging_config, "_library_logging", False)
     if request.node.path.name != "test_logging_config.py":
         monkeypatch.setattr(structlog, "configure", _configure_uncached_structlog)
     # `setup_logging` reroutes Agno's loggers; give later tests on this worker Agno's own setup back.
