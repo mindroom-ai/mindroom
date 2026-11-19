@@ -1825,6 +1825,8 @@ async def test_handle_config_command_set_previews_and_applies_ordinary_values(
         ("set models.default.api_key sk-new-config-sentinel", "sentinel"),
         ("set mcp_servers.home.env {HOMEASSISTANT_TOKEN: new-env-sentinel}", "sentinel"),
         ("set models.default.extra_kwargs {default_headers: {X-Auth: new-header-sentinel}}", "sentinel"),
+        # Bytes a typed field accepts as text are shown as they are, and are no JSON value.
+        ("set agents.assistant.display_name '!!binary SGVsbG8='", "display_name: Hello"),
         # A YAML date is no JSON value, so the store cannot hold it either.
         (
             "set defaults.automations '[{name: digest, cron: \"0 9 * * *\", options: {since: 2026-11-18}}]'",

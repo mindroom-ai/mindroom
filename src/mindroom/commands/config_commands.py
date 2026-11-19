@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shlex
 from typing import TYPE_CHECKING, Any
 
@@ -274,12 +275,16 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
                 f"React with ✅ to confirm or ❌ to cancel this change."
             )
 
+            try:
+                survives_json = json.loads(json.dumps(value)) == value
+            except (TypeError, ValueError):
+                survives_json = False
             # Return the preview and the change info for confirmation
             change_info = {
                 "config_path": config_path_str,
                 "new_value": value,
-                # A value that redaction masks stays out of the pending change's saved record.
-                "new_value_withheld": redacted_value != value,
+                # A value that redaction masks, or that the store's JSON does not give back, stays out of the record.
+                "new_value_withheld": redacted_value != value or not survives_json,
             }
 
             return preview_msg, change_info
