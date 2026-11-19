@@ -518,6 +518,21 @@ describe("egress services on the personal page", () => {
     ).toHaveLength(2);
   });
 
+  it("adds a service only as a new one, so it never replaces another's key", async () => {
+    const putHeaders = () =>
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(([, options]) => options?.method === "PUT")
+        .map(([, options]) => options?.headers as Record<string, string>);
+    await renderPage();
+    await openAdd();
+    fill("gh", "github");
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+    await waitFor(() => expect(putHeaders()).toHaveLength(1));
+    expect(putHeaders()[0]).toMatchObject({ "If-None-Match": "*" });
+  });
+
   it("keeps the editor and what is typed when the agent is closed and opened again", async () => {
     await renderPage();
     await openAdd();
@@ -633,6 +648,71 @@ describe("egress services on the personal page", () => {
         `${KEYS}/ai`,
         `${KEYS}/ai`,
       ]);
+    });
+
+    it("adds only once: a change saved after its own create replaces it, whatever the list says", async () => {
+      let keyAttempts = 0;
+      mutation = (_method, path) =>
+        !path.startsWith(SERVICES) && keyAttempts++ === 0
+          ? json({ detail: "The key vault is read-only" }, 409)
+          : new Response(null, { status: 204 });
+      const putHeaders = () =>
+        vi
+          .mocked(fetch)
+          .mock.calls.filter(
+            ([input, options]) =>
+              options?.method === "PUT" && String(input).startsWith(SERVICES),
+          )
+          .map(
+            ([, options]) =>
+              (options?.headers as Record<string, string>)["If-None-Match"],
+          );
+      await renderPage();
+      await openAdd();
+      // The list has not caught up with this editor's own create.
+      fillOpenAi("sk-secret");
+      await screen.findByRole("alert");
+      fireEvent.click(screen.getByRole("button", { name: "More options" }));
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: "Changed" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+      await waitFor(() => expect(putHeaders()).toHaveLength(2));
+      expect(putHeaders()).toEqual(["*", undefined]);
+    });
+
+    it("remembers its own create when Keep editing answers another row's Edit", async () => {
+      let keyAttempts = 0;
+      mutation = (_method, path) =>
+        !path.startsWith(SERVICES) && keyAttempts++ === 0
+          ? json({ detail: "The key vault is read-only" }, 409)
+          : new Response(null, { status: 204 });
+      const putHeaders = () =>
+        vi
+          .mocked(fetch)
+          .mock.calls.filter(
+            ([input, options]) =>
+              options?.method === "PUT" && String(input).startsWith(SERVICES),
+          )
+          .map(
+            ([, options]) =>
+              (options?.headers as Record<string, string>)["If-None-Match"],
+          );
+      await renderPage();
+      await openAdd();
+      fillOpenAi("sk-secret");
+      await screen.findByText(/its key was not/);
+      fireEvent.click(screen.getByRole("button", { name: "More options" }));
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: "Changed" },
+      });
+      fireEvent.click(await rowAction("Edit service for My API"));
+      fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+      fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+      await waitFor(() => expect(putHeaders()).toHaveLength(2));
+      expect(putHeaders()).toEqual(["*", undefined]);
     });
 
     it("sets a key while editing a service", async () => {

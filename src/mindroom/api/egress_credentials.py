@@ -13,7 +13,7 @@ import functools
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ValidationError
 
 from mindroom.api import config_lifecycle, oauth
@@ -65,12 +65,14 @@ from mindroom.egress_broker.user_services import (
     InactiveUserService,
     ServiceSource,
     UserServiceConflictError,
+    consistent_read,
     delete_user_service,
     inactive_user_services,
     load_user_services,
     save_user_service,
     service_source,
-    user_service_hosts_not_allowed,
+    stored_user_service_names,
+    user_service_hosts_error,
 )
 from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking, resolve_oauth_credential_context
 from mindroom.oauth.registry import snapshot_oauth_providers
@@ -495,13 +497,8 @@ def _parse_user_service(body: object) -> EgressService:
 
 def _require_hosts_within_operator_policy(operator: EgressBrokerConfig, service: EgressService) -> None:
     """Refuse a service whose rules would apply on hosts that `unmatched_hosts: deny` keeps closed."""
-    hosts = user_service_hosts_not_allowed(operator, service)
-    if hosts:
-        msg = (
-            "Your administrator only allows requests to hosts that one of its own services covers, "
-            f"so these hosts cannot be used: {', '.join(hosts)}"
-        )
-        raise _unprocessable(msg)
+    if error := user_service_hosts_error(operator, service):
+        raise _unprocessable(error)
 
 
 @router.get("/agents/{agent_name}/services/{name}")
@@ -530,14 +527,16 @@ def put_user_service(
     requester_id: _EgressUser,
     _size: Annotated[None, Depends(_limit_service_body)],
     body: Annotated[object, Body()] = None,
+    if_none_match: Annotated[str | None, Header()] = None,
 ) -> None:
-    """Create or replace one of the scope's own services.
+    """Create or replace one of the scope's own services; with `If-None-Match: *` (the page's Add) only create it.
 
     The body has the fields of a config service except `oauth_on_shared_workers`. Returns 413 for a body over 16 KiB,
     409 for the name of a config service, and 422, always with a string detail, for a body that is not a JSON object,
     an invalid service, a limit (count or size), a placeholder user services may not set, an unknown OAuth provider,
     one on a shared or unscoped agent, or one whose rules leave its provider's preset hosts, a service's own account of a
     requester-scoped provider (GitHub, built-in Atlassian), or rules on hosts that `unmatched_hosts: deny` keeps closed.
+    An Add of a name the scope already has is a 412, so it never takes over that service's key.
     """
     _require_egress_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)
@@ -555,25 +554,29 @@ def put_user_service(
             f"{provider.display_name} accounts belong to each user, not to one agent; leave oauth_separate_account off"
         )
         raise _unprocessable(msg)
-    stored = load_user_services(agent.manager, agent.target).get(name)
-    same_own_account = (
-        stored is not None and stored.oauth_separate_account and stored.oauth_provider == service.oauth_provider
-    )
-    if service.oauth_separate_account and not same_own_account:
-        # A delete that could not remove an own account, such as one while a config service shadowed the name, left
-        # it behind; it goes before the service can use it.
-        _remove_account(request, agent, name, service, by=requester_id)
-    try:
-        save_user_service(
-            agent.manager,
-            agent.target,
-            name,
-            service,
-            config_services=operator.services,
-            oauth_providers=providers.keys(),
+    # No other service write lands between an Add's check of the name, the account cleanup, and the save.
+    with consistent_read():
+        if if_none_match == "*" and name in stored_user_service_names(agent.manager, agent.target):
+            raise HTTPException(412, "You already have a service with this name", headers=CONNECTIONS_HEADERS)
+        stored = load_user_services(agent.manager, agent.target).get(name)
+        same_own_account = (
+            stored is not None and stored.oauth_separate_account and stored.oauth_provider == service.oauth_provider
         )
-    except ValueError as exc:
-        raise _unprocessable(str(exc)) from exc
+        if service.oauth_separate_account and not same_own_account:
+            # A delete that could not remove an own account, such as one while a config service shadowed the name,
+            # left it behind; it goes before the service can use it.
+            _remove_account(request, agent, name, service, by=requester_id)
+        try:
+            save_user_service(
+                agent.manager,
+                agent.target,
+                name,
+                service,
+                config_services=operator.services,
+                oauth_providers=providers.keys(),
+            )
+        except ValueError as exc:
+            raise _unprocessable(str(exc)) from exc
     if (
         stored is not None
         and stored.oauth_separate_account

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,6 +18,7 @@ from mindroom.egress_broker.user_services import (
     MAX_USER_SERVICES,
     USER_SERVICES_CREDENTIAL_SERVICE,
     UserServiceConflictError,
+    add_user_service,
     delete_user_service,
     effective_config,
     inactive_user_services,
@@ -64,6 +66,69 @@ def _store_raw(manager: CredentialsManager, services: object) -> None:
         USER_SERVICES_CREDENTIAL_SERVICE,
         {"services": services},
     )
+
+
+@pytest.mark.parametrize("keeps", [True, False, None], ids=["kept", "refused", "raised"])
+def test_adding_a_service_holds_off_other_writes_until_it_is_kept_or_taken_back(
+    manager: CredentialsManager,
+    keeps: bool | None,
+) -> None:
+    """No other write lands between adding a new service and its key; a refused or failed one is taken back alone."""
+    edit = threading.Thread(
+        target=_save,
+        args=(manager, worker_target(), "acme", _service("api.acme.test", description="Edited")),
+    )
+    other = threading.Thread(target=_save, args=(manager, worker_target(), "other", _service()))
+
+    def then() -> bool:
+        edit.start()
+        other.start()
+        edit.join(timeout=0.2)
+        assert edit.is_alive(), "another write landed while the new service waited for its key"
+        assert load_user_services(manager, worker_target())["acme"] == _service("api.acme.test")
+        if keeps is None:
+            msg = "disk full"
+            raise OSError(msg)
+        return keeps
+
+    def add() -> bool:
+        return add_user_service(
+            manager,
+            worker_target(),
+            "acme",
+            _service("api.acme.test"),
+            config_services=_CONFIG.services,
+            then=then,
+        )
+
+    if keeps is None:
+        with pytest.raises(OSError, match="disk full"):
+            add()
+    else:
+        assert add() is keeps
+    edit.join()
+    other.join()
+
+    services = load_user_services(manager, worker_target())
+    # The edit lands after the new service was kept, or as a new service after it was taken back.
+    assert services["acme"].description == "Edited"
+    assert set(services) == {"acme", "other"}
+
+
+def test_adding_refuses_a_name_the_scope_has(manager: CredentialsManager) -> None:
+    """Adding never replaces a service, so it cannot take over another service's key."""
+    _save(manager, worker_target(), "acme", _service())
+    with pytest.raises(ValueError, match="already used by a service of your own"):
+        add_user_service(
+            manager,
+            worker_target(),
+            "acme",
+            _service("api.acme.test"),
+            config_services=_CONFIG.services,
+            then=lambda: True,
+        )
+
+    assert load_user_services(manager, worker_target())["acme"] == _service()
 
 
 def test_saved_service_is_stored_in_authored_form_in_the_primary_only_scope_store(manager: CredentialsManager) -> None:

@@ -705,14 +705,21 @@ It can also give the `url` of the page where the user gets or creates the key an
 - Chat sends the key to this MindRoom's API with the user's client session.
   MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
   The key never goes through Matrix, the model, the worker, or the logs.
+- For a service that does not exist yet, the agent passes `new_service` with the fields of a [user service](#user-services) (`display_name`, `description`, `preset`, `rules`, `placeholder_env`, `restrict_to_rules`), and `service` names the new service.
+  The card then also shows the new service: each rule's host, path prefix, port, and how the key is sent, and the variables the agent's commands get.
+  Saving adds it as one of the requester's own services in the agent's scope and stores the key, both or neither; declining or expiring adds nothing.
+  Such a service only ever uses that key: a preset's account login is dropped, and fields only config.yaml sets are refused.
+  The tool posts no card for a proposal the Agent Keys page would refuse, such as a name already in use, an invalid rule, a disallowed placeholder, or a host `unmatched_hosts: deny` keeps closed; the error says why.
+  A card whose new service could no longer be added when the user saves, for example because config.yaml now has a service of that name, expires.
 - The tool returns `saved`, `declined`, or `expired`, so the agent can retry the failed request.
+  After `saved`, the agent makes one request through Agent Keys to the service, and when it is refused, it tells the user why (for example a token of the wrong owner or read-only access) and asks again.
   A card expires after 15 minutes or when the reply is stopped, and a restart of MindRoom ends every pending request.
   It also expires when an answer arrives after its service changed or the agent's keys moved to another scope; the agent can then ask again with a new card.
 - When the call runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs), the reply waits for the answer for `background_tool_jobs.approval_wait_timeout` seconds (default 300) and then goes on; the outcome arrives later as the job's result.
   Stop withdraws the card only while the reply still waits for it.
 - The requester answers.
   For a shared agent, the requester must also be a credential manager or an administrator, as on the Agent Keys pages.
-- The tool refuses, and posts no card, for an unknown service, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.
+- The tool refuses, and posts no card, for an unknown service without `new_service`, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.
   The refusal names the Agent Keys page where one exists.
 - For a secret that is no service's API key, such as a password or a pairing code, an agent with the [`temporary_secrets`](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets) tool asks with a card of its own, and its shell commands receive the value for a limited time.
 - Chat signs in to this API with a client session, so Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` (see [Primary MindRoom runtime](https://docs.mindroom.chat/deployment/sandbox-proxy/#primary-mindroom-runtime-proxy-client)), and the homeserver must bind OpenID tokens to this deployment (`mindroom_openid_audience` on Tuwunel, see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)).

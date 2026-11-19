@@ -40,7 +40,7 @@ from mindroom.egress_broker.secrets import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator, Mapping
+    from collections.abc import Callable, Collection, Iterator, Mapping
 
     from mindroom.config.egress_broker import EgressBrokerConfig
     from mindroom.credentials.manager import CredentialsManager
@@ -62,6 +62,7 @@ __all__ = [
     "InactiveUserService",
     "ServiceSource",
     "UserServiceConflictError",
+    "add_user_service",
     "consistent_read",
     "delete_user_service",
     "effective_config",
@@ -70,6 +71,8 @@ __all__ = [
     "save_user_service",
     "service_source",
     "services_for_agent",
+    "stored_user_service_names",
+    "user_service_hosts_error",
     "user_service_hosts_not_allowed",
 ]
 
@@ -147,6 +150,11 @@ def load_user_services(manager: CredentialsManager, target: ResolvedWorkerTarget
     return services
 
 
+def stored_user_service_names(manager: CredentialsManager, target: ResolvedWorkerTarget | None) -> set[str]:
+    """Return the name of every entry the scope stores, inactive ones included."""
+    return set(_stored_services(manager, target))
+
+
 def inactive_user_services(
     config: EgressBrokerConfig,
     manager: CredentialsManager,
@@ -183,13 +191,16 @@ def save_user_service(
     *,
     config_services: Mapping[str, EgressService],
     oauth_providers: Collection[str],
+    only_new: bool = False,
+    write: bool = True,
 ) -> None:
     """Add or replace one of the scope's services, stored as authored so a preset stays a preset.
 
     A new name starts without a key: any key stored under it in the scope, for example one left by a removed config
     service, is deleted first. Replacing an existing service keeps its key, unless it becomes `restrict_only` or
     `oauth_separate_account`, which never use one, so unticking the box later brings back no key. `oauth_providers`
-    holds the ids of the registry's providers (`ConfigPlugins.oauth_providers`).
+    holds the ids of the registry's providers (`ConfigPlugins.oauth_providers`). `only_new` refuses a name the scope
+    already stores, an inactive entry's included, instead of replacing it, and `write=False` only checks.
 
     Raises UserServiceConflictError when `config_services` has the name, and ValueError for an invalid name, a
     service that sets `oauth_on_shared_workers`, `admin_key`, `agents`, or `github_app`, an OAuth provider (a preset's
@@ -209,6 +220,9 @@ def save_user_service(
     with _write_lock:
         stored = _stored_services(manager, target)
         new = name not in stored
+        if only_new and not new:
+            msg = f"service name '{name}' is already used by a service of your own"
+            raise ValueError(msg)
         if new and len(stored) >= MAX_USER_SERVICES:
             msg = f"a scope can have at most {MAX_USER_SERVICES} services of its own; delete one before adding another"
             raise ValueError(msg)
@@ -216,6 +230,8 @@ def save_user_service(
         if _json_size({"services": stored}) > MAX_DOCUMENT_BYTES:
             msg = f"a scope's own services can take at most {MAX_DOCUMENT_BYTES // 1024} KiB together"
             raise ValueError(msg)
+        if not write:
+            return
         try:
             if new or service.restrict_only or service.oauth_separate_account:
                 delete_secret(manager, target, name)
@@ -256,6 +272,40 @@ def delete_user_service(
         finally:
             _cache.invalidate()
     return True
+
+
+def add_user_service(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    service: EgressService,
+    *,
+    config_services: Mapping[str, EgressService],
+    then: Callable[[], bool],
+) -> bool:
+    """Add `service` as the scope's new key-only service `name`, then run `then` before any other user-service write.
+
+    `then` stores its key and says whether to keep it; when it returns False or raises, the service and any key are
+    taken back, which removes only this entry, since no other write could land meanwhile. Raises as
+    `save_user_service(only_new=True)` does before adding anything.
+    """
+    with _write_lock:
+        save_user_service(
+            manager,
+            target,
+            name,
+            service,
+            config_services=config_services,
+            oauth_providers=(),
+            only_new=True,
+        )
+        kept = False
+        try:
+            kept = then()
+        finally:
+            if not kept:
+                delete_user_service(manager, target, name, config_services=config_services)
+    return kept
 
 
 @contextlib.contextmanager
@@ -322,6 +372,17 @@ def user_service_hosts_not_allowed(config: EgressBrokerConfig, service: EgressSe
         return []
     hosts = [rule.host for rule in service.rules if not config_covers_rule(config, rule)]
     return list(dict.fromkeys(hosts))
+
+
+def user_service_hosts_error(config: EgressBrokerConfig, service: EgressService) -> str | None:
+    """Return why a save refuses `service`'s hosts (`user_service_hosts_not_allowed`), or None when it does not."""
+    hosts = user_service_hosts_not_allowed(config, service)
+    if not hosts:
+        return None
+    return (
+        "Your administrator only allows requests to hosts that one of its own services covers, "
+        f"so these hosts cannot be used: {', '.join(hosts)}"
+    )
 
 
 def _oauth_provider_hosts() -> dict[str, tuple[str, ...]]:
@@ -514,5 +575,6 @@ class _EffectiveConfigCache:
 
 _cache = _EffectiveConfigCache()
 # Serializes read-modify-write of the services documents in this process, so concurrent saves lose nothing;
-# `consistent_read` holds it too, so the broker checks a routed service and reads its key in one state.
-_write_lock = threading.Lock()
+# `consistent_read` holds it too, so the broker checks a routed service and reads its key in one state. Reentrant, so
+# `add_user_service` holds it across its own save, key, and take-back.
+_write_lock = threading.RLock()

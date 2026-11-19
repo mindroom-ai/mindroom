@@ -20,7 +20,11 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from pydantic import ValidationError
+
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
+from mindroom.config.egress_broker import EgressService
+from mindroom.config.main import validation_issue_message
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import egress_agent_scope, egress_tool_with_only_primary_python, personal_page_served
 from mindroom.egress_broker.key_access import egress_key_access, service_key_refusal
@@ -28,7 +32,14 @@ from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
 from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import egress_key_path, is_personal_target, service_status
 from mindroom.egress_broker.service import manage_url
-from mindroom.egress_broker.user_services import effective_config, service_source, services_for_agent
+from mindroom.egress_broker.user_services import (
+    UserServiceConflictError,
+    effective_config,
+    save_user_service,
+    service_source,
+    services_for_agent,
+    user_service_hosts_error,
+)
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.secret_request_cards import (
@@ -45,7 +56,6 @@ from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from mindroom.config.egress_broker import EgressService
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
@@ -83,6 +93,8 @@ _OUTCOME_NOTES: dict[SecretRequestOutcome, str] = {
         "agent keeps its keys changed before the user answered. Ask again if you still need the key."
     ),
 }
+# What a service proposed on a card may set: a key-only service of the requester's own, as the Agent Keys page adds it.
+_PROPOSABLE_FIELDS = ("display_name", "description", "preset", "rules", "placeholder_env", "restrict_to_rules")
 # Where the user adds a key when no card can be posted; the result's `link` is null where no page is served.
 _ADD_ON_PAGE = (
     "The user can add the key on the Agent Keys page instead: the `link` in this result, or, when it is null, the "
@@ -123,8 +135,8 @@ def _requestable_service(services: dict[str, EgressService], name: str) -> Egres
     service = services.get(name)
     if service is None:
         return (
-            f"Unknown service '{name}'. Call `list_egress_credentials` for the services this agent can use; "
-            "a new service needs host rules, which the user adds on the Agent Keys page."
+            f"Unknown service '{name}'. Call `list_egress_credentials` for the services this agent can use, "
+            "or propose a new one with `new_service`."
         )
     refusal = service_key_refusal(service)
     if refusal is None:
@@ -141,6 +153,54 @@ def _requestable_service(services: dict[str, EgressService], name: str) -> Egres
         ),
     }
     return refusals[refusal]
+
+
+def _proposed_service(
+    config: Config,
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget,
+    name: str,
+    body: object,
+) -> EgressService | str:
+    """Return the service the agent proposes as `name`, or why the Agent Keys page would not add it to this scope.
+
+    It is key-only: it sets no account login, a preset's included, and none of the fields only config.yaml sets.
+    """
+    if not isinstance(body, dict):
+        return "Give `new_service` as a JSON object with the fields of the service."
+    refused = [field for field in body if field not in _PROPOSABLE_FIELDS]
+    if refused:
+        return (
+            f"`new_service` cannot set {', '.join(map(str, refused))}: a service proposed on a card takes only an API "
+            f"key, so it sets only {', '.join(_PROPOSABLE_FIELDS)}."
+        )
+    broker = config.egress_broker
+    try:
+        service = EgressService.model_validate({**body, "oauth_provider": None})
+        # Checked as the Agent Keys page saves a new service, writing nothing.
+        save_user_service(
+            manager,
+            target,
+            name,
+            service,
+            config_services=broker.services,
+            oauth_providers=(),
+            only_new=True,
+            write=False,
+        )
+    except ValidationError as error:
+        issues = [
+            f"{'.'.join(map(str, issue['loc']))}: {validation_issue_message(issue)}"
+            if issue["loc"]
+            else validation_issue_message(issue)
+            for issue in error.errors(include_url=False, include_context=False, include_input=False)
+        ]
+        return f"New service '{name}' is invalid: {'; '.join(issues)}."
+    except (ValueError, UserServiceConflictError) as error:
+        return f"New service '{name}' cannot be added: {error}."
+    if error := user_service_hosts_error(broker, service):
+        return f"New service '{name}' cannot be added: {error}."
+    return service
 
 
 class EgressCredentialsTools(Toolkit):
@@ -209,6 +269,7 @@ class EgressCredentialsTools(Toolkit):
         reason: str,
         url: str | None = None,
         placeholder: str | None = None,
+        new_service: dict[str, object] | None = None,
     ) -> str:
         """Ask the user for a missing API key with a card in this conversation, and wait for their answer.
 
@@ -219,17 +280,27 @@ class EgressCredentialsTools(Toolkit):
         A key the service already has is replaced, which the card tells the user, so do not ask while that key works.
         Give `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to
         hint at the key's form.
+        For a service that does not exist yet, propose it with `new_service` instead of editing config.yaml; saving
+        adds it with the key.
         Waits up to 15 minutes and returns `status`:
         `saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;
         `declined` when the user refused: do not ask again for this service in this turn;
         `expired` when no answer came in 15 minutes.
         An `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.
+        After `saved`, test the key with one request; if it is refused, tell the user why (such as a token of the
+        wrong owner or read-only access) and ask again.
 
         Args:
-            service: The service's `name` from `list_egress_credentials`.
+            service: The service's `name` from `list_egress_credentials`, or the name of the service `new_service`
+                proposes (lowercase letters, digits, `-` and `_`).
             reason: What you need the key for, in a sentence or two the user reads on the card.
             url: An `http` or `https` page where the user gets or creates the key, such as the service's keys page.
             placeholder: A hint the empty field shows, such as the key's form (`sk-…`). Never a real value.
+            new_service: A new service of the user's own that takes this key, with only these fields of a service in
+                config.yaml: `display_name`, `description`, `preset`, `rules` (each with `host`, optional `path_prefix`
+                and `port`, and `auth`: `type` `bearer`, `basic` with `username`, `header` or `query` with `name`, and
+                optional `template` containing `{secret}`), `placeholder_env`, `restrict_to_rules`. Key only, never
+                an account login.
 
         """
         context = get_tool_runtime_context()
@@ -250,6 +321,7 @@ class EgressCredentialsTools(Toolkit):
             reason,
             url=link,
             placeholder=card_line(placeholder),
+            new_service=new_service,
         )
         if isinstance(card, str):
             return self._request_error(card)
@@ -270,6 +342,7 @@ class EgressCredentialsTools(Toolkit):
         *,
         url: str,
         placeholder: str,
+        new_service: dict[str, object] | None,
     ) -> SecretRequestCard | str:
         """Return the card asking the turn's requester for `service`'s key, or why no card may be posted.
 
@@ -278,7 +351,8 @@ class EgressCredentialsTools(Toolkit):
         requester must be one who may set this agent's keys, as on the Agent Keys pages; the card needs no personal
         page, so it works where none is served. Chat answers through this MindRoom's API with a client session, so a
         card needs what that session needs. `url` and `placeholder` are what the card shows of the agent's, already
-        checked and cut, each empty when it gave none.
+        checked and cut, each empty when it gave none. `new_service` is the service the agent proposes as `service`,
+        checked here as the Agent Keys page would check it; saving the answer adds it.
         """
         requester_id = resolve_tool_approval_approver(context.current_config, self._runtime_paths, context.requester_id)
         if requester_id is None:
@@ -299,8 +373,11 @@ class EgressCredentialsTools(Toolkit):
                 execution_identity=identity,
             ).worker_target
         manager = get_runtime_credentials_manager(self._runtime_paths)
-        services = services_for_agent(effective_config(config.egress_broker, manager, target).services, agent_name)
-        egress_service = _requestable_service(services, service)
+        if new_service is None:
+            services = services_for_agent(effective_config(config.egress_broker, manager, target).services, agent_name)
+            egress_service = _requestable_service(services, service)
+        else:
+            egress_service = _proposed_service(config, manager, target, service, new_service)
         if isinstance(egress_service, str):
             return egress_service
         if (refusal := await chat_refusal(self._runtime_paths, noun="key")) is not None:
@@ -312,9 +389,15 @@ class EgressCredentialsTools(Toolkit):
             requester_id=requester_id,
             agent_display_name=(agent.display_name if agent is not None else "") or agent_name,
             reason=shown_reason,
-            target=KeyTarget(service=service, worker_target=target, hosts=secret_request_hosts(egress_service)),
+            target=KeyTarget(
+                service=service,
+                worker_target=target,
+                hosts=secret_request_hosts(egress_service),
+                new_service=None if new_service is None else egress_service,
+            ),
             display_name=egress_service.display_name or service,
-            replaces=key_path is not None and key_path.exists(),
+            # A new service starts without a key: one left under its name is deleted, not replaced.
+            replaces=new_service is None and key_path is not None and key_path.exists(),
             url=url,
             placeholder=placeholder,
         )
