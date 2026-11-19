@@ -324,14 +324,12 @@ async def emit(
 async def emit_service_bot_ready(orchestrator: OrchestratorRuntime) -> None:
     """Emit the runtime's own ``bot:ready``, once per process start, to the service-scoped hooks.
 
-    Its context names the router entity with every configured room and every room a bot is in, which is what the
-    hooks filtered to the router bot received.
+    Its context names the router entity with every configured room and every room a bot's client has joined.
     """
     if not orchestrator.hook_registry_state.registry.has_hooks(EVENT_BOT_READY):
         return
     bindings = orchestrator.service_hook_bindings()
-    bots = orchestrator.agent_bots.values()
-    room_ids = (room_id for bot in bots for room_id in (*bot.rooms, *(bot.client.rooms if bot.client else ())))
+    joined = (room_id for bot in orchestrator.agent_bots.values() if bot.client for room_id in bot.client.rooms)
     context = AgentLifecycleContext(
         **bindings.context_kwargs(
             EVENT_BOT_READY,
@@ -343,7 +341,7 @@ async def emit_service_bot_ready(orchestrator: OrchestratorRuntime) -> None:
         entity_type="router",
         rooms=tuple(sorted(orchestrator.config.get_all_configured_rooms())),
         matrix_user_id=owner_matrix_id(orchestrator.runtime_paths),
-        joined_room_ids=tuple(dict.fromkeys(room_id for room_id in room_ids if room_id.startswith("!"))),
+        joined_room_ids=tuple(dict.fromkeys(joined)),
     )
     await emit(bindings.registry, EVENT_BOT_READY, context, service=True)
 

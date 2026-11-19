@@ -1550,8 +1550,11 @@ async def test_service_bot_ready_fires_once_per_start(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_service_context_lists_union_of_joined_rooms(tmp_path: Path) -> None:
-    """The service bot:ready names the router entity, every configured room, and every room any bot is in."""
-    orchestrator, _code, _general = _two_bot_runtime(tmp_path)
+    """The service bot:ready names the router entity, every configured room, and only the rooms a bot is in."""
+    orchestrator, code, _general = _two_bot_runtime(tmp_path)
+    # A configured room given by its ID that no bot has joined is configured, not joined.
+    orchestrator.config.agents["code"].rooms.append("!unjoined:localhost")
+    code.rooms.append("!unjoined:localhost")
     captured: list[AgentLifecycleContext] = []
 
     @hook(EVENT_BOT_READY, scope="service")
@@ -1564,6 +1567,6 @@ async def test_service_context_lists_union_of_joined_rooms(tmp_path: Path) -> No
 
     [ctx] = captured
     assert (ctx.entity_name, ctx.entity_type) == (ROUTER_AGENT_NAME, "router")
-    assert ctx.rooms == ("!room:localhost",)
+    assert ctx.rooms == ("!room:localhost", "!unjoined:localhost")
     assert ctx.joined_room_ids == ("!room:localhost", "!code-only:localhost", "!general-only:localhost")
     assert ctx.is_active()
