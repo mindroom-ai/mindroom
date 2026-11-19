@@ -1059,3 +1059,7 @@ async def test_saved_owner_runs_a_targeted_command_without_a_fresh_proposal(tmp_
     admitting = bind_runtime_paths(denying.model_copy(update={"router": RouterConfig()}), runtime_paths_for(denying))
     assert await _command_owners(admitting, "!help", rooms, None, untargeted) == ["general"]
     assert await _command_owners(denying, "!help", general, degraded, untargeted) == []
+    # Nor does a thread that names another agent by now make it a command aimed at an agent.
+    research_replied = [make_visible_message(sender=_entity_id(denying, "research").full_id, body="on it")]
+    in_research_thread = _context(thread_id="$thread:localhost", thread_history=research_replied)
+    assert await _command_owners(denying, "!help", rooms, in_research_thread, untargeted) == []

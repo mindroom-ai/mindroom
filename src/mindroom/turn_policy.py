@@ -569,7 +569,8 @@ class TurnPolicy:
         the reply mode and the thread, where `router.access` admits the requester.
         Bots can differ on this while a join or a thread reaches them, so the first to decide saves the owner and
         every bot follows the saved one, on each replay too.
-        A bot that finds no owner itself still runs a command saved as aimed at it, never one that addressed MindRoom.
+        A bot that finds no owner itself still runs a command saved as aimed at it.
+        One saved as addressing MindRoom itself stays gated by `router.access`, whatever names an agent on a replay.
         """
         config = self.deps.runtime.config
         me = self.deps.matrix_id
@@ -592,11 +593,12 @@ class TurnPolicy:
         owner = self._select_response_owner(aimed_at)
         journal = self.deps.runtime.orchestrator.event_journal_store()
         if owner is None:
-            saved = await journal.room_event_owner(room.room_id, source_event_id, "command")
-            return saved == me.full_id and me in candidates
-        claim = owner.full_id + (_UNTARGETED if aimed_at is candidates else "")
-        saved = await journal.claim_room_event(room.room_id, source_event_id, "command", claim)
-        return saved.removesuffix(_UNTARGETED) == me.full_id and me in (owner, *candidates)
+            saved = await journal.room_event_owner(room.room_id, source_event_id, "command") or ""
+        else:
+            claim = owner.full_id + (_UNTARGETED if aimed_at is candidates else "")
+            saved = await journal.claim_room_event(room.room_id, source_event_id, "command", claim)
+        admitted = not saved.endswith(_UNTARGETED) or self._routing_admits(requester_user_id, room.room_id)
+        return admitted and saved.removesuffix(_UNTARGETED) == me.full_id and me in (owner, *candidates)
 
     async def owns_command(
         self,
