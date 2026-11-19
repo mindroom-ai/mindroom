@@ -14,13 +14,16 @@ from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner, tool_catalog
+from mindroom.agent_cli.shell_access import agent_cli_shell_env, minimal_shell_problems
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.prompt import join_sections
+from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.failure_text import failure_text
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message, system_text
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.run_storage import RunStorage
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.skills import Skill
 
 __all__ = [
@@ -45,6 +49,7 @@ __all__ = [
     "bind_minimal_owner",
     "minimal_attempt",
     "minimal_context_documents",
+    "minimal_grant_survives_reload",
     "minimal_turn",
     "prepare_minimal_catalog",
     "presented_build",
@@ -139,6 +144,36 @@ def minimal_turn(
 def presented_build(build: AgentBuild) -> AgentBuild:
     """Return ``build`` as a minimal turn's requests present it: the Bash facade is its only tool."""
     return replace(build, spec=replace(build.spec, toolkits=(minimal_bash_toolkit(),)))
+
+
+def minimal_grant_survives_reload(runtime: ToolRuntimeContext, current: ToolRuntimeContext) -> bool:
+    """Return whether a minimal turn's CLI grant, issued under ``runtime``'s config, reaches the same under ``current``'s.
+
+    ``current`` is ``runtime`` on the reloaded config. The grant's bearer reads the turn's context documents without
+    a tool authorization check, its shell environment was made for where the shell ran, and its saved outputs go to
+    the agent's workspace. So the turn may rebuild only while its requester is still allowed the agent's replies and
+    the agent's worker, storage, shell placement, and saved-output threshold are what they were.
+    """
+    name, paths, identity = runtime.agent_name, runtime.runtime_paths, runtime.execution_identity
+    old, new = runtime.config, current.config
+    return (
+        name in new.agents
+        and is_sender_allowed_for_entity_replies_in_room(
+            current.requester_id,
+            (name,),
+            new,
+            current.room_id,
+            paths,
+            current.require_agent_reply_memberships(),
+            require_resolved_membership=True,
+        )
+        and current.resolve_worker_target() == runtime.resolve_worker_target()
+        and resolve_agent_runtime(name, new, paths, identity) == resolve_agent_runtime(name, old, paths, identity)
+        and new.defaults.tool_output_auto_save_threshold_bytes == old.defaults.tool_output_auto_save_threshold_bytes
+        and not minimal_shell_problems(new, paths, name)
+        and not minimal_shell_problems(old, paths, name)
+        and agent_cli_shell_env(new, paths, name, "") == agent_cli_shell_env(old, paths, name, "")
+    )
 
 
 def _failure(build: AgentBuild, delegation_depth: int, reason: str) -> str:

@@ -7,6 +7,7 @@ __all__ = [
     "CliAuthenticationError",
     "CliBashWindowRequiredError",
     "CliCallConflictError",
+    "CliCatalogReloadedError",
     "CliGrant",
     "CliOperationError",
     "CliOperationOwner",
@@ -42,6 +43,14 @@ class CliBashWindowRequiredError(ValueError):
 
 class CliOperationError(ValueError):
     """A caller-safe rejection whose message is relayed to the CLI."""
+
+
+class CliCatalogReloadedError(CliOperationError):
+    """A config reload replaced what the turn's catalog was built from: the call does not run, and the run stops.
+
+    The response's next attempt rebuilds the catalog. Only a catalog authority mismatch raises it, never a requester,
+    membership, or worker denial.
+    """
 
 
 @dataclass(frozen=True, slots=True)

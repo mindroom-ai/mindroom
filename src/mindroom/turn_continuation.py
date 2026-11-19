@@ -94,17 +94,6 @@ def _model_switch_limit_message(*, model_name: str) -> str:
     )
 
 
-def _config_reload_continuation_prompt(original_prompt: str) -> str:
-    """Append the hidden instruction that resumes a turn whose tools a config reload rebuilt."""
-    return (
-        f"{original_prompt}\n\n"
-        "[SYSTEM NOTICE - CONFIGURATION RELOADED]\n"
-        "MindRoom's configuration was reloaded during the previous step. The tool calls it refused did not run, and "
-        "your tools are now rebuilt from the current configuration. Continue the same task, repeating a refused call "
-        "if it is still needed."
-    )
-
-
 _CONFIG_RELOAD_LIMIT_MESSAGE = (
     "The configuration kept reloading: the reply did not finish after "
     f"{TURN_CONTINUATION_LIMIT} continuation attempts on rebuilt tools."
@@ -138,9 +127,8 @@ def continuation_decision_from_tools(
             return _TurnContinuationDecision()
         if continuation_count >= TURN_CONTINUATION_LIMIT:
             return _TurnContinuationDecision(limit_message=_CONFIG_RELOAD_LIMIT_MESSAGE)
-        return _TurnContinuationDecision(
-            continuation=_TurnContinuation(prompt=_config_reload_continuation_prompt(original_prompt), model_name=None),
-        )
+        # The refused calls' own results say what happened, so the turn continues on its prompt as it was.
+        return _TurnContinuationDecision(continuation=_TurnContinuation(prompt=original_prompt, model_name=None))
     model_name = switched[-1]
     if continuation_count >= TURN_CONTINUATION_LIMIT:
         return _TurnContinuationDecision(limit_message=_model_switch_limit_message(model_name=model_name))

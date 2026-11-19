@@ -12,7 +12,12 @@ from uuid import uuid4
 from mindroom.agent_cli.cli_shell_agent import bind_standard_cli
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_calls
-from mindroom.agent_cli.minimal_agent import minimal_attempt, minimal_turn, presented_build
+from mindroom.agent_cli.minimal_agent import (
+    minimal_attempt,
+    minimal_grant_survives_reload,
+    minimal_turn,
+    presented_build,
+)
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
@@ -37,7 +42,11 @@ from mindroom.delegation.lifecycle import (
     running_child_run,
 )
 from mindroom.delegation.state import child_execution_identity
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import (
+    MinimalModeUnavailableError,
+    get_user_friendly_error_message,
+    minimal_mode_failure_message,
+)
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import TurnInput, stored_turn_input
 from mindroom.history.mid_turn_compaction import without_run_usage
@@ -564,8 +573,13 @@ async def _start_agent_run(
                 context_documents=prepared.cli_context,
                 delegation_depth=run_context.turn.delegation_depth,
                 refresh_scheduler=run_context.turn.refresh_scheduler,
-                # An approval overlay cannot be laid over a reloaded config, so its turn keeps refusing instead.
-                rebuilds_on_reload=tool_context is not None and tool_context.config is run_context.config,
+                # Neither an approval overlay nor a narrowed turn's tool names can be carried over to a reloaded
+                # config, so their turns keep refusing instead.
+                rebuilds_on_reload=(
+                    tool_context is not None
+                    and tool_context.config is run_context.config
+                    and run_context.turn.tool_names is None
+                ),
             )
     elif build.surface.cli_shell:
         await bind_standard_cli(
@@ -1011,6 +1025,40 @@ async def _prepare_agent_and_prompt(
     )
 
 
+def _tool_context_on_reloaded_config(
+    ctx: ResponseTurnContext,
+    tool_context: ToolRuntimeContext,
+    runtime_paths: RuntimePaths,
+) -> ToolRuntimeContext:
+    """Return a minimal turn's tool context on the current config, or refuse as a turn that cannot rebuild does.
+
+    Nothing of the reloaded config reaches the turn's prompt, knowledge, or CLI grant before this check: the grant
+    must reach what it did (``minimal_grant_survives_reload``), and a delegated child's caller must still be allowed
+    to delegate to it.
+    """
+    current = tool_context.on_current_config()
+    observation = running_child_run()
+    child = observation.child if observation is not None else None
+    delegated = child is None or not isinstance(
+        authorize_delegation(
+            child.caller_agent_name,
+            child.child_agent_name,
+            child.task,
+            config=current.config,
+            runtime_paths=runtime_paths,
+            execution_identity=replace(child_execution_identity(child), agent_name=child.caller_agent_name),
+            depth=child.depth - 1,
+            grant=delegation_grant(child),
+        ),
+        str,
+    )
+    if not delegated or not minimal_grant_survives_reload(tool_context, current):
+        reason = "Current configuration no longer permits this prepared CLI call"
+        message = minimal_mode_failure_message(reason, ctx.entity_label, subagent=ctx.delegation_depth > 0)
+        raise MinimalModeUnavailableError(message)
+    return current
+
+
 async def _prepare_agent_run_context(
     ctx: ResponseTurnContext,
     continuation: TurnContinuationRunState,
@@ -1041,11 +1089,12 @@ async def _prepare_agent_run_context(
         ctx.agent_mode == "minimal"
         and tool_context is not None
         and tool_context.config is config
+        and ctx.tool_names is None
         and tool_context.current_config is not config
     ):
         # A reload replaced the turn's config, and a minimal turn's tools refuse calls under any but the current one
         # (``check_prepared_catalog_authority``): this attempt builds its agent as a turn starting now would.
-        tool_context = tool_context.on_current_config()
+        tool_context = _tool_context_on_reloaded_config(ctx, tool_context, runtime_paths)
         config = tool_context.config
         knowledge = await resolve_agent_knowledge_access_async(
             ctx.entity_label,
@@ -1189,6 +1238,12 @@ async def run_delegated_child_response(
             sinks=sinks,
             resume=TurnResume(prior_usage=tuple(prior_usage)),
         )
+    error = result.failed.reply.error if result.failed is not None else None
+    if isinstance(error, MinimalModeUnavailableError) and observation is not None:
+        # The turn ended in no run of its own, so the child fails with that reason: the run a config reload stopped
+        # before a refused rebuild is not its outcome.
+        observation.response = None
+        raise error
     return result.text
 
 

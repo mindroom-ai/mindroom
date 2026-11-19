@@ -30,6 +30,7 @@ from mindroom.agent_cli.session import (
     CliAuthenticationError,
     CliBashWindowRequiredError,
     CliCallConflictError,
+    CliCatalogReloadedError,
     CliOperationError,
     TurnToolBridge,
 )
@@ -387,7 +388,11 @@ class LiveTurnTools(TurnToolBridge):
             self.close_for_shutdown = self._is_shutdown()
             request_task_cancel(task, process_shutdown=self.close_for_shutdown)
 
-        return await wait_for_future_until_complete(task, on_cancel=cancel)
+        try:
+            return await wait_for_future_until_complete(task, on_cancel=cancel)
+        except CliCatalogReloadedError as exc:
+            # Whichever of the call's authority checks a config reload failed, the provider run stops at this batch.
+            return ToolOutcome(content=str(exc), stop_after_call=True, is_error=True)
 
     async def _execute_bash(self, key: ToolKey, arguments: dict[str, object], call_id: str) -> ToolOutcome:
         """Checkpoint exact provider history before any binding, hook or shell IO."""
@@ -404,13 +409,7 @@ class LiveTurnTools(TurnToolBridge):
                 msg = "Bash binding is unavailable"
                 raise ValueError(msg)
             await self.checkpoint.persist(call_id)
-            try:
-                await self._authorize(key, arguments)
-            except PermissionError as exc:
-                if not self.control_calls:
-                    raise
-                # A config reload refused the call (``stop_for_rebuild``): it never runs, and the run stops here.
-                return ToolOutcome(content=str(exc), stop_after_call=True, is_error=True)
+            await self._authorize(key, arguments)
             binding = await self.catalog.bind(key)
 
             async def authorize() -> None:
@@ -745,7 +744,7 @@ class LiveTurnTools(TurnToolBridge):
                     else:
                         status = "failed" if event.call.is_error else "completed"
                         result = event.call.result
-        except _StaleAttemptError as exc:
+        except (_StaleAttemptError, CliCatalogReloadedError) as exc:
             status = "cancelled"
             result = str(exc)
         except UnknownToolError as exc:

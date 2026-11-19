@@ -6,7 +6,7 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, cli_turn_owner
+from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, CliCatalogReloadedError, cli_turn_owner
 from mindroom.agent_cli.shell_access import agent_cli_shell_env, minimal_shell_problems
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.approval.tool_owners import authorize_prepared_tool_call, check_prepared_catalog_authority
@@ -31,8 +31,8 @@ if TYPE_CHECKING:
 __all__ = ["bind_response_owner", "tool_catalog"]
 
 _RELOADED = (
-    "MindRoom's configuration was reloaded, so this call did not run. "
-    "This step ends here, and the task continues once the tools are rebuilt from the current configuration."
+    "This call did not run: MindRoom's configuration was reloaded. "
+    "The tools are rebuilt from the current configuration before the next step; repeat the call if it is still needed."
 )
 
 
@@ -95,18 +95,24 @@ def bind_response_owner(
 
     async def authorize(key: ToolKey, _arguments: dict[str, object]) -> None:
         current = new_owner.catalog
-        # Before binding, so a refused catalog builds no deferred toolkit; dispatch checks again after the bind's awaits.
-        try:
-            check_prepared_catalog_authority(current.runtime_context)
-        except PermissionError as exc:
-            if rebuilds_on_reload and new_owner.stop_for_rebuild():
-                raise PermissionError(_RELOADED) from exc
-            raise PermissionError(failure_message(str(exc))) from exc
+
+        def check_authority() -> None:
+            try:
+                check_prepared_catalog_authority(current.runtime_context)
+            except PermissionError as exc:
+                if rebuilds_on_reload and new_owner.stop_for_rebuild():
+                    raise CliCatalogReloadedError(_RELOADED) from exc
+                raise PermissionError(failure_message(str(exc))) from exc
+
+        # Before binding, so a refused catalog builds no deferred toolkit.
+        check_authority()
         cache_key = (id(current), key)
         binding = bindings.get(cache_key)
         if binding is None:
             binding = await current.bind(key)
             bindings[cache_key] = binding
+        # Again after the bind's awaits, so the authority check of the call below, which runs first, cannot fail.
+        check_authority()
         await authorize_prepared_tool_call(binding, expected_worker_target=expected_target)
 
     new_owner = LiveTurnTools(

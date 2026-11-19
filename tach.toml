@@ -404,6 +404,7 @@ expose = [
     "CliAuthenticationError",
     "CliBashWindowRequiredError",
     "CliCallConflictError",
+    "CliCatalogReloadedError",
     "CliOperationError",
     "MAX_CLI_GRANT_LIFETIME_NS",
     "TurnToolBridge",
@@ -478,6 +479,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.agent_cli.response_owner",
+    "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.agent_cli.cli_shell_agent",
 ]
@@ -9460,7 +9462,9 @@ depends_on = [
     "mindroom.agent_cli.context",
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
+    "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.shell_contract",
+    "mindroom.runtime_resolution",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
     "mindroom.agent_loop.build",
