@@ -153,8 +153,10 @@ Optional browser settings and redacted diagnostics are in expandable sections; s
 ### Full Control of This Mac
 
 **Full control of this Mac**, at the top of **Computer access**, lets the paired agent see and use every app and the primary screen, with no expiry, the way Codex computer use works.
-Turning it on asks once for confirmation, adds the primary screen to the saved apps if it is missing, makes MindRoom open at login, and starts access; the status reads **Full control** while it runs.
+Turning it on asks once for confirmation, naming the controller, requester, and agent, adds the primary screen to the saved apps if it is missing, makes MindRoom open at login, and starts access; the status reads **Full control** while it runs.
 If macOS needs approval for the login item, the app says so under the switch; allow it under System Settings > General > Login Items.
+While full control is on, **Settings** > **Open menu bar app at login** stays on and cannot be changed there.
+If the connection changes while the confirmation is open, full control is not turned on; review the connection and confirm again.
 At every later launch, including after a restart or reboot, MindRoom starts access by itself and grants full control again while the switch is on.
 The switch is a preference of the app on this Mac; the bridge itself never saves control.
 
@@ -163,6 +165,7 @@ It does not add folder or shell access, which stay separate, and it never target
 macOS still needs Accessibility and Screen Recording for MindRoom.
 
 Turn the switch off, or select **Revoke Now** or **Revoke Computer Control**, to end it and keep it off.
+Turning it off removes the login item only if full control added it; a login item you chose yourself stays.
 **Stop Access** ends it until you start access again or MindRoom next opens.
 Connecting the Mac to another agent, or removing the primary screen from the saved apps, turns it off.
 

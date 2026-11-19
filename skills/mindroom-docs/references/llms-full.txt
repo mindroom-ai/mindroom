@@ -885,8 +885,10 @@ Optional browser settings and redacted diagnostics are in expandable sections; s
 ### Full Control of This Mac
 
 **Full control of this Mac**, at the top of **Computer access**, lets the paired agent see and use every app and the primary screen, with no expiry, the way Codex computer use works.
-Turning it on asks once for confirmation, adds the primary screen to the saved apps if it is missing, makes MindRoom open at login, and starts access; the status reads **Full control** while it runs.
+Turning it on asks once for confirmation, naming the controller, requester, and agent, adds the primary screen to the saved apps if it is missing, makes MindRoom open at login, and starts access; the status reads **Full control** while it runs.
 If macOS needs approval for the login item, the app says so under the switch; allow it under System Settings > General > Login Items.
+While full control is on, **Settings** > **Open menu bar app at login** stays on and cannot be changed there.
+If the connection changes while the confirmation is open, full control is not turned on; review the connection and confirm again.
 At every later launch, including after a restart or reboot, MindRoom starts access by itself and grants full control again while the switch is on.
 The switch is a preference of the app on this Mac; the bridge itself never saves control.
 
@@ -895,6 +897,7 @@ It does not add folder or shell access, which stay separate, and it never target
 macOS still needs Accessibility and Screen Recording for MindRoom.
 
 Turn the switch off, or select **Revoke Now** or **Revoke Computer Control**, to end it and keep it off.
+Turning it off removes the login item only if full control added it; a login item you chose yourself stays.
 **Stop Access** ends it until you start access again or MindRoom next opens.
 Connecting the Mac to another agent, or removing the primary screen from the saved apps, turns it off.
 
@@ -10369,8 +10372,8 @@ Leases are never saved or renewed automatically, so a restarted bridge is observ
 **Full control of this Mac** in the macOS app gives the paired agent control of every app and the `primary-screen` target with no expiry, until a person turns it off.
 It is a preference of the macOS app and is never saved in the bridge's setup: each time access starts for that pairing, the app grants the running bridge control until revoked over the whole computer, and at launch the app starts access by itself.
 While that grant is live, `list_apps` returns every running app plus `primary-screen`, any bundle ID except MindRoom's own can be inspected, launched, and controlled, and `status` reports `control_scope` as `computer`.
-A list too long for one reply keeps `primary-screen` and the apps that fit, and sets `apps_truncated`.
-When the grant ends, the bridge is observe-only for the saved apps again.
+A list too long for one reply keeps `primary-screen` and the apps that fit, and sets `apps_truncated`; the bundle ID of any installed app is valid as `app` even when the list omits it.
+When the grant ends, the bridge is observe-only for the saved apps again, and an action that was still running returns its receipt without a new observation of an app that is no longer saved.
 **Revoke** in the macOS app or its menu ends it at once and turns the preference off, **Stop Access** ends it until access starts again, and turning the switch off does both.
 Connecting the computer to a different agent, requester, or controller, or removing `primary-screen` from the saved apps, turns the preference off.
 Full control does not enable folders, shell commands, or the browser extension, and `mindroom desktop run` does not offer it.
