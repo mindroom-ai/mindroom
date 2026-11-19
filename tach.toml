@@ -8592,6 +8592,7 @@ depends_on = [
     "mindroom.room_agent_access",
     "mindroom.room_modes",
     "mindroom.room_reply_modes",
+    "mindroom.room_steward",
     "mindroom.room_thread_modes",
     "mindroom.terminal.client",
     "mindroom.terminal.session",

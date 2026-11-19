@@ -98,7 +98,7 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
     kwargs.setdefault("scheduled_tasks", scheduled_tasks)
     kwargs.setdefault(
         "put_room_state",
-        partial(put_room_state_as_steward, SimpleNamespace(room_steward=lambda _room_id: steward)),
+        partial(put_room_state_as_steward, lambda _room_id: steward),
     )
     return CommandHandlerContext(*args, **kwargs)
 

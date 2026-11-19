@@ -8,7 +8,7 @@ from collections import Counter
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, overload
+from typing import TYPE_CHECKING, Annotated, cast, overload
 
 from fastapi import HTTPException, Path, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
@@ -32,7 +32,7 @@ from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.api.plugin_routes import published_plugins
 from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection, is_sender_allowed_for_responder
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.entity_directory import entity_directory
 from mindroom.hooks.types import format_hook_source
@@ -53,11 +53,13 @@ from mindroom.room_reply_modes import (
     resolve_room_reply_mode_override,
     set_room_reply_mode_override,
 )
+from mindroom.room_steward import room_poster, room_steward
 from mindroom.room_thread_modes import (
     RoomThreadMode,
     resolve_room_thread_mode_override,
 )
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
+from mindroom.steward_duties import moderator_rights_message, put_room_state_as_steward
 from mindroom.terminal.client import WorkerTerminals
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
@@ -67,6 +69,9 @@ from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
     from types import EllipsisType
+
+    import nio
+    from fastapi import FastAPI
 
     from mindroom.api.client_sessions import ClientSession
     from mindroom.bot import AgentBot
@@ -110,7 +115,6 @@ _STREAMS_PER_USER = 16
 _open_streams: Counter[str] = Counter()
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
-_ROUTER_NOT_RUNNING = "The router is not running in this room."
 _NOT_A_MEMBER = "Not a member of this room."
 
 
@@ -293,7 +297,7 @@ class RoomReader:
     _room_state: Callable[[], Awaitable[RoomStateSnapshot]] = field(repr=False)
     _room_direct: Callable[[], Awaitable[bool]] = field(repr=False)
     _room_id: str = field(repr=False)
-    _router: Callable[[], AgentBot | None] = field(repr=False)
+    _steward: Callable[[], AgentBot] = field(repr=False)
     _room_history: Callable[[], Awaitable[RoomHistory | None]] = field(repr=False)
     _room_agents: Callable[[Callable[[], Awaitable[RoomPower]], str | None], Awaitable[list[AgentWorkspace]]] = field(
         repr=False,
@@ -319,15 +323,13 @@ class RoomReader:
         return await self._room_direct()
 
     def modes(self) -> RoomModes:
-        """Return the room's thread and reply mode overrides and the reply mode it uses, answering 503 without a router."""
-        router = self._router()
-        if router is None:
-            raise HTTPException(503, _ROUTER_NOT_RUNNING)
-        paths = router.runtime_paths
+        """Return the room's thread and reply mode overrides and the reply mode it uses, answering 503 without an agent."""
+        steward = self._steward()
+        paths = steward.runtime_paths
         return RoomModes(
             resolve_room_thread_mode_override(paths, self._room_id),
             resolve_room_reply_mode_override(paths, self._room_id),
-            router.config.get_room_reply_mode(paths, self._room_id),
+            steward.config.get_room_reply_mode(paths, self._room_id),
         )
 
     async def set_modes(
@@ -339,25 +341,28 @@ class RoomReader:
         """Change the room's overrides as ``!thread_mode`` and ``!reply_mode`` do: None clears one, one left out stays.
 
         Before anything is written it answers 403 unless the caller holds room admin power by a ``power()`` read, 503
-        when that read fails, and 503 unless the router, which republishes the thread mode, runs and is in the room.
-        A thread mode change the router cannot publish stays saved and answers 503.
+        when that read fails, and 503 unless a running agent is in the room: its steward republishes the thread mode.
+        A thread mode the room refuses for lack of power changes nothing and answers 403 with what the steward needs.
+        A thread mode change that cannot be published otherwise stays saved and answers 503.
         """
         if not (await self.power()).is_admin(self.user.user_id):
             raise HTTPException(403, "Only room admins change the room's modes.")
-        router = self._router()
-        if router is None or not router.running or router.client is None or self._room_id not in router.client.rooms:
-            raise HTTPException(503, _ROUTER_NOT_RUNNING)
-        if reply is None:
-            clear_room_reply_mode_override(router.runtime_paths, self._room_id)
-        elif reply is not ...:
-            set_room_reply_mode_override(router.runtime_paths, room_id=self._room_id, mode=reply)
-        if thread is not ... and not await change_room_thread_mode(
-            router.client,
-            router.config,
-            router.runtime_paths,
+        steward = self._steward()
+        published = thread is ... or await change_room_thread_mode(
+            cast("nio.AsyncClient", steward.client),
+            steward.config,
+            steward.runtime_paths,
             self._room_id,
             thread,
-        ):
+            put_state=partial(put_room_state_as_steward, lambda _room_id: steward),
+        )
+        if published is None:
+            raise HTTPException(403, moderator_rights_message("change the thread mode"))
+        if reply is None:
+            clear_room_reply_mode_override(steward.runtime_paths, self._room_id)
+        elif reply is not ...:
+            set_room_reply_mode_override(steward.runtime_paths, room_id=self._room_id, mode=reply)
+        if not published:
             raise HTTPException(
                 503,
                 "The modes were saved, but the room's thread mode is not published yet; try again.",
@@ -436,7 +441,7 @@ async def _room_reader(connection: HTTPConnection, user: ClientUser, room_id: st
         partial(_bound(state.room_state), room_id),
         partial(_bound(state.room_direct), room_id),
         room_id,
-        lambda: state.runtime.agent_bot(ROUTER_AGENT_NAME),
+        partial(_room_bot, connection.app, room_steward, room_id),
         partial(_bound(state.room_history), room_id, user.user_id),
         partial(room_agent_workspaces, connection, user.user_id, room_id, members),
         partial(_workspace_terminals, connection, user.user_id, room_id),
@@ -463,7 +468,7 @@ _MATRIX_KEY_PREFIXES = ("m.", "org.matrix.")
 
 @dataclass(frozen=True)
 class RoomMessenger:
-    """Posts to one room as the router for a route whose caller is joined to it, never from or as any person's account.
+    """Posts to one room as a MindRoom account for a route whose caller is joined to it, never as any person's account.
 
     Each message carries its plugin's name as its hook source.
     """
@@ -481,18 +486,18 @@ class RoomMessenger:
         thread_id: str | None = None,
         content: Mapping[str, object] | None = None,
     ) -> str:
-        """Post ``text`` as the router's ``m.notice``, which mentions no one and wakes no agent; return its event ID.
+        """Post ``text`` as the room poster's ``m.notice``, which mentions no one and wakes no agent; return its event ID.
 
-        It checks no power level: the route decides who may have the router post. ``content`` adds namespaced keys of
+        It checks no power level: the route decides who may have MindRoom post. ``content`` adds namespaced keys of
         the plugin's own, and it answers 400 before anything is sent when ``content`` sets one of Matrix's own keys,
         such as ``body`` or ``m.relates_to``, or a key under ``com.mindroom.``, ``io.mindroom.``, ``chat.mindroom.``
-        or a namespace another loaded plugin reserves and this one does not, at any depth. It answers 503 when the router
-        is not running or not in the room, or when the send fails.
+        or a namespace another loaded plugin reserves and this one does not, at any depth. It answers 503 when no
+        agent is running or in the room, or when the send fails.
         """
-        router = self._router()
-        extra = self._content(router, content)
+        poster = _room_bot(self._request.app, room_poster, self._room_id)
+        extra = self._content(poster, content)
         extra["msgtype"] = "m.notice"
-        return await self._send(router, text, thread_id, extra, ())
+        return await self._send(poster, text, thread_id, extra, ())
 
     async def relay(
         self,
@@ -502,11 +507,12 @@ class RoomMessenger:
         thread_id: str | None = None,
         content: Mapping[str, object] | None = None,
     ) -> str:
-        """Post ``text`` as the router for the caller, waking exactly the agents and teams ``mentions`` names.
+        """Post ``text`` for the caller as the first of ``mentions``, waking exactly the agents and teams it names.
 
-        It names the caller as the message's original sender, so each agent it wakes answers and authorizes them, and
-        its text says it is sent for them. ``mentions`` must name at least one agent or team, and only agents and teams
-        joined to the room, else it answers 400. Just before sending it checks again that the session is live (401),
+        It names the caller as the message's original sender, so each agent it wakes, the one that posts it included,
+        answers and authorizes them, and its text says it is sent for them. ``mentions`` must name at least one agent
+        or team, and only agents and teams joined to the room, else it answers 400. It answers 503 while the first
+        one's bot is not running in the room. Just before sending it checks again that the session is live (401),
         that the caller is joined (403) and may send ``m.room.message`` (403), answering 503 when either cannot be read.
         ``content`` and the other answers are as for ``notice()``. It returns the message's event ID.
         """
@@ -517,27 +523,18 @@ class RoomMessenger:
             raise HTTPException(403, "Not allowed to send messages in this room.")
         # The session may have ended while the room was read.
         await require_client_user(self._request)
-        router = self._router()
-        extra = self._content(router, content)
-        directory = entity_directory(router.config, router.runtime_paths)
+        steward = _room_bot(self._request.app, room_steward, self._room_id)
+        extra = self._content(steward, content)
+        directory = entity_directory(steward.config, steward.runtime_paths)
         for mentioned in mentions:
             entity = directory.get(mentioned)
             if entity is None or entity.kind == "router" or mentioned not in room.members:
                 raise HTTPException(400, f"A relay mentions only agents and teams in this room, not {mentioned}.")
+        poster = _room_bot(self._request.app, room_poster, self._room_id, only=directory[mentions[0]].name)
         extra[ORIGINAL_SENDER_KEY] = room.user.user_id
-        return await self._send(router, f"Sent for {room.user.user_id}:\n\n{text}", thread_id, extra, mentions)
+        return await self._send(poster, f"Sent for {room.user.user_id}:\n\n{text}", thread_id, extra, mentions)
 
-    def _router(self) -> AgentBot:
-        """Return the router bot running now, so a restarted router posts with its new client, once it is in the room."""
-        embedded = ensure_app_state(self._request.app).embedded
-        router = None if embedded is None else embedded.agent_bot(ROUTER_AGENT_NAME)
-        if router is None or not router.running or (client := router.client) is None:
-            raise HTTPException(503, "MindRoom's router is not running; try again.")
-        if self._room_id not in client.rooms:
-            raise HTTPException(503, "MindRoom's router is not in this room.")
-        return router
-
-    def _content(self, router: AgentBot, content: Mapping[str, object] | None) -> dict[str, object]:
+    def _content(self, bot: AgentBot, content: Mapping[str, object] | None) -> dict[str, object]:
         """Return a copy of ``content``, answering 400 unless its keys are namespaced and none is reserved for another.
 
         A Matrix key such as ``body``, ``m.relates_to`` or ``m.new_content`` would change what the message says, where
@@ -547,7 +544,7 @@ class RoomMessenger:
         extra = dict(content or {})
         if matrix_keys := sorted(key for key in extra if "." not in key or key.startswith(_MATRIX_KEY_PREFIXES)):
             raise HTTPException(400, f"content must not set Matrix's own keys ({', '.join(matrix_keys)}).")
-        plugins = config_plugins(router.config, router.runtime_paths)
+        plugins = config_plugins(bot.config, bot.runtime_paths)
         # A namespace this plugin reserves is its own even when another plugin reserves it too, as plugins of one
         # family sharing a namespace do; a narrower one another plugin reserves inside it stays that plugin's.
         own = {
@@ -564,7 +561,7 @@ class RoomMessenger:
 
     async def _send(
         self,
-        router: AgentBot,
+        poster: AgentBot,
         text: str,
         thread_id: str | None,
         extra: dict[str, object],
@@ -572,7 +569,7 @@ class RoomMessenger:
     ) -> str:
         # One hop into the synthetic chain, as a hook's own send outside a message is, so hooks reacting to it cannot loop.
         extra[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = 1
-        event_id = await router.hook_context.send_message(
+        event_id = await poster.hook_context.send_message(
             self._room_id,
             text,
             thread_id,
@@ -611,6 +608,26 @@ async def client_rooms(request: Request, candidates: Iterable[str]) -> list[str]
         for room_id, members in zip(rooms, answers, strict=True)
         if not isinstance(members, BaseException) and user.user_id in members
     ]
+
+
+def _room_bot(
+    app: FastAPI,
+    pick: Callable[[Mapping[str, AgentBot], str], AgentBot | None],
+    room_id: str,
+    *,
+    only: str | None = None,
+) -> AgentBot:
+    """Return the bot ``pick`` names for the room among the runtime's bots running now, or among ``only`` that entity.
+
+    A restarted bot acts with its new client. It answers 503 when no agent runs, or none it may pick is in the room.
+    """
+    bots = ensure_app_state(app).room_bots or {}
+    if not any(bot.running for bot in bots.values()):
+        raise HTTPException(503, "No MindRoom agent is running; try again.")
+    bot = pick(bots if only is None else {only: bots[only]} if only in bots else {}, room_id)
+    if bot is None:
+        raise HTTPException(503, "No MindRoom agent is in this room.")
+    return bot
 
 
 def _bound[T](reader: T | None) -> T:

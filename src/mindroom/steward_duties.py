@@ -32,8 +32,11 @@ from mindroom.matrix.room_member_joins import (
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import structlog
 
+    from mindroom.bot import AgentBot
     from mindroom.bot_room_lifecycle import BotRoomLifecycle
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.event_journal import PrincipalStore
@@ -48,7 +51,7 @@ def moderator_rights_message(feature: str) -> str:
 
 
 async def put_room_state_as_steward(
-    runtime: OrchestratorRuntime,
+    room_steward: Callable[[str], AgentBot | None],
     room_id: str,
     event_type: str,
     content: dict[str, Any],
@@ -60,7 +63,7 @@ async def put_room_state_as_steward(
     None means refused: the room has no steward, or it lacks the power, which only moderator rights can fix.
     A ``state_key`` of None is the steward's own Matrix ID, the one such key Matrix lets it write.
     """
-    steward = runtime.room_steward(room_id)
+    steward = room_steward(room_id)
     if steward is None or steward.client is None:
         return None
     key = steward.client.user_id if state_key is None else state_key

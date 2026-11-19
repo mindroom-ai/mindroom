@@ -208,12 +208,14 @@ async def test_sweep_reconciles_each_held_room_once_through_its_steward(tmp_path
 async def test_put_room_state_as_steward_returns_false_without_power(tmp_path: Path) -> None:
     """The write goes through the steward's client and reports a refusal, or a room without a steward, as False."""
     room = _Room(tmp_path, ("agent1",))
-    assert await put_room_state_as_steward(room.orchestrator, ROOM_ID, "io.mindroom.test", {"a": 1}, state_key="k")
+    assert await put_room_state_as_steward(
+        room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 1}, state_key="k"
+    )
     assert room.state["io.mindroom.test", "k"] == {"a": 1}
     room.refusal = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    assert not await put_room_state_as_steward(room.orchestrator, ROOM_ID, "io.mindroom.test", {"a": 2})
+    assert not await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 2})
     room.bots.clear()
-    assert not await put_room_state_as_steward(room.orchestrator, ROOM_ID, "io.mindroom.test", {"a": 3})
+    assert not await put_room_state_as_steward(room.orchestrator.room_steward, ROOM_ID, "io.mindroom.test", {"a": 3})
 
 
 def test_moderator_rights_message_text() -> None:

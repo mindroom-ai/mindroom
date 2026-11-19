@@ -196,7 +196,7 @@ class CommandTurnExecutor:
             controller_identity=self.deps.controller_identity,
             agent_reply_memberships=self.deps.runtime.agent_reply_memberships,
             scheduled_tasks=orchestrator.scheduled_tasks,
-            put_room_state=partial(put_room_state_as_steward, orchestrator),
+            put_room_state=partial(put_room_state_as_steward, orchestrator.room_steward),
         )
         await handle_command(
             context=context,

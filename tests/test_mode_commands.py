@@ -622,7 +622,7 @@ def _thread_mode_command_through(
         room_id=THREAD_MODE_ROOM_ID,
         requester_user_id="@admin:localhost",
         sender_user_id="@admin:localhost",
-        put_state=partial(put_room_state_as_steward, runtime),
+        put_state=partial(put_room_state_as_steward, runtime.room_steward),
     )
 
 

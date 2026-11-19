@@ -111,6 +111,7 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     state.room_state = partial(_room_state, bots)
     state.room_direct = partial(_room_direct, bots)
     state.room_history = partial(_room_history, bots)
+    state.room_bots = bots
 
 
 async def _room_state(bots: Mapping[str, AgentBot], room_id: str) -> RoomStateSnapshot:
@@ -143,3 +144,4 @@ def unbind_room_members(app: FastAPI) -> None:
     state.room_state = None
     state.room_direct = None
     state.room_history = None
+    state.room_bots = None

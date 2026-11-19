@@ -104,6 +104,8 @@ class _MindroomAppState:
     room_state: Callable[[str], Awaitable[RoomStateSnapshot]] | None = None
     room_direct: Callable[[str], Awaitable[bool]] | None = None
     room_history: Callable[[str, str], Awaitable[RoomHistory | None]] | None = None
+    # The runtime's live bots, among which plugin routes pick a room's steward and poster.
+    room_bots: Mapping[str, AgentBot] | None = None
     usage_export_runner: UsageExportRunner | None = None
 
     @property

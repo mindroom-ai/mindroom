@@ -278,7 +278,7 @@ async def test_auto_approve_command_publishes_the_rooms_open_windows_for_clients
     client = AsyncMock(user_id="@mindroom_router:localhost")
     client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id=ROOM_ID)
     runtime = SimpleNamespace(room_steward=lambda _room_id: SimpleNamespace(client=client))
-    put_room_state = partial(put_room_state_as_steward, runtime)
+    put_room_state = partial(put_room_state_as_steward, runtime.room_steward)
 
     await _send(tmp_path, "!auto_approve 30", put_room_state=put_room_state)
 
