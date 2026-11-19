@@ -40,7 +40,7 @@ from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import SUBAGENT_BUSY, load_retained_subagent_turn, subagent_recovery_lock
-from mindroom.delegation.state import DelegationState, child_card_id
+from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, DelegationState, child_card_id
 from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -1014,9 +1014,7 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(
     await _drive_background_child(tmp_path, monkeypatch, runtime, child, while_waiting=stop)
     (job,) = (await saved_jobs(tmp_path)).values()
     assert (job.status, job.result) == (
-        ("interrupted", "Subagent turn was interrupted by a restart. Send a follow-up to continue its history.")
-        if shutdown
-        else ("cancelled", "Delegation cancelled.")
+        ("interrupted", RESTART_INTERRUPTION_REASON) if shutdown else ("cancelled", "Delegation cancelled.")
     )
 
 
@@ -1057,7 +1055,7 @@ async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_
             await unwind()
     reason = interrupt.await_args.kwargs["reason"]
     assert (reason, interrupt.await_args.kwargs.get("status", "cancelled")) == (
-        ("Subagent turn was interrupted by a restart. Send a follow-up to continue its history.", "failed")
+        (RESTART_INTERRUPTION_REASON, "failed")
         if stop in {"shutdown", "teardown"}
         else ("Delegation cancelled.", "cancelled")
     )

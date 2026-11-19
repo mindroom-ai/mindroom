@@ -17,7 +17,7 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, restart_interruption
 from mindroom.live_frames.frames import FRAME_VERSION, LiveDocs, live_delta, new_publisher_id
 from mindroom.live_frames.transport import (
     RETRY_BACKOFF_SECONDS,
@@ -112,6 +112,9 @@ def _run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
         "started_at": snapshot.started_at,
         "ended_at": snapshot.ended_at,
     }
+    if restart_interruption(snapshot.status, snapshot.result_preview):
+        # A failed turn a restart cut short, which its job may continue; clients need not read its result to tell.
+        meta["interrupted_by_restart"] = True
     if full:
         meta["task"] = snapshot.task
         if snapshot.status in TERMINAL_CHILD_STATUSES:

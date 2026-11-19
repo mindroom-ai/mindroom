@@ -21,6 +21,7 @@ from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.delegation import execution as delegation_execution
+from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import SUBAGENT_BUSY
@@ -415,6 +416,30 @@ async def test_a_subagent_a_restart_stopped_continues_from_its_own_calls_and_its
             result = str(answer_of(read, "wait").content)
             assert result.startswith("Continued")
             assert f"Subagent ID: {handle['subagent_id']}" in result
+        finally:
+            await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_a_release_before_the_upgrade_stopped_still_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn settled with the reason earlier releases wrote on their way down still continues after the upgrade."""
+    old_reason = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
+    monkeypatch.setattr(delegation_recovery, "RESTART_INTERRUPTION_REASON", old_reason)
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=delegating_config(child_tools=[PROBE_TOOL]))
+        await conversation.open(calls(tool_call("read_file", "read", path="a")), _hang("shell"), answer("Continued"))
+        try:
+            record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            handle = json.loads(str(answer_of(record, "first").content))
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            await conversation.restart()
+            await wait_for_status(conversation.runtime, handle["job_id"], "completed")
+            job = await conversation.job(handle["job_id"])
+            assert (job.result or "").startswith("Continued")
+            assert job.adapter["restart_continuations"] == 1
         finally:
             await conversation.close()
 

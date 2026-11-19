@@ -107,6 +107,7 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
 - `docs.status` is `"streaming"` while `meta.status` is `running` or `awaiting_approval`, and `"pending"` otherwise, so a client takes the run's state from `meta.status`.
 - Statuses: `running` from the first frame, and again after an approval or a pause; `awaiting_approval` while the child waits for the person to decide its gated calls, as a background job child does through its job's cards; `paused` when the child stopped on an approval its parent's reply owns, until it resumes as `running`; `completed`, `failed`, `cancelled`, and `denied` end the run.
   An attempt that settled no outcome ends as `cancelled` when it was cancelled and as `failed` otherwise, with the reason as `result`.
+  A turn a restart cut short ends `failed` with `interrupted_by_restart: true` in its `meta`, because its job may continue it with a later turn, so a client can show it as interrupted without reading `result`; any other run has no such key.
   A run's last frame is a snapshot of its end, and `ended_at` is set from then on.
 - Caps: the transcript's text is cut to its newest 5,000 characters once it passes 6,000, so the frames after a cut are appends again until the next cut; at most the 20 newest tool rows; `args_preview` and `result_preview` at 300 characters, with `truncated: true` on a row whose preview was cut.
   Text and previews are redacted before any cut, so a secret is masked whole.
