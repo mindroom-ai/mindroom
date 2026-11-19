@@ -1604,7 +1604,11 @@ class AgentBot:
         Both happen before journal replay, so a message to a held conversation waits for its approval after a restart.
         """
         self._response_runner.note_continued_sources(await self._reply_runtime.start())
-        self._response_runner.follow_approval_holds(self._journal_store.approval_signals, self._journal_principal_id)
+        self._response_runner.follow_approval_holds(
+            self._journal_store.approval_signals,
+            self._journal_principal_id,
+            freed=lambda room_id: self._journal_dispatcher.retry_turn_sources(room_id, ()),
+        )
 
     async def start(self) -> None:
         """Log in with the account the runtime prepared and start this bot's services, without joining rooms yet."""

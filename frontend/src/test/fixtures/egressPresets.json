@@ -191,6 +191,20 @@
       ]
     },
     {
+      "description": "Overleaf projects over Git (Overleaf premium)",
+      "display_name": "Overleaf",
+      "id": "overleaf",
+      "oauth_provider": null,
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "git.overleaf.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
       "description": "OpenAI API",
       "display_name": "OpenAI",
       "id": "openai",
