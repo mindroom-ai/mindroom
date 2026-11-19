@@ -280,16 +280,15 @@ class EgressCredentialsTools(Toolkit):
         A key the service already has is replaced, which the card tells the user, so do not ask while that key works.
         Give `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to
         hint at the key's form.
-        For a service that does not exist yet, propose it with `new_service` instead of editing config.yaml: the card
-        shows its rules, and saving adds it as one of the user's own services together with the key. It must pass
-        what the Agent Keys page checks, or no card is posted and the `error` says why.
+        For a service that does not exist yet, propose it with `new_service` instead of editing config.yaml; saving
+        adds it with the key.
         Waits up to 15 minutes and returns `status`:
         `saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;
         `declined` when the user refused: do not ask again for this service in this turn;
         `expired` when no answer came in 15 minutes.
         An `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.
-        After `saved`, make one request through Agent Keys to the service; if it is refused, tell the user why (for
-        example a token of the wrong owner, read-only access, or an organization's token-lifetime rule) and ask again.
+        After `saved`, test the key with one request; if it is refused, tell the user why (such as a token of the
+        wrong owner or read-only access) and ask again.
 
         Args:
             service: The service's `name` from `list_egress_credentials`, or the name of the service `new_service`
@@ -300,8 +299,8 @@ class EgressCredentialsTools(Toolkit):
             new_service: A new service of the user's own that takes this key, with only these fields of a service in
                 config.yaml: `display_name`, `description`, `preset`, `rules` (each with `host`, optional `path_prefix`
                 and `port`, and `auth`: `type` `bearer`, `basic` with `username`, `header` or `query` with `name`, and
-                optional `template` containing `{secret}`), `placeholder_env`, `restrict_to_rules`. It never uses an
-                account login, a preset's included.
+                optional `template` containing `{secret}`), `placeholder_env`, `restrict_to_rules`. Key only, never
+                an account login.
 
         """
         context = get_tool_runtime_context()
