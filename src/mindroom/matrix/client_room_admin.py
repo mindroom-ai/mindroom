@@ -593,6 +593,9 @@ def _describe_matrix_response_error(response: object) -> str:
     """Convert a Matrix response object into a concise error string."""
     if isinstance(response, nio.ErrorResponse):
         if response.status_code and response.message:
+            # Tuwunel already prefixes the errcode to its message.
+            if str(response.message).startswith(f"{response.status_code}:"):
+                return str(response.message)
             return f"{response.status_code}: {response.message}"
         if response.status_code:
             return str(response.status_code)

@@ -402,11 +402,13 @@ async def test_send_message_outcome_keeps_other_server_refusals_retryable() -> N
 
 
 @pytest.mark.asyncio
-async def test_send_message_outcome_maps_a_homeserver_that_refuses_encryption() -> None:
+# Tuwunel sends the errcode-prefixed form in its `error` field.
+@pytest.mark.parametrize("message", ["M_FORBIDDEN: Encryption has been disabled", "Encryption has been disabled"])
+async def test_send_message_outcome_maps_a_homeserver_that_refuses_encryption(message: str) -> None:
     """A homeserver that refuses encrypted events will refuse every resend of one."""
     client = _mock_client(encrypted=True)
     client.room_send.return_value = nio.RoomSendError(
-        message="Encryption has been disabled",
+        message=message,
         status_code="M_FORBIDDEN",
         room_id="!room:localhost",
     )
@@ -418,10 +420,7 @@ async def test_send_message_outcome_maps_a_homeserver_that_refuses_encryption() 
         content_is_prepared=True,
     )
 
-    assert outcome == MatrixDeliveryFailure(
-        MatrixDeliveryFailureKind.ENCRYPTION_REFUSED,
-        "Encryption has been disabled",
-    )
+    assert outcome == MatrixDeliveryFailure(MatrixDeliveryFailureKind.ENCRYPTION_REFUSED, message)
 
 
 @pytest.mark.asyncio

@@ -90,9 +90,9 @@ def _refuses_encryption(response: nio.RoomSendError) -> bool:
 
     Matrix has no errcode for this, so only the exact disabled-encryption reason counts. Any other refusal, such
     as one a membership or power-level change can lift, stays retryable, even when a user or room ID in its
-    reason happens to contain "encryption".
+    reason happens to contain "encryption". Tuwunel prefixes the errcode to the reason (`M_FORBIDDEN: ...`).
     """
-    reason = (response.message or "").strip().rstrip(".").lower()
+    reason = (response.message or "").strip().removeprefix("M_FORBIDDEN:").strip().rstrip(".").lower()
     return response.status_code == "M_FORBIDDEN" and reason in _ENCRYPTION_DISABLED_REASONS
 
 

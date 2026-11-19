@@ -334,7 +334,12 @@ class TestEncryptCommand:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "reason",
-        ["Encryption is disabled on this homeserver.", "You don't have permission to send m.room.encryption."],
+        [
+            "Encryption is disabled on this homeserver.",
+            # Tuwunel's form: the errcode is already in the message and is shown once.
+            "M_FORBIDDEN: Encryption is disabled on this homeserver.",
+            "You don't have permission to send m.room.encryption.",
+        ],
     )
     async def test_confirm_reports_the_homeservers_refusal(self, reason: str) -> None:
         """A refused confirm quotes the homeserver, so a server without encryption is not mistaken for a permission gap."""
@@ -356,7 +361,8 @@ class TestEncryptCommand:
                 sender_user_id="@sender:localhost",
             )
 
-        assert response.startswith(f"❌ Failed to enable encryption: M_FORBIDDEN: {reason}\n\n")
+        shown = reason.removeprefix("M_FORBIDDEN: ")
+        assert response.startswith(f"❌ Failed to enable encryption: M_FORBIDDEN: {shown}\n\n")
         assert "enable it from your own client" in response
 
 
