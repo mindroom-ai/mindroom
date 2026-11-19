@@ -26,6 +26,7 @@ from mindroom.agent_loop.model_loop import (
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.agent_loop.run import resumed_record
 from mindroom.agent_loop.tools import MAX_CONSECUTIVE_TOOL_FAILURES, MEDIA_FOLLOW_UP_TEXT, PreparedTools
+from mindroom.constants import TOOL_TRACE_CONTENT_KEY
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, CUT_OFF_TEXT_KEY, REWRITTEN_ATTEMPT_KEY, Message
@@ -34,6 +35,7 @@ from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import FailingTool, RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.tool_system.events import build_tool_trace_content, format_tool_completed_event
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, answer, calls, raw_tool_call, tool_call, usage
@@ -309,6 +311,20 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_in_call_order() 
     assert model.requests[1].messages[-3:] == tuple(tool_messages)
     # The run's agent is named on the warning for the tool it was not offered.
     assert [entry["entity"] for entry in logs if entry["event"] == "tool_not_offered"] == ["code"]
+
+
+async def test_a_refused_call_is_published_as_not_succeeding() -> None:
+    """A call the loop refused completes with ``is_error`` in the reply's public trace; one that ran does not."""
+    model = ScriptedModel([calls(tool_call("missing", "c1"), tool_call("add", "c2", a=1, b=2)), answer("ok")])
+
+    events, _record = await _run(spec(model, toolkit(add)), _prompt())
+
+    completed = [format_tool_completed_event(event.call) for event in events if isinstance(event, ToolCompleted)]
+    content = build_tool_trace_content(completed)
+    assert content is not None
+    refused, ran = content[TOOL_TRACE_CONTENT_KEY]["events"]
+    assert (refused["tool_call_id"], refused["is_error"]) == ("c1", True)
+    assert "is_error" not in ran
 
 
 async def test_a_cut_off_response_records_and_announces_its_calls_without_running_them() -> None:
