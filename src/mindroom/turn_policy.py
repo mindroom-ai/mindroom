@@ -598,8 +598,9 @@ class TurnPolicy:
         else:
             claim = owner.full_id + (_UNTARGETED if aimed_at is candidates else "")
             saved = await journal.claim_room_event(room.room_id, source_event_id, "command", claim)
-        admitted = not saved.endswith(_UNTARGETED) or self._routing_admits(requester_user_id, room.room_id)
-        return admitted and saved.removesuffix(_UNTARGETED) == me.full_id and me in (owner, *candidates)
+        if saved.removesuffix(_UNTARGETED) != me.full_id or me not in (owner, *candidates):
+            return False
+        return not saved.endswith(_UNTARGETED) or self._routing_admits(requester_user_id, room.room_id)
 
     async def owns_command(
         self,

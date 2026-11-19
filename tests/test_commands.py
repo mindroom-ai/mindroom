@@ -1082,3 +1082,26 @@ async def test_saved_owner_runs_a_targeted_command_without_a_fresh_proposal(tmp_
     research_replied = [make_visible_message(sender=_entity_id(denying, "research").full_id, body="on it")]
     in_research_thread = _context(thread_id="$thread:localhost", thread_history=research_replied)
     assert await _command_owners(denying, "!help", rooms, in_research_thread, untargeted) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_non_owner_drops_an_untargeted_command_while_routing_access_is_pending(tmp_path: Path) -> None:
+    """A bot that is not the saved owner drops its copy without waiting for the `router.access` grant to resolve."""
+    admitting = _router_access_denies_everyone(tmp_path).model_copy(update={"router": RouterConfig()})
+    admitting = bind_runtime_paths(admitting, test_runtime_paths(tmp_path))
+    rooms = _shared_room(admitting, "general", "research")
+    untargeted = _claims()
+    assert await _command_owners(admitting, "!help", rooms, None, untargeted) == ["general"]
+    pending_access = ResponderAccessConfig(current_room_members=True, members_of_rooms=[])
+    pending = bind_runtime_paths(
+        admitting.model_copy(update={"router": RouterConfig(access=pending_access)}),
+        test_runtime_paths(tmp_path),
+    )
+    research_replied = [make_visible_message(sender=_entity_id(pending, "research").full_id, body="on it")]
+    in_research_thread = _context(thread_id="$thread:localhost", thread_history=research_replied)
+
+    research = {"research": rooms["research"]}
+    assert await _command_owners(pending, "!help", research, in_research_thread, untargeted) == []
+    with pytest.raises(ReplyMembershipPendingError):
+        await _command_owners(pending, "!help", {"general": rooms["general"]}, in_research_thread, untargeted)
