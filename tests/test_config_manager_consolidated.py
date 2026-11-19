@@ -1777,10 +1777,10 @@ class TestConsolidatedConfigManager:
         )
 
         assert config.defaults.tool_names == ["scheduler", "shell"]
-        assert config.agents["code"].tool_names == ["file", "shell"]
+        assert config.agents["code"].tool_names == ["filesystem", "shell"]
 
         resolved = config.resolve_agent("code").tools.authored
-        assert [entry.name for entry in resolved[:3]] == ["file", "shell", "scheduler"]
+        assert [entry.name for entry in resolved[:3]] == ["filesystem", "shell", "scheduler"]
         resolved_shell = next(entry for entry in resolved if entry.name == "shell")
         assert resolved_shell.tool_config_overrides == {
             "enable_run_shell_command": True,
@@ -1922,7 +1922,7 @@ class TestConsolidatedConfigManager:
             {"shell": {"extra_env_passthrough": "DAWARICH_*"}},
         ]
         assert reloaded.model_dump(exclude_none=True)["agents"]["code"]["tools"] == [
-            "file",
+            "filesystem",
             {"shell": {"enable_run_shell_command": True}},
         ]
 
@@ -1960,7 +1960,7 @@ class TestConsolidatedConfigManager:
         }
         assert resolved["openclaw_compat"] == {}
         assert resolved["shell"] == {"enable_run_shell_command": False}
-        assert resolved["coding"] == {}
+        assert resolved["filesystem"] == {}
         assert resolved["browser"] == {}
 
     def test_manage_agent_update_preserves_inline_tool_overrides(self, tmp_path: Path) -> None:
