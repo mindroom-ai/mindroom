@@ -8,6 +8,7 @@ from datetime import datetime  # noqa: TC003 - Pydantic resolves postponed annot
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import aiohttp
+import nio
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -35,8 +36,6 @@ from mindroom.scheduling.tasks import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    import nio
 
     from mindroom.constants import RuntimePaths
 
@@ -146,8 +145,8 @@ async def _room_ids(
         for room_ref in room_refs:
             try:
                 resolved = await resolve_room_reference(client, room_ref, runtime_paths)
-            except aiohttp.ClientError as exc:
-                # nio raises an alias lookup whose response broke off instead of answering it.
+            except (aiohttp.ClientError, nio.LocalProtocolError) as exc:
+                # nio raises an alias lookup whose response broke off, or whose lent client its bot closed since.
                 unresolved_rooms.append(_unresolved_alias(room_ref, f"{type(exc).__name__}: {exc}"))
                 continue
             if isinstance(resolved, str):

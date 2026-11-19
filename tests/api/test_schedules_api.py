@@ -173,8 +173,13 @@ def test_list_schedules_success(test_client: TestClient) -> None:
             aiohttp.ClientPayloadError("Response payload is not completed"),
             "ClientPayloadError: Response payload is not completed",
         ),
+        (
+            # A lent client whose bot closed its session past the stop bound.
+            nio.LocalProtocolError("AsyncClient has been disposed"),
+            "LocalProtocolError: AsyncClient has been disposed",
+        ),
     ],
-    ids=["error response", "broken-off response"],
+    ids=["error response", "broken-off response", "disposed client"],
 )
 def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
     test_client: TestClient,
@@ -249,9 +254,19 @@ def test_list_schedules_reads_a_room_configured_by_alias_under_its_room_id(
     ]
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        aiohttp.ClientPayloadError("Response payload is not completed"),
+        # A lent client whose bot closed its session past the stop bound.
+        nio.LocalProtocolError("AsyncClient has been disposed"),
+    ],
+    ids=["broken-off response", "disposed client"],
+)
 def test_list_schedules_reports_an_alias_whose_lookup_broke_off_beside_the_readable_rooms(
     test_client: TestClient,
     temp_config_file: Path,
+    failure: Exception,
 ) -> None:
     """An alias lookup that breaks off is reported with the reason, and the other rooms' tasks are still listed."""
     # The broken-off lookup comes first, so the next reference must not inherit its outcome.
@@ -260,7 +275,7 @@ def test_list_schedules_reports_an_alias_whose_lookup_broke_off_beside_the_reada
     client = make_matrix_client_mock()
     client.room_resolve_alias = AsyncMock(
         side_effect=[
-            aiohttp.ClientPayloadError("Response payload is not completed"),
+            failure,
             nio.RoomResolveAliasResponse(room_alias="#readable:localhost", room_id="!readable:localhost", servers=[]),
         ],
     )
@@ -279,7 +294,7 @@ def test_list_schedules_reports_an_alias_whose_lookup_broke_off_beside_the_reada
         {
             "room_id": "#flaky:localhost",
             "room_alias": "#flaky:localhost",
-            "error": "Unable to resolve room alias: ClientPayloadError: Response payload is not completed",
+            "error": f"Unable to resolve room alias: {type(failure).__name__}: {failure}",
         },
     ]
 

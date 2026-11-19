@@ -572,8 +572,8 @@ async def _room_state_for_tasks(client: nio.AsyncClient, room_id: str) -> nio.Ro
     """Read a room's full state to list or cancel its tasks, or raise that its tasks cannot be retrieved."""
     try:
         response = await client.room_get_state(room_id)
-    except aiohttp.ClientError as exc:
-        # nio raises a response that broke off instead of answering it.
+    except (aiohttp.ClientError, nio.LocalProtocolError) as exc:
+        # nio raises a response that broke off, or a read through a lent client its bot closed since.
         msg = f"Unable to retrieve scheduled tasks: {type(exc).__name__}: {exc}"
         raise ScheduledTaskStateReadError(msg) from exc
     if not isinstance(response, nio.RoomGetStateResponse):
