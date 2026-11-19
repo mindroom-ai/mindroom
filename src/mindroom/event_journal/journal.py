@@ -39,7 +39,7 @@ from . import (
     turn_rows,
 )
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
-from .membership_state import claim_membership_epoch
+from .membership_state import claim_membership_epoch, projection_generation
 from .models import (
     TURN_BACKED_KINDS,
     AdmissionFacts,
@@ -415,13 +415,14 @@ def read_generation(transaction: Transaction) -> str | None:
     return None if row is None else str(row["generation"])
 
 
-def _room_history_recovery_from_row(room_id: str, row: Row) -> RoomHistoryRecovery:
+def _room_history_recovery_from_row(room_id: str, row: Row, generation: int) -> RoomHistoryRecovery:
     """Decode one durable recovery row into its transport-neutral value."""
     return RoomHistoryRecovery(
         room_id=room_id,
         state=HistoryRecoveryState(str(row["state"])),
         revision=int(row["revision"]),
         attempted_policy_rank=int(row["attempted_policy_rank"]),
+        projection_generation=generation,
     )
 
 
@@ -438,7 +439,9 @@ def room_history_recovery(
         """,
         (principal_id, room_id, _REPAIRED_RECOVERY_STATE),
     )
-    return None if row is None else _room_history_recovery_from_row(room_id, row)
+    if row is None:
+        return None
+    return _room_history_recovery_from_row(room_id, row, projection_generation(transaction, principal_id, room_id))
 
 
 def _record_room_history_recovery(
@@ -466,7 +469,7 @@ def _record_room_history_recovery(
     if row is None:
         msg = f"Room history recovery for {room_id!r} is missing immediately after it was written"
         raise RuntimeError(msg)
-    return _room_history_recovery_from_row(room_id, row)
+    return _room_history_recovery_from_row(room_id, row, projection_generation(transaction, principal_id, room_id))
 
 
 def _claim_room_history_recovery(
@@ -613,6 +616,7 @@ def _claim_recovery(
         principal_id,
         room_id=recovery.room_id,
         expected_membership_epoch=expected_membership_epoch,
+        expected_projection_generation=recovery.projection_generation,
     ) and _claim_room_history_recovery(transaction, principal_id, recovery)
 
 
