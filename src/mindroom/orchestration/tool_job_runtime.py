@@ -356,8 +356,11 @@ class ToolJobRuntimeCoordinator:
             await runtime.quiesce()
             # The jobs it ended leave the rooms' state now. Every job it returned without ending is a subagent job it
             # keeps running in storage for the next start to continue (`_keeps`; a failed settle raises above), and
-            # stays listed as it was; a next start with jobs off clears it (`_clear_listing`).
-            await self._publisher.publish(self.bot_provider, runtime.retained_jobs(), awaited=runtime.awaited_job_ids())
+            # stays listed as it was; a next start with jobs off clears it (`_clear_listing`). A runtime a newer process
+            # took the journal or the jobs from leaves the rooms' state to that one.
+            if await self._holds_journal() and await runtime.owns_jobs():
+                jobs, awaited = runtime.retained_jobs(), runtime.awaited_job_ids()
+                await self._publisher.publish(self.bot_provider, jobs, awaited=awaited)
 
     async def stop(self) -> None:
         """Release the service after response finalization has stopped using its receipts."""
@@ -373,28 +376,34 @@ class ToolJobRuntimeCoordinator:
             self._instance = self._runtime = self._journal = None
             self._initialized = False
 
-    async def _clear_listing(self, journal: EventJournalStore) -> None:
-        """With jobs off, clear the listing of the saved jobs an earlier shutdown kept running, which nothing runs now.
+    async def _holds_journal(self) -> bool:
+        """Return whether this process still holds the journal, which a newer process takes once it lost it."""
+        return self._journal is not None and await self._journal.still_usable()
 
+    async def _clear_listing(self, journal: EventJournalStore) -> None:
+        """With jobs off, clear the listing of every room with saved jobs, which nothing runs now, until it is done.
+
+        A room whose saved jobs all ended is cleared too, as a process that ended them may have died before its write.
         Each bot writes once it has synced, when its client holds its rooms; a bot that is gone writes nothing.
         """
-        try:
-            saved = [parse_saved_job(saved) for saved in await journal.tool_jobs(uuid4().hex).load_all()]
-        except Exception:
-            logger.exception("Saved background jobs could not be read to clear their listing")
-            return
-        # Published as ended, they leave every room's listing; the saved jobs stay as they are.
-        kept = [replace(job, status="interrupted") for job in saved if job.status not in TERMINAL_STATUSES]
 
         def ready(name: str) -> bool:
             bot = self.bot_provider(name)
             return bot is None or bot.first_sync_complete or self.entity_unavailable(name)
 
-        while True:
-            ready_jobs = [job for job in kept if ready(job.owner.recipient)]
-            await self._publisher.publish(self.bot_provider, ready_jobs)
-            if len(ready_jobs) == len(kept):
-                return
+        saved: list[BackgroundJob] | None = None
+        # A process that lost the journal leaves the listing to the newer one that holds it.
+        while await self._holds_journal():
+            try:
+                if saved is None:
+                    # Published as ended, they leave every listing; the saved jobs stay as they are.
+                    stored = await journal.tool_jobs(uuid4().hex).load_all()
+                    saved = [replace(parse_saved_job(job), status="interrupted") for job in stored]
+                ready_jobs = [job for job in saved if ready(job.owner.recipient)]
+                if await self._publisher.publish(self.bot_provider, ready_jobs) and len(ready_jobs) == len(saved):
+                    return
+            except Exception:
+                logger.exception("Clearing the listing of saved background jobs failed; retrying")
             await asyncio.sleep(_RETRY_SECONDS)
 
     async def _run(self) -> None:

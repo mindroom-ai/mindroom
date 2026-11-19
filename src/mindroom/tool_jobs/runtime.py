@@ -21,7 +21,7 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON
+from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON, ToolJobOwnershipLostError
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.background_after import validate_wait_seconds
@@ -409,6 +409,14 @@ class ToolJobRuntime:
     def retained_jobs(self) -> tuple[BackgroundJob, ...]:
         """Return every job this runtime retains, unfiltered by access, for the coordinator's own passes."""
         return tuple(entry.job for entry in self._entries.values())
+
+    async def owns_jobs(self) -> bool:
+        """Return whether no newer runtime took the saved jobs over from this one."""
+        try:
+            await self._store.require_ownership()
+        except ToolJobOwnershipLostError:
+            return False
+        return True
 
     def awaited_job_ids(self) -> frozenset[str]:
         """Return the jobs whose outcome a call holds the claim on, as the call that started one does until released."""

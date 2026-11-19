@@ -118,12 +118,13 @@ class JobStatePublisher:
         jobs: Sequence[BackgroundJob],
         *,
         awaited: Collection[str] = frozenset(),
-    ) -> None:
+    ) -> bool:
         """Rewrite the state of every agent and room whose live jobs changed; a failed write is retried next time.
 
         ``jobs`` are every retained job, so a new process also clears state an earlier one left listing jobs that a
-        restart interrupted. ``awaited`` names the jobs a call still waits for.
+        restart interrupted. ``awaited`` names the jobs a call still waits for. Returns whether no write failed.
         """
+        failed = False
         groups: dict[tuple[str, str], list[BackgroundJob]] = {pair: [] for pair in self._published}
         for job in jobs:
             if job.owner.room_id is not None:
@@ -152,6 +153,7 @@ class JobStatePublisher:
                 )
             except Exception:
                 logger.warning("Publishing background jobs state failed; retrying", room_id=room_id, exc_info=True)
+                failed = True
                 continue
             if isinstance(response, nio.RoomPutStateResponse):
                 self._published[(agent, room_id)] = content
@@ -161,6 +163,8 @@ class JobStatePublisher:
                 self._published[(agent, room_id)] = content
             else:
                 logger.warning("Background jobs state was refused; retrying", room_id=room_id, response=str(response))
+                failed = True
+        return not failed
 
     def _warn_refused(self, agent: str, room_id: str, status_code: str) -> None:
         """Warn that the room refused the agent's state, unless it already refused the agent's last write."""
