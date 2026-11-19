@@ -15,7 +15,10 @@ from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.config.personal_agents import GeneratedAgentEdits
 from mindroom.constants import resolve_runtime_paths
 from mindroom.contacts.store import ContactSide
+from mindroom.custom_tools.script import ScriptTools
 from mindroom.delegation.personas import inline_persona
+from mindroom.dynamic_workflows.spec import SubagentParticipant
+from mindroom.workers.protocol import ExecuteRequest
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -178,6 +181,18 @@ def test_subagent_tools_take_every_spelling() -> None:
     """run_subagent's and a profile's tools name the caller's filesystem toolkit by any spelling."""
     persona = inline_persona("You review.", ["coding", "file.read_file", "shell"], None, None)
     assert persona.tools == ("filesystem", "filesystem.read_file", "shell")
+
+
+def test_workflow_script_and_worker_tool_names_take_every_spelling() -> None:
+    """A workflow participant, the script toolkit's grants, and a worker call name filesystem by any spelling."""
+    participant = SubagentParticipant.model_validate({"id": "p", "system_prompt": "P", "tools": ["coding", "file"]})
+    assert participant.tools == ["filesystem"]
+    assert ScriptTools(allowed_tools=["file", " coding.read_file "]).limits.allowed_tools == (
+        "filesystem",
+        "filesystem.read_file",
+    )
+    request = ExecuteRequest(protocol=1, tool_name="coding", function_name="read_file")
+    assert request.tool_name == "filesystem"
 
 
 def test_openclaw_compat_brings_filesystem() -> None:

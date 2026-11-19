@@ -2038,8 +2038,7 @@ def test_subprocess_config_projection_keeps_effective_policy_and_omits_agents() 
     }
 
 
-@pytest.mark.parametrize("tool_name", ["file", "coding"])
-def test_subprocess_config_projection_keeps_agent_file_access(tool_name: str) -> None:
+def test_subprocess_config_projection_keeps_agent_file_access() -> None:
     """Worker subprocesses must resolve the routing agent's file_access, not fall back to workspace."""
     config = Config.model_validate(
         {
@@ -2052,7 +2051,7 @@ def test_subprocess_config_projection_keeps_agent_file_access(tool_name: str) ->
         },
     )
 
-    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, tool_name))
+    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, "filesystem"))
     subprocess_config = Config.model_validate(payload)
 
     assert payload["agents"]["admin"] == {"display_name": "Admin", "file_access": "unrestricted"}
@@ -3162,7 +3161,7 @@ def test_sandbox_runner_enforces_snapshot_agent_file_access_over_seed(
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
                 "function_name": "read_file",
-                "kwargs": {"file_name": str(outside)},
+                "kwargs": {"path": str(outside)},
                 "routing_agent_name": "mind",
                 "base_dir": str(workspace),
                 "config_snapshot": _primary_config_snapshot(file_access=file_access),
@@ -4045,7 +4044,7 @@ def test_sandbox_runner_rejects_disallowed_authored_base_dir_override(
     )
 
     assert response.status_code == 400
-    assert "request.tool_config_overrides.coding.base_dir" in response.json()["error"]
+    assert "request.tool_config_overrides.filesystem.base_dir" in response.json()["error"]
 
 
 def test_sandbox_runner_rejects_password_authored_override(
@@ -4369,8 +4368,8 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello"],
                 "kwargs": {},
                 "worker_key": worker_key,
                 "base_dir": "agents/general/workspace",
@@ -4420,8 +4419,8 @@ def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_worksp
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello"],
                 "kwargs": {},
                 "worker_key": "v1:tenant-123:user:@alice:example.org",
                 "base_dir": f"agents/{agent_name}/workspace",
@@ -4479,8 +4478,8 @@ def test_a_subagent_worker_acts_in_its_normal_workers_private_workspace(
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello"],
                 "kwargs": {},
                 "worker_key": worker_key,
                 "worker_scope": "user_agent",
@@ -4619,8 +4618,8 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello", "note.txt"],
+            "function_name": "write_file",
+            "args": ["note.txt", "hello"],
             "kwargs": {},
             "worker_key": worker_key,
             "base_dir": "agents/general/workspace",
@@ -4877,8 +4876,8 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello from worker A", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello from worker A"],
                 "kwargs": {},
                 "worker_key": "worker-a",
             },
@@ -4917,7 +4916,7 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
         assert read_other_worker.status_code == 200
         assert read_other_worker.json()["ok"] is True
         assert "hello from worker A" not in read_other_worker.json()["result"]
-        assert "No such file or directory" in read_other_worker.json()["result"]
+        assert read_other_worker.json()["result"] == "Error: File not found: note.txt"
 
     worker_file = worker_root / worker_dir_name("worker-a") / "workspace" / "note.txt"
     assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
@@ -4943,8 +4942,8 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello from canonical workspace", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello from canonical workspace"],
                 "kwargs": {},
                 "worker_key": worker_key,
                 "base_dir": "agents/general/workspace",
@@ -4985,8 +4984,8 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello from default storage root fallback", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello from default storage root fallback"],
                 "kwargs": {},
                 "worker_key": "v1:tenant-123:shared:general",
                 "base_dir": str(canonical_base_dir),
@@ -5173,9 +5172,9 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
         assert prepared_worker is not None
         assert prepared_worker.paths.root == worker_root
         assert call.route.workspace == expected_base_dir
-        note_path = expected_base_dir / str(request.args[1])
+        note_path = expected_base_dir / str(request.args[0])
         note_path.parent.mkdir(parents=True, exist_ok=True)
-        note_path.write_text(str(request.args[0]), encoding="utf-8")
+        note_path.write_text(str(request.args[1]), encoding="utf-8")
         return ExecuteResponse(ok=True, result="saved")
 
     monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
@@ -5187,8 +5186,8 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello from dedicated worker canonical workspace", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello from dedicated worker canonical workspace"],
                 "kwargs": {},
                 "worker_key": worker_key,
                 "base_dir": "agents/general/workspace",
@@ -5261,9 +5260,9 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
         assert prepared_worker is not None
         assert prepared_worker.paths.root == worker_root
         assert call.route.workspace == private_base_dir
-        note_path = private_base_dir / str(request.args[1])
+        note_path = private_base_dir / str(request.args[0])
         note_path.parent.mkdir(parents=True, exist_ok=True)
-        note_path.write_text(str(request.args[0]), encoding="utf-8")
+        note_path.write_text(str(request.args[1]), encoding="utf-8")
         return ExecuteResponse(ok=True, result="saved")
 
     monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
@@ -5275,8 +5274,8 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello from private worker", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello from private worker"],
                 "kwargs": {},
                 "worker_key": worker_key,
                 "routing_agent_name": "mind",
@@ -5452,8 +5451,8 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_work
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello from nested worker prefix", "note.txt"],
+            "function_name": "write_file",
+            "args": ["note.txt", "hello from nested worker prefix"],
             "kwargs": {},
             "worker_key": worker_key,
             "base_dir": "agents/general/workspace",
@@ -5638,8 +5637,8 @@ def test_sandbox_runner_lists_known_workers(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello from worker A", "note.txt"],
+            "function_name": "write_file",
+            "args": ["note.txt", "hello from worker A"],
             "kwargs": {},
             "worker_key": "worker-a",
         },
@@ -5675,8 +5674,8 @@ def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello from worker A", "note.txt"],
+            "function_name": "write_file",
+            "args": ["note.txt", "hello from worker A"],
             "kwargs": {},
             "worker_key": "worker-a",
         },
@@ -5741,9 +5740,9 @@ def test_dedicated_worker_mode_uses_mounted_root(
         runtime_payload = request_envelope["runtime_paths"]
         assert runtime_payload["process_env"]["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
         assert runtime_payload["process_env"]["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == str(worker_root)
-        note_path = worker_root / "workspace" / request_payload["args"][1]
+        note_path = worker_root / "workspace" / request_payload["args"][0]
         note_path.parent.mkdir(parents=True, exist_ok=True)
-        note_path.write_text(request_payload["args"][0], encoding="utf-8")
+        note_path.write_text(request_payload["args"][1], encoding="utf-8")
         response = ExecuteResponse(ok=True, result="saved")
         return subprocess.CompletedProcess(
             args=cmd,
@@ -5762,8 +5761,8 @@ def test_dedicated_worker_mode_uses_mounted_root(
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello from dedicated worker", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello from dedicated worker"],
                 "kwargs": {},
                 "worker_key": "worker-a",
             },
@@ -5802,9 +5801,9 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
         assert run_kwargs["cwd"] == str(worker_root / "workspace")
         assert request_envelope["runtime_paths"]["process_env"]["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
 
-        note_path = worker_root / "workspace" / request_payload["args"][1]
+        note_path = worker_root / "workspace" / request_payload["args"][0]
         note_path.parent.mkdir(parents=True, exist_ok=True)
-        note_path.write_text(request_payload["args"][0], encoding="utf-8")
+        note_path.write_text(request_payload["args"][1], encoding="utf-8")
 
         response = ExecuteResponse(ok=True, result="saved")
         return subprocess.CompletedProcess(
@@ -5824,8 +5823,8 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["hello from inferred worker", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "hello from inferred worker"],
                 "kwargs": {},
             },
         )
@@ -7640,8 +7639,8 @@ def test_workspace_env_hook_failure_does_not_block_worker_routed_file_default_mo
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "file",
-                "function_name": "save_file",
-                "args": ["should not be written", "note.txt"],
+                "function_name": "write_file",
+                "args": ["note.txt", "should not be written"],
                 "kwargs": {},
                 "worker_key": "v1:tenant-123:shared:general",
                 "base_dir": "agents/general/workspace",
@@ -7651,7 +7650,7 @@ def test_workspace_env_hook_failure_does_not_block_worker_routed_file_default_mo
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    assert payload["result"] == "note.txt"
+    assert payload["result"] == "Wrote 21 bytes (1 lines) to note.txt"
     assert (workspace / "note.txt").read_text(encoding="utf-8") == "should not be written"
 
 
@@ -8191,8 +8190,8 @@ def test_execute_refuses_base_dir_as_a_tool_init_override(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "file",
-            "function_name": "save_file",
-            "kwargs": {"contents": "hello", "file_name": "note.txt"},
+            "function_name": "write_file",
+            "kwargs": {"content": "hello", "path": "note.txt"},
             "tool_init_overrides": {"base_dir": str(tmp_path / "elsewhere")},
         },
     )
