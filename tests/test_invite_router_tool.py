@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
-import nio
 import pytest
 from agno.tools import Toolkit
 
@@ -18,12 +16,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.custom_tools.invite_router import InviteRouterTools
 from mindroom.llm.messages import stable_serialize
-from mindroom.matrix.personal_room_store import (
-    PersonalRoomAdoption,
-    PersonalRoomRecord,
-    personal_room_record_path,
-    write_personal_room,
-)
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
@@ -280,196 +272,6 @@ def test_matrix_agents_reject_local_invite_router_function_collisions(
 
 
 @pytest.mark.asyncio
-async def test_invite_router_targets_persisted_router_in_current_room(tmp_path: Path) -> None:
-    """A wrong room or configurable user target would widen the recovery tool's authority."""
-    context, client = _tool_context(tmp_path)
-    client.room_get_state_event.side_effect = [
-        nio.RoomGetStateEventError(
-            "Not found",
-            status_code="M_NOT_FOUND",
-            room_id="!project:localhost",
-        ),
-        nio.RoomGetStateEventResponse(
-            content={"membership": "join"},
-            event_type="m.room.member",
-            state_key="@mindroom_router:localhost",
-            room_id="!project:localhost",
-        ),
-    ]
-    client.room_invite.return_value = nio.RoomInviteResponse()
-
-    with tool_runtime_context(context):
-        result = await InviteRouterTools().invite_router()
-
-    assert result == "Router joined."
-    client.room_invite.assert_awaited_once_with("!project:localhost", "@mindroom_router:localhost")
-
-
-@pytest.mark.asyncio
-async def test_invite_router_waits_for_delayed_router_join(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Recovery must not report readiness while router membership is still pending."""
-    context, client = _tool_context(tmp_path)
-    client.room_get_state_event.side_effect = [
-        nio.RoomGetStateEventError(
-            "Not found",
-            status_code="M_NOT_FOUND",
-            room_id="!project:localhost",
-        ),
-        nio.RoomGetStateEventResponse(
-            content={"membership": "invite"},
-            event_type="m.room.member",
-            state_key="@mindroom_router:localhost",
-            room_id="!project:localhost",
-        ),
-        nio.RoomGetStateEventResponse(
-            content={"membership": "join"},
-            event_type="m.room.member",
-            state_key="@mindroom_router:localhost",
-            room_id="!project:localhost",
-        ),
-    ]
-    client.room_invite.return_value = nio.RoomInviteResponse()
-    sleep = AsyncMock()
-    monkeypatch.setattr(asyncio, "sleep", sleep)
-
-    with tool_runtime_context(context):
-        result = await InviteRouterTools().invite_router()
-
-    assert result == "Router joined."
-    assert client.room_get_state_event.await_count == 3
-    sleep.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_invite_router_reports_disabled_router_auto_accept(tmp_path: Path) -> None:
-    """Sending an invite while router acceptance is disabled would promise recovery that cannot happen."""
-    context, client = _tool_context(tmp_path, accept_invites=False)
-
-    with tool_runtime_context(context):
-        result = await InviteRouterTools().invite_router()
-
-    assert result == "Error: Router auto-accept does not allow this Matrix transport account."
-    client.room_invite.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("policy", "expected", "invite_sent"),
-    [
-        (["@mindroom_code:localhost"], "Router joined.", True),
-        (["@other:localhost"], "Error: Router auto-accept does not allow this Matrix transport account.", False),
-    ],
-)
-async def test_invite_router_respects_inviter_list_for_transport_agent(
-    tmp_path: Path,
-    policy: list[str],
-    expected: str,
-    invite_sent: bool,
-) -> None:
-    """The recovery tool must not send an invitation its router policy will reject."""
-    context, client = _tool_context(tmp_path, accept_invites=policy)
-    client.room_get_state_event.side_effect = [
-        nio.RoomGetStateEventError(
-            "Not found",
-            status_code="M_NOT_FOUND",
-            room_id="!project:localhost",
-        ),
-        nio.RoomGetStateEventResponse(
-            content={"membership": "join"},
-            event_type="m.room.member",
-            state_key="@mindroom_router:localhost",
-            room_id="!project:localhost",
-        ),
-    ]
-    client.room_invite.return_value = nio.RoomInviteResponse()
-
-    with tool_runtime_context(context):
-        result = await InviteRouterTools().invite_router()
-
-    assert result == expected
-    assert client.room_invite.await_count == int(invite_sent)
-
-
-@pytest.mark.asyncio
-async def test_invite_router_uses_team_transport_account_for_member_execution(tmp_path: Path) -> None:
-    """A member agent must authorize the Matrix account that actually sends the team invite."""
-    context, client = _tool_context(
-        tmp_path,
-        accept_invites=["@mindroom_builders:localhost"],
-        transport_agent_name="builders",
-    )
-    client.room_get_state_event.side_effect = [
-        nio.RoomGetStateEventError(
-            "Not found",
-            status_code="M_NOT_FOUND",
-            room_id="!project:localhost",
-        ),
-        nio.RoomGetStateEventResponse(
-            content={"membership": "join"},
-            event_type="m.room.member",
-            state_key="@mindroom_router:localhost",
-            room_id="!project:localhost",
-        ),
-    ]
-    client.room_invite.return_value = nio.RoomInviteResponse()
-
-    with tool_runtime_context(context):
-        result = await InviteRouterTools().invite_router()
-
-    assert result == "Router joined."
-    client.room_invite.assert_awaited_once_with("!project:localhost", "@mindroom_router:localhost")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("membership", "expected"),
-    [
-        ("invite", "Router invite pending; retry after it joins."),
-        ("join", "Router already joined."),
-    ],
-)
-async def test_invite_router_is_idempotent_for_existing_membership(
-    tmp_path: Path,
-    membership: str,
-    expected: str,
-) -> None:
-    """Duplicate router invites can fail even though recovery is already underway or complete."""
-    context, client = _tool_context(tmp_path)
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        content={"membership": membership},
-        event_type="m.room.member",
-        state_key="@mindroom_router:localhost",
-        room_id="!project:localhost",
-    )
-    with tool_runtime_context(context):
-        result = await InviteRouterTools().invite_router()
-
-    assert result == expected
-    client.room_invite.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_invite_router_reports_joined_before_disabled_auto_accept(tmp_path: Path) -> None:
-    """Disabling future invites must not hide that router recovery is already complete."""
-    context, client = _tool_context(tmp_path, accept_invites=False)
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        content={"membership": "join"},
-        event_type="m.room.member",
-        state_key="@mindroom_router:localhost",
-        room_id="!project:localhost",
-    )
-
-    with tool_runtime_context(context):
-        result = await InviteRouterTools().invite_router()
-
-    assert result == "Router already joined."
-    client.room_invite.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_invite_router_cannot_require_router_backed_approval(tmp_path: Path) -> None:
     """Approval-gating the recovery call would deadlock when the router is absent."""
     config = bind_runtime_paths(
@@ -539,68 +341,13 @@ def test_a_function_named_after_its_registered_tool_stays_gated(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_invite_router_reports_matrix_invite_failure(tmp_path: Path) -> None:
-    """A refused invite must not tell the agent that router recovery is underway."""
+async def test_invite_router_answers_no_longer_needed(tmp_path: Path) -> None:
+    """The kept tool name invites nobody: an unregistered owner ID must never receive a room invite."""
     context, client = _tool_context(tmp_path)
-    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
-        "Not found",
-        status_code="M_NOT_FOUND",
-        room_id="!project:localhost",
-    )
-    client.room_invite.return_value = nio.RoomInviteError("Forbidden", status_code="M_FORBIDDEN")
 
     with tool_runtime_context(context):
         result = await InviteRouterTools().invite_router()
 
-    assert result == "Error: Router invite failed; current agent may lack invite permission."
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("owner", ["code", "helper"])
-@pytest.mark.parametrize("router_admitted_by", [None, "router_user_id", "additional_user_ids"])
-async def test_invite_router_refuses_an_adopted_personal_room_that_does_not_admit_the_router(
-    tmp_path: Path,
-    owner: str,
-    router_admitted_by: str | None,
-) -> None:
-    """The room's guest check would remove the router again, so inviting it would only start a loop."""
-    context, client = _tool_context(tmp_path)
-    router_id = "@mindroom_router:localhost"
-    write_personal_room(
-        personal_room_record_path(context.runtime_paths, owner, "@alice:localhost"),
-        PersonalRoomRecord(
-            user_id="@alice:localhost",
-            alias="#personal:localhost",
-            source_room_id="!lobby:localhost",
-            room_id="!project:localhost",
-            adoption=PersonalRoomAdoption(
-                creator_user_id="@alice:localhost",
-                agent_user_id=f"@mindroom_{owner}:localhost",
-                router_user_id=router_id if router_admitted_by == "router_user_id" else None,
-                # Another agent's room admits the calling agent explicitly.
-                additional_user_ids=[
-                    *(["@mindroom_code:localhost"] if owner != "code" else []),
-                    *([router_id] if router_admitted_by == "additional_user_ids" else []),
-                ],
-            ),
-        ),
-    )
-    client.room_get_state_event.side_effect = [
-        nio.RoomGetStateEventError("Not found", status_code="M_NOT_FOUND", room_id="!project:localhost"),
-        nio.RoomGetStateEventResponse(
-            content={"membership": "join"},
-            event_type="m.room.member",
-            state_key=router_id,
-            room_id="!project:localhost",
-        ),
-    ]
-    client.room_invite.return_value = nio.RoomInviteResponse()
-
-    with tool_runtime_context(context):
-        result = await InviteRouterTools().invite_router()
-
-    if router_admitted_by is None:
-        assert result.startswith("Error: This adopted personal room does not admit the router")
-        client.room_invite.assert_not_awaited()
-    else:
-        assert result == "Router joined."
+    assert result == "invite_router is no longer needed: approvals, commands and access work without another account."
+    client.room_invite.assert_not_awaited()
+    client.room_get_state_event.assert_not_awaited()
