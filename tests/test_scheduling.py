@@ -850,6 +850,8 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
         return next(task_reads)
 
     client.room_get_state_event.side_effect = read_state
+    # The bot is joined, so it is the room's steward and its final status write lands.
+    client.rooms = {"!test:server": nio.MatrixRoom("!test:server", "@mindroom_router:server")}
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
         {"event_id": "$completed"},
         room_id="!test:server",
@@ -879,6 +881,7 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
     assert sum(SCHEDULED_TASK_EVENT_TYPE in call.args[2] for call in client._send.await_args_list) == 2
     execute.assert_awaited_once()
     failure_notice.assert_not_awaited()
+    assert client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
 
 
 @pytest.mark.asyncio

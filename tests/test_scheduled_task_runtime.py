@@ -1075,6 +1075,65 @@ async def test_a_final_status_write_refused_while_the_steward_restarts_lands_onc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_slot", ["absent", "not synced"])
+async def test_a_final_status_write_refused_while_the_steward_is_replaced_lands_once_it_synced(
+    tmp_path: Path,
+    replacement_slot: str,
+) -> None:
+    """Between a steward's stop and its replacement's first sync nothing is fenced, and the write is still retried."""
+    room, runtime, bots, ids = _due_task_under_a_steward(tmp_path)
+    refusals: list[object] = []
+    retried_in_the_gap = asyncio.Event()
+
+    async def refuse(**_kwargs: object) -> nio.RoomPutStateError:
+        refusals.append(None)
+        if len(refusals) > 1:
+            retried_in_the_gap.set()
+        return nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+
+    bots["general"].client.room_put_state.side_effect = refuse
+    await runtime.release({"helper"})
+    # The fleet drops the stopped steward's slot, then creates its replacement, which syncs later.
+    replacement = _stopped(scheduling_bot(room.client(ids["helper"]), agent_name="helper"))
+    del bots["helper"]
+    if replacement_slot == "not synced":
+        bots["helper"] = replacement
+
+    with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()) as execute:
+        runtime.start_new_task(TASK_ID, _workflow(), owner_id=ids["general"])
+        _runner, task = runtime._runners[TASK_ID]
+        await asyncio.wait_for(retried_in_the_gap.wait(), timeout=2)
+        assert not task.done()
+        assert room.task()["content"]["status"] == "pending"
+        replacement.running = replacement.first_sync_complete = True
+        bots["helper"] = replacement
+        await asyncio.wait_for(task, timeout=2)
+
+    execute.assert_awaited_once()
+    assert (room.task()["sender"], room.task()["content"]["status"]) == (ids["helper"], "completed")
+
+
+@pytest.mark.asyncio
+async def test_a_final_status_write_that_keeps_failing_is_given_up_at_its_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write no bot can make is not retried forever: the runner ends and the task stays as stored."""
+    monkeypatch.setattr(scheduling_runtime, "_STATUS_WRITE_RETRY_SECONDS", 0.05)
+    room, runtime, bots, ids = _due_task_under_a_steward(tmp_path)
+    refusal = AsyncMock(return_value=nio.RoomPutStateError("forbidden", "M_FORBIDDEN"))
+    bots["general"].client.room_put_state = bots["helper"].client.room_put_state = refusal
+
+    with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()) as execute:
+        runtime.start_new_task(TASK_ID, _workflow(), owner_id=ids["general"])
+        await asyncio.wait_for(runtime._runners[TASK_ID][1], timeout=2)
+
+    execute.assert_awaited_once()
+    assert refusal.await_count > 1
+    assert room.task()["content"]["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_fences_changing_entities_and_fails_removed_entities_tasks(tmp_path: Path) -> None:
     """The fleet's change hook fences the stopping bots; its removal hook fails their tasks before approvals settle."""
     orchestrator = _MultiAgentOrchestrator(

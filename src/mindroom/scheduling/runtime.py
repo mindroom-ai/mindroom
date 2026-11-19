@@ -62,6 +62,8 @@ logger = get_logger(__name__)
 
 # How often a runner checks whether its owner runs again.
 _OWNER_POLL_INTERVAL_SECONDS = 1.0
+# How long a one-time task's final status write is retried, which covers a restart of the bot it goes through.
+_STATUS_WRITE_RETRY_SECONDS = 180.0
 # How often a running task re-reads its persisted state for edits and cancellations.
 _TASK_STATE_POLL_INTERVAL_SECONDS = 30
 # A missed one-time task older than this is marked failed instead of run when its room is restored.
@@ -511,28 +513,35 @@ class _TaskRunner:
             )
 
     async def _save_status(self, task: ScheduledTaskRecord, status: str) -> None:
-        """Persist a one-time task's final status; a write that fails while a bot stops is retried once it runs again.
+        """Persist a one-time task's final status; a write that fails is retried for a few minutes.
 
-        The stopping bot is the task's owner, or the room's steward the write would go through.
+        The write fails while the task's owner, or the room's steward it goes through, restarts.
+        Its slot is absent until the replacement finished its first sync, so only time bounds the retry.
         The write holds the task's state lock, so an edit still writing cannot land after it and revive the task.
         """
+        loop = asyncio.get_running_loop()
+        give_up_at = loop.time() + _STATUS_WRITE_RETRY_SECONDS
         while True:
-            async with self.runtime.operation(self.owner) as (bot, client):
+            async with self.runtime.operation(self.owner) as (_bot, client):
                 try:
                     async with scheduled_task_state_lock(client, self.room_id, self.task_id):
                         await _save_task_status(client, task, status, writers=self.runtime)
-                except Exception:
-                    stopping = self.runtime._fenced
-                    if bot not in stopping and not any(other in stopping for other in self.runtime.bots().values()):
+                except Exception as exc:
+                    if loop.time() >= give_up_at:
                         logger.exception(
                             "Failed to persist one-time task final state",
                             task_id=self.task_id,
                             status=status,
                         )
                         return
+                    logger.warning(
+                        "scheduled_task_status_write_failed_retrying",
+                        task_id=self.task_id,
+                        status=status,
+                        error=str(exc),
+                    )
                 else:
                     return
-            logger.warning("scheduled_task_status_write_interrupted_by_owner_stop", task_id=self.task_id, status=status)
             await asyncio.sleep(_OWNER_POLL_INTERVAL_SECONDS)
 
     async def run_cron(self, workflow: ScheduledWorkflow) -> None:
