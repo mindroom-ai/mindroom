@@ -43,6 +43,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_access_checked_requester_id
+from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_system.progress import cap_report, report_tool_progress
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
@@ -292,19 +293,25 @@ async def finish_child_turn(
     runtime_paths: RuntimePaths,
     status: DelegationTerminalStatus | None = None,
     reason: str | None = None,
+    restart: bool = False,
 ) -> str:
     """Settle an interruption without overwriting an already retained terminal outcome.
 
     A child interrupted outside its run, such as one whose job was cancelled while it waited for an approval, is
     published with this outcome; one whose run already published its end has no feed left.
     """
+    # Only a turn a restart's settlement ends here is published as interrupted by it.
+    restart = restart and status is not None and child.status not in TERMINAL_CHILD_STATUSES
     if status is not None and child.status not in TERMINAL_CHILD_STATUSES:
         child.status = status
         child.result = reason
     if child.status not in TERMINAL_CHILD_STATUSES:
         msg = f"Cannot finish active delegation: {child.delegation_id}"
         raise ValueError(msg)
-    _publish(child.delegation_id, lambda feed: feed.status(child.status, result=child.result))
+    _publish(
+        child.delegation_id,
+        lambda feed: feed.status(child.status, result=child.result, interrupted_by_restart=restart),
+    )
     await update_subagent_turn(child, runtime_paths)
     if not child.record_locator:
         return ""
@@ -427,6 +434,9 @@ def _publish_exit(child: DelegationChild, *, cancelled: bool, reason: str) -> No
     """Publish how an attempt ended: its settled pause or outcome, else cancelled or failed with ``reason``."""
     if child.status == "paused" or child.status in TERMINAL_CHILD_STATUSES:
         _publish(child.delegation_id, lambda feed: feed.status(child.status, result=child.result))
+    elif cancelled and job_stopped_by_shutdown():
+        # The restart's settlement (`interrupt_stopped_child`) publishes how it ended, as interrupted by the restart.
+        return
     else:
         _publish(child.delegation_id, lambda feed: feed.status("cancelled" if cancelled else "failed", result=reason))
 

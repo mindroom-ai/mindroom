@@ -550,10 +550,11 @@ async def test_terminal_frame_is_a_snapshot_and_ends_the_stream() -> None:
 
 @pytest.mark.asyncio
 async def test_a_turn_a_restart_cut_short_says_so_on_its_frames() -> None:
-    """A turn a restart ended is marked as such, so a client need not read its result; another failure is not."""
+    """A turn a restart's settlement ended is marked; a failure whose text only says the same is not."""
     room = FrameRoom()
-    room.publish(make_snapshot(status="failed", ended_at=1002.0, result_preview=RESTART_INTERRUPTION_REASON))
-    room.publish(make_snapshot(delegation_id="d2", status="failed", ended_at=1002.0, result_preview="It broke."))
+    ended = {"status": "failed", "ended_at": 1002.0, "result_preview": RESTART_INTERRUPTION_REASON}
+    room.publish(make_snapshot(**ended, interrupted_by_restart=True))
+    room.publish(make_snapshot(**ended, delegation_id="d2"))
     await _until(lambda: len(room.sent) == 2)
 
     assert [frame["meta"].get("interrupted_by_restart") for frame in room.sent] == [True, None]

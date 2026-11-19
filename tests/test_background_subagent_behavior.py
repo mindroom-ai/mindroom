@@ -21,6 +21,7 @@ from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.delegation import execution as delegation_execution
+from mindroom.delegation import lifecycle as delegation_lifecycle
 from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.recovery import read_child_run
@@ -29,6 +30,7 @@ from mindroom.delegation.state import RESTART_INTERRUPTION_REASON
 from mindroom.event_journal import ApprovalDecisionMetadata, BackgroundApprovalDecision, CallKey, tool_job_run_id
 from mindroom.event_journal.replies import ReplyStopped
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT
+from mindroom.live_frames.subagents import _run_meta
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.orchestration import tool_job_runtime as tool_job_coordinator
 from mindroom.prompts import BACKGROUND_JOBS_CONTINUED_NOTICE, SUBAGENT_RESTART_CONTINUATION_PROMPT
@@ -418,6 +420,42 @@ async def test_a_subagent_a_restart_stopped_continues_from_its_own_calls_and_its
             assert f"Subagent ID: {handle['subagent_id']}" in result
         finally:
             await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_the_frames_say_a_restart_cut_a_turn_short_and_not_that_its_continuation_was(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An orderly restart ends the cut-short turn's frames as interrupted by it, not cancelled; its continuation's not."""
+    snapshots: list[Any] = []
+    continued = asyncio.Event()
+
+    def sink(snapshot: Any) -> None:  # noqa: ANN401
+        snapshots.append(snapshot)
+        if snapshot.status == "completed":
+            continued.set()
+
+    monkeypatch.setattr(delegation_lifecycle, "_subagent_sink", lambda *_: sink)
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=delegating_config(child_tools=[PROBE_TOOL]))
+        await conversation.open(calls(tool_call("read_file", "read", path="a")), _hang("shell"), answer("Continued"))
+        try:
+            record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            handle = json.loads(str(answer_of(record, "first").content))
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            await conversation.restart()
+            await wait_for_status(conversation.runtime, handle["job_id"], "completed")
+        finally:
+            await conversation.close()
+
+    def ends() -> list[tuple[str, object]]:
+        frames = [_run_meta(snapshot, full=True) for snapshot in snapshots]
+        return [(frame["status"], frame.get("interrupted_by_restart")) for frame in frames if "result" in frame]
+
+    await asyncio.wait_for(continued.wait(), JOB_TEST_TIMEOUT)
+    assert len({snapshot.delegation_id for snapshot in snapshots}) == 2
+    assert ends() == [("failed", True), ("completed", None)]
 
 
 @pytest.mark.asyncio

@@ -147,6 +147,7 @@ async def _recover_subagent_turn(child: DelegationChild, *, config: Config, runt
         runtime_paths=runtime_paths,
         reason=RESTART_INTERRUPTION_REASON,
         status="failed",
+        restart=True,
     )
 
 
@@ -169,6 +170,7 @@ async def interrupt_stopped_child(
         runtime_paths=runtime_paths,
         reason=RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
         status="failed" if shutdown else "cancelled",
+        restart=shutdown,
     )
     if not shutdown and interrupted_by_restart(child):
         child.status, child.result = "cancelled", cancel_reason
@@ -181,8 +183,9 @@ async def interrupt_child(
     runtime_paths: RuntimePaths,
     reason: str,
     status: Literal["cancelled", "failed"] = "cancelled",
+    restart: bool = False,
 ) -> None:
-    """Settle retained descendants and preserve any already completed child outcome."""
+    """Settle retained descendants and preserve any already completed child outcome; restart when a restart stopped it."""
     retained = await load_retained_subagent_turn(child, runtime_paths)
     if retained is not None:
         child.run_id = retained.run_id
@@ -225,7 +228,14 @@ async def interrupt_child(
         # The save runs in the parent's context; the child's run keeps its own stored cost, not the parent's.
         with receiving_subagent_cost(SubagentCost()):
             await run_session_storage_operation(partial(_child_storage, child, config, runtime_paths), persist)
-    await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
+    await finish_child_turn(
+        child,
+        config=config,
+        runtime_paths=runtime_paths,
+        status=status,
+        reason=reason,
+        restart=restart,
+    )
 
 
 async def _cancel_delegations(

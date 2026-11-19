@@ -88,6 +88,8 @@ class SubagentSnapshot:
     # that ended, zero until the first did, the ``tool_calls`` it started, rows the caps removed included, and those tokens' ``cost_usd``,
     # left out when no model they used is priced. A feed's snapshot always has it.
     usage: Mapping[str, int | float] | None = None
+    # Set on the failed end a restart's settlement gave the turn, which its job may continue with a later turn.
+    interrupted_by_restart: bool = False
 
 
 type SubagentSink = Callable[[SubagentSnapshot], None]
@@ -161,6 +163,7 @@ class _SubagentActivity:
     status: _SubagentStatus = "running"
     ended_at: float | None = None
     result: str | None = None
+    interrupted_by_restart: bool = False
     items_dropped: int = 0
     # What the run has used so far, as its snapshots report it (``SubagentSnapshot.usage``).
     tool_calls: int = 0
@@ -255,9 +258,16 @@ class _SubagentActivity:
             del self._items[tools[0]]
             self.items_dropped += 1
 
-    def set_status(self, status: _SubagentStatus, now: float, *, result: str | None = None) -> None:
+    def set_status(
+        self,
+        status: _SubagentStatus,
+        now: float,
+        *,
+        result: str | None = None,
+        interrupted_by_restart: bool = False,
+    ) -> None:
         """Move to a status; terminal ones set `ended_at`, `running` clears it."""
-        self.status = status
+        self.status, self.interrupted_by_restart = status, interrupted_by_restart
         self.ended_at = now if status in TERMINAL_CHILD_STATUSES else None
         if result is not None:
             self.result = result
@@ -292,6 +302,7 @@ class _SubagentActivity:
             items=tuple(items),
             items_dropped=self.items_dropped + dropped,
             result_preview=None if self.result is None else _clip(self.result, _MAX_RESULT_CHARACTERS),
+            interrupted_by_restart=self.interrupted_by_restart,
             usage={
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
@@ -384,9 +395,15 @@ class ActivityFeed:
         activity.cost_usd = cost_usd
         self._mark()
 
-    def status(self, status: _SubagentStatus, *, result: str | None = None) -> None:
+    def status(
+        self,
+        status: _SubagentStatus,
+        *,
+        result: str | None = None,
+        interrupted_by_restart: bool = False,
+    ) -> None:
         """Move to a status and publish it at once; a terminal status also forgets the feed."""
-        self._activity.set_status(status, time.time(), result=result)
+        self._activity.set_status(status, time.time(), result=result, interrupted_by_restart=interrupted_by_restart)
         self._mark(urgent=True)
         if status in TERMINAL_CHILD_STATUSES:
             _OPEN.pop(self._activity.delegation_id, None)
