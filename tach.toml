@@ -4204,6 +4204,7 @@ visibility = [
     "mindroom.stop",
     "mindroom.contacts.flow",
     "mindroom.custom_tools.matrix_user_writes",
+    "mindroom.orchestration.tool_job_runtime",
 ]
 
 [[modules]]
@@ -9214,6 +9215,8 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.delegation.continuation",
     "mindroom.tool_system.runtime_context",
+    "mindroom.matrix.client_delivery",
+    "mindroom.constants",
 ]
 visibility = [
     "mindroom.orchestrator",

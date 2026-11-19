@@ -116,3 +116,17 @@ def follow_up_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
     return tuple(
         job for job in jobs if job.status != "cancelled" and _follow_up_streak(job.source_event_id) < _FOLLOW_UP_LIMIT
     )
+
+
+def held_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
+    """Return the ended jobs the limit holds for a human message, which `follow_up_jobs` leaves out."""
+    return tuple(
+        job for job in jobs if job.status != "cancelled" and _follow_up_streak(job.source_event_id) >= _FOLLOW_UP_LIMIT
+    )
+
+
+def held_notice(key: ConversationKey, jobs: Sequence[BackgroundJob]) -> tuple[str, str]:
+    """Return the transaction ID and text of the notice that the limit holds ``jobs``; follow-ups start at streak 1."""
+    noun = "job" if len(jobs) == 1 else "jobs"
+    text = f"⏸️ {len(jobs)} background {noun} finished while I was paused after {_FOLLOW_UP_LIMIT} automatic follow-ups."
+    return _follow_up_event_id(key, jobs, 0), f"{text} Reply here to let me continue."

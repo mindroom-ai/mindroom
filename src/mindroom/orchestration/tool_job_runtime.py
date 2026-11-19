@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
+from mindroom.constants import CONVERSATION_CONTENT_KEY
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.continuation import continued_subagent_job
@@ -20,11 +21,13 @@ from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import turn_rows
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_delivery import send_message_result
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals
 from mindroom.tool_jobs.authorization import locally_allowed
 from mindroom.tool_jobs.conversation import ConversationKey
-from mindroom.tool_jobs.follow_ups import follow_up_jobs, next_follow_up_id
+from mindroom.tool_jobs.follow_ups import follow_up_jobs, held_jobs, held_notice, next_follow_up_id
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.publication import JobStatePublisher
@@ -43,6 +46,8 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
+
+    import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -79,7 +84,7 @@ def _is_subagent_job(job: BackgroundJob) -> bool:
 
 
 def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey, tuple[BackgroundJob, ...]]:
-    """Group the ended top-level jobs a follow-up may report by conversation, before checking anyone's access.
+    """Group the ended top-level jobs a follow-up or held-jobs notice may report by conversation, before access checks.
 
     A silent schedule's work waits for its next silent run, which opens with the note instead.
     """
@@ -101,8 +106,20 @@ def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey
                 silent=False,
             )
             groups.setdefault(key, []).append(job)
-    candidates = {key: follow_up_jobs(group) for key, group in groups.items()}
-    return {key: candidates[key] for key in sorted(candidates, key=_key_order) if candidates[key]}
+    return {key: tuple(groups[key]) for key in sorted(groups, key=_key_order)}
+
+
+async def _post_held_notice(client: nio.AsyncClient, key: ConversationKey, txn: str, text: str) -> bool:
+    """Post the agent's notice that the limit holds jobs; a failed send is retried on a later pass, as the same transaction."""
+    # An m.notice starts no turn; as a conversation a room-level one is listed, and a room-mode reply keeps its key.
+    content = build_message_content(
+        text,
+        thread_event_id=key.thread_id,
+        latest_thread_event_id=key.thread_id,
+        extra_content={"msgtype": "m.notice", CONVERSATION_CONTENT_KEY: True},
+    )
+    delivered = await send_message_result(client, key.room_id, content, operation="send_job_hold", transaction_id=txn)
+    return delivered is not None
 
 
 def _key_order(key: ConversationKey) -> tuple[str, str, str, str]:
@@ -139,6 +156,8 @@ class ToolJobRuntimeCoordinator:
     _publisher: JobStatePublisher = field(default_factory=JobStatePublisher, init=False)
     # Follow-ups this process admitted for jobs still waiting to be reported, which later passes leave alone.
     _admitted_follow_ups: set[str] = field(default_factory=set, init=False)
+    # Held-jobs notices this process posted, by the jobs each names; kept until one of those jobs is reported or gone.
+    _sent_notices: dict[str, frozenset[str]] = field(default_factory=dict, init=False)
 
     async def initialize(self) -> None:
         """Pin execution mode, then build the job runtime when the instance runs jobs, before dispatch can start."""
@@ -459,24 +478,35 @@ class ToolJobRuntimeCoordinator:
         """Admit one follow-up per conversation whose ended jobs no reply collected, at most the limit in a row.
 
         A job a follow-up turn started counts that follow-up, so work that keeps starting work stops at the limit;
-        a job a human message started counts none.
+        a job a human message started counts none. Jobs only the limit holds get one notice instead.
         """
         due: set[str] = set()
-        for key, candidates in _follow_up_candidates(runtime.retained_jobs()).items():
-            # Jobs an admitted follow-up already reports need no access check again.
-            follow_up_id = next_follow_up_id(key, candidates)
-            if follow_up_id not in self._admitted_follow_ups:
-                jobs = follow_up_jobs(await runtime.ended_jobs(key))
-                bot = self.bot_provider(key.recipient)
-                if not jobs or bot is None:
-                    continue
+        for key, group in _follow_up_candidates(runtime.retained_jobs()).items():
+            # Jobs an admitted follow-up or a sent notice already reports need no access check again.
+            candidates, held = follow_up_jobs(group), held_jobs(group)
+            known = {next_follow_up_id(key, candidates)} if candidates else set()
+            known |= {held_notice(key, held)[0]} if held else set()
+            if not known or known <= self._admitted_follow_ups | self._sent_notices.keys():
+                due |= known
+                continue
+            # The jobs the requester may still access decide between a follow-up and a notice of jobs the limit holds.
+            ended = await runtime.ended_jobs(key)
+            if (bot := self.bot_provider(key.recipient)) is None:
+                continue
+            if jobs := follow_up_jobs(ended):
                 follow_up_id = next_follow_up_id(key, jobs)
                 if follow_up_id not in self._admitted_follow_ups:
                     await bot.admit_job_follow_up(key, follow_up_id)
                     self._admitted_follow_ups.add(follow_up_id)
-            due.add(follow_up_id)
+                due.add(follow_up_id)
+            elif (held := held_jobs(ended)) and bot.client is not None:
+                notice_id, text = held_notice(key, held)
+                if notice_id in self._sent_notices or await _post_held_notice(bot.client, key, notice_id, text):
+                    self._sent_notices[notice_id] = frozenset(job.job_id for job in held)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
+        waiting = {job.job_id for group in _follow_up_candidates(runtime.retained_jobs()).values() for job in group}
+        self._sent_notices = {notice: ids for notice, ids in self._sent_notices.items() if ids <= waiting}
 
     async def _expire_ended_jobs(self) -> None:
         """Keep ended jobs for the retention period and as long as response or approval work owns them."""
