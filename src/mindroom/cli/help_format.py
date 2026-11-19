@@ -8,7 +8,8 @@ from rich.markup import escape
 from typer.core import TyperCommand, TyperGroup
 
 if TYPE_CHECKING:
-    import click
+    # Typer 0.26 vendors Click as `typer._click`; its commands and contexts are not `click`'s.
+    from typer import _click as click
 
 # Command panels in the order help pages show them; commands without a panel come first.
 _HELP_PANELS = (

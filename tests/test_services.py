@@ -971,15 +971,16 @@ def test_confirm_action_reads_the_answer(typed: str, expected: bool) -> None:
     """Enter accepts, as the question's `[Y/n]` says, and `n` declines."""
     with CliRunner().isolation(input=typed) as (_, _, output):
         assert _confirm_action("Install?") is expected
-    assert b"Install? [Y/n]" in output.getvalue()
+        assert b"Install? [Y/n]" in output.getvalue()
 
 
 def test_confirm_action_cancels_quietly_at_end_of_input() -> None:
     """Closed input or Ctrl+C cancels the command without an error exit."""
-    with CliRunner().isolation(input="") as (_, _, output), pytest.raises(typer.Exit) as exit_info:
-        _confirm_action("Install?")
+    with CliRunner().isolation(input="") as (_, _, output):
+        with pytest.raises(typer.Exit) as exit_info:
+            _confirm_action("Install?")
+        assert b"Cancelled." in output.getvalue()
     assert exit_info.value.exit_code == 0
-    assert b"Cancelled." in output.getvalue()
 
 
 @pytest.mark.parametrize(

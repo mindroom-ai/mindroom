@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 import typer
-from click.testing import CliRunner
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
+from typer.testing import CliRunner
 
 from mindroom.cli import interactive
 

@@ -115,31 +115,31 @@
             {
               "inlineData": {
                 "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk-M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-                "mimeType": "image/png"
+                "mime_type": "image/png"
               }
             },
             {
               "inlineData": {
                 "data": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=",
-                "mimeType": "image/svg+xml"
+                "mime_type": "image/svg+xml"
               }
             },
             {
               "inlineData": {
                 "data": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA-AAACABAAZGF0YQAAAAA=",
-                "mimeType": "audio/wav"
+                "mime_type": "audio/wav"
               }
             },
             {
               "inlineData": {
                 "data": "AAAAGGZ0eXBtcDQy",
-                "mimeType": "video/mp4"
+                "mime_type": "video/mp4"
               }
             },
             {
               "inlineData": {
                 "data": "JVBERi0xLjQKJSVFT0YK",
-                "mimeType": "application/pdf"
+                "mime_type": "application/pdf"
               }
             },
             {
@@ -148,19 +148,19 @@
             {
               "inlineData": {
                 "data": "UGFjayBsaWdodC4K",
-                "mimeType": "text/plain"
+                "mime_type": "text/plain"
               }
             },
             {
               "inlineData": {
                 "data": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=",
-                "mimeType": "image/svg+xml"
+                "mime_type": "image/svg+xml"
               }
             },
             {
               "fileData": {
-                "fileUri": "https://example.com/parity/guide.pdf",
-                "mimeType": "application/pdf"
+                "file_uri": "https://example.com/parity/guide.pdf",
+                "mime_type": "application/pdf"
               }
             }
           ],
