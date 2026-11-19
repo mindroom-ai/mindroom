@@ -182,7 +182,8 @@ def _room(
     **env: str,
 ) -> _Room:
     """A room with ``agents``, all of them joined unless ``joined`` names some, under a runtime ``env`` changes."""
-    return _Room(Config(agents=agents), _paths(tmp_path, **env), joined or tuple(agents))
+    config = Config(agents=agents, server_emoji={"enabled": True})
+    return _Room(config, _paths(tmp_path, **env), joined or tuple(agents))
 
 
 async def _status(read: Awaitable[object]) -> tuple[int, object]:

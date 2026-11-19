@@ -414,6 +414,7 @@ def _orchestrator_config(tmp_path: Path, *, role: str = "Write code") -> Config:
         {
             "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {"demo": {"transport": "stdio", "command": "npx"}},
+            "server_emoji": {"enabled": True},
             "agents": {"code": {"display_name": "Code", "role": role, "tools": ["mcp_demo"]}},
         },
         _runtime_paths(tmp_path),

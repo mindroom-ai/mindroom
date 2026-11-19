@@ -451,7 +451,8 @@ async def test_handle_mcp_catalog_change_replaces_only_dependent_entities(tmp_pa
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=config)
     orchestrator.running = True
     install_bots(
-        orchestrator, {name: MagicMock(spec=AgentBot, running=False) for name in ("code", "dev_team", "plain")}
+        orchestrator,
+        {name: MagicMock(spec=AgentBot, running=False) for name in ("code", "dev_team", "plain")},
     )
 
     with patch.object(

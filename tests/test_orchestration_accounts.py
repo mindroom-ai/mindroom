@@ -531,6 +531,22 @@ async def test_owner_account_is_prepared_apart_from_the_agents(tmp_path: Path, r
 
 
 @pytest.mark.asyncio
+async def test_owner_localpart_taken_by_the_internal_user_fails_only_the_owner_account(tmp_path: Path) -> None:
+    """A localpart collision of the owner's account is found at its own preparation, before any account is created."""
+    paths = test_runtime_paths(tmp_path)
+    config = _roomless_config(paths, ["lobby"])
+    _persist_account(paths, "user", "mindroom_router")
+    create = AsyncMock(side_effect=_recording_user(paths, {}))
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=create):
+        users = await _prepare(config, configured_entity_names(config), paths)
+        with pytest.raises(PermanentStartupError, match="localpart collision"):
+            await prepare_owner_account(config, paths, users[ROUTER_AGENT_NAME])
+
+    assert _created(create) == ["general"]
+
+
+@pytest.mark.asyncio
 async def test_existing_owner_account_kept_when_not_needed(tmp_path: Path) -> None:
     """A config that stops needing the owner account keeps its persisted account and identity, and asks for no new one."""
     paths = test_runtime_paths(tmp_path)

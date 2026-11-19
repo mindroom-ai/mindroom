@@ -1502,7 +1502,7 @@ class TestAgentUserCreation:
     @pytest.mark.parametrize(
         ("colliding_entity_name", "agents", "teams"),
         [
-            ("router", {}, {}),
+            # The optional owner's localpart is checked at its own start, where a collision fails only the owner.
             ("general", {"general": {"display_name": "GeneralAgent"}}, {}),
             (
                 "helpers",
