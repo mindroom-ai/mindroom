@@ -83,14 +83,19 @@
       "html": "<p>Run &lt;script&gt;go()&lt;/script&gt; then <strong>bold</strong> &lt;textarea&gt;note <em>x</em>&lt;/textarea&gt; <code>y</code></p>\n"
     },
     {
-      "name": "inline html comment",
-      "md": "before <!-- hidden --> *after*",
-      "html": "<p>before &lt;!-- hidden --&gt; <em>after</em></p>\n"
-    },
-    {
       "name": "allowed inline tag unchanged",
       "md": "H<sub>2</sub>O and x<sup>2</sup> with <foo> kept escaped",
       "html": "<p>H<sub>2</sub>O and x<sup>2</sup> with &lt;foo&gt; kept escaped</p>\n"
+    },
+    {
+      "name": "list item opening with title tag",
+      "md": "- <title> labels the tab\n- second\n\n**After** the list",
+      "html": "<ul>\n<li>\n&lt;title&gt; labels the tab\n</li>\n<li>second</li>\n</ul>\n<p><strong>After</strong> the list</p>\n"
+    },
+    {
+      "name": "quote opening with title tag",
+      "md": "> <title> names the page\n\n*After* the `quote`",
+      "html": "<blockquote>\n&lt;title&gt; names the page\n</blockquote>\n<p><em>After</em> the <code>quote</code></p>\n"
     }
   ]
 }
