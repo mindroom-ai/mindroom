@@ -1191,6 +1191,29 @@ class TestConsolidatedConfigManager:
         assert "test_agent" in config.agents
         assert config.agents["test_agent"].display_name == "Test Agent"
 
+    def test_manage_agent_takes_filesystem_by_its_other_names(self, tmp_path: Path) -> None:
+        """File and coding create, update, and describe the filesystem toolkit, keeping the entry's own settings."""
+        config_path = tmp_path / "config.yaml"
+        agent = AgentConfig(display_name="Reader", tools=[{"filesystem": {"exclude_tools": ["write_file"]}}])
+        models = {"default": {"provider": "openai", "id": "test-model"}}
+        write_config_yaml(Config(agents={"reader": agent}, models=models), config_path)
+        cm = _config_manager(config_path)
+
+        created = cm.manage_agent(
+            operation="create", agent_name="coder", display_name="Coder", tools=["coding", "file"]
+        )
+        updated = cm.manage_agent(operation="update", agent_name="reader", tools=["file", "calculator"])
+
+        assert "Successfully created" in created, created
+        assert "Successfully updated" in updated, updated
+        config = load_config_yaml(config_path)
+        assert config.agents["coder"].tool_names == ["filesystem"]
+        assert config.agents["reader"].model_dump(exclude_none=True)["tools"] == [
+            {"filesystem": {"exclude_tools": ["write_file"]}},
+            "calculator",
+        ]
+        assert "Tool: filesystem" in cm.get_info(info_type="tool_details", name="coding")
+
     def test_configuration_mutations_load_one_authoritative_snapshot(self, tmp_path: Path) -> None:
         """Authorization and mutation must use the same single loaded configuration."""
         config_path = tmp_path / "config.yaml"

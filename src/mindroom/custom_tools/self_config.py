@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
+from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.custom_tools.config_manager import (
     commit_authored_config,
     platform_administrator_error,
@@ -145,6 +146,7 @@ class SelfConfigTools(Toolkit):
 
         # Validate tools against known tool metadata
         if tools is not None:
+            tools = canonical_tool_names(tools)
             tool_metadata = config_plugins(config, self.runtime_paths).tools
             invalid_tools = [t for t in tools if t not in tool_metadata]
             if invalid_tools:
