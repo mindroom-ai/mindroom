@@ -236,11 +236,6 @@ extension DesktopStatus {
         }
     }
 
-    /// Anything the bridge still has to finish; the helper refuses an emergency-stop reset meanwhile.
-    var hasBridgeWorkInFlight: Bool {
-        bridge.activeAction != nil || shell.pending != nil || shell.activeRequestID != nil
-    }
-
     var shellApprovalState: DesktopShellApprovalState {
         guard isBridgeOnline, shell.enabled else { return .off }
         if let pending = shell.pending { return .pending(pending) }

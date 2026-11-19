@@ -368,9 +368,6 @@ struct DesktopControlView: View {
             }
             if let action = store.status.bridge.activeAction { LabeledContent("Active action", value: action) }
             if store.status.needsGUIPermissions { appControlOptions }
-            if store.status.authority.emergencyStopLatched {
-                Button("Reset Emergency Stop") { store.resetEmergencyStop() }.disabled(store.status.hasBridgeWorkInFlight)
-            }
             browserOptions
             DisclosureGroup("Diagnostics") {
                 LabeledContent("Helper version", value: store.status.helper.version)
@@ -389,7 +386,7 @@ struct DesktopControlView: View {
                     Button("Revoke Now", role: .destructive) { store.revokeControl() }
                         .disabled(!store.status.authority.controlAvailable)
                 }
-                Text("Control applies only to the saved apps and expires automatically. Revoke it at any time, or move the pointer to the upper-left corner to stop input.")
+                Text("Control applies only to the saved apps and expires automatically. Revoke it at any time.")
                     .font(.callout).foregroundStyle(.secondary)
             }.padding(.top, 8)
         }

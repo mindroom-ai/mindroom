@@ -477,7 +477,6 @@ final class DesktopControlStore: ObservableObject {
         perform("grant_control", parameters: ["duration_seconds": controlMinutes * 60])
     }
     func revokeControl() { perform("revoke_control", urgent: true) }
-    func resetEmergencyStop() { perform("reset_emergency_stop", urgent: true) }
     func requestPermission(_ permission: String) {
         perform("request_permission", parameters: ["permission": permission])
     }
@@ -506,7 +505,6 @@ final class DesktopControlStore: ObservableObject {
             "browser_runtime": status.browser.runtime,
             "browser_extension": status.browser.extensionState,
             "control_available": status.authority.controlAvailable,
-            "emergency_stop_latched": status.authority.emergencyStopLatched,
             "last_error_code": (errorCode ?? status.bridge.lastError?.code).map { $0 as Any } ?? NSNull(),
         ]
         let data = try? JSONSerialization.data(withJSONObject: diagnostics, options: [.prettyPrinted, .sortedKeys])

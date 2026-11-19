@@ -210,7 +210,7 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertEqual(value.startActionTitle, "Start Access")
     }
 
-    func testPendingShellCommandShowsApprovalStateAndBlocksEmergencyReset() {
+    func testPendingShellCommandShowsApprovalState() {
         let request = shellRequest()
         let pending = status(
             bridge: "observe_only", helper: "running", config: "ready", apps: ["com.apple.TextEdit"],
@@ -219,7 +219,6 @@ final class DesktopControlPresentationTests: XCTestCase {
 
         XCTAssertEqual(pending.shellApprovalState, .pending(request))
         XCTAssertEqual(pending.shellApprovalState.label, "Shell command waiting for approval")
-        XCTAssertTrue(pending.hasBridgeWorkInFlight)
         // Shell commands can change the account, so the connection is never labelled observe-only.
         XCTAssertEqual(pending.accessModeLabel(controlRemainingSeconds: 0), "Apps observe only")
         let shellOnly = status(
@@ -228,7 +227,6 @@ final class DesktopControlPresentationTests: XCTestCase {
         )
         XCTAssertEqual(shellOnly.accessModeLabel(controlRemainingSeconds: 0), "Access on")
         XCTAssertEqual(shellOnly.shellApprovalState, .askEachTime)
-        XCTAssertFalse(shellOnly.hasBridgeWorkInFlight)
         let appsOnly = status(bridge: "control", helper: "running", config: "ready", apps: ["com.apple.TextEdit"])
         XCTAssertEqual(appsOnly.accessModeLabel(controlRemainingSeconds: 125), "Control · 2m 5s")
         XCTAssertEqual(appsOnly.shellApprovalState, .off)
@@ -237,7 +235,6 @@ final class DesktopControlPresentationTests: XCTestCase {
             bridge: "observe_only", helper: "running", config: "ready", shellEnabled: true,
             shell: DesktopShellStatus(enabled: true, autoApproveRemainingSeconds: 251, activeRequestID: "shell-2")
         )
-        XCTAssertTrue(running.hasBridgeWorkInFlight)
         XCTAssertEqual(running.shellApprovalState, .autoApprove(seconds: 251))
         XCTAssertEqual(running.shellApprovalState.label, "Shell auto-approval · 4m 11s left")
         XCTAssertTrue(running.shell.hasRevocableWork)
