@@ -671,19 +671,25 @@ async def test_a_paused_reply_whose_requester_lost_access_ends_its_turn_failed(t
 async def test_a_paused_turn_ends_through_its_entity_s_bot_or_a_running_bot_s_once_the_entity_is_gone(
     tmp_path: Path,
 ) -> None:
-    """A removed agent has no bot, so a running bot ends its paused turns, with no owner account."""
+    """An entity's own bot ends its paused turn; a removed agent has none, so another running bot ends its turn.
+
+    No owner account runs here.
+    """
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
-    stopped, general = MagicMock(running=False), MagicMock(running=True)
-    orchestrator.fleet.add("code", stopped)
-    orchestrator.fleet.add("general", general)
+    # The fleet's first running bot is the fallback, which is neither the stopped bot before it nor the turn's own.
+    bots = {"code": MagicMock(running=False), "fallback": MagicMock(running=True), "general": MagicMock(running=True)}
+    for name, bot in bots.items():
+        orchestrator.fleet.add(name, bot)
 
     for entity_name in ("general", "removed"):
         orchestrator._end_paused_turn(EndedApproval(approval_continuation(entity_name=entity_name), None))
 
-    stopped.end_paused_turn.assert_not_called()
-    ended = [call.args[0].continuation.entity_name for call in general.end_paused_turn.call_args_list]
-    assert ended == ["general", "removed"]
+    ended = {
+        name: [call.args[0].continuation.entity_name for call in bot.end_paused_turn.call_args_list]
+        for name, bot in bots.items()
+    }
+    assert ended == {"code": [], "fallback": ["removed"], "general": ["general"]}
 
 
 async def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events() -> None:
