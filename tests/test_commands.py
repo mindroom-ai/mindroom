@@ -12,6 +12,7 @@ import nio
 import pytest
 
 from mindroom.authorization import (
+    ReplyMembershipPendingError,
     ensure_room_membership_synced,
     responder_candidate_entities_from_cached_room,
 )
@@ -986,6 +987,24 @@ async def test_saved_command_owner_is_followed_on_replay(config: Config) -> None
 
     assert await _command_owners(config, "!help", rooms, journal_store=claims) == ["research"]
     assert await _command_owners(config, "!help", rooms, journal_store=claims) == ["research"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_named_model_device_claims_its_selection_while_another_responder_is_pending(config: Config) -> None:
+    """The device a model selection names runs it without waiting for the membership of an agent it does not concern."""
+    config.agents["general"].access = ResponderAccessConfig(users=[_SENDER])
+    config.agents["research"].access = ResponderAccessConfig(current_room_members=True, members_of_rooms=[])
+    policy = _policy_for(config, "general")
+    policy.deps.runtime.orchestrator.journal_store = _claims()
+    room = _shared_room(config, "general", "research")["general"]
+    command = command_parser.parse("!model reset")
+    assert command is not None
+    dispatch = _dispatch(_context(), agent_name="general")
+
+    with pytest.raises(ReplyMembershipPendingError):
+        await policy.owns_command(room, dispatch, command, source_event_id="$unnamed:localhost")
+    assert await policy.owns_command(room, dispatch, command, source_event_id=_EVENT_ID, names_me=True)
 
 
 def _router_access_denies_everyone(tmp_path: Path, **general: Any) -> Config:  # noqa: ANN401

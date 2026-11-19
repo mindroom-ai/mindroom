@@ -575,9 +575,10 @@ class TurnPolicy:
         config = self.deps.runtime.config
         me = self.deps.matrix_id
         joined = cached_joined_member_ids(room)
+        # The device a model selection names was admitted at its own ingress, so no other candidate is awaited.
         candidates = [
             candidate
-            for candidate in await self.responder_candidates_for_room(room, requester_user_id)
+            for candidate in ([] if names_me else await self.responder_candidates_for_room(room, requester_user_id))
             if candidate.full_id in joined
         ]
         desktop_agent = desktop_room_agent(config, self.deps.runtime_paths, room, requester_user_id)
