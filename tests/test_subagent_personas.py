@@ -314,7 +314,8 @@ def test_minimal_persona_with_tools_must_keep_shell(tmp_path: Path) -> None:
         "shell.run_shell_command; use standard mode for a subagent without shell."
     )
     assert isinstance(
-        _resolve(tmp_path, system_prompt="P", tools=["filesystem", "shell"], minimal=True), PersonaRequest
+        _resolve(tmp_path, system_prompt="P", tools=["filesystem", "shell"], minimal=True),
+        PersonaRequest,
     )
     assert isinstance(
         _resolve(tmp_path, system_prompt="P", tools=["filesystem", "shell.run_shell_command"], minimal=True),

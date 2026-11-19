@@ -234,7 +234,11 @@ def test_persona_with_tools_hides_generated_functions_from_the_agent() -> None:
     """An explicit tool list hides functions with no owning toolkit, which the configured agent offers."""
     generated = ToolFunction(name="generated", description=None, parameters={}, entrypoint=lambda: None)
     owned = ToolFunction(
-        name="read_file", toolkit="filesystem", description=None, parameters={}, entrypoint=lambda: None
+        name="read_file",
+        toolkit="filesystem",
+        description=None,
+        parameters={},
+        entrypoint=lambda: None,
     )
 
     configured_filter, _ = persona_tool_policy(None, lambda: ["filesystem"], None)

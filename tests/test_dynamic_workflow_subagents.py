@@ -382,7 +382,7 @@ async def test_a_judged_function_a_toolkit_shows_only_once_built_is_judged_by_th
         lambda toolkit, registry: None if toolkit == "filesystem" else declared(toolkit, registry),
     )
     config = _config(
-        tools=[{"dynamic_workflow": {"allowed_tools": ["calculator", "filesystem"]}}, "calculator", "filesystem"]
+        tools=[{"dynamic_workflow": {"allowed_tools": ["calculator", "filesystem"]}}, "calculator", "filesystem"],
     )
     workflow = _Workflow(tmp_path, monkeypatch, config)
 
@@ -644,7 +644,7 @@ async def test_declared_toolkits_are_never_built_just_for_approvals(
     workflow = _Workflow(tmp_path, monkeypatch, config)
 
     run = await workflow.run(
-        _spec([{"id": "reader", "system_prompt": "Read files.", "tools": ["filesystem"]}], steps=2)
+        _spec([{"id": "reader", "system_prompt": "Read files.", "tools": ["filesystem"]}], steps=2),
     )
 
     assert run["status"] == "completed", run

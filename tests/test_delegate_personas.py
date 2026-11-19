@@ -504,7 +504,10 @@ async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=identity),
         persona=SubagentPersona(
-            source_kind="inline", source_name="", system_prompt="P", tools=("delegate", "filesystem")
+            source_kind="inline",
+            source_name="",
+            system_prompt="P",
+            tools=("delegate", "filesystem"),
         ),
     )
 
@@ -803,7 +806,7 @@ async def test_authored_knowledge_narrows_the_childs_knowledge_bases(
         harness.toolkit.run_subagent(task="Read.", system_prompt="P", knowledge=["notes"]),
     )
     await harness.run(
-        harness.toolkit.run_subagent(task="Read.", system_prompt="P", tools=["filesystem"], knowledge=["faq"])
+        harness.toolkit.run_subagent(task="Read.", system_prompt="P", tools=["filesystem"], knowledge=["faq"]),
     )
 
     assert refused == "Cannot delegate: unknown knowledge base 'wiki'. Your knowledge bases: docs, faq."
