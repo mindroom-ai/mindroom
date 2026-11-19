@@ -18,6 +18,7 @@ from mindroom.coalescing.batch import (
 )
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.coalescing.ingress_ticket import IngressTicket
+from mindroom.commands.parsing import CommandType
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
@@ -536,8 +537,9 @@ class TurnIngress:
             self.deps.runtime_paths,
             room=room,
         )
-        content, client = event.source.get("content", {}), self._client()
         # A model selection names one device: no other bot answers for it, and that bot shares the command's claim.
+        content = event.source.get("content", {}) if command.type is CommandType.MODEL else {}
+        client = self._client()
         addressed_elsewhere = model_selection_targets_other_runtime(content, client.user_id, client.device_id)
         if not addressed_elsewhere and await self.deps.turn_policy.aims_command_at_me(
             room,

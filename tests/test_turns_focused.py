@@ -2199,6 +2199,32 @@ async def test_command_target_not_ready_notice_comes_from_the_commands_owner(
     assert len(harness.gateway.sent) == (agent_name == "general")
 
 
+@pytest.mark.asyncio
+async def test_selection_metadata_on_another_command_does_not_silence_its_not_ready_notice(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model selection names a device only for `!model`: any other command keeps its owner and its notice."""
+    harness = _build_harness(config, tmp_path)
+    event = _text_event("!help", event_id="$unplaced:localhost")
+    event.source["content"]["io.mindroom.model_selection"] = {
+        "version": 1,
+        "runtime_user_id": _entity_user_id(config, "research"),
+        "runtime_device_id": "RESEARCH",
+        "operation": "reset",
+    }
+
+    async def unresolved(*_args: object) -> str | None:
+        raise ThreadMembershipLookupError
+
+    monkeypatch.setattr(harness.ingress.deps.resolver, "coalescing_thread_id", unresolved)
+
+    await harness.ingress.handle_text_event(_room_with_members(config, "general", "research"), event)
+
+    assert len(harness.gateway.sent) == 1
+
+
 @pytest.mark.parametrize(
     ("body", "mentioned", "is_command"),
     [
