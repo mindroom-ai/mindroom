@@ -271,7 +271,10 @@ def _agent(*tools: str, **extra: object) -> dict[str, object]:
 
 
 # A sandbox runner, so shell and python calls run in a worker unless an agent's `worker_tools` keeps them local.
-_RUNNER_WITHOUT_BROKER = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test", "MINDROOM_EGRESS_BROKER_PORT": "off"}
+_RUNNER_WITHOUT_BROKER = {
+    "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+    "MINDROOM_EGRESS_BROKER_PORT": "off",
+}
 _RUNNER = {**_RUNNER_WITHOUT_BROKER, "MINDROOM_EGRESS_BROKER_PORT": "8768"}
 # The broker without a worker backend, so every tool runs in the primary.
 _BROKER = {"MINDROOM_EGRESS_BROKER_PORT": "8768"}
@@ -419,6 +422,9 @@ def test_an_egress_tool_whose_only_command_tool_is_a_primary_python_is_reported(
     [
         pytest.param(_RUNNER, "unscoped", id="broker-on"),
         pytest.param(_RUNNER_WITHOUT_BROKER, None, id="broker-off"),
+        # The default broker has no worker-facing URL, so a worker-routed shell gets nothing from it.
+        pytest.param({"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}, None, id="default-broker-worker"),
+        pytest.param({}, "unscoped", id="default-broker-primary"),
     ],
 )
 def test_an_agent_does_not_use_a_broker_that_is_off(
