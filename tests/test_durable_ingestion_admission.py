@@ -550,7 +550,7 @@ async def test_empty_completion_retries_until_after_sync_succeeds(tmp_path: Path
     session = Session(batch)
     attempts = []
 
-    async def complete() -> None:
+    async def complete(_receipt_new: bool) -> None:
         attempts.append(1)
         if len(attempts) == 1:
             message = "completion"

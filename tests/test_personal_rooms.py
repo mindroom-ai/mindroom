@@ -1376,6 +1376,7 @@ async def test_invalid_retained_room_does_not_block_router_sync_or_other_user(
     monkeypatch.setattr(router._router, "refresh_memberships_if_needed", AsyncMock())
     monkeypatch.setattr(router, "_schedule_delivery_recovery", lambda: None)
 
+    router._first_sync_done = True
     await router._run_sync_response_side_effects(first_sync_response=False)
 
     ready.assert_awaited_once_with(router)

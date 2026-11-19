@@ -1028,12 +1028,12 @@ async def test_router_invite_join_after_agent_publishes_on_next_frame(room_state
         await bot._after_ingestion_admission(admission, AdmissionFacts(True, False), None)
     assert (EVENT_TYPE, "") not in events
     _sync_live_room(room_state)
-    await bot._on_ingestion_frame_completion()
+    await bot._on_ingestion_frame_completion(True)
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
     assert _accounts(room_state) == sorted([router_id, ids["agent1"].full_id])
     # The frame publishes a join once; later frames reconcile nothing until another join.
     client.room_get_state_event.reset_mock()
-    await bot._on_ingestion_frame_completion()
+    await bot._on_ingestion_frame_completion(True)
     client.room_get_state_event.assert_not_awaited()
 
 
