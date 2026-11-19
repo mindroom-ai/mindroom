@@ -496,7 +496,7 @@ class ChatUITools(Toolkit):
         width, scaled down to fit. A page with ``raw`` or ``width`` ignores the inline
         layout rules: it shows in a browser window at most 16:10 of its width tall
         (568 to 1080px), where ``vh`` units work as in a browser and taller content
-        scrolls.
+        scrolls. The panel shows raw pages too, at the panel's own width.
 
         Design it like a polished web app. Fetch, XHR, and WebSockets are always
         blocked. External images, scripts, styles, and fonts are blocked too
