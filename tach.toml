@@ -1892,11 +1892,11 @@ depends_on = [
 path = "mindroom.api.matrix_operations"
 depends_on = [
     "mindroom.api.config_lifecycle",
-    "mindroom.constants",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
+    "mindroom.room_steward",
 ]
 
 [[modules]]
@@ -1952,7 +1952,6 @@ depends_on = [
     "mindroom.api.oauth",
     "mindroom.api.connection_agents",
     "mindroom.api.egress_credentials",
-    "mindroom.constants",
     "mindroom.contacts.parties",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.egress_broker",
@@ -4606,7 +4605,6 @@ visibility = [
 [[modules]]
 path = "mindroom.thread_export.selection"
 depends_on = [
-    "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.state",

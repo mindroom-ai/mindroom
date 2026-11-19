@@ -353,20 +353,29 @@ def test_me_links_the_dashboard_on_its_own_host(portal: dict[str, Any]) -> None:
     assert response.json()["dashboard_url"] == "https://admin.example.org/"
 
 
+def _read_profiles_as_running_agent(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    state = MatrixState()
+    state.add_account("agent_general", "mindroom_general", None, domain="example.org", access_token="agent-token")  # noqa: S106
+    save_matrix_state(state, portal["paths"])
+    monkeypatch.setattr(config_lifecycle.app_state(main.app), "room_bots", {"general": Mock(running=True)})
+
+
 @pytest.mark.parametrize(
     ("status", "payload", "expected"),
     [(200, {"displayname": "Bob Builder"}, "Bob Builder"), (200, {}, "bob"), (404, {"errcode": "M_NOT_FOUND"}, "bob")],
 )
 def test_me_names_the_user_by_matrix_display_name(
     portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
     status: int,
     payload: dict[str, str],
     expected: str,
 ) -> None:
-    """The header greets the user by their Matrix display name, and by their localpart when the profile has none."""
-    state = MatrixState()
-    state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
-    save_matrix_state(state, portal["paths"])
+    """The header greets the user by their Matrix display name, and by their localpart when the profile has none.
+
+    With no owner account, the profile is read as a running agent.
+    """
+    _read_profiles_as_running_agent(portal, monkeypatch)
     with aioresponses() as matrix:
         matrix.get(
             "http://localhost:8008/_matrix/client/v3/profile/@bob:example.org/displayname",
@@ -375,6 +384,7 @@ def test_me_names_the_user_by_matrix_display_name(
         )
         response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
         assert len(matrix.requests) == 1, list(matrix.requests)
+        assert next(iter(matrix.requests.values()))[0].kwargs["headers"]["Authorization"] == "Bearer agent-token"
     assert response.status_code == 200, response.text
     assert response.json()["display_name"] == expected
 
@@ -387,11 +397,13 @@ def test_me_names_the_user_by_matrix_display_name(
     ],
     ids=["unreachable", "rate-limited"],
 )
-def test_me_falls_back_at_once_when_the_homeserver_fails(portal: dict[str, Any], failure: dict[str, Any]) -> None:
+def test_me_falls_back_at_once_when_the_homeserver_fails(
+    portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: dict[str, Any],
+) -> None:
     """A homeserver that is down or rate limiting gets one try, so the header links are not held up by retries."""
-    state = MatrixState()
-    state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
-    save_matrix_state(state, portal["paths"])
+    _read_profiles_as_running_agent(portal, monkeypatch)
     with aioresponses() as matrix:
         matrix.get(re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.*"), repeat=True, **failure)
         started = time.monotonic()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import MissingManagedEntityAccountError
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.invited_rooms_store import invited_room_entity_names, invited_rooms_path, load_invited_rooms
@@ -95,7 +94,7 @@ def build_export_groups(
     state_rooms: Sequence[ThreadExportRoom],
     invited_groups: Sequence[tuple[str, list[ThreadExportRoom]]],
 ) -> list[ThreadExportGroup]:
-    """Use the router for configured rooms and each invited room's own entity."""
-    groups = [ThreadExportGroup(entity_name=ROUTER_AGENT_NAME, rooms=tuple(state_rooms))] if state_rooms else []
+    """Read each configured room through its own steward and invited rooms through their own entity."""
+    groups = [ThreadExportGroup(entity_name=None, rooms=(room,)) for room in state_rooms]
     groups.extend(ThreadExportGroup(entity_name=name, rooms=tuple(rooms)) for name, rooms in invited_groups)
     return groups

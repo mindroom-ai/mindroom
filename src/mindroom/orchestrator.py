@@ -412,6 +412,7 @@ class _MultiAgentOrchestrator:
                 runtime_paths=self.runtime_paths,
                 config_provider=lambda: self.config,
                 bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+                steward_provider=self.room_steward,
                 response_admission_gate=self.response_admission_gate,
                 agent_reply_memberships=self.agent_reply_memberships,
             ),

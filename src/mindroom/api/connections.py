@@ -23,7 +23,6 @@ from mindroom.api.connection_agents import (
     resolve_connection_user,
 )
 from mindroom.api.egress_credentials import EgressCredentialService, egress_services_for_agent
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.parties import owner_contact_agents
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import egress_broker_enabled
@@ -38,6 +37,8 @@ from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from fastapi import FastAPI
 
     from mindroom.constants import RuntimePaths
     from mindroom.oauth import OAuthProvider
@@ -360,14 +361,18 @@ async def _egress_services(
         return None
 
 
-async def _matrix_display_name(user_id: str, runtime_paths: RuntimePaths) -> str:
-    """Read the user's display name as the router, falling back to the localpart when it cannot be read.
+async def _matrix_display_name(app: FastAPI, user_id: str, runtime_paths: RuntimePaths) -> str:
+    """Read the user's display name as any running bot, falling back to the localpart when it cannot be read.
 
     The lookup does not retry, so a homeserver that is down or rate limiting cannot hold up the rest of the identity.
     """
     fallback = user_id.removeprefix("@").split(":", 1)[0] or user_id
+    bots = config_lifecycle.app_state(app).room_bots or {}
+    reader = next((name for name, bot in bots.items() if bot.running), None)
+    if reader is None:
+        return fallback
     try:
-        client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
+        client = create_agent_http_client(reader, runtime_paths)
     except ValueError:
         return fallback
     client.config = replace(client.config, max_timeouts=0, max_limit_exceeded=0)
@@ -400,7 +405,7 @@ async def me(request: Request, response: Response) -> ConnectionsIdentity:
     )
     return ConnectionsIdentity(
         matrix_user_id=matrix_user_id,
-        display_name=await _matrix_display_name(matrix_user_id, snapshot.runtime_paths),
+        display_name=await _matrix_display_name(request.app, matrix_user_id, snapshot.runtime_paths),
         email=auth_user.email,
         is_administrator=is_administrator(matrix_user_id, snapshot),
         egress_enabled=egress_broker_enabled(snapshot.runtime_paths),

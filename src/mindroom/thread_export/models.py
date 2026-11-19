@@ -115,10 +115,10 @@ class ThreadExportAccumulator:
 
 @dataclass(frozen=True)
 class ThreadExportGroup:
-    """Rooms to read through one running entity."""
+    """Rooms to read through one running entity, or one room through its steward when ``entity_name`` is None."""
 
     rooms: tuple[ThreadExportRoom, ...]
-    entity_name: str
+    entity_name: str | None
 
 
 @dataclass(frozen=True)

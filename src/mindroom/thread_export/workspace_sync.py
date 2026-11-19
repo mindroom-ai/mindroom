@@ -50,6 +50,7 @@ _DEBOUNCE_SECONDS = 2.0
 class _ThreadExportBot(Protocol):
     """What the runner reads from a running bot."""
 
+    agent_name: str
     running: bool
     client: nio.AsyncClient | None
     rooms: list[str]
@@ -80,6 +81,7 @@ class WorkspaceThreadExportDeps:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], _ThreadExportBot | None]
+    steward_provider: Callable[[str], _ThreadExportBot | None]
     response_admission_gate: ResponseAdmissionGate
     agent_reply_memberships: AgentReplyMembershipIndex
     debounce_seconds: float = _DEBOUNCE_SECONDS
@@ -157,16 +159,19 @@ class WorkspaceThreadExportRunner:
                 raise RuntimeError(msg)
 
             def source_for_group(group: ThreadExportGroup) -> ThreadExportSource:
-                bot = self._deps.bot_provider(group.entity_name)
+                # A configured room is read by its steward, any running bot joined to it.
+                owner = group.rooms[0].room_id if group.entity_name is None else group.entity_name
+                provider = self._deps.steward_provider if group.entity_name is None else self._deps.bot_provider
+                bot = provider(owner)
                 if bot is None or not bot.running or bot.client is None:
-                    msg = f"No running Matrix owner for {group.entity_name}; retry after startup or reload"
+                    msg = f"No running Matrix owner for {owner}; retry after startup or reload"
                     raise RuntimeError(msg)
                 return _source_for_bot(
                     bot,
                     group.rooms,
                     None,
                     config,
-                    entity_name=group.entity_name,
+                    entity_name=bot.agent_name,
                     membership_index=self._deps.agent_reply_memberships,
                 )
 
