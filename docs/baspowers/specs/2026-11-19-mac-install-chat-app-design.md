@@ -182,7 +182,7 @@ Budget: at most 300 net product Swift lines for the first build; the review roun
 - Force-quitting MindRoom mid-install leaves the temporary folder, possibly a mounted, hidden image until restart, and a hidden `.MindRoomChatInstall-…` folder in the target folder, which nothing removes.
 - The install needs the network twice (GitHub API, download). It asks for a revocation check, but macOS does not promise to refuse when Apple's revocation service cannot be reached.
 - `/Applications` is writable by every administrator of the Mac by design; MindRoom does not refuse it for that. The private staging folder and the exclusive rename protect the copy until it is in place, not afterwards.
-- The trust rule fails closed on access control lists: a folder with any entry is not used, also when the entry only denies something, as the `everyone deny delete` entry on macOS's own home folders does. Remove the list (`chmod -N`) to install there.
+- The trust rule fails closed on access control lists: a folder with any entry is not used, also when the entry only denies something, as the `everyone deny delete` entry on macOS's own home folders does. Such a folder is skipped, and the user installs MindRoom Chat by hand there.
 - Between the signature check of an existing copy and Launch Services opening it, the same user could still swap the bundle; macOS offers no way to open the bytes that were checked.
 - GitHub's unauthenticated API allows 60 requests per hour per address; over that the card says no download was found.
 - Launch Services decides what "installed" means, so a stray copy in an unusual folder (a backup, a build folder) counts as installed and is what **Open MindRoom Chat** opens, if its signature passes.
