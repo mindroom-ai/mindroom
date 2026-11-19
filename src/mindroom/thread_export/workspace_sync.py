@@ -171,7 +171,6 @@ class WorkspaceThreadExportRunner:
                     group.rooms,
                     None,
                     config,
-                    entity_name=bot.agent_name,
                     membership_index=self._deps.agent_reply_memberships,
                 )
 
@@ -310,7 +309,6 @@ class WorkspaceThreadExportRunner:
                     tuple(rooms),
                     agent_targets,
                     config,
-                    entity_name=agent_name,
                     membership_index=self._deps.agent_reply_memberships,
                 ),
             )
@@ -355,7 +353,6 @@ def _source_for_bot(
     targets: tuple[ThreadExportTarget, ...] | None,
     config: Config,
     *,
-    entity_name: str,
     membership_index: AgentReplyMembershipIndex,
 ) -> ThreadExportSource:
     """Read ``rooms`` through one running bot's client and projection view."""
@@ -370,7 +367,7 @@ def _source_for_bot(
             self_sender=bot.matrix_id.full_id,
         ),
         rooms=rooms,
-        entity_name=entity_name,
+        entity_name=bot.agent_name,
         membership_index=membership_index,
         target_output_dirs=None if targets is None else tuple(target.output_dir for target in targets),
     )
