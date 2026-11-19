@@ -801,11 +801,17 @@ def _stewarded_registry(
     return HookRegistryState(registry, room_hook_owner=partial(runs_room_hooks, orchestrator))
 
 
-async def _emit_message_as(runtime: HookRegistryState, tmp_path: Path, agent_name: str) -> None:
+async def _emit_message_as(
+    runtime: HookRegistryState,
+    tmp_path: Path,
+    agent_name: str,
+    skip_plugin_names: frozenset[str] = frozenset(),
+) -> None:
     """Emit the one room message as the bot of that name does when its own copy arrives."""
     context = replace(
         _message_received_context(tmp_path),
         envelope=_envelope(agent_name=agent_name),
+        skip_plugin_names=skip_plugin_names,
         _hook_registry_state=runtime.lifetime(agent_name),
     )
     await emit(runtime.registry, EVENT_MESSAGE_RECEIVED, context)
@@ -820,8 +826,13 @@ def _recording_hook(scope: str, calls: list[str]) -> object:
 
 
 @pytest.mark.asyncio
-async def test_room_scope_runs_once_with_three_bots_in_room(tmp_path: Path, journal_store: EventJournalStore) -> None:
-    """Three bots emit one message, and its room-scoped hook runs on the steward's emission only."""
+@pytest.mark.parametrize("arrival", [("code", "router", "research"), ("research", "router", "code")])
+async def test_room_scope_runs_once_with_three_bots_in_room(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    arrival: tuple[str, ...],
+) -> None:
+    """Three bots emit one message in either order, and its room-scoped hook runs on the first emission only."""
     calls: list[str] = []
     registry = _stewarded_registry(
         [_recording_hook("room", calls)],
@@ -829,21 +840,63 @@ async def test_room_scope_runs_once_with_three_bots_in_room(tmp_path: Path, jour
         journal_store,
     )
 
-    for agent_name in ("code", "router", "research"):
+    for agent_name in arrival:
         await _emit_message_as(registry, tmp_path, agent_name)
 
-    assert calls == ["router"]
-    assert await journal_store.room_event_owner(_STEWARD_ROOM, "$event", "hook:message:received") == "router"
+    assert calls == [arrival[0]]
+    assert await journal_store.room_event_owner(_STEWARD_ROOM, "$event", "hook:message:received") == arrival[0]
 
 
 @pytest.mark.asyncio
-async def test_room_scope_runs_on_agent_steward_without_owner(tmp_path: Path, journal_store: EventJournalStore) -> None:
-    """A room with no owner account runs room-scoped hooks on its agent steward."""
+async def test_room_scope_runs_on_another_bot_when_the_steward_denies_the_sender(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """A steward whose own access denies the sender never emits the event, and the bots that admit them run it once."""
+    calls: list[str] = []
+
+    @hook(EVENT_REACTION_RECEIVED, scope="room")
+    async def on_reaction(ctx: ReactionReceivedContext) -> None:
+        calls.append(f"reaction:{ctx.event_id}")
+
+    registry = _stewarded_registry(
+        [_recording_hook("room", calls), on_reaction],
+        {"router": 100, "code": 0, "research": 0},
+        journal_store,
+    )
+
+    for agent_name in ("code", "research"):
+        await _emit_message_as(registry, tmp_path, agent_name)
+        reaction = ReactionReceivedContext(
+            event_name=EVENT_REACTION_RECEIVED,
+            config=_config(tmp_path),
+            runtime_paths=runtime_paths_for(_config(tmp_path)),
+            correlation_id="corr-reaction",
+            room_id=_STEWARD_ROOM,
+            event_id="$reaction",
+            sender_id="@user:localhost",
+            reaction_key="👍",
+            target_event_id="$event",
+            thread_id=None,
+            _hook_registry_state=registry.lifetime(agent_name),
+        )
+        await emit(registry.registry, EVENT_REACTION_RECEIVED, reaction)
+
+    assert calls == ["code", "reaction:$reaction"]
+
+
+@pytest.mark.asyncio
+async def test_room_scope_claims_only_for_an_emission_with_a_matching_hook(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """An emission whose room-scoped hooks are all filtered out takes no claim, so a later bot's emission runs them."""
     calls: list[str] = []
     registry = _stewarded_registry([_recording_hook("room", calls)], {"research": 0, "code": 0}, journal_store)
 
-    for agent_name in ("research", "code"):
-        await _emit_message_as(registry, tmp_path, agent_name)
+    await _emit_message_as(registry, tmp_path, "research", skip_plugin_names=frozenset({"scoped"}))
+    assert await journal_store.room_event_owner(_STEWARD_ROOM, "$event", "hook:message:received") is None
+    await _emit_message_as(registry, tmp_path, "code")
 
     assert calls == ["code"]
 
@@ -853,7 +906,7 @@ async def test_router_alias_runs_once_per_message_in_a_room_without_owner(
     tmp_path: Path,
     journal_store: EventJournalStore,
 ) -> None:
-    """A hook still filtered to the router runs once per message where no owner account is, on the agent steward."""
+    """A hook still filtered to the router runs once per message where no owner account is, on the first agent."""
     calls: list[str] = []
 
     @hook(EVENT_MESSAGE_RECEIVED, agents=(ROUTER_AGENT_NAME,))
@@ -865,7 +918,7 @@ async def test_router_alias_runs_once_per_message_in_a_room_without_owner(
     for agent_name in ("research", "code"):
         await _emit_message_as(registry, tmp_path, agent_name)
 
-    assert calls == ["code"]
+    assert calls == ["research"]
 
 
 @pytest.mark.asyncio
@@ -873,17 +926,16 @@ async def test_room_scope_runs_once_when_steward_changes_between_emissions(
     tmp_path: Path,
     journal_store: EventJournalStore,
 ) -> None:
-    """The first emission saves the steward of that moment, so a later steward does not run the hook again or instead."""
+    """The first emission keeps the claim, so a bot that becomes steward later does not run the hook again or instead."""
     calls: list[str] = []
     powers = {"research": 0, "code": 0}
     registry = _stewarded_registry([_recording_hook("room", calls)], powers, journal_store)
 
     await _emit_message_as(registry, tmp_path, "research")
-    powers["research"] = 50
+    powers["code"] = 100
     await _emit_message_as(registry, tmp_path, "code")
-    await _emit_message_as(registry, tmp_path, "research")
 
-    assert calls == ["code"]
+    assert calls == ["research"]
 
 
 @pytest.mark.asyncio

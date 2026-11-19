@@ -267,17 +267,18 @@ async def _eligible_hooks(
     for hook in hooks:
         if not _hook_in_scope(hook, context, service=service):
             continue
-        if hook.scope == "room":
-            if runs_room_hooks is None:
-                runs_room_hooks = await _emitter_runs_room_hooks(event_name, context)
-            if not runs_room_hooks:
-                continue
         if (
             isinstance(context, MessageReceivedContext)
             and event_name == EVENT_MESSAGE_RECEIVED
             and hook.plugin_name in context.skip_plugin_names
         ):
             continue
+        # Asked last and once: the first emission with a room-scoped hook to run takes the event's claim.
+        if hook.scope == "room":
+            if runs_room_hooks is None:
+                runs_room_hooks = await _emitter_runs_room_hooks(event_name, context)
+            if not runs_room_hooks:
+                continue
         eligible_hooks.append(hook)
     return tuple(eligible_hooks)
 

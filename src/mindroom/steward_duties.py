@@ -57,16 +57,17 @@ async def runs_room_hooks(
     event_name: str,
     event_id: str | None,
 ) -> bool:
-    """Return whether the bot of that name runs one emission's room-scoped hooks: it is the room's steward.
+    """Return whether the bot of that name runs one emission's room-scoped hooks.
 
-    For a Matrix event the first bot to dispatch it claims it for the steward of that moment, or for itself where
-    the room has none, so the claim's holder runs the hooks when its own copy arrives, on each retry and after a
-    handover, and no other bot does.
+    A Matrix event has one claim, which its first writer keeps on each retry and after a handover: a membership
+    event's goes to the steward of that moment, and a message's or reaction's to the first bot that emits it, which
+    admitted its sender. Any other emission runs them on the room's steward.
     """
     steward = orchestrator.room_steward(room_id)
     if event_id is None:
         return steward is not None and steward.agent_name == agent_name
-    owner = agent_name if steward is None else steward.agent_name
+    elects = event_name in (EVENT_ROOM_MEMBER_JOINED, EVENT_ROOM_MEMBER_LEFT)
+    owner = steward.agent_name if steward is not None and elects else agent_name
     purpose = f"hook:{event_name}"
     return await orchestrator.event_journal_store().claim_room_event(room_id, event_id, purpose, owner) == agent_name
 
