@@ -21,13 +21,17 @@ from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.delegation import execution as delegation_execution
+from mindroom.delegation import lifecycle as delegation_lifecycle
+from mindroom.delegation import recovery as delegation_recovery
+from mindroom.delegation.activity import ActivityFeed
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import SUBAGENT_BUSY
-from mindroom.delegation.state import RESTART_INTERRUPTION_REASON
+from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, TERMINAL_CHILD_STATUSES
 from mindroom.event_journal import ApprovalDecisionMetadata, BackgroundApprovalDecision, CallKey, tool_job_run_id
 from mindroom.event_journal.replies import ReplyStopped
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT
+from mindroom.live_frames.subagents import _run_meta
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.orchestration import tool_job_runtime as tool_job_coordinator
 from mindroom.prompts import BACKGROUND_JOBS_CONTINUED_NOTICE, SUBAGENT_RESTART_CONTINUATION_PROMPT
@@ -415,6 +419,116 @@ async def test_a_subagent_a_restart_stopped_continues_from_its_own_calls_and_its
             result = str(answer_of(read, "wait").content)
             assert result.startswith("Continued")
             assert f"Subagent ID: {handle['subagent_id']}" in result
+        finally:
+            await conversation.close()
+
+
+@pytest.mark.asyncio
+async def test_the_frames_say_a_restart_cut_a_turn_short_and_not_that_its_continuation_was(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An orderly restart ends the cut-short turn's frames as interrupted by it, not cancelled; its continuation's not."""
+    snapshots: list[Any] = []
+    continued = asyncio.Event()
+
+    def sink(snapshot: Any) -> None:  # noqa: ANN401
+        snapshots.append(snapshot)
+        if snapshot.status == "completed":
+            continued.set()
+
+    monkeypatch.setattr(delegation_lifecycle, "_subagent_sink", lambda *_: sink)
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=delegating_config(child_tools=[PROBE_TOOL]))
+        await conversation.open(calls(tool_call("read_file", "read", path="a")), _hang("shell"), answer("Continued"))
+        try:
+            record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            handle = json.loads(str(answer_of(record, "first").content))
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            await conversation.restart()
+            await wait_for_status(conversation.runtime, handle["job_id"], "completed")
+        finally:
+            await conversation.close()
+
+    def ends() -> list[tuple[str, object]]:
+        frames = [_run_meta(snapshot, full=True) for snapshot in snapshots]
+        return [(frame["status"], frame.get("interrupted_by_restart")) for frame in frames if "result" in frame]
+
+    await asyncio.wait_for(continued.wait(), JOB_TEST_TIMEOUT)
+    assert len({snapshot.delegation_id for snapshot in snapshots}) == 2
+    assert ends() == [("failed", True), ("completed", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["settlement_raises", "teardown_without_settlement"])
+async def test_a_shutdown_that_does_not_settle_the_turn_still_ends_its_frames_once_as_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop: str,
+) -> None:
+    """The cut-short turn's exit ends its feed itself, so no settlement that fails or never runs leaves it running."""
+    snapshots: list[Any] = []
+    ended = asyncio.Event()
+
+    def sink(snapshot: Any) -> None:  # noqa: ANN401
+        snapshots.append(snapshot)
+        if snapshot.delegation_id == snapshots[0].delegation_id and snapshot.status in TERMINAL_CHILD_STATUSES:
+            ended.set()
+
+    async def unreadable(*_args: object) -> None:
+        msg = "storage unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr(delegation_lifecycle, "_subagent_sink", lambda *_: sink)
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=delegating_config(child_tools=[PROBE_TOOL]))
+        await conversation.open(calls(tool_call("read_file", "read", path="a")), _hang("shell"), answer("Continued"))
+        try:
+            await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            if stop == "settlement_raises":
+                monkeypatch.setattr(delegation_recovery, "read_child_run", unreadable)
+                await conversation.restart()
+            else:
+                # The loop's teardown cancels the job's task and no settlement runs, nor any later process's recovery.
+                monkeypatch.setattr(delegation_execution, "interrupt_stopped_child", _leave_child)
+                tasks = [entry.task for entry in conversation.runtime._entries.values() if entry.task is not None]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.wait_for(ended.wait(), JOB_TEST_TIMEOUT)
+        finally:
+            monkeypatch.undo()
+            await conversation.close()
+
+    cut_short = snapshots[0].delegation_id
+    ends = [s for s in snapshots if s.delegation_id == cut_short and s.status in TERMINAL_CHILD_STATUSES]
+    assert [(s.status, s.result_preview, s.interrupted_by_restart) for s in ends] == [
+        ("failed", RESTART_INTERRUPTION_REASON, True),
+    ]
+    assert ActivityFeed.find(cut_short) is None
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_a_release_before_the_upgrade_stopped_still_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn settled with the reason earlier releases wrote on their way down still continues after the upgrade."""
+    old_reason = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
+    monkeypatch.setattr(delegation_recovery, "RESTART_INTERRUPTION_REASON", old_reason)
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=delegating_config(child_tools=[PROBE_TOOL]))
+        await conversation.open(calls(tool_call("read_file", "read", path="a")), _hang("shell"), answer("Continued"))
+        try:
+            record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            handle = json.loads(str(answer_of(record, "first").content))
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            await conversation.restart()
+            await wait_for_status(conversation.runtime, handle["job_id"], "completed")
+            job = await conversation.job(handle["job_id"])
+            assert (job.result or "").startswith("Continued")
+            assert job.adapter["restart_continuations"] == 1
         finally:
             await conversation.close()
 

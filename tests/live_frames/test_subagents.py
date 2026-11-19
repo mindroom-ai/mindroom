@@ -15,6 +15,7 @@ import pytest_asyncio
 
 import mindroom.live_frames.subagents as subagents_module
 from mindroom.delegation.activity import SubagentSnapshot, _SubagentActivity, _SubagentItem
+from mindroom.delegation.state import RESTART_INTERRUPTION_REASON
 from mindroom.live_frames.frames import LiveDocs
 from mindroom.live_frames.subagents import _run_docs
 from mindroom.llm.events import ReportedCall, ToolCompleted, ToolStarted
@@ -545,6 +546,18 @@ async def test_terminal_frame_is_a_snapshot_and_ends_the_stream() -> None:
     )
     assert (last["meta"]["task"], last["meta"]["result"]) == ("Find the answer", "It broke.")
     assert (next_run["run"], next_run["seq"], "snapshot" in next_run) == ("d2", 0, True)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_a_restart_cut_short_says_so_on_its_frames() -> None:
+    """A turn a restart's settlement ended is marked; a failure whose text only says the same is not."""
+    room = FrameRoom()
+    ended = {"status": "failed", "ended_at": 1002.0, "result_preview": RESTART_INTERRUPTION_REASON}
+    room.publish(make_snapshot(**ended, interrupted_by_restart=True))
+    room.publish(make_snapshot(**ended, delegation_id="d2"))
+    await _until(lambda: len(room.sent) == 2)
+
+    assert [frame["meta"].get("interrupted_by_restart") for frame in room.sent] == [True, None]
 
 
 @pytest.mark.asyncio

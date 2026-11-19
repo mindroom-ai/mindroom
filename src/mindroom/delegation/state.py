@@ -27,7 +27,19 @@ DELEGATION_STATE_KEY = "mindroom_delegation"
 RUN_SUBAGENT = "run_subagent"
 CONTINUE_SUBAGENT = "continue_subagent"
 # What a child turn that a restart cut short is settled with, as failed.
-RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
+RESTART_INTERRUPTION_REASON = (
+    "Subagent turn was interrupted by a restart. MindRoom may continue it automatically; if it doesn't, you may be "
+    "able to continue it with a follow-up."
+)
+# LEGACY_COMPAT: restart-settled child turns with the reason that told the reader to send a follow-up.
+# Legacy format: a failed child whose result is this string, which a stopping build writes for the next one to continue.
+# Last legacy release: v2026.11.444; the first release containing this fix writes
+# `RESTART_INTERRUPTION_REASON` instead.
+# Handling: `interrupted_by_restart` reads it as a restart's, so a turn the old build settled on its way down continues.
+# Coverage: tests/test_background_subagent_behavior.py::test_a_subagent_a_release_before_the_upgrade_stopped_still_continues
+_LEGACY_RESTART_INTERRUPTION_REASON = (
+    "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
+)
 DELEGATION_FUNCTIONS = (RUN_SUBAGENT, CONTINUE_SUBAGENT)
 
 
@@ -187,7 +199,10 @@ class DelegationChild:
 
 def interrupted_by_restart(child: DelegationChild) -> bool:
     """Return whether a restart cut the child's turn short, which only that settlement ends with this reason."""
-    return child.status == "failed" and child.result == RESTART_INTERRUPTION_REASON
+    return child.status == "failed" and child.result in (
+        RESTART_INTERRUPTION_REASON,
+        _LEGACY_RESTART_INTERRUPTION_REASON,
+    )
 
 
 def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:

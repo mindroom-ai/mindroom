@@ -112,6 +112,8 @@ def _run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:
         "started_at": snapshot.started_at,
         "ended_at": snapshot.ended_at,
     }
+    if snapshot.interrupted_by_restart:
+        meta["interrupted_by_restart"] = True
     if full:
         meta["task"] = snapshot.task
         if snapshot.status in TERMINAL_CHILD_STATUSES:
