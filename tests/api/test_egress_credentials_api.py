@@ -1202,6 +1202,39 @@ def test_listing_offers_the_callers_own_logins_on_a_personal_agent_they_manage(
     assert logins("bob", "shared_dev") == {}
 
 
+def test_listing_finds_logins_without_provisioning_an_oauth_client(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Looking for logins reads only stored clients: a page load never provisions one over the network."""
+    portal = egress_portal
+    _use_fake_oauth_providers(monkeypatch, portal["paths"])
+    provision = AsyncMock(side_effect=AssertionError("provisioned a client"))
+    monkeypatch.setattr(oauth, "_client_config_resolution_for_request", provision)
+
+    logins = _listed_agents(portal, "alice")["personal"]["oauth_logins"]
+    assert [(login["provider"], login["connected"]) for login in logins] == [("github", False), ("google_drive", False)]
+    provision.assert_not_called()
+
+
+def test_an_inactive_entry_names_its_login(egress_portal: dict[str, Any]) -> None:
+    """An ignored entry names its own or its preset's login, whatever its name, so a page can tell what it signs in to."""
+    portal = egress_portal
+    _store_raw_entries(
+        portal,
+        {
+            "work-gh": {"preset": "github", "rules": "not rules"},
+            "drive_copy": {"oauth_provider": "google_drive", "rules": []},
+            "odd": "not a service",
+        },
+    )
+    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [
+        {"name": "drive_copy", "reason": "invalid", "oauth_provider": "google_drive"},
+        {"name": "odd", "reason": "invalid", "oauth_provider": None},
+        {"name": "work-gh", "reason": "invalid", "oauth_provider": "github"},
+    ]
+
+
 _GITHUB_TOKEN_RESPONSE = {
     "access_token": "gho-user-access",
     "refresh_token": "ghr-user-refresh",
@@ -3317,7 +3350,7 @@ def test_a_shadowed_entry_is_listed_with_its_reason_and_deleted_keeping_the_key(
     _republish(portal)
 
     agent = _listed_agents(portal, "alice")["personal"]
-    assert agent["inactive_services"] == [{"name": "notes", "reason": "shadowed"}]
+    assert agent["inactive_services"] == [{"name": "notes", "reason": "shadowed", "oauth_provider": None}]
     assert [(s["name"], s["source"]) for s in agent["services"] if s["name"] == "notes"] == [("notes", "config")]
 
     deleted = _delete_service(portal, "alice", "personal", "notes")
@@ -3338,15 +3371,17 @@ def test_an_invalid_entry_is_listed_with_its_reason_and_deleted_with_its_key(egr
 
     agent = _listed_agents(portal, "alice")["personal"]
     assert agent["inactive_services"] == [
-        {"name": "odd", "reason": "invalid"},
-        {"name": "stale", "reason": "invalid"},
+        {"name": "odd", "reason": "invalid", "oauth_provider": None},
+        {"name": "stale", "reason": "invalid", "oauth_provider": None},
     ]
     assert [s["name"] for s in agent["services"]] == ["github", "openai", "notes"]
     assert _get_service(portal, "alice", "personal", "stale").status_code == 404
 
     deleted = _delete_service(portal, "alice", "personal", "stale")
     assert deleted.status_code == 204, deleted.text
-    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [{"name": "odd", "reason": "invalid"}]
+    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [
+        {"name": "odd", "reason": "invalid", "oauth_provider": None},
+    ]
     assert _stored_key(portal, "stale") is None
     assert _delete_service(portal, "alice", "personal", "stale").status_code == 404
     assert _delete_service(portal, "alice", "personal", "odd").status_code == 204
@@ -3359,10 +3394,14 @@ def test_inactive_entries_never_reach_another_requester(egress_portal: dict[str,
     portal = egress_portal
     _store_raw_entries(portal, {"stale": {"rules": []}})
 
-    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [{"name": "stale", "reason": "invalid"}]
+    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [
+        {"name": "stale", "reason": "invalid", "oauth_provider": None},
+    ]
     assert _listed_agents(portal, "bob")["personal"]["inactive_services"] == []
     assert _delete_service(portal, "bob", "personal", "stale").status_code == 404
-    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [{"name": "stale", "reason": "invalid"}]
+    assert _listed_agents(portal, "alice")["personal"]["inactive_services"] == [
+        {"name": "stale", "reason": "invalid", "oauth_provider": None},
+    ]
 
 
 def test_inactive_entries_of_a_shared_agent_are_listed_for_its_users_and_deleted_by_managers(
@@ -3374,7 +3413,7 @@ def test_inactive_entries_of_a_shared_agent_are_listed_for_its_users_and_deleted
 
     for user in ("alice", "bob"):
         assert _listed_agents(portal, user)["shared_dev"]["inactive_services"] == [
-            {"name": "stale", "reason": "invalid"},
+            {"name": "stale", "reason": "invalid", "oauth_provider": None},
         ]
     assert _delete_service(portal, "alice", "shared_dev", "stale").status_code == 403
     assert _delete_service(portal, "bob", "shared_dev", "stale").status_code == 204

@@ -348,6 +348,7 @@ async def _listed_oauth_status(
     target: ResolvedWorkerTarget,
     *,
     can_manage: bool,
+    bootstrap: bool = True,
 ) -> OAuthStatus | None:
     """Return service `name`'s OAuth status as the personal listing shows it, read without a token refresh."""
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
@@ -368,6 +369,8 @@ async def _listed_oauth_status(
             request,
             resolve_oauth_credential_context(provider, runtime_paths, manager, target, config=config),
             refresh=False,
+            # Without `bootstrap`, only a stored OAuth client counts: none is provisioned over the network.
+            bootstrap_client=bootstrap,
         ),
         reuse_target=lambda _provider: target,
     )
@@ -377,12 +380,12 @@ async def _oauth_logins(request: Request, target: ResolvedWorkerTarget) -> list[
     """List the presets' logins the caller connected for a personal agent's tools, or could connect, by provider.
 
     It is the caller's own connection as a new preset service would show it, read like the rows, so a service
-    account, a shared sandbox, or a connection that needs a reset never shows. It holds no token.
+    account, a shared sandbox, a connection that needs a reset, or a client not provisioned yet never shows.
     """
     presets = {name: EgressService.model_validate({"preset": name}) for name in EGRESS_PRESETS}
     statuses = await load_concurrently(
         (
-            functools.partial(_listed_oauth_status, request, name, service, target, can_manage=True)
+            functools.partial(_listed_oauth_status, request, name, service, target, can_manage=True, bootstrap=False)
             for name, service in presets.items()
         ),
         limited=True,
