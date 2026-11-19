@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import warnings
+import zlib
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
@@ -4132,6 +4133,34 @@ def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Ge
         pytest.fail(failure, pytrace=False)
 
 
+def ci_shard_from_env() -> tuple[int, int] | None:
+    """Read ``MINDROOM_TEST_SHARD="<index>/<total>"`` (1-based index, e.g. ``2/3``); unset runs every test file."""
+    value = os.environ.get("MINDROOM_TEST_SHARD", "").strip()
+    if not value:
+        return None
+    match = re.fullmatch(r"(\d+)/(\d+)", value)
+    if match is None or not 1 <= int(match[1]) <= int(match[2]):
+        msg = f"MINDROOM_TEST_SHARD must be '<index>/<total>' with 1 <= index <= total, got {value!r}"
+        raise pytest.UsageError(msg)
+    return int(match[1]), int(match[2])
+
+
+def ci_shard_of_test_file(relative_path: str, total: int) -> int:
+    """Return the 1-based CI shard of a test file, keyed by its repo-relative POSIX path so it never moves."""
+    return zlib.crc32(relative_path.encode()) % total + 1
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    """Skip test files that belong to another CI shard before pytest imports them."""
+    shard = ci_shard_from_env()
+    if shard is None or not collection_path.name.startswith("test_") or collection_path.suffix != ".py":
+        return None
+    if not collection_path.is_relative_to(config.rootpath):
+        return None
+    relative_path = collection_path.relative_to(config.rootpath).as_posix()
+    return True if ci_shard_of_test_file(relative_path, shard[1]) != shard[0] else None
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Keep Google client libraries and Git from acting as the developer.
 
@@ -4145,6 +4174,7 @@ def pytest_configure(config: pytest.Config) -> None:
     Git also ignores the developer's global and system config, so commits in test repositories never sign or run
     template hooks.
     """
+    ci_shard_from_env()  # Reject a malformed MINDROOM_TEST_SHARD before collection starts.
     gcloud_config = tempfile.mkdtemp(prefix="mindroom-test-gcloud-")
     config.add_cleanup(lambda: shutil.rmtree(gcloud_config, ignore_errors=True))
     hide_developer_google_credentials(os.environ, gcloud_config)

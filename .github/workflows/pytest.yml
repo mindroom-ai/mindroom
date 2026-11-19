@@ -16,12 +16,21 @@ concurrency:
 
 jobs:
   test:
+    # The 3.13 full suite is split by test file into three shards so a lost runner loses only a third of the run.
+    name: test (${{ matrix.python-version }}${{ matrix.shard && format(', shard {0}', matrix.shard) || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.13", "3.14"]
+        include:
+          - python-version: "3.13"
+            shard: "1/3"
+          - python-version: "3.13"
+            shard: "2/3"
+          - python-version: "3.13"
+            shard: "3/3"
+          - python-version: "3.14"
     env:
       UV_PYTHON: ${{ matrix.python-version }}
 
@@ -54,8 +63,11 @@ jobs:
       - name: Allow unprivileged user namespaces for content-bundle script tests
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
-      - name: Run full suite on Python 3.13
+      - name: Run full suite shard ${{ matrix.shard }} on Python 3.13
         if: matrix.python-version == '3.13'
+        env:
+          # tests/conftest.py collects only the test files whose path hashes to this 1-based shard.
+          MINDROOM_TEST_SHARD: ${{ matrix.shard }}
         run: |
           # Ubuntu's AppArmor profile permits the installed Chrome sandbox.
           MINDROOM_TEST_BROWSER_EXECUTABLE="$(command -v google-chrome)" \
