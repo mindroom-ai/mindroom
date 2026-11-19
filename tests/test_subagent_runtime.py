@@ -24,6 +24,7 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ToolCo
 from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
+from mindroom.delegation.state import RESTART_INTERRUPTION_REASON
 from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.matrix import state as matrix_state
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
@@ -839,7 +840,7 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
         await coordinator.runtime.shutdown()
     assert outcome is not None
     assert recorded == [
-        ("Subagent turn was interrupted by a restart. Send a follow-up to continue its history.", "failed")
+        (RESTART_INTERRUPTION_REASON, "failed")
         if restart
         else ("Background execution was cancelled; tools were not replayed.", "cancelled"),
     ]
