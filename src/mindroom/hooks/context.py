@@ -5,9 +5,8 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
@@ -195,20 +194,20 @@ class HookContextSupport:
         """Return the sender bound into hook contexts: this bot's own while it has a client, else each room's poster."""
         if self.runtime.client is not None:
             return self.send_message
-        return cast("HookMessageSender", partial(_send_as_room_poster, self.runtime.orchestrator))
+        return _room_poster_sender(self.runtime.orchestrator)
 
     def room_state_querier(self) -> HookRoomStateQuerier | None:
         """Return the room-state querier bound into hook contexts: this bot's own client, else the room's steward."""
         return chain_hook_room_state_queriers(
             _client_room_state_querier(self.runtime.client),
-            cast("HookRoomStateQuerier", partial(_query_state_as_steward, self.runtime.orchestrator)),
+            _steward_state_querier(self.runtime.orchestrator),
         )
 
     def room_state_putter(self) -> HookRoomStatePutter | None:
         """Return the room-state putter bound into hook contexts: this bot's own client, else the room's steward."""
         return chain_hook_room_state_putters(
             _client_room_state_putter(self.runtime.client),
-            cast("HookRoomStatePutter", partial(_put_state_as_steward, self.runtime.orchestrator)),
+            _steward_state_putter(self.runtime.orchestrator),
         )
 
     def matrix_admin(self) -> HookMatrixAdmin | None:
@@ -246,73 +245,43 @@ class HookContextSupport:
         ) | {"_emitter": self.agent_name}
 
 
-async def _as_borrowed_bot[T](
-    bot: AgentBot | None,
-    work: Callable[[AgentBot, nio.AsyncClient], Awaitable[T]],
+def _as_room_bot[T](
+    pick: Callable[[str], AgentBot | None],
+    capability: Callable[[AgentBot, nio.AsyncClient], Callable[..., Awaitable[T]]],
     refused: T,
-) -> T:
-    """Do ``work`` as another bot, which a reload waits for; a bot that is absent, stopping or closed gives ``refused``."""
-    # Imported on first use: the slim plugin-API import path must not pull nio.
-    import nio  # noqa: PLC0415
+) -> Callable[..., Awaitable[T]]:
+    """Return one capability of the bot ``pick`` names for each call's room, which a reload waits for.
 
-    if bot is None:
-        return refused
-    try:
-        async with bot.admission_fence():
-            return refused if bot.client is None else await work(bot, bot.client)
-    except (ResponseAdmissionRefusedError, nio.LocalProtocolError):
-        return refused
+    A room with no such bot, or with one that is stopping or closed its client, gives ``refused``.
+    """
 
+    async def call(room_id: str, *args: Any, **options: Any) -> T:  # noqa: ANN401
+        # Imported on first use: the slim plugin-API import path must not pull nio.
+        import nio  # noqa: PLC0415
 
-async def _send_as_room_poster(
-    orchestrator: OrchestratorRuntime,
-    room_id: str,
-    body: str,
-    thread_id: str | None,
-    source_hook: str,
-    extra_content: dict[str, Any] | None,
-    **options: Any,  # noqa: ANN401
-) -> str | None:
-    """Send a hook message as the poster of its room, the one voice for a post no agent of the room answers with."""
-    return await _as_borrowed_bot(
-        orchestrator.room_poster(room_id),
-        lambda poster, _client: poster.hook_context.send_message(
-            room_id,
-            body,
-            thread_id,
-            source_hook,
-            extra_content,
-            **options,
-        ),
-        None,
-    )
+        bot = pick(room_id)
+        if bot is None:
+            return refused
+        try:
+            async with bot.admission_fence():
+                return refused if bot.client is None else await capability(bot, bot.client)(room_id, *args, **options)
+        except (ResponseAdmissionRefusedError, nio.LocalProtocolError):
+            return refused
+
+    return call
 
 
-async def _query_state_as_steward(
-    orchestrator: OrchestratorRuntime,
-    room_id: str,
-    event_type: str,
-    state_key: str | None,
-) -> dict[str, Any] | None:
-    return await _as_borrowed_bot(
-        orchestrator.room_steward(room_id),
-        lambda _steward, client: build_hook_room_state_querier(client)(room_id, event_type, state_key),
-        None,
-    )
+def _room_poster_sender(orchestrator: OrchestratorRuntime) -> HookMessageSender:
+    """Return a sender that sends each message as the poster of its room."""
+    return _as_room_bot(orchestrator.room_poster, lambda poster, _client: poster.hook_context.send_message, None)
 
 
-async def _put_state_as_steward(
-    orchestrator: OrchestratorRuntime,
-    room_id: str,
-    event_type: str,
-    state_key: str,
-    content: dict[str, Any],
-) -> bool:
-    return await _as_borrowed_bot(
-        orchestrator.room_steward(room_id),
-        lambda _steward, client: build_hook_room_state_putter(client)(room_id, event_type, state_key, content),
-        False,
-    )
+def _steward_state_querier(orchestrator: OrchestratorRuntime) -> HookRoomStateQuerier:
+    return _as_room_bot(orchestrator.room_steward, lambda _bot, client: build_hook_room_state_querier(client), None)
+
+
+def _steward_state_putter(orchestrator: OrchestratorRuntime) -> HookRoomStatePutter:
+    return _as_room_bot(orchestrator.room_steward, lambda _bot, client: build_hook_room_state_putter(client), False)
 
 
 def _owner_matrix_admin(orchestrator: OrchestratorRuntime) -> HookMatrixAdmin | None:
@@ -331,10 +300,10 @@ def service_hook_bindings(orchestrator: OrchestratorRuntime, registry_state: Hoo
     return HookBindings(
         registry=registry_state.registry,
         registry_state=registry_state,
-        message_sender=cast("HookMessageSender", partial(_send_as_room_poster, orchestrator)),
+        message_sender=_room_poster_sender(orchestrator),
         matrix_admin=_owner_matrix_admin(orchestrator),
-        room_state_querier=cast("HookRoomStateQuerier", partial(_query_state_as_steward, orchestrator)),
-        room_state_putter=cast("HookRoomStatePutter", partial(_put_state_as_steward, orchestrator)),
+        room_state_querier=_steward_state_querier(orchestrator),
+        room_state_putter=_steward_state_putter(orchestrator),
         runtime_started_at=min(started, default=time.time()),
     )
 
