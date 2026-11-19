@@ -8,8 +8,9 @@ import hashlib
 import json
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, cast
 from unittest.mock import AsyncMock
 
@@ -55,6 +56,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from httpx import Response
+
+    from mindroom.bot import AgentBot
 
 _OWNER = "@owner:example.org"
 
@@ -251,17 +254,20 @@ def _bind_runtime(
         agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
         response_admission_gate=admission_gate,
     )
-    api_main.bind_external_trigger_runtime(
-        api_main.app,
+    target_bot = SimpleNamespace(
         client=client,
         conversation_reader=object(),
-        runtime_config=runtime_config,
-        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
         admission_fence=partial(
             admitted_response_decision,
             admission_gate,
             wait_for_admission_or_shutdown or wait_for_admission,
         ),
+    )
+    api_main.bind_external_trigger_runtime(
+        api_main.app,
+        runtime_config=runtime_config,
+        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+        target_bot=lambda _entity_name: cast("AgentBot", target_bot),
     )
     return client
 
@@ -1432,10 +1438,14 @@ def test_trigger_endpoint_requires_live_human_equivalent_membership(
     matrix_client.room_get_state.side_effect = room_get_state
     conversation_reader = AsyncMock()
     conversation_reader.latest_thread_event_id.return_value = "$latest"
-    app_state.external_trigger_runtime = replace(runtime, client=matrix_client, conversation_reader=conversation_reader)
+    target_bot = runtime.target_bot("research")
+    assert target_bot is not None
+    target_bot.client = matrix_client
+    target_bot.conversation_reader = conversation_reader
     delivered_owners: list[str] = []
 
-    async def send(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+    async def send(client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+        assert client is matrix_client
         delivered_owners.append(cast("str", content[constants.ORIGINAL_SENDER_KEY]))
         return DeliveredMatrixEvent(event_id="$delivered", content_sent=content)
 

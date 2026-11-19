@@ -232,8 +232,8 @@ async def test_router_start_does_not_bind_external_trigger_runtime_before_room_s
     mock_bind.assert_not_called()
 
 
-def test_external_trigger_runtime_binds_router_with_live_readiness_gate(tmp_path: Path) -> None:
-    """Trigger delivery runtime should bind the router with a live readiness gate."""
+def test_external_trigger_runtime_binds_each_target_with_live_readiness_gate(tmp_path: Path) -> None:
+    """Trigger delivery runtime should bind each trigger's running target with a live readiness gate."""
     orchestrator = _MultiAgentOrchestrator(
         runtime_paths=_runtime_paths(tmp_path),
         config=_config_with_code_agent(tmp_path),
@@ -261,8 +261,8 @@ def test_external_trigger_runtime_binds_router_with_live_readiness_gate(tmp_path
         orchestrator._external_trigger_runtime.bind_if_ready(orchestrator.config, orchestrator.agent_bots)
 
     mock_bind.assert_called_once()
-    assert mock_bind.call_args.kwargs["client"] is router_bot.client
-    assert mock_bind.call_args.kwargs["conversation_reader"] is router_bot.conversation_reader
+    assert mock_bind.call_args.kwargs["target_bot"](ROUTER_AGENT_NAME) is router_bot
+    assert mock_bind.call_args.kwargs["target_bot"]("code") is None
     assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
 
 
@@ -449,7 +449,9 @@ async def test_handle_mcp_catalog_change_replaces_only_dependent_entities(tmp_pa
     config = _config(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=config)
     orchestrator.running = True
-    install_bots(orchestrator, {name: MagicMock(spec=AgentBot) for name in ("code", "dev_team", "plain")})
+    install_bots(
+        orchestrator, {name: MagicMock(spec=AgentBot, running=False) for name in ("code", "dev_team", "plain")}
+    )
 
     with patch.object(
         orchestrator.fleet,
@@ -948,7 +950,7 @@ async def test_handle_mcp_catalog_change_serializes_overlapping_restarts(tmp_pat
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
     orchestrator.running = True
-    install_bots(orchestrator, {"code": MagicMock(spec=AgentBot)})
+    install_bots(orchestrator, {"code": MagicMock(spec=AgentBot, running=False)})
 
     first_restart_entered = asyncio.Event()
     allow_first_restart_to_finish = asyncio.Event()

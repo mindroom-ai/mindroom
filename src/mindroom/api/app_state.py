@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
-    from contextlib import AbstractAsyncContextManager
 
     from fastapi import FastAPI
 
@@ -71,12 +70,11 @@ class EmbeddedRuntime:
 class ExternalTriggerRuntime:
     """Runtime objects needed to deliver accepted external triggers, bound per published config generation."""
 
-    client: object
-    conversation_reader: object
+    # The running bot of a trigger's target entity, None while it does not run.
+    # It posts the trigger it answers, under its own run phase and the runtime's admission gate.
+    target_bot: Callable[[str], AgentBot | None]
     config_generation: int
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
-    # The router bot's fence: delivery runs as the router, under its run phase and the runtime's admission gate.
-    admission_fence: Callable[[], AbstractAsyncContextManager[None]]
 
 
 @dataclass

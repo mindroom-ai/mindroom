@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms
 
 if TYPE_CHECKING:
@@ -27,11 +26,8 @@ class ExternalTriggerRuntimeCoordinator:
         config: Config,
         bots: Mapping[str, AgentBot],
     ) -> None:
-        """Bind trigger delivery runtime after router is running."""
-        if not self.api_enabled:
-            return
-        router_bot = bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None or not router_bot.running:
+        """Bind trigger delivery through each trigger's target once any bot runs."""
+        if not self.api_enabled or not any(_running(bot) for bot in bots.values()):
             return
 
         async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
@@ -41,11 +37,9 @@ class ExternalTriggerRuntimeCoordinator:
 
         api_main.bind_external_trigger_runtime(
             api_main.app,
-            client=router_bot.client,
-            conversation_reader=router_bot.conversation_reader,
             runtime_config=config,
             is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-            admission_fence=router_bot.admission_fence,
+            target_bot=lambda entity_name: bot if _running(bot := bots.get(entity_name)) else None,
         )
 
     def unbind(self) -> None:
@@ -61,22 +55,12 @@ class ExternalTriggerRuntimeCoordinator:
         snapshot: TriggerDeliverySnapshot,
         bots: Mapping[str, AgentBot],
     ) -> bool:
-        """Return whether router and target clients are currently joined to one trigger room."""
-        if not snapshot.enabled:
-            return False
-        router_bot = bots.get(ROUTER_AGENT_NAME)
+        """Return whether the trigger's target, which posts and answers it, is currently joined to its room."""
         target_bot = bots.get(snapshot.target.agent)
-        if (
-            router_bot is None
-            or router_bot.client is None
-            or not router_bot.running
-            or target_bot is None
-            or target_bot.client is None
-            or not target_bot.running
-        ):
+        if not snapshot.enabled or target_bot is None or target_bot.client is None or not target_bot.running:
             return False
-        router_joined_room_ids = frozenset(await get_joined_rooms(router_bot.client) or ())
-        target_joined_room_ids = frozenset(await get_joined_rooms(target_bot.client) or ())
-        return (
-            snapshot.resolved_room_id in router_joined_room_ids and snapshot.resolved_room_id in target_joined_room_ids
-        )
+        return snapshot.resolved_room_id in (await get_joined_rooms(target_bot.client) or ())
+
+
+def _running(bot: AgentBot | None) -> bool:
+    return bot is not None and bot.running and bot.client is not None
