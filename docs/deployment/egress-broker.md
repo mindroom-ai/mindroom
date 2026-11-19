@@ -54,8 +54,8 @@ With `MINDROOM_EGRESS_BROKER_PORT=off`, the broker does not start, workers get n
 Keys and accounts can only be entered while the broker is on.
 While it is on, the request log and CA download routes return 409 when the broker is not running.
 
-Running MindRoom with `--no-api` disables the broker along with the API.
-Without a port, the broker is also off when it cannot run: with `--no-api`, where nobody could answer a key request, and when the primary's `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` names a proxy the broker cannot follow, which it never dials around. MindRoom logs a warning and keeps running; a broker that fails to bind its loopback port is logged the same way. With a set port, these stop startup instead.
+Running MindRoom with `--no-api` disables the broker along with the API, since nobody could answer a key request; with a set port, MindRoom logs a warning and keeps running.
+Without a port, the broker is also off when the primary's `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` names a proxy the broker cannot follow, which it never dials around, or when it fails to start, for example on an invalid token TTL, unreadable broker state, or a loopback port it cannot bind. MindRoom stops whatever the broker started, logs a warning, and keeps running without it. With a set port, a failure to start stops startup instead.
 
 ### Service rules
 

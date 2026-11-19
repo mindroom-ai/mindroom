@@ -525,36 +525,46 @@ async def serve_egress_broker(
     `config_provider` returns the primary's current config, read on the broker thread for every CONNECT, so
     service edits apply without a restart; while it returns None or raises, the broker keeps the last config it read.
     Keys are read through `credentials_manager`, by default the runtime's, which is resolved only when the broker
-    starts. With a set port, raises ValueError for invalid settings and the bind error when the port is unavailable;
-    the default broker logs those and MindRoom runs on without it.
+    starts. With a set port, any startup failure, such as invalid settings or a port in use, is raised; the default
+    broker stops whatever it started, logs the failure, and MindRoom runs on without it.
     """
-    settings = _broker_settings(runtime_paths)
-    if settings is None:
+    service: _BrokerService | None = None
+    try:
+        if (settings := _broker_settings(runtime_paths)) is not None:
+            service = _BrokerService(
+                runtime_paths,
+                settings,
+                config_provider=config_provider,
+                credentials_manager=(
+                    credentials_manager
+                    if credentials_manager is not None
+                    else get_runtime_credentials_manager(runtime_paths)
+                ),
+            )
+            # Startup finishes even if the owner is cancelled meanwhile, so it can be stopped.
+            await run_blocking_until_complete(service.start)
+    except BaseException as exc:
+        if service is not None:
+            await run_blocking_until_complete(service.stop)
+        if not _default_port(runtime_paths) or not isinstance(exc, Exception):
+            raise
+        logger.warning("egress_broker_default_unavailable", error_type=type(exc).__name__, error=str(exc))
+        service = None
+    if service is None:
         yield
         return
-    service = _BrokerService(
-        runtime_paths,
-        settings,
-        config_provider=config_provider,
-        credentials_manager=(
-            credentials_manager if credentials_manager is not None else get_runtime_credentials_manager(runtime_paths)
-        ),
-    )
+    _active.runtime = runtime = service.runtime
+    logger.info("egress_broker_started", url=runtime and runtime.primary_url)
     try:
-        try:
-            # Startup finishes even if the owner is cancelled meanwhile, so the finally below can stop it.
-            await run_blocking_until_complete(service.start)
-        except (OSError, ValueError) as exc:
-            if settings.url is not None:
-                raise
-            logger.warning("egress_broker_default_unavailable", error_type=type(exc).__name__, error=str(exc))
-        else:
-            _active.runtime = runtime = service.runtime
-            logger.info("egress_broker_started", url=runtime and runtime.primary_url)
         yield
     finally:
         _active.runtime = None
         await run_blocking_until_complete(service.stop)
+
+
+def _default_port(runtime_paths: RuntimePaths) -> bool:
+    """Whether the broker port is unset, so the broker runs only by default."""
+    return not (runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]) or "").strip()
 
 
 def turn_off_unusable_default_broker(runtime_paths: RuntimePaths, *, api: bool) -> RuntimePaths:
@@ -563,8 +573,7 @@ def turn_off_unusable_default_broker(runtime_paths: RuntimePaths, *, api: bool) 
     Without the API nobody can answer the tool's key cards, and an operator proxy the broker cannot follow must never
     be dialed around. The warning names the variable, never its value.
     """
-    port = EGRESS_BROKER_ENV_BY_KEY["port"]
-    if not egress_broker_enabled(runtime_paths) or (runtime_paths.env_value(port) or "").strip():
+    if not egress_broker_enabled(runtime_paths) or not _default_port(runtime_paths):
         return runtime_paths
     if api:
         try:
@@ -573,7 +582,7 @@ def turn_off_unusable_default_broker(runtime_paths: RuntimePaths, *, api: bool) 
             logger.warning("egress_broker_default_off", reason=str(exc))
         else:
             return runtime_paths
-    return replace(runtime_paths, process_env={**runtime_paths.process_env, port: "off"})
+    return replace(runtime_paths, process_env={**runtime_paths.process_env, EGRESS_BROKER_ENV_BY_KEY["port"]: "off"})
 
 
 def _signable_target(worker_target: ResolvedWorkerTarget) -> ResolvedWorkerTarget:

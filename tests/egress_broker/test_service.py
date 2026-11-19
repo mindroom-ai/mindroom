@@ -33,6 +33,7 @@ from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import (
     BROKER_CA_PEM_ENV,
+    EGRESS_BROKER_ENV_BY_KEY,
     RUNNER_CA_BUNDLE_ENV,
     apply_runner_ca_bundle,
     egress_broker_enabled,
@@ -1037,30 +1038,45 @@ def test_the_default_broker_turns_off_where_it_cannot_run(
 
 @pytest.mark.usefixtures("no_proxy_env")
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["bind", "ttl", "audit", "ca-bundle"])
 async def test_a_default_broker_that_cannot_start_leaves_mindroom_running(
     tmp_runtime_paths: Callable[..., RuntimePaths],
     manager: CredentialsManager,
     monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
-    """A bind failure of the implicit broker is logged and MindRoom runs on without it; a set port still raises."""
+    """Any startup failure of the implicit broker is logged, leaves nothing running, and MindRoom runs on; a set port raises."""
 
     async def refuse(_broker: object, _host: str, _port: int) -> None:
         raise OSError(98, "Address already in use")
 
-    monkeypatch.setattr(service.EgressBroker, "start", refuse)
-    with capture_logs() as logs:
-        async with serve_egress_broker(tmp_runtime_paths(), config_provider=lambda: None, credentials_manager=manager):
-            assert active_ca_pem() is None
-            assert _broker_threads() == []
-    assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["egress_broker_default_unavailable"]
+    def refuse_bundle(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied")
 
-    with pytest.raises(OSError, match="in use"):
-        async with serve_egress_broker(
-            tmp_runtime_paths(**_broker_env(free_port())),
-            config_provider=lambda: None,
-            credentials_manager=manager,
-        ):
-            pytest.fail("the broker must not start")
+    env = {EGRESS_BROKER_ENV_BY_KEY["token_ttl_seconds"]: "soon"} if failure == "ttl" else {}
+    if failure == "bind":
+        monkeypatch.setattr(service.EgressBroker, "start", refuse)
+    if failure == "ca-bundle":
+        monkeypatch.setattr(service, "apply_runner_ca_bundle", refuse_bundle)
+    for broker_env in ({}, _broker_env(free_port())):
+        runtime_paths = tmp_runtime_paths(**broker_env, **env)
+        if failure == "audit":
+            (runtime_paths.storage_root / "egress_broker").mkdir(parents=True, exist_ok=True)
+            (runtime_paths.storage_root / "egress_broker" / "requests.sqlite3").write_bytes(b"not a database" * 100)
+        broker = serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager)
+        if broker_env:
+            with pytest.raises(Exception):  # noqa: B017, PT011 - each failure keeps its own loud error.
+                async with broker:
+                    pytest.fail("the broker must not start")
+            assert _broker_threads() == []
+            continue
+        with capture_logs() as logs:
+            async with broker:
+                assert active_ca_pem() is None
+                assert active_audit_log() is None
+                assert _broker_threads() == []
+        warnings = [log["event"] for log in logs if log["log_level"] == "warning"]
+        assert warnings == ["egress_broker_default_unavailable"]
 
 
 @pytest.mark.asyncio
