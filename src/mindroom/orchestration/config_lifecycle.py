@@ -458,14 +458,20 @@ class ConfigReloadLifecycle:
 
     @asynccontextmanager
     async def startup_publication_admission(self) -> AsyncIterator[None]:
-        """Serialize startup publication with every runtime replacement."""
-        async with self._response_admission_apply_lock:
-            self.response_admission_gate.close()
-            try:
-                yield
-            finally:
-                self.response_admission_gate.reopen()
-            await self.after_reload()
+        """Hold response admission closed until startup publishes, and reopen it between runtime replacements.
+
+        Startup's wait for first syncs does not hold the apply lock, so a reload can replace a bot that never syncs.
+        """
+        gate = self.response_admission_gate
+        gate.startup_hold = True
+        gate.close()
+        try:
+            yield
+        finally:
+            async with self._response_admission_apply_lock:
+                gate.startup_hold = False
+                gate.reopen()
+        await self.after_reload()
 
     async def apply_with_response_admission(
         self,

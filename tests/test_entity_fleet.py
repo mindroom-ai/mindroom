@@ -34,6 +34,8 @@ class _Bot:
     # The arguments of the cancellation that ended the stand-in sync loop, once it ended.
     sync_cancel_args: tuple[object, ...] | None = None
     running: bool = False
+    first_sync_complete: bool = True
+    ingestion_quiesced: bool = False
     client: object | None = None
     deferred_stop_required: bool = False
     pending_response_owner_count: int = 0
@@ -556,3 +558,30 @@ async def test_removing_a_bot_that_never_started_skips_leaving_and_still_removes
     assert f"stop:held:{ENTITY_REMOVED_SHUTDOWN}" in harness.order
     assert "end_replies:held" in harness.order
     assert not harness.fleet.bots
+
+
+@pytest.mark.asyncio
+async def test_a_generation_whose_sync_loop_gave_up_before_its_first_sync_is_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot that never syncs stops, so it no longer holds startup's gate, and the fleet starts a fresh generation."""
+    harness = _Harness()
+    stuck = harness.add("stuck", first_sync_complete=False)
+    synced: list[_Bot] = []
+
+    async def sync_forever(bot: _Bot) -> None:
+        synced.append(bot)
+        if bot is not stuck:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(entity_fleet, "sync_forever_with_restart", sync_forever)
+    await harness.fleet.start(["stuck"])
+    await _settle(lambda: len(synced) == 2)
+
+    replacement = harness.built["stuck"]
+    assert not stuck.running
+    assert replacement is not stuck
+    assert replacement.running
+    assert synced == [stuck, replacement]
+    assert harness.order[:2] == ["start:stuck", "changing:stuck"]
+    await harness.fleet.stop(["stuck"])

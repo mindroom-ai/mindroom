@@ -652,6 +652,9 @@ async def sync_forever_with_restart(bot: AgentBot, max_retries: int = -1) -> Non
         if outcome.restart_reason_category is None or not _matrix_sync_receive_loop_active(bot):
             break
         bot.invalidate_agent_reply_memberships(reason=outcome.restart_reason_category)
+        if outcome.stalled_restart and not bot.first_sync_complete:
+            # A generation that never synced is not restarted in place: the fleet replaces it.
+            break
         retry_count += 1
         will_retry = max_retries < 0 or retry_count < max_retries
         resulting_action: RuntimeLifecycleAction = "restart_receive_loop" if will_retry else "preserve_response_runtime"

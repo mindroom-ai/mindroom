@@ -1125,18 +1125,18 @@ class _MultiAgentOrchestrator:
             # keeps running in the background: a grant room it has not joined
             # or created yet stays pending, and its sources replay after setup
             # refreshes the grants.
+            self.fleet.schedule_retries(start_results.retryable_entities)
             if self.agent_reply_memberships.needs_refresh(config):
                 set_runtime_starting("Waiting for the first Matrix sync")
                 if not await self._wait_for_first_syncs(runtime_shutdown_event, started_bots):
                     return
 
-            self.fleet.schedule_retries(start_results.retryable_entities)
-
             create_background_task(
                 check_embedder_health(config, self.runtime_paths, reason="startup"),
                 name="embedder_startup_health_check",
             )
-            self.config_reload.startup_published(config)
+            # A reload may have applied during the wait above.
+            self.config_reload.startup_published(self.config)
             set_runtime_ready()
             self._runtime_ready_event.set()
             self.turn_recovery.schedule()

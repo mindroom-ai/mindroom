@@ -185,7 +185,22 @@ class EntityFleet:
         for bot in bots:
             slot = self._slots[bot.agent_name]
             if slot.sync_task is None or slot.sync_task.done():
-                slot.sync_task = asyncio.create_task(sync_forever_with_restart(bot), name=f"sync_{bot.agent_name}")
+                slot.sync_task = asyncio.create_task(self._sync(slot), name=f"sync_{bot.agent_name}")
+
+    async def _sync(self, slot: _EntitySlot) -> None:
+        """Run one bot's receive loop, and replace a generation whose loop gave up before its first sync.
+
+        The stopped generation no longer counts as running, so it holds no startup gate.
+        """
+        bot = slot.bot
+        await sync_forever_with_restart(bot)
+        if bot.running and not bot.ingestion_quiesced and not bot.first_sync_complete:
+            # In its own task, since stopping the entity cancels this one.
+            slot.retry_task = create_logged_task(
+                self.replace([bot.agent_name]),
+                name=f"replace_unsynced_{bot.agent_name}",
+                failure_message="Replacing a bot that never synced failed",
+            )
 
     def schedule_retries(self, entity_names: Iterable[str]) -> None:
         """Retry each entity's start in the background unless a retry already runs."""
@@ -420,7 +435,8 @@ class EntityFleet:
 
     async def _prepare_change(self, slots: dict[str, _EntitySlot]) -> None:
         for slot in slots.values():
-            await cancel_task(slot.retry_task)
+            if slot.retry_task is not asyncio.current_task():
+                await cancel_task(slot.retry_task)
             slot.retry_task = None
         await self._hooks.entities_changing(set(slots))
 

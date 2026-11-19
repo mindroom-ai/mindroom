@@ -5986,6 +5986,47 @@ async def test_dispatch_waits_for_every_started_bot_first_sync(tmp_path: Path, e
 
 
 @pytest.mark.asyncio
+async def test_a_bot_that_never_syncs_neither_blocks_replacements_nor_holds_startup(tmp_path: Path) -> None:
+    """Startup's first-sync wait leaves the apply lock free, and ends once the fleet replaced the bot that never syncs."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+    stuck, fresh = _startable_bot("general", synced=False), _startable_bot("general")
+    stuck.ingestion_quiesced = False
+    stuck.prepare_for_sync_shutdown = AsyncMock()
+    stuck.stop = AsyncMock(side_effect=lambda **_kwargs: setattr(stuck, "running", False))
+    install_bots(orchestrator, {"general": stuck})
+    gave_up = asyncio.Event()
+    replacement = AsyncMock()
+
+    async def receive(bot: AgentBot) -> None:
+        await (gave_up if bot is stuck else asyncio.Event()).wait()
+
+    async def apply_while_startup_waits() -> None:
+        await asyncio.sleep(0.2)
+        await orchestrator.config_reload.apply_with_response_admission(
+            replacement,
+            operation_name="test",
+            request_is_current=lambda: True,
+        )
+        gave_up.set()
+
+    with (
+        _matrix_free_startup(orchestrator),
+        patch("mindroom.orchestration.entity_fleet.sync_forever_with_restart", new=receive),
+        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(return_value={"general": MagicMock()})),
+        patch("mindroom.orchestrator.create_bot_for_entity", return_value=fresh),
+    ):
+        applying = asyncio.create_task(apply_while_startup_waits())
+        try:
+            await _run_orchestrator_start_until_ready(orchestrator)
+        finally:
+            applying.cancel()
+
+    replacement.assert_awaited_once()
+    stuck.stop.assert_awaited_once()
+    fresh.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_stopped_bot_releases_startup_gate(tmp_path: Path) -> None:
     """A runtime whose only started bot stops before its first sync still gets ready."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())

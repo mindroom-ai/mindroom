@@ -160,6 +160,7 @@ class _FakeBot:
         self._last_sync_monotonic: float | None = None
         self._first_sync_done = False
         self.ingestion_quiesced = False
+        self.first_sync_complete = True
         self._durable_ingestion_progress_generation: int | None = None
         self.sync_calls = 0
         self.first_call_cancelled = False
@@ -487,6 +488,27 @@ async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pyte
     assert bot.sync_calls == 1  # sync_forever called once, then sync_then_stop stopped
     assert bot.prepare_for_sync_shutdown_calls == 1
     assert bot.prepare_for_sync_shutdown_cancel_messages == [None]
+
+
+@pytest.mark.asyncio
+async def test_sync_supervisor_gives_up_a_generation_stalled_before_its_first_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot the watchdog stops before its first sync is not restarted in place: the fleet replaces that generation."""
+    bot = _FakeBot()
+    bot.agent_name = "never_synced"
+    bot.first_sync_complete = False
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "matrix_sync_startup_timeout_seconds", lambda _paths: 0.01)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
+
+    await asyncio.wait_for(sync_forever_with_restart(bot), 2)
+
+    assert bot.first_call_cancelled is True
+    assert bot.sync_calls == 1
+    assert bot.running
 
 
 @pytest.mark.asyncio
@@ -2497,7 +2519,6 @@ async def test_start_runtime_publishes_after_every_first_sync_without_waiting_fo
                 await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert not runtime_ready.is_set()
             assert orchestrator.response_admission_gate.closed
-            assert not orchestrator.response_admission_gate.close_if_idle()
 
             # One bot's first frame cannot publish semantic callbacks
             # before every started bot's first frame has let the reply grants be rebuilt.
@@ -2561,11 +2582,11 @@ def _orchestrator_with_membership_startup_bots(
 
 
 @pytest.mark.asyncio
-async def test_startup_membership_publication_serializes_config_reload(  # noqa: PLR0915
+async def test_a_reload_during_startups_first_sync_wait_applies_without_reopening_admission(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reload must not share or prematurely reopen startup admission ownership."""
+    """Startup's wait holds no apply lock, so a reload applies during it; admission stays closed until startup publishes."""
     orchestrator, router_bot, general_bot = _orchestrator_with_membership_startup_bots(tmp_path, monkeypatch)
     # The config is a mock, so no Matrix account names the principal that keeps the approval cards.
     orchestrator._approval_cards = MagicMock(return_value=None)
@@ -2614,19 +2635,18 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
             orchestrator.config_reload.request_reload()
             reload_task = orchestrator.config_reload._reload_task
             assert reload_task is not None
-            # The reload loads the edit for the dashboard at once, but applies it only after startup publication.
+            # The reload does not wait for a bot that has not synced yet, which it may be the one to remove.
             await asyncio.wait_for(reload_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             reload_can_finish.set()
-            for _ in range(10):
-                await asyncio.sleep(0)
-            assert not reload_task.done()
+            await asyncio.wait_for(reload_task, timeout=SETTLE_TIMEOUT_SECONDS)
+            assert not runtime_ready.is_set()
             assert orchestrator.response_admission_gate.closed
 
             setup_can_finish.set()
             await asyncio.wait_for(router_sync_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             await orchestrator.handle_bot_ready(router_bot)
             await asyncio.wait_for(runtime_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-            await asyncio.wait_for(reload_task, timeout=SETTLE_TIMEOUT_SECONDS)
+            await asyncio.sleep(0)
             assert not orchestrator.response_admission_gate.closed
         finally:
             setup_can_finish.set()
