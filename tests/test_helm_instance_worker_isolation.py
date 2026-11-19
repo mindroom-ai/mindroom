@@ -3578,13 +3578,25 @@ def _broker_primary_env(docs: list[dict[str, Any]]) -> tuple[dict[str, Any], dic
 
 
 def test_runtime_chart_egress_broker_disabled_by_default() -> None:
-    """Without opting in, the chart renders no broker Service, policies, listener, or env."""
+    """Without opting in, the chart renders no broker Service, policies, or listener, and turns the broker off."""
     docs = _render_runtime_chart("networkPolicy.create=true", *_EGRESS_PROXY_VALUES)
     container, env = _broker_primary_env(docs)
 
     assert _egress_broker_resource_names(docs) == []
     assert [port["name"] for port in container["ports"]] == ["api"]
-    assert not [name for name in env if name.startswith("MINDROOM_EGRESS_BROKER_")]
+    assert {name: value for name, value in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")} == {
+        "MINDROOM_EGRESS_BROKER_PORT": "off",
+    }
+
+
+def test_instance_chart_turns_the_egress_broker_off_unless_enabled() -> None:
+    """MindRoom runs a loopback broker by default, so the chart's `egressBroker.enabled: false` must say off."""
+    container = _container(_resource(_render_instance_chart(), "Deployment", "mindroom-demo"), "mindroom")
+    env = {name: entry.get("value", "") for name, entry in _env_by_name(container).items()}
+
+    assert {name: value for name, value in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")} == {
+        "MINDROOM_EGRESS_BROKER_PORT": "off",
+    }
 
 
 def test_runtime_chart_egress_broker_direct_mode_without_worker_egress_policy() -> None:

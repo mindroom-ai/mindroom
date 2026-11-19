@@ -216,14 +216,16 @@ async def _worker_client(env: dict[str, str], runner_dir: Path) -> AsyncIterator
         yield client
 
 
+@pytest.mark.parametrize("off", ["off", "0"])
 @pytest.mark.asyncio
-async def test_disabled_without_port(
+async def test_turned_off_by_its_port_setting(
     tmp_runtime_paths: Callable[..., RuntimePaths],
     manager: CredentialsManager,
     tmp_path: Path,
+    off: str,
 ) -> None:
-    """Without a port the context is a no-op: no thread, no state, and worker calls get no broker env."""
-    runtime_paths = tmp_runtime_paths()
+    """With the port set to off the context is a no-op: no thread, no state, and worker calls get no broker env."""
+    runtime_paths = tmp_runtime_paths(MINDROOM_EGRESS_BROKER_PORT=off)
     config = _config(github=_GITHUB)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         assert _broker_threads() == []
@@ -244,7 +246,7 @@ async def test_runtime_credentials_manager_is_built_only_when_the_broker_starts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Without a port no credentials manager is built for the broker; with one it uses the runtime's own."""
+    """While the broker is off no credentials manager is built for it; once it runs it uses the runtime's own."""
     built: list[RuntimePaths] = []
 
     def runtime_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
@@ -252,7 +254,7 @@ async def test_runtime_credentials_manager_is_built_only_when_the_broker_starts(
         return CredentialsManager(tmp_path / "mindroom_data" / "credentials")
 
     monkeypatch.setattr(service, "get_runtime_credentials_manager", runtime_manager)
-    async with serve_egress_broker(tmp_runtime_paths(), config_provider=lambda: None):
+    async with serve_egress_broker(tmp_runtime_paths(MINDROOM_EGRESS_BROKER_PORT="off"), config_provider=lambda: None):
         assert built == []
 
     runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
@@ -278,7 +280,6 @@ async def test_requires_url_when_port_set(
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("MINDROOM_EGRESS_BROKER_PORT", "0"),
         ("MINDROOM_EGRESS_BROKER_PORT", "65536"),
         ("MINDROOM_EGRESS_BROKER_PORT", "http"),
         ("MINDROOM_EGRESS_BROKER_PORT", "8_768"),
@@ -331,6 +332,63 @@ async def test_end_to_end_inject_through_running_service(
         assert audit is not None
         [record] = await audit_records(audit, 1)
         assert (record.host, record.service, record.agent_name) == ("localhost", "github", "code")
+
+
+@pytest.mark.asyncio
+async def test_by_default_the_broker_serves_primary_shells_on_a_free_loopback_port(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    get_through: GetThrough,
+) -> None:
+    """Without any broker setting a primary shell gets keys through a loopback broker on a port the system picked.
+
+    Worker calls get no broker env, since no worker-facing URL is known.
+    """
+    runtime_paths = tmp_runtime_paths()
+    config = _primary_shell_config()
+    save_secret(manager, worker_target(scope=None), "github", "s3cret")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=tool_identity("@alice:example.org"),
+        ).applied({}, {})
+        response = await get_through(env)
+        worker_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+
+    proxy = urlsplit(env["HTTPS_PROXY"])
+    assert proxy.hostname == "127.0.0.1"
+    assert proxy.port not in {None, 0}
+    assert response.json()["headers"]["authorization"] == ["Bearer s3cret"]
+    assert worker_env == {}
+
+
+@pytest.mark.asyncio
+async def test_only_primary_shell_tokens_carry_the_primary_shell_claim(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """The broker dials private addresses for a primary shell's token alone; a worker call's token never says so."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
+    config = _primary_shell_config()
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        runtime = service._active.runtime
+        assert runtime is not None
+        primary = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=tool_identity("@alice:example.org"),
+        ).applied({}, {})
+        worker = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+        primary_claims = runtime.signer.verify(_token(primary))
+        worker_claims = runtime.signer.verify(_token(worker))
+
+    assert primary_claims is not None
+    assert primary_claims.primary_shell is True
+    assert worker_claims is not None
+    assert worker_claims.primary_shell is False
 
 
 def _primary_shell_config(**agent: object) -> Config:

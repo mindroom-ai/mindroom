@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import socket
 import ssl
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +20,7 @@ from mindroom.egress_broker.dial import (
 )
 from mindroom.server_fetch_url import ServerFetchUrlError
 from tests.egress_broker.conftest import (
+    DEFAULT_CLAIMS,
     connect_request,
     open_upstream,
     plain_request,
@@ -333,6 +335,54 @@ async def test_broker_refuses_blocked_destinations_in_every_form(
     assert response.status == status
     assert response.json()["error"] == ("destination_blocked" if status == 403 else "bad_request")
     dial_checked_address.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "primary_dials"),
+    [
+        ("10.0.0.1:443", True),
+        ("192.168.1.5:443", True),
+        ("100.64.0.1:443", True),
+        ("[fd00::1]:443", True),
+        ("127.0.0.1:443", False),
+        ("[::1]:443", False),
+        ("169.254.169.254:80", False),
+        ("[fd00:ec2::254]:80", False),
+        ("169.254.1.1:443", False),
+        ("[fe80::1]:443", False),
+    ],
+)
+@pytest.mark.parametrize("transport", ["connect", "plain"])
+async def test_a_primary_shell_token_reaches_private_addresses_but_never_loopback_or_metadata(
+    broker_default_policy: EgressBroker,
+    broker: BrokerFactory,
+    raw_proxy: RawProxy,
+    target: str,
+    transport: str,
+    *,
+    primary_dials: bool,
+) -> None:
+    """A shell in the primary can bypass the broker anyway, so its token dials the LAN; a worker's token never does.
+
+    Loopback, link-local, and cloud metadata stay refused for both.
+    """
+    send = connect_request if transport == "connect" else plain_request
+    primary = proxy_authorization(broker.token(replace(DEFAULT_CLAIMS, primary_shell=True)))
+    worker = proxy_authorization(broker.token())
+    unreachable = OSError("Connection refused")
+
+    with patch("mindroom.egress_broker.dial._dial", new_callable=AsyncMock, side_effect=unreachable) as dial:
+        from_primary = await raw_proxy(broker_default_policy.port, send(target, authorization=primary))
+        from_worker = await raw_proxy(broker_default_policy.port, send(target, authorization=worker))
+
+    assert from_worker.json()["error"] == "destination_blocked"
+    if primary_dials:
+        assert from_primary.status == 502
+        assert dial.call_count == 1
+    else:
+        assert from_primary.json()["error"] == "destination_blocked"
+        dial.assert_not_called()
 
 
 @pytest.mark.asyncio

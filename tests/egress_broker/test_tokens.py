@@ -138,6 +138,16 @@ def test_signed_payload_with_valid_claims_is_accepted(signer: TokenSigner, claim
     assert signer.verify(_signed_token(_payload(unscoped)), now=1000) is not None
 
 
+def test_primary_shell_claim_is_signed_and_absent_means_a_worker_token(signer: TokenSigner) -> None:
+    """A token minted before the claim existed verifies as a worker token; a signed `primary_shell` round-trips."""
+    legacy = signer.verify(_signed_token(_payload()), now=1000)
+    assert legacy is not None
+    assert legacy.primary_shell is False
+    primary = signer.verify(_signed_token(_payload({**_VALID_CLAIMS, "primary_shell": True})), now=1000)
+    assert primary is not None
+    assert primary.primary_shell is True
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -155,6 +165,8 @@ def test_signed_payload_with_valid_claims_is_accepted(signer: TokenSigner, claim
         pytest.param(_payload({**_VALID_CLAIMS, "channel": None}), id="channel-none"),
         pytest.param(_payload({**_VALID_CLAIMS, "requester_id": 7}), id="requester-not-str"),
         pytest.param(_payload({**_VALID_CLAIMS, "tenant_id": ["t"]}), id="tenant-not-str"),
+        pytest.param(_payload({**_VALID_CLAIMS, "primary_shell": 1}), id="primary-shell-not-bool"),
+        pytest.param(_payload({**_VALID_CLAIMS, "primary_shell": "true"}), id="primary-shell-str"),
     ],
 )
 def test_signed_payload_with_invalid_content_is_rejected(signer: TokenSigner, payload: bytes) -> None:

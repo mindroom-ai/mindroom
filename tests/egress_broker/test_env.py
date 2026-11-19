@@ -209,13 +209,17 @@ def test_primary_callback_hosts(tmp_path: Path, process_env: dict[str, str], exp
 @pytest.mark.parametrize(
     ("process_env", "enabled"),
     [
-        pytest.param({}, False, id="unset"),
-        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "   "}, False, id="blank"),
+        # Unset or blank, the broker runs on a free loopback port for shell calls in the primary.
+        pytest.param({}, True, id="unset"),
+        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "   "}, True, id="blank"),
+        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "off"}, False, id="off"),
+        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": " OFF "}, False, id="off-upper"),
+        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "0"}, False, id="zero"),
         pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "8768"}, True, id="set"),
         # An invalid port still counts, so startup refuses it instead of the feature silently disappearing.
         pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "http"}, True, id="invalid"),
-        # The worker-facing URL alone does not start the broker.
-        pytest.param({"MINDROOM_EGRESS_BROKER_URL": "http://broker.local:8768"}, False, id="url-only"),
+        # The worker-facing URL alone does not turn the default broker off.
+        pytest.param({"MINDROOM_EGRESS_BROKER_URL": "http://broker.local:8768"}, True, id="url-only"),
     ],
 )
 def test_egress_broker_enabled_follows_the_port_setting(
@@ -224,7 +228,7 @@ def test_egress_broker_enabled_follows_the_port_setting(
     *,
     enabled: bool,
 ) -> None:
-    """The broker, and with it every Agent Keys surface, is enabled exactly when its port setting is set."""
+    """The broker, and with it every Agent Keys surface, is enabled unless its port setting turns it off."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
