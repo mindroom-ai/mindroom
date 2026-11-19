@@ -23,6 +23,7 @@ import nio
 import yaml
 
 from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
+from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.constants import CONVERSATION_CONTENT_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.contacts.parties import (
     agent_party,
@@ -159,6 +160,7 @@ def _validate_side_tools(
     """Return the tools one side of a contact offers, refusing any the agent lacks or a contact may never offer."""
     if tools is None:
         return None
+    tools = canonical_tool_names(tools)
     allowed = contact_tool_choices(config, runtime_paths, agent_name)
     if outside := [name for name in tools if name not in allowed]:
         msg = f"Not among the tools a contact may use: {', '.join(outside)}; allowed: {', '.join(allowed)}"

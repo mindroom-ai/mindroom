@@ -15,12 +15,13 @@ from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
-from mindroom.delegation.personas import inline_persona
+from mindroom.delegation.personas import follow_up_refusal, inline_persona
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
 from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.agent_tool_helpers import toolkit_offers
 from tests.delegation_helpers import (
@@ -284,6 +285,20 @@ async def test_follow_up_after_caller_lost_a_tool_is_refused(
 
     assert refusal in result
     assert authored_prompts(harness.model) == ["P"]
+
+
+def test_a_stored_selector_under_an_old_toolkit_name_is_refused_on_follow_up() -> None:
+    """A subagent saved with file or coding is not read as filesystem: its follow-up asks for a new subagent."""
+    config, registry = _config(tools=("filesystem", "shell")), builtin_tool_registry()
+    snapshot = {"source_kind": "inline", "source_name": "", "system_prompt": "P", "skills": None, "knowledge": None}
+
+    for stored, missing in ((["coding"], "coding"), (["shell", "file.read_file"], "file.read_file")):
+        persona = SubagentPersona.from_dict({**snapshot, "tools": stored})
+        refusal = follow_up_refusal(persona, "leader", config, registry, delegation_depth=0)
+        assert refusal == f"Subagent tool '{missing}' is no longer available to you; start a new subagent."
+    fresh = inline_persona("P", ["shell", "coding.read_file"], None, None)
+    assert fresh.tools == ("shell", "filesystem.read_file")
+    assert follow_up_refusal(fresh, "leader", config, registry, delegation_depth=0) is None
 
 
 @pytest.mark.asyncio

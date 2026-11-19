@@ -125,7 +125,7 @@ def _contact(contact_id: str, requester: ContactParty, target: ContactParty, **f
         "target": target,
         "reason": "Plan the dinner",
         "requester_side": ContactSide(rules="Alice's secret rule"),
-        "target_side": ContactSide(rules="Bob's secret rule", tools=["calculator", "file"]),
+        "target_side": ContactSide(rules="Bob's secret rule", tools=["calculator", "filesystem"]),
         "origin_room_id": "!aliceroom:example.org",
         "origin_thread_id": "$ask",
         "notice_event_id": "$notice",
@@ -263,6 +263,15 @@ def test_update_changes_only_the_viewers_side(portal: dict[str, Any]) -> None:
     (stored,) = read_contacts(portal["paths"]).contacts
     assert stored.target_side == ContactSide(rules="Only dinner.", tools=["calculator", "shell"])
     assert stored.requester_side == ContactSide(rules="Alice's secret rule")
+
+
+def test_update_takes_the_filesystem_toolkit_by_its_other_names(portal: dict[str, Any]) -> None:
+    """A fresh choice naming file or coding is the agent's filesystem toolkit, stored once under that name."""
+    _seed(portal["paths"], _contact("ab", _agent("mind_alice", ALICE), _agent("mind_bob", BOB), status="active"))
+    response = _post(portal, "bob", "ab/update", {"tools": ["coding", "calculator", "file"]})
+    assert response.status_code == 200, response.text
+    assert response.json()["contacts"][0]["effective_tools"] == ["filesystem", "calculator", "matrix_message"]
+    assert read_contacts(portal["paths"]).contacts[0].target_side.tools == ["filesystem", "calculator"]
 
 
 def test_update_refuses_tools_a_contact_may_not_use(portal: dict[str, Any]) -> None:

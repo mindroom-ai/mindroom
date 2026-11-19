@@ -182,18 +182,22 @@ def test_current_filesystem_settings_load_under_every_spelling(tmp_path: Path) -
 
 
 def test_tool_name_lists_take_every_spelling() -> None:
-    """worker_tools, contacts, listening, background-job exclusions, edits, and grants read file and coding."""
+    """worker_tools, listening, background-job exclusions, and personal agent edits read file and coding."""
     config = _config(["filesystem", "shell"], worker_tools=["shell", "file", "python", "coding"])
     assert config.agents["a"].worker_tools == ["shell", "filesystem", "python"]
     assert DefaultsConfig(worker_tools=["file", "coding"]).worker_tools == ["filesystem"]
-    assert ContactsConfig(tools=["coding"]).tools == ["filesystem"]
     assert ListenConfig(rooms=["lobby"], tools=["memory", "coding.read_file"]).tools == [
         "memory",
         "filesystem.read_file",
     ]
     assert BackgroundToolJobsConfig(exclude_toolkits=["file"]).exclude_toolkits == ["filesystem"]
     assert GeneratedAgentEdits(tools=["file", "shell"]).tools == ["filesystem", "shell"]
-    assert ContactSide.model_validate({"tools": ["coding", "file"]}).tools == ["filesystem"]
+
+
+def test_stored_and_configured_grants_under_an_old_name_are_kept_as_written() -> None:
+    """A stored contact grant and a configured contact default keep their spelling, so they match no toolkit."""
+    assert ContactSide.model_validate({"tools": ["coding", "file"]}).tools == ["coding", "file"]
+    assert ContactsConfig(tools=["coding"]).tools == ["coding"]
 
 
 def test_subagent_tools_take_every_spelling() -> None:

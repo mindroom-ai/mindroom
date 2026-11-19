@@ -21,7 +21,6 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.models import split_model_reference
 from mindroom.config.resolution import authored_tool_entries
-from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
@@ -842,9 +841,7 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
         raw_allowed = [raw_allowed]
     if not isinstance(raw_allowed, list):
         return frozenset()
-    return frozenset(
-        canonical_tool_name(tool.strip()) for tool in raw_allowed if isinstance(tool, str) and tool.strip()
-    )
+    return frozenset(tool.strip() for tool in raw_allowed if isinstance(tool, str) and tool.strip())
 
 
 async def _run_room_agent_turn(context: ToolRuntimeContext, build: AgentBuild, prompt: str) -> object:

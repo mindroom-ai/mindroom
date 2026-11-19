@@ -200,6 +200,25 @@ async def test_participant_may_use_any_configured_model(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_a_preapproval_under_an_old_toolkit_name_stays_dormant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """allowed_tools naming file or coding pre-approves nothing; a participant may still name the toolkit by them."""
+    spec = _spec([{"id": "reader", "system_prompt": "Read.", "tools": ["coding"]}], tools=["file"])
+    statuses = {}
+    for allowed in (["coding", "file"], ["filesystem"]):
+        tools = [{"dynamic_workflow": {"allowed_tools": allowed}}, "filesystem"]
+        workflow = _Workflow(tmp_path / allowed[0], monkeypatch, _config(tools=tools))
+        with workflow.context():
+            statuses[allowed[0]] = json.loads(await workflow.tools.validate_workflow(spec))
+
+    assert statuses["coding"]["status"] == "error"
+    assert "participant 'reader' tool 'filesystem' is not pre-approved" in statuses["coding"]["message"]
+    assert statuses["filesystem"]["status"] == "ok", statuses["filesystem"]
+
+
+@pytest.mark.asyncio
 async def test_unapproved_participant_tool_is_refused_before_saving(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

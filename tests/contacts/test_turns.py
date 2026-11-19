@@ -264,6 +264,18 @@ def test_a_contact_turn_offers_the_chosen_tools_the_agent_still_has_plus_matrix_
     )
 
 
+def test_a_stored_grant_under_an_old_toolkit_name_stays_dormant(tmp_path: Path) -> None:
+    """A grant saved as file or coding is not read as filesystem: it offers nothing until its owner grants it anew."""
+    config, paths = _setup(tmp_path, tools=("coding", "calculator"))
+
+    assert _tools(config, paths, ContactSide(tools=["coding"])) == ("matrix_message",)
+    assert _tools(config, paths, ContactSide(tools=["file", "calculator", "coding"])) == (
+        "calculator",
+        "matrix_message",
+    )
+    assert _tools(config, paths, ContactSide(tools=["filesystem"])) == ("filesystem", "matrix_message")
+
+
 def test_a_plugin_tool_that_needs_a_room_is_never_offered_in_a_contact_turn(tmp_path: Path) -> None:
     """A plugin's room tool could post into the contact room without the policy, like a built-in room tool."""
     plugin = tmp_path / "plugins" / "room_poster"
