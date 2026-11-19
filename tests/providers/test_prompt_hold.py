@@ -340,7 +340,7 @@ async def test_a_prompt_that_inlines_a_memory_file_is_told_as_an_update_like_any
 async def test_a_changed_turn_system_message_is_told_like_the_first_and_a_changed_count_restarts_the_hold(
     conversation: _Conversation,
 ) -> None:
-    """The leading system messages are diffed as one text: one update tells a change to either of them."""
+    """Each leading system message is diffed: one update tells a change to either of them."""
     second, _sent = await conversation.told()
     third = [*_system(_B, "Today is Thursday."), *second[2:], _answer(), _user("three")]
     sent = await conversation.send(third)
@@ -543,6 +543,65 @@ def test_a_change_among_repeated_lines_that_no_passage_names_once_is_not_told() 
     fresh = held.replace("- Run the tests.", "- Run the linter.", 2).replace("- Run the linter.", "- Run the tests.", 1)
     assert fresh != held
     assert prompt_hold._update_text((held,), (fresh,)) is None
+
+
+@pytest.mark.parametrize(
+    ("held", "fresh"),
+    [
+        # The first hunk makes a second ``a`` in the lines above the second hunk.
+        (("x", "a"), ("x\na", "b")),
+        # The second hunk's ``a`` stands in the first held message too.
+        (("a\nx", "a"), ("x", "b")),
+    ],
+)
+def test_a_hunk_whose_lines_another_system_message_holds_is_not_told(
+    held: tuple[str, ...],
+    fresh: tuple[str, ...],
+) -> None:
+    """Each old side is read in every held message, and in every message the hunks above it made."""
+    assert prompt_hold._update_text(held, fresh) is None
+
+
+def test_a_passage_that_stands_once_in_each_message_is_told_though_two_messages_join_to_repeat_it() -> None:
+    """No message ends where the next begins on the wire, so a passage counts only within one."""
+    held, fresh = ("A\nB\nA", "B\nA"), ("A\nX\nA", "B\nA")
+    update = prompt_hold._update_text(held, fresh)
+    assert update is not None
+    # Only the first message changed, and its hunk applies within it.
+    assert _applied(held[0], update) == fresh[0]
+
+
+def test_an_unchanged_system_message_is_never_diffed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Diffing is quadratic in a message's lines, so only a message that changed is diffed."""
+    diffed: list[list[str]] = []
+    matcher = prompt_hold.SequenceMatcher
+
+    def recording(junk: None, old: list[str], new: list[str], **kwargs: bool) -> object:
+        diffed.append(old)
+        return matcher(junk, old, new, **kwargs)
+
+    monkeypatch.setattr(prompt_hold, "SequenceMatcher", recording)
+    stable = "\n".join(f"- Note {number}." for number in range(50))
+    assert prompt_hold._update_text((stable, "Monday"), (stable, "Tuesday")) is not None
+    assert diffed == [["Monday"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("held", "fresh"),
+    [(["X", "", "Z"], ["X", "Y", "Z"]), (["X", "Z", ""], ["X", "Z", "Y"]), (["X", "Y", "Z"], ["X", "", "Z"])],
+)
+async def test_a_system_message_that_turns_empty_or_stops_being_empty_restarts_the_hold(
+    held: list[str],
+    fresh: list[str],
+    conversation: _Conversation,
+) -> None:
+    """A route leaves an empty system text out, so an update could not say where its lines go."""
+    first = [*(Message(role="system", content=text) for text in held), _user("one")]
+    await conversation.send(first)
+    edited = [*(Message(role="system", content=text) for text in fresh), *first[3:], _answer(), _user("two")]
+    assert await conversation.send(edited) == edited
+    assert conversation.state()["updates"] == []
 
 
 @pytest.mark.asyncio

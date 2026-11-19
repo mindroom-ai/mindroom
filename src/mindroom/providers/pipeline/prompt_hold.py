@@ -3,8 +3,8 @@
 The system prompt leads every request, so a changed one makes the provider read the whole conversation again. A
 request that names its conversation's hold (``ModelRequest.prompt_hold``) to a route that takes a system prompt
 update (``Capabilities.system_updates``) is therefore sent the system prompt the conversation last sent, and a change
-to its leading system messages, read as one text, such as an edited ``AGENTS.md`` or ``MEMORY.md``, as a system prompt
-update: a system message after the newest user message, which every later request sends again in the same place. So
+to any of its leading system messages, such as an edited ``AGENTS.md`` or ``MEMORY.md``, as a system prompt update:
+a system message after the newest user message, which every later request sends again in the same place. So
 a line deleted from the prompt, such as a forgotten memory, stays quoted in the update until the hold starts over.
 
 One rule decides it, here and nowhere else: a request is sent the held prompt and its updates only if the file was
@@ -99,24 +99,25 @@ def _update_text(held: tuple[str, ...], fresh: tuple[str, ...]) -> str | None:
 
     It states the whole difference, so the newest update alone says what is in force: a unified diff without line
     numbers, whose hunks quote each change with the lines around it and are split by a bare ``@@`` line. Each text
-    is diffed on its own, so no hunk spans two. Every hunk's old side stands exactly once in the lines of ``held``,
-    and in the lines the hunks above it made of them, so the update and ``held`` give ``fresh`` and no other text,
-    read either way; a change that cannot be told so is not told.
+    that changed is diffed on its own, so no hunk spans two. Every hunk's old side stands exactly once within the
+    held texts, and within the texts the hunks above it made of them (a passage never runs from one text into the
+    next), so the update and ``held`` give ``fresh`` and no other text, read either way; a change that cannot be
+    told so is not told.
     """
     if held == fresh:
         return _UPDATE_WITHDRAWN
     texts = [(old.split("\n"), new.split("\n")) for old, new in zip(held, fresh, strict=True)]
-    whole = [line for old, _ in texts for line in old]
     body: list[str] = []
     for at, (old, new) in enumerate(texts):
-        # The lines before this text, as the hunks above it made them, and the held lines after it.
-        above = [line for _, done in texts[:at] for line in done]
-        below = whole[sum(len(lines) for lines, _ in texts[: at + 1]) :]
+        if old == new:
+            continue
         for group in SequenceMatcher(None, old, new, autojunk=False).get_grouped_opcodes(_CONTEXT_LINES):
             before = old[group[0][1] : group[-1][2]]
-            # Read in ``held``, and in what the hunks above it made of ``held``.
-            for lines in (whole, [*above, *new[: group[0][3]], *old[group[0][1] :], *below]):
-                if sum(lines[i : i + len(before)] == before for i in range(len(lines) - len(before) + 1)) != 1:
+            # Read in ``held``, and in what the hunks above it made of ``held``: any later held text is read in both.
+            made = [*(done for _, done in texts[:at]), [*new[: group[0][3]], *old[group[0][1] :]]]
+            for read in ([lines for lines, _ in texts], made):
+                spans = (lines[i : i + len(before)] for lines in read for i in range(len(lines) - len(before) + 1))
+                if sum(span == before for span in spans) != 1:
                     return None
             body += ["@@"] if body else []
             for tag, i1, i2, j1, j2 in group:
@@ -182,6 +183,8 @@ def _continued(state: _State, route: object, system: Sequence[Message], rest: Se
     if (
         state["route"] != route
         or len(held) != len(system)
+        # A route leaves an empty text out, where an update could not say its lines go.
+        or any(bool(text) != bool(now) for text, now in zip(held, fresh, strict=True))
         or first is None
         or first != state["first"]
         or any(
