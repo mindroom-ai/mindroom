@@ -19,7 +19,6 @@ from mindroom.agent_reply_membership import agent_reply_membership_policy_change
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.store import contact_room_ids
 from mindroom.entity_resolution import MissingManagedEntityAccountError, current_entity_id
 from mindroom.logging_config import get_logger
@@ -174,7 +173,7 @@ async def _admitted_agents(
     """Return each agent joined to the room that ``requester_id`` may use there, by name and user ID, in config order.
 
     It leaves out an agent without its account or whose own grant rooms are unresolved, and answers 503 while the
-    router's rooms are unknown and an agent's access waits on them.
+    bots' rooms are unknown and an agent's access waits on them.
     """
     joined_agents = [
         (name, user_id)
@@ -184,7 +183,7 @@ async def _admitted_agents(
     if not joined_agents:
         return []
     await _bring_memberships_current(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
-    # Without the router's rooms every room grant is unresolved, and an empty answer would read as no agents.
+    # Without the bots' rooms every room grant is unresolved, and an empty answer would read as no agents.
     rooms_known = memberships.knows_joined_rooms()
     admitted: list[tuple[str, str]] = []
     for name, user_id in joined_agents:
@@ -376,16 +375,15 @@ async def room_agent_workspaces(
     """
     snapshot = bind_current_request_snapshot(connection)
     config = snapshot.runtime_config
-    runtime = ensure_app_state(connection.app).embedded
-    router = runtime.agent_bot(ROUTER_AGENT_NAME) if runtime is not None else None
+    state = ensure_app_state(connection.app)
+    runtime = state.embedded
+    bots = [bot for bot in (state.room_bots or {}).values() if bot.running and bot.client is not None]
     if (
         config is None
         or runtime is None
-        or router is None
-        or router.client is None
-        or not router.running
+        or not bots
         # The runtime's grants follow its own config; a refresh under another membership policy would replace them.
-        or agent_reply_membership_policy_changed(router.config, config)
+        or any(agent_reply_membership_policy_changed(bot.config, config) for bot in bots)
     ):
         raise HTTPException(503, _ACCESS_UNAVAILABLE)
     runtime_paths = snapshot.runtime_paths

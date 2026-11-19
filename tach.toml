@@ -8606,7 +8606,6 @@ path = "mindroom.room_agent_access"
 depends_on = [
     "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
-    "mindroom.constants",
     "mindroom.contacts.store",
     "mindroom.entity_resolution",
     "mindroom.runtime_resolution",
@@ -8699,7 +8698,6 @@ visibility = ["mindroom.bot"]
 path = "mindroom.orchestration.computer_runtime"
 depends_on = [
     "mindroom.api.app_state",
-    "mindroom.constants",
     "mindroom.room_agent_access",
     "mindroom.tool_system.worker_routing",
     "mindroom.worker_computer.sessions",

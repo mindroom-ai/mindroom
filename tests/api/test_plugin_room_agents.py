@@ -127,9 +127,9 @@ class _Room:
             config_lifecycle.ApiSnapshot(1, self.paths, runtime_config=self.config),
         )
         bind_embedded_runtime(self.app, self.runtime.embedded_runtime())
-        # Another running bot in the room answers room reads while the router is down.
-        bots = {ROUTER_AGENT_NAME: self.router, "other": SimpleNamespace(client=self.client, running=True)}
-        bind_room_members(self.app, bots)  # type: ignore[arg-type]
+        # Another running bot in the room answers room reads and agent access while the router is down.
+        self.other = SimpleNamespace(client=self.client, running=True, config=config)
+        bind_room_members(self.app, {ROUTER_AGENT_NAME: self.router, "other": self.other})  # type: ignore[arg-type]
 
     def serve(self, config: Config) -> None:
         """Serve ``config`` from the API, as a config save does."""
@@ -138,7 +138,7 @@ class _Room:
 
     def apply(self, config: Config) -> None:
         """Run ``config`` in the runtime, as a reload does once the API serves it."""
-        self.runtime.config = self.router.config = config
+        self.runtime.config = self.router.config = self.other.config = config
 
     def refreshes(self) -> int:
         """How many grant refreshes the router's client has served."""
@@ -691,12 +691,16 @@ async def test_a_config_save_that_removes_access_shows_on_the_next_request(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_room_without_a_running_router_answers_503(tmp_path: Path) -> None:
-    """The access check refreshes grants through the router, so without it nobody is admitted or refused."""
+async def test_agent_access_answers_without_the_owner_account_and_503_without_any_bot(tmp_path: Path) -> None:
+    """Any running bot serves the access check; with none running nobody is admitted or refused."""
     room = _room(tmp_path, _agents())
+    reader = await room._reader(ALICE)
+    listed = [agent.name for agent in await reader.agents()]
     room.router.running = False
+    assert [agent.name for agent in await reader.agents()] == listed != []
 
-    assert await _status(room.agents(ALICE)) == (503, "Agent access is unavailable; try again.")
+    room.other.running = False
+    assert await _status(reader.agents()) == (503, "Agent access is unavailable; try again.")
 
 
 @pytest.mark.asyncio
