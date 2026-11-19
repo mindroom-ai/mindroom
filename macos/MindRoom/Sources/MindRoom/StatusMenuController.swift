@@ -148,10 +148,9 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     @objc private func openSettings() { showWindow(.settings) }
     @objc private func openChat() { runner.run(.openHostedChat) }
     @objc private func openChatApp() {
-        chatApp.refresh()
-        // An install shows its progress on Overview, so it is never silent.
-        if chatApp.installedURL == nil { showWindow(.overview) }
         chatApp.openOrInstall()
+        // Overview shows an install's progress and why a copy was not opened: neither is silent.
+        if chatApp.installedURL == nil || chatApp.error != nil { showWindow(.overview) }
     }
     @objc private func openDashboard() { runner.run(.openDashboard) }
     @objc private func refreshStatus() { runner.refreshStatus() }

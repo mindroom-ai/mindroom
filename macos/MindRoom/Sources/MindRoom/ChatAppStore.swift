@@ -11,36 +11,41 @@ final class ChatAppStore: ObservableObject {
     @Published private(set) var error: String?
 
     private let installer: ChatAppInstaller
-    private let locate: () -> URL?
-    private let open: (URL) -> Void
+    private let verifyInstalled: (URL) throws -> Void
+    private let open: (URL, @escaping (Error?) -> Void) -> Void
 
     init(
         installer: ChatAppInstaller = ChatAppInstaller(),
-        locate: @escaping () -> URL? = {
-            NSWorkspace.shared.urlForApplication(withBundleIdentifier: ChatAppSignature.bundleIdentifier)
-        },
-        open: @escaping (URL) -> Void = { NSWorkspace.shared.openApplication(at: $0, configuration: .init()) }
+        verifyInstalled: @escaping (URL) throws -> Void = ChatAppSignature.verifyInstalled,
+        open: @escaping (URL, @escaping (Error?) -> Void) -> Void = { app, done in
+            NSWorkspace.shared.openApplication(at: app, configuration: .init()) { _, error in done(error) }
+        }
     ) {
         self.installer = installer
-        self.locate = locate
+        self.verifyInstalled = verifyInstalled
         self.open = open
         refresh()
     }
 
-    /// A copy from any source counts (disk image, Homebrew, App Store): they share the bundle
-    /// identifier. A copy this app just installed counts before Launch Services has noticed it.
+    /// Finds a copy without checking it: `openOrInstall` does that before it opens one.
     func refresh() {
-        let found = [locate(), installedURL].compactMap { $0 }
-            .first { FileManager.default.fileExists(atPath: $0.path) }
+        let found = installer.existingCopy()
         if found != installedURL { installedURL = found }
     }
 
     /// Opens MindRoom Chat, installing it first when this Mac has none. Only a click calls this.
     func openOrInstall() {
         refresh()
-        if let installedURL { return open(installedURL) }
         guard progress == nil else { return }
         error = nil
+        if let installedURL {
+            // A bundle identifier or a path only finds a candidate; its signature says whose app it is.
+            guard (try? verifyInstalled(installedURL)) != nil else {
+                error = "\(installedURL.path) is not the MindRoom Chat that MindRoom publishes, so it was not opened. Remove it to install MindRoom Chat here."
+                return
+            }
+            return launch(installedURL)
+        }
         progress = "Starting…"
         Task {
             do {
@@ -48,11 +53,18 @@ final class ChatAppStore: ObservableObject {
                     Task { @MainActor in if self.progress != nil { self.progress = stage } }
                 }
                 installedURL = installed
-                open(installed)
+                launch(installed)
             } catch {
                 self.error = error.localizedDescription
             }
             progress = nil
+        }
+    }
+
+    private func launch(_ app: URL) {
+        open(app) { failure in
+            guard let failure else { return }
+            Task { @MainActor in self.error = "MindRoom Chat could not be opened: \(failure.localizedDescription)" }
         }
     }
 }

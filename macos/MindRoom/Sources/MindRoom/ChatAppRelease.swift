@@ -6,6 +6,12 @@ enum ChatAppRelease {
     /// The image's name on a release, then the name older releases gave it.
     private static let imageNames = ["MindRoom-Chat.dmg", "MindRoom.dmg"]
     private static let downloads = "https://github.com/mindroom-ai/mindroom-chat/releases/download/"
+    private static let hosts: Set = ["api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
+
+    /// GitHub over HTTPS: where the release list and the image, redirects included, may come from.
+    static func isGitHub(_ url: URL?) -> Bool {
+        url?.scheme == "https" && hosts.contains(url?.host ?? "")
+    }
 
     private struct Release: Decodable {
         struct Asset: Decodable {
@@ -31,5 +37,15 @@ enum ChatAppRelease {
             }
         }
         return nil
+    }
+}
+
+/// Stops at a redirect that leaves GitHub; the caller then sees the redirect, not a download.
+final class GitHubRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(ChatAppRelease.isGitHub(request.url) ? request : nil)
     }
 }
