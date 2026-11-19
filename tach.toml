@@ -4467,7 +4467,7 @@ visibility = ["mindroom.desktop.protocol"]
 
 [[modules]]
 path = "mindroom.desktop.accessibility"
-depends_on = []
+depends_on = ["mindroom.desktop.input"]
 
 [[modules]]
 path = "mindroom.desktop.provider"

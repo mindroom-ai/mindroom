@@ -120,13 +120,14 @@ struct DesktopAuthorityStatus: Codable, Equatable {
     let controlAvailable: Bool
     let leaseRemainingSeconds: Double
     let leaseExpiresAtMilliseconds: Double?
-    let emergencyStopLatched: Bool
+    /// "computer" while live control reaches every app and the screen; otherwise only the saved apps.
+    var controlScope: String?
 
     enum CodingKeys: String, CodingKey {
         case controlAvailable = "control_available"
         case leaseRemainingSeconds = "lease_remaining_seconds"
         case leaseExpiresAtMilliseconds = "lease_expires_at_ms"
-        case emergencyStopLatched = "emergency_stop_latched"
+        case controlScope = "control_scope"
     }
 }
 
@@ -303,8 +304,7 @@ struct DesktopStatus: Codable, Equatable {
         authority: DesktopAuthorityStatus(
             controlAvailable: false,
             leaseRemainingSeconds: 0,
-            leaseExpiresAtMilliseconds: nil,
-            emergencyStopLatched: false
+            leaseExpiresAtMilliseconds: nil
         ),
         permissions: DesktopPermissionsStatus(
             accessibility: DesktopPermissionStatus(state: "unknown", canRequest: false, recovery: nil),

@@ -157,7 +157,7 @@ The menu bar shows Command waiting with Review Command…, which opens the card 
 Approvals and auto-approval are never saved.
 
 Ordinary setup mutations are serialized and the stdio server admits at most four concurrently queued regular requests.
-Stop has a separate single request lane; status, control and shell revoke, shell decisions and grants, handle kills, and emergency reset remain available while a login, pairing, browser, or stop request is pending.
+Stop has a separate single request lane; status, control and shell revoke, shell decisions and grants, and handle kills remain available while a login, pairing, browser, or stop request is pending.
 Excess requests receive an immediate retryable `busy` response.
 A durable transport or bridge worker failure fences admission and control before its peer is cancelled.
 

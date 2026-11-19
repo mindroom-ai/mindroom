@@ -51,8 +51,9 @@ _IMMEDIATE_NATIVE_ACTIONS = frozenset(
     {
         "status",
         "dashboard_configuration",
+        # Grant shares revoke's ordered lane, so a revoke sent after a grant always lands after it.
+        "grant_control",
         "revoke_control",
-        "reset_emergency_stop",
         "decide_shell",
         "grant_shell",
         "revoke_shell",
@@ -67,9 +68,8 @@ class _NativeBridgeRuntimeProtocol(Protocol):
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
     def status(self) -> dict[str, object]: ...
-    def grant_control(self, duration_seconds: int) -> dict[str, object]: ...
+    def grant_control(self, duration_seconds: int | None = None, *, computer: bool = False) -> dict[str, object]: ...
     def revoke_control(self) -> dict[str, object]: ...
-    def reset_emergency_stop(self) -> dict[str, object]: ...
     def decide_shell(
         self,
         command_id: str,
@@ -158,6 +158,9 @@ class NativeDesktopHost:
         config = self._config
         session_state, session_identity = _saved_session_identity(self._runtime_paths)
         runtime_status = self._runtime.status() if self._runtime is not None else {}
+        if isinstance(opened := runtime_status.get("session"), dict):
+            # A running bridge keeps the session it opened, whatever a later login saved.
+            session_state, session_identity = "ready", cast("dict[str, str]", opened)
         gui_mode = str(runtime_status.get("gui_mode", "stopped"))
         bridge_state = (
             gui_mode if gui_mode in {"stopped", "observe_only", "control", "stopping", "faulted"} else "faulted"
@@ -196,7 +199,7 @@ class NativeDesktopHost:
                 "control_available": bool(runtime_status.get("control_available", False)),
                 "lease_remaining_seconds": runtime_status.get("lease_remaining_seconds", 0),
                 "lease_expires_at_ms": runtime_status.get("lease_expires_at_ms"),
-                "emergency_stop_latched": bool(runtime_status.get("emergency_stop_latched", False)),
+                "control_scope": runtime_status.get("control_scope", "saved_apps"),
             },
             "permissions": _permission_status(),
             "shell": runtime_status.get(
@@ -459,10 +462,16 @@ class NativeDesktopHost:
                 self._helper_state = "running"
             return {"status": self.status()}
         if action == "grant_control":
-            _expect_keys(parameters, {"duration_seconds"})
+            # The whole computer is granted only until revoked; a duration grants only the saved apps.
+            computer = (
+                parameters == {"until_revoked": True, "scope": "computer"} and parameters["until_revoked"] is True
+            )
+            if not computer:
+                _expect_keys(parameters, {"duration_seconds"})
             try:
                 self._require_runtime().grant_control(
-                    _required_int(parameters, "duration_seconds", minimum=60, maximum=3600),
+                    None if computer else _required_int(parameters, "duration_seconds", minimum=60, maximum=3600),
+                    computer=computer,
                 )
             except ValueError as exc:
                 raise NativeProtocolError("control_denied", str(exc)) from exc
@@ -470,13 +479,6 @@ class NativeDesktopHost:
         if action == "revoke_control":
             _expect_keys(parameters, set())
             self._require_runtime().revoke_control()
-            return {"status": self.status()}
-        if action == "reset_emergency_stop":
-            _expect_keys(parameters, set())
-            try:
-                self._require_runtime().reset_emergency_stop()
-            except ValueError as exc:
-                raise NativeProtocolError("control_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "decide_shell":
             _expect_keys(
@@ -627,6 +629,7 @@ class NativeBridgeRuntime:
         self._runtime_paths, self._config = runtime_paths, config
         self._deps = deps
         self._session: DesktopBridgeSession | None = None
+        self._opened_session: dict[str, str] = {}
         self._supervisor: asyncio.Task[None] | None = None
         self._fault: str | None = None
 
@@ -641,6 +644,11 @@ class NativeBridgeRuntime:
             _matrix_http_headers_path(self._runtime_paths),
             cloudflare_access=session.cloudflare_access,
         )
+        self._opened_session = {
+            "homeserver": session.homeserver,
+            "user_id": session.user_id,
+            "device_id": session.device_id,
+        }
         self._session = await start_desktop_bridge_session(
             self._config,
             session,
@@ -668,14 +676,17 @@ class NativeBridgeRuntime:
         session = self._live_session()
         if session is not None:
             browser = session.browser
-            return {**session.bridge.local_status(), "browser_connected": browser is not None and browser.running}
+            return {
+                **session.bridge.local_status(),
+                "browser_connected": browser is not None and browser.running,
+                "session": self._opened_session,
+            }
         if self._fault is not None:
             return {
                 "gui_mode": "faulted",
                 "control_available": False,
                 "lease_remaining_seconds": 0,
                 "lease_expires_at_ms": None,
-                "emergency_stop_latched": False,
                 "active_action": None,
                 "last_error": NativeProtocolError(
                     "internal_error",
@@ -687,17 +698,13 @@ class NativeBridgeRuntime:
             }
         return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
 
-    def grant_control(self, duration_seconds: int) -> dict[str, object]:
-        """Grant a bounded local control lease."""
-        return self._required_bridge().grant_local_control(duration_seconds)
+    def grant_control(self, duration_seconds: int | None = None, *, computer: bool = False) -> dict[str, object]:
+        """Grant a bounded lease over the saved apps, or control of the whole computer until revoked or stopped."""
+        return self._required_bridge().grant_local_control(duration_seconds, computer=computer)
 
     def revoke_control(self) -> dict[str, object]:
         """Revoke new local control actions."""
         return self._required_bridge().revoke_local_control()
-
-    def reset_emergency_stop(self) -> dict[str, object]:
-        """Reset the local emergency latch while idle."""
-        return self._required_bridge().reset_local_emergency_stop()
 
     def decide_shell(
         self,

@@ -930,7 +930,6 @@ async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
     assert "every locally allowed requester and agent" in output
     assert "for 5 minutes" in output
     assert "observe-only" not in output
-    assert "emergency stop" not in output
 
 
 @pytest.mark.asyncio
