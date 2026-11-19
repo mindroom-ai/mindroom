@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import threading
 import unicodedata
-from contextlib import AbstractContextManager, contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from glob import has_magic
 from pathlib import Path
@@ -444,28 +444,32 @@ def _line_ranges(text: str, spans: list[tuple[int, int]]) -> str:
     return label + ", ".join(words)
 
 
-def _closest_line_hint(content: str, old_text: str) -> str:
-    """Name the file's line most like old_text's first non-blank line, or return nothing."""
-    first = next((line.strip() for line in old_text.splitlines() if line.strip()), "")
+def _not_found_hint(content: str, edit: _Edit) -> str:
+    """Name the lines most like old_text's first non-blank line."""
+    first = next((line.strip() for line in edit.old_text.splitlines() if line.strip()), "")
     lines = content.splitlines()
     stripped = [line.strip() for line in lines]
-    close = difflib.get_close_matches(first, stripped, n=1, cutoff=0.6) if first else []
-    if not close:
-        return ""
-    index = stripped.index(close[0])
-    return f"\nClosest line {index + 1}: {lines[index].rstrip()[:_MAX_HINT_CHARS]}"
+    close = difflib.get_close_matches(first, list(dict.fromkeys(stripped)), n=3, cutoff=0.6) if first else []
+    cut = _MAX_HINT_CHARS if len(close) == 1 else _MAX_HINT_CHARS // 2
+    hits = [f"{index + 1}: {lines[index].rstrip()[:cut]}" for index in sorted(map(stripped.index, close))]
+    return f"\nClosest lines: {' | '.join(hits)}" if len(hits) > 1 else f"\nClosest line {hits[0]}" if hits else ""
 
 
 def _edits_argument(edits: object, legacy: dict[str, object]) -> list[_Edit] | str:
     """Return the edits a call asked for, a call in the old flat shape as one edit, or why not."""
+    if isinstance(edits, str) and edits.strip():
+        try:
+            edits = json.loads(edits)
+        except (ValueError, RecursionError):
+            return (
+                "edits must be a JSON array, but it arrived as a string that is not valid JSON "
+                f"(it starts {edits[:30]!r}). Send edits as an array: {_EDITS_SHAPE.removeprefix('Pass ')}"
+            )
     if legacy:
         # Calls written for the old flat shape send one old_text and new_text, which the schema no longer shows.
         if edits is not _OMITTED or set(legacy) != {"old_text", "new_text"}:
             return f"edit_file takes path and edits, not {', '.join(sorted(legacy))}. {_EDITS_SHAPE}"
         edits = [legacy]
-    if isinstance(edits, str):
-        with suppress(ValueError):
-            edits = json.loads(edits)
     if not edits or edits is _OMITTED:
         return f"edits is empty. {_EDITS_SHAPE}"
     try:
@@ -486,7 +490,7 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
             return f"{f'edits[{index}].' if many else ''}old_text is empty."
         matches = _find_all_matches(content, edit.old_text)
         if not matches:
-            return f"{who} not found in the file.{_closest_line_hint(content, edit.old_text)}"
+            return f"{who} not found in the file.{_not_found_hint(content, edit)}"
         if len(matches) > 1 and not edit.replace_all:
             lines = _line_ranges(content, [(match.start, match.end) for match in matches])
             return (
@@ -498,7 +502,13 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
     for (first, first_index), (second, second_index) in itertools.pairwise(spans):
         if second.start < first.end:
             low, high = sorted((first_index, second_index))
-            return f"edits[{low}] and edits[{high}] overlap. Merge them into one edit."
+            covers = " (a replace_all edit replaces every match of its old_text)" * (
+                edits[low].replace_all or edits[high].replace_all
+            )
+            return (
+                f"edits[{low}] and edits[{high}] overlap at {_line_ranges(content, [(second.start, min(first.end, second.end))])}{covers}. "
+                "Merge them into one edit, or make old_text more specific."
+            )
     return spans
 
 
@@ -527,7 +537,8 @@ def _apply_edits(content: str, edits: list[_Edit]) -> tuple[str, int, str] | str
         if bom and match.start == 0:
             new_text = bom + new_text.removeprefix(bom)
         parts += [text[position : match.start], new_text]
-        landed.append((match.start + shift, match.start + shift + len(new_text)))
+        if new_text != text[match.start : match.end]:
+            landed.append((match.start + shift, match.start + shift + len(new_text)))
         shift += len(new_text) - (match.end - match.start)
         position = match.end
     parts.append(text[position:])
@@ -809,7 +820,8 @@ class CodingTools(Toolkit):
 
         Copy each old_text from the current file; edits match the original, not each other's results.
         Without replace_all, old_text must match one place. Whitespace/quote differences are tolerated.
-        Edits must not overlap; merge nearby ones. If one fails, nothing is written.
+        Edits must not overlap, and a replace_all edit already covers every match; merge nearby ones.
+        If one fails, nothing is written.
 
         Args:
             path: File path, relative to working directory or absolute.

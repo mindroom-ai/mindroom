@@ -4662,7 +4662,7 @@
       },
       {
         "name": "edit_file",
-        "description": "Replace exact text in one file. Read it first.\nCopy each old_text from the current file; edits match the original, not each other's results.\nWithout replace_all, old_text must match one place. Whitespace/quote differences are tolerated.\nEdits must not overlap; merge nearby ones. If one fails, nothing is written.",
+        "description": "Replace exact text in one file. Read it first.\nCopy each old_text from the current file; edits match the original, not each other's results.\nWithout replace_all, old_text must match one place. Whitespace/quote differences are tolerated.\nEdits must not overlap, and a replace_all edit already covers every match; merge nearby ones.\nIf one fails, nothing is written.",
         "parameters": {
           "type": "object",
           "properties": {

@@ -31,8 +31,10 @@ from mindroom.path_safety import (
     resolve_base_dir_path,
     split_search_pattern,
 )
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_schema import tool_parameters, validated_entrypoint
 from mindroom.tools.file import file_tools
 
@@ -276,8 +278,70 @@ class TestEditFile:
                 {"old_text": "beta gamma", "new_text": "B"},
             ],
         )
-        assert result == "Error: edits[1] and edits[2] overlap. Merge them into one edit.\nNo changes written."
+        assert result == (
+            "Error: edits[1] and edits[2] overlap at line 1. Merge them into one edit, or make old_text more specific."
+            "\nNo changes written."
+        )
         assert (tmp_base / "overlap.py").read_text() == "alpha beta gamma\n"
+
+    def test_overlap_with_replace_all_says_it_changes_every_match(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An overlap with a replace_all edit says that edit already changes every match."""
+        (tmp_base / "cfg.py").write_text("import os\n\n\ndef get_cfg(path=None):\n    return get_cfg\n")
+        result = tools.edit_file(
+            "cfg.py",
+            [
+                {"old_text": "def get_cfg(path=None):", "new_text": "def load_config(path=None):"},
+                {"old_text": "get_cfg", "new_text": "load_config", "replace_all": True},
+            ],
+        )
+        assert result == (
+            "Error: edits[0] and edits[1] overlap at line 4 (a replace_all edit replaces every match of its old_text). "
+            "Merge them into one edit, or make old_text more specific.\nNo changes written."
+        )
+
+    def test_overlap_of_two_replace_all_edits(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Two replace_all edits that overlap get the same advice."""
+        (tmp_base / "abc.txt").write_text("alpha beta gamma\nalpha beta\nbeta gamma\n")
+        result = tools.edit_file(
+            "abc.txt",
+            [
+                {"old_text": "alpha beta", "new_text": "X", "replace_all": True},
+                {"old_text": "beta gamma", "new_text": "Y", "replace_all": True},
+            ],
+        )
+        assert result == (
+            "Error: edits[0] and edits[1] overlap at line 1 (a replace_all edit replaces every match of its old_text). "
+            "Merge them into one edit, or make old_text more specific.\nNo changes written."
+        )
+
+    def test_deeply_nested_string_edits_is_reported_not_raised(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A string edits too deeply nested to decode gets the not-valid-JSON error instead of raising."""
+        result = tools.edit_file("hello.py", "[" * 100_000)
+        assert result.startswith("Error: edits must be a JSON array, but it arrived as a string that is not valid JSON")
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
+
+    def test_overlap_line_is_numbered_as_read_file_numbers_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A file whose lines end in a lone CR names the overlap's line as read_file would."""
+        (tmp_base / "cr.txt").write_bytes(b"one\rtwo three\rfour\r")
+        result = tools.edit_file("cr.txt", [*_one("two three", "x"), *_one("three", "y")])
+        assert result.startswith("Error: edits[0] and edits[1] overlap at line 2.")
+
+    def test_replace_all_of_self_overlapping_text_goes_left_to_right(self, tools: CodingTools, tmp_base: Path) -> None:
+        """replace_all replaces non-overlapping matches from left to right, as str.replace does."""
+        (tmp_base / "a.txt").write_text("aaa\n")
+        result = tools.edit_file("a.txt", [{"old_text": "aa", "new_text": "b", "replace_all": True}])
+        assert result == "Applied 1 edit to a.txt: line 1."
+        assert (tmp_base / "a.txt").read_text() == "aaa\n".replace("aa", "b")
+
+    def test_identity_edit_is_not_reported(self, tools: CodingTools, tmp_base: Path) -> None:
+        """An edit that changes nothing in a multi-edit call is left out of the reported lines."""
+        (tmp_base / "id.py").write_text("one\ntwo\nthree\n")
+        result = tools.edit_file(
+            "id.py",
+            [{"old_text": "one", "new_text": "one"}, {"old_text": "three", "new_text": "3"}],
+        )
+        assert result == "Applied 2 edits to id.py: line 3."
+        assert (tmp_base / "id.py").read_text() == "one\ntwo\n3\n"
 
     def test_one_failing_edit_writes_nothing(self, tools: CodingTools, tmp_base: Path) -> None:
         """All edits apply or none does."""
@@ -296,6 +360,32 @@ class TestEditFile:
         assert result == (
             "Error: old_text not found in the file.\nClosest line 4: def compute_total(items):\nNo changes written."
         )
+
+    def test_not_found_names_up_to_three_close_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Several near lines are listed in file order, so the meant one is among them."""
+        body = "".join(f"# filler line {i}\n" for i in range(17))
+        body += "def fetch(url, timeout=30, headers=None):\n    pass\n\n\n\n\ndef fetch_json(url, timeout=30):\n"
+        (tmp_base / "net.py").write_text(body)
+        result = tools.edit_file("net.py", _one("def fetch(url: str, timeout: int = 30) -> str:", "x"))
+        assert result == (
+            "Error: old_text not found in the file.\nClosest lines: 18: def fetch(url, timeout=30, headers=None):"
+            " | 24: def fetch_json(url, timeout=30):\nNo changes written."
+        )
+
+    def test_not_found_names_distinct_close_lines(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Repeated lines count once, so they don't crowd out other candidates."""
+        (tmp_base / "f.py").write_text("f(x=2)\nf(x=2)\nf(x=2)\nf(y=3)\n")
+        result = tools.edit_file("f.py", _one("f(x=1)", "z"))
+        assert (
+            result
+            == "Error: old_text not found in the file.\nClosest lines: 1: f(x=2) | 4: f(y=3)\nNo changes written."
+        )
+
+    def test_incidental_new_text_is_not_called_applied(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A new_text found only inside a line, or inside old_text, still gets the closest line."""
+        (tmp_base / "flag.py").write_text("flag = enabled\n")
+        result = tools.edit_file("flag.py", _one("flag = enabled  # stale comment", "enabled"))
+        assert result == "Error: old_text not found in the file.\nClosest line 1: flag = enabled\nNo changes written."
 
     def test_not_found_without_a_close_line(self, tools: CodingTools) -> None:
         """No hint when nothing in the file resembles old_text."""
@@ -327,6 +417,17 @@ class TestEditFile:
         assert tools.edit_file("hello.py", json.dumps(_one("print('hi')", "print('hey')"))).startswith("Applied 1 edit")
         assert (tmp_base / "hello.py").read_text() == "print('hey')\nprint('world')\n"
 
+    def test_edits_as_a_broken_json_string(self, tools: CodingTools, tmp_base: Path) -> None:
+        """A string that is no JSON is named as the problem, before the debris it left in other keys."""
+        edits = '[{"old_text">def upload(client, key, data):\n    retries = 3'
+        result = validated_entrypoint(tools.edit_file)(path="hello.py", edits=edits, new_text="x")
+        assert result == (
+            "Error: edits must be a JSON array, but it arrived as a string that is not valid JSON "
+            "(it starts '[{\"old_text\">def upload(client'). "
+            'Send edits as an array: edits=[{"old_text": "...", "new_text": "..."}].\nNo changes written.'
+        )
+        assert (tmp_base / "hello.py").read_text() == "print('hello')\nprint('world')\n"
+
     def test_legacy_flat_call_still_applies(self, tools: CodingTools, tmp_base: Path) -> None:
         """A call with the old flat old_text and new_text arguments works, though the schema no longer shows them."""
         result = validated_entrypoint(tools.edit_file)(
@@ -336,6 +437,11 @@ class TestEditFile:
         )
         assert result == "Applied 1 edit to hello.py: line 1."
         assert (tmp_base / "hello.py").read_text() == "print('hi')\nprint('world')\n"
+
+    def test_legacy_flat_call_passes_the_argument_gate(self, tools: CodingTools) -> None:
+        """The CLI and MCP gates check the offered schema, which must still admit the old flat call."""
+        offered = next(f for f in adapt_toolkit(tools).functions if f.name == "edit_file")
+        validate_tool_arguments(dict(offered.parameters), {"path": "hello.py", "old_text": "a", "new_text": "b"})
 
     def test_unknown_arguments_show_the_shape(self, tools: CodingTools, tmp_base: Path) -> None:
         """A call without edits gets an error that shows how to call it."""
