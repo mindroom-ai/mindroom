@@ -83,13 +83,14 @@ The service name is yours to choose; it names the stored `egress_<name>` credent
 | `google_docs` | `google_docs` | `docs.googleapis.com` bearer | None |
 | `google_tasks` | `google_tasks` | `tasks.googleapis.com` bearer; `www.googleapis.com` path `/tasks/`, bearer | None |
 | `atlassian` | `atlassian` | `api.atlassian.com` bearer | None |
+| `overleaf` | None | `git.overleaf.com` basic with username `git` | None |
 | `openai` | None | `api.openai.com` bearer | `OPENAI_API_KEY` |
 | `anthropic` | None | `api.anthropic.com` header `x-api-key` | `ANTHROPIC_API_KEY` |
 
 Placeholder values are `mindroom-brokered`.
 Presets without a connected account take an API key only.
 A preset's connected account is used only after someone allows Agent Keys to use it; see [Using a connected account](#using-a-connected-account).
-The Google presets and `atlassian` also set [`read_only`](#read-only-accounts), with `google_calendar` listing `/calendar/v3/freeBusy`, so their accounts can be allowed read only; `github` does not, because git clone and fetch read with `POST`.
+The Google presets and `atlassian` also set [`read_only`](#read-only-accounts), with `google_calendar` listing `/calendar/v3/freeBusy`, so their accounts can be allowed read only; `github` and `overleaf` do not, because git clone and fetch read with `POST`.
 
 Several Google presets share `www.googleapis.com`.
 Longest path prefix matching picks the right service, and a request to another path on that host is forwarded without injection, because the host has rules and so does not count as unmatched.
@@ -97,6 +98,27 @@ Longest path prefix matching picks the right service, and a request to another p
 Any field you set next to `preset` replaces the preset's value for that field as a whole, such as `display_name: Work GitHub`, or `placeholder_env: {}` to drop the `github` preset's `GH_TOKEN` and `GITHUB_TOKEN`.
 Fields you leave out keep coming from the preset, so MindRoom updates to a preset reach your service, and an authored `rules` list replaces all of the preset's rules.
 A service must end up with at least one rule, from `rules` or from its preset.
+
+#### Overleaf
+
+Overleaf has no API for agents, only its Git bridge at `https://git.overleaf.com/<project_id>`, which takes a Git authentication token as the password of user `git`.
+The token comes from **Git integration** in Overleaf's [Account Settings](https://www.overleaf.com/user/settings), and Git access needs an Overleaf premium plan.
+Add the `overleaf` preset, on the Agent Keys page with **Add service** or in `config.yaml`, and store the token as its key, or let the agent ask for it with [`request_secret`](#asking-in-chat).
+The agent's `git clone`, `git pull`, and `git push` then authenticate without the token in the URL or the agent's environment.
+Give the agent the bundled `overleaf` skill, which covers cloning, pushing to `master`, and Overleaf's errors:
+
+```yaml
+egress_broker:
+  services:
+    overleaf:
+      preset: overleaf
+agents:
+  writer:
+    tools: [shell, egress_credentials]
+    skills: [overleaf]
+```
+
+For a self-hosted Overleaf Server Pro, define a custom service for its host with `auth: {type: basic, username: git}`.
 
 #### Custom services
 
@@ -263,7 +285,7 @@ A service can take its secret from two sources in a worker's scope:
 
 - **API key**: a key stored for the scope, set by hand.
 - **Connected account**: an OAuth login that the user connected through MindRoom's OAuth providers (the GitHub App user login, the Google providers, Atlassian).
-  A service uses this source when it has an `oauth_provider`, which every preset except `openai` and `anthropic` sets, and only after someone allows Agent Keys to use the account; see [Using a connected account](#using-a-connected-account).
+  A service uses this source when it has an `oauth_provider`, which every preset except `openai`, `anthropic`, and `overleaf` sets, and only after someone allows Agent Keys to use the account; see [Using a connected account](#using-a-connected-account).
 
 A [GitHub App](#github-app) service uses only tokens of its App instead.
 
