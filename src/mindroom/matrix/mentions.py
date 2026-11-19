@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Any
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import current_entity_id, entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
-from mindroom.matrix.message_builder import build_message_content, markdown_fenced_code_ranges, markdown_to_html
+from mindroom.matrix.message_builder import (
+    build_message_content,
+    markdown_fenced_code_ranges,
+    markdown_to_html,
+    replace_unsendable_images,
+)
 from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_localpart
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
@@ -449,7 +454,8 @@ def _is_wrapped_in_single_backticks(text: str, start: int, end: int) -> bool:
 
 
 def _parse_visible_mentions(text: str, config: Config, runtime_paths: RuntimePaths) -> tuple[str, list[str], str]:
-    return parse_mentions_in_text(ensure_visible_tool_marker_spacing(text), config, runtime_paths)
+    visible_text = ensure_visible_tool_marker_spacing(replace_unsendable_images(text))
+    return parse_mentions_in_text(visible_text, config, runtime_paths)
 
 
 def visible_markdown(config: Config, runtime_paths: RuntimePaths, text: str) -> str:

@@ -325,6 +325,19 @@ class TestMentionParsing:
         assert content["m.relates_to"]["event_id"] == "$thread123"
         assert content["m.relates_to"]["rel_type"] == "m.thread"
 
+    def test_format_message_replaces_placeholder_images_in_body_and_html(self) -> None:
+        """A made-up image link reaches neither the body nor the formatted body, nor the live-frame Markdown."""
+        config = _make_config(_default_runtime_paths())
+        text = "Here: ![app logo](mxc://placeholder)"
+
+        content = _format_message_with_mentions(config, text)
+
+        note = "\u26a0\ufe0f Image not sent: app logo (no uploaded file)"
+        assert content["body"] == f"Here: {note}"
+        assert "<img" not in content["formatted_body"]
+        assert note in content["formatted_body"]
+        assert mentions_module.visible_markdown(config, _runtime_paths_for(config), text) == f"Here: {note}"
+
     def test_format_message_uses_persisted_actual_id(self) -> None:
         """Alias mentions should use persisted actual Matrix IDs."""
         config = _make_config(_default_runtime_paths())

@@ -4,11 +4,13 @@ import re
 from collections.abc import Callable, Mapping
 from html import escape, unescape
 from html.parser import HTMLParser
+from itertools import accumulate
 from typing import Any
 from urllib.parse import urlsplit
 
 from markdown_it import MarkdownIt
 from markdown_it.rules_block import StateBlock, heading, html_block
+from markdown_it.rules_inline import StateInline, image
 from markdown_it.token import Token
 from mdit_py_plugins.dollarmath import dollarmath_plugin
 from pygments import highlight
@@ -17,6 +19,7 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 from mindroom.matrix.event_info import UNQUOTED_REPLY_RELATION_KEY
+from mindroom.matrix.sidecar_content import validated_mxc_url
 
 # Standard Matrix-safe HTML tags.
 _GENERAL_FORMATTED_BODY_TAGS = frozenset(
@@ -494,6 +497,63 @@ def _build_markdown_renderer() -> MarkdownIt:
 
 
 _MARKDOWN_RENDERER = _build_markdown_renderer()
+
+
+_IMAGE_SCANNER = _build_markdown_renderer()
+
+
+def _recording_image(state: StateInline, silent: bool) -> bool:
+    """Parse one image like markdown-it and record where its source sits in the inline text."""
+    start = state.pos
+    if not image(state, silent):
+        return False
+    if not silent:
+        state.env.setdefault("images", []).append((start, state.pos, state.tokens[-1]))
+    return True
+
+
+_IMAGE_SCANNER.inline.ruler.at("image", _recording_image)
+
+
+def _is_loadable_image_url(url: object) -> bool:
+    scheme, separator, rest = str(url).partition("://")
+    web = scheme.lower() in {"http", "https"} and separator and rest[:1] not in {"", "/"}
+    return bool(web) or validated_mxc_url(url) is not None
+
+
+def replace_unsendable_images(text: str) -> str:
+    """Replace each Markdown image no client can load, such as ``![logo](mxc://placeholder)``, with a visible note.
+
+    Only ``mxc://server/media_id`` and ``http(s)://`` images can show; image syntax inside code stays as written.
+    """
+    if "![" not in text:
+        return text
+    env: dict[str, list[tuple[int, int, Token]]] = {}
+    blocks = _IMAGE_SCANNER.parse(text, env)
+    line_starts = list(accumulate((len(line) + 1 for line in text.split("\n")), initial=0))
+    cursors: dict[int, int] = {}
+    edits: list[tuple[int, int, str]] = []
+    for block in blocks:
+        if block.type != "inline" or not block.map:
+            continue
+        # The inline text starts on its first source line, after any quote, list, or table-cell markup before it.
+        first_line = block.content.split("\n", 1)[0]
+        base = text.find(first_line, cursors.get(block.map[0], line_starts[block.map[0]]))
+        if base < 0:
+            continue
+        cursors[block.map[0]] = base + len(first_line)
+        for start, end, token in env.get("images", []):
+            if not any(child is token for child in block.children or ()) or _is_loadable_image_url(token.attrs["src"]):
+                continue
+            source = block.content[start:end]
+            skip = block.content.count(source, 0, start)
+            if len(parts := text[base:].split(source, skip + 1)) == skip + 2:
+                at = base + len(source.join(parts[: skip + 1]))
+                note = f"\u26a0\ufe0f Image not sent: {token.content or 'image'} (no uploaded file)"
+                edits.append((at, at + len(source), note))
+    for start, end, note in reversed(edits):
+        text = text[:start] + note + text[end:]
+    return text
 
 
 def markdown_to_html(text: str) -> str:

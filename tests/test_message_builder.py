@@ -8,6 +8,7 @@ from mindroom.matrix.message_builder import (
     build_reaction_content,
     build_thread_relation,
     markdown_to_html,
+    replace_unsendable_images,
 )
 
 
@@ -105,3 +106,42 @@ def test_nested_quote_list_div_keeps_inner_markdown_literal() -> None:
     assert "<div>ok</div>" in html
     assert "**bold**" in html
     assert "<strong>bold</strong>" not in html
+
+
+def test_placeholder_mxc_images_become_a_visible_note() -> None:
+    """An mxc:// image with no server/media_id part, the shape agents invent, is replaced with a note."""
+    for target in ("mxc://placeholder", "mxc://...", "mxc://\u2026", "mxc://example.org/"):
+        assert replace_unsendable_images(f"See ![logo]({target}) here.") == (
+            "See \u26a0\ufe0f Image not sent: logo (no uploaded file) here."
+        )
+
+
+def test_non_url_image_targets_become_a_visible_note() -> None:
+    """A relative path, attachment id, absolute path, or sandbox link is not an uploaded image."""
+    text = "![a](./login.png)\n\n- ![b](att_123)\n\n> ![c](/home/me/x.png) and ![d](sandbox:/x.png)"
+    assert replace_unsendable_images(text) == (
+        "\u26a0\ufe0f Image not sent: a (no uploaded file)\n\n"
+        "- \u26a0\ufe0f Image not sent: b (no uploaded file)\n\n"
+        "> \u26a0\ufe0f Image not sent: c (no uploaded file) and \u26a0\ufe0f Image not sent: d (no uploaded file)"
+    )
+
+
+def test_uploaded_mxc_images_are_kept() -> None:
+    """An image of a complete mxc://server/media_id URI stays as written."""
+    text = "# Logo\n\n![logo](mxc://mindroom.chat/AbC123)"
+    assert replace_unsendable_images(text) == text
+
+
+def test_http_images_are_kept() -> None:
+    """An http(s) image stays as written."""
+    text = "| a | b |\n| - | - |\n| ![x](https://example.org/a.png) | ![y](http://example.org/b.png) |"
+    assert replace_unsendable_images(text) == text
+
+
+def test_images_in_code_are_kept() -> None:
+    """Image syntax inside a code span or fence is text, so only the real image beside it is replaced."""
+    text = "`![x](att_1)` then ![x](att_1)\n\n```md\n![x](att_1)\n```\n\n| `![x](att_1)` | ![x](att_1) |\n| - | - |"
+    assert replace_unsendable_images(text) == text.replace(
+        "` then ![x](att_1)",
+        "` then \u26a0\ufe0f Image not sent: x (no uploaded file)",
+    ).replace("| ![x](att_1) |", "| \u26a0\ufe0f Image not sent: x (no uploaded file) |")
