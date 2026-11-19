@@ -56,6 +56,8 @@ class IngressFacts:
     requester_entity_name: str | None = None
     # The names the agents and teams this event's pills mention can read as in its text.
     mention_names: tuple[str, ...] = ()
+    # Whether this event's pills name the owner account and no agent or team: it is aimed at nobody who answers.
+    aimed_at_owner: bool = False
     # Whether this is a contact room of the responder that refuses the sender: only the counterparty and the
     # responder's owner start an active contact's turns, and a removed contact's room starts none.
     contact_refused: bool = False
@@ -158,8 +160,9 @@ def command_for(facts: IngressFacts, command_text: str, source_count: int = 1) -
     conversation: an agent or a plugin can write it, yet it would run with a
     person's authority. ``command_text`` is ``dispatch_prompt_for_event`` of the
     event's logical content, so a finished reply's tool markers never hide a
-    command. A turn of several sources carries no command.
+    command. A turn of several sources carries no command, and neither does a
+    message aimed at the owner account alone: no agent runs it as its own.
     """
-    if source_count != 1 or facts.source_kind != MESSAGE_SOURCE_KIND:
+    if source_count != 1 or facts.source_kind != MESSAGE_SOURCE_KIND or facts.aimed_at_owner:
         return None
     return command_parser.parse(command_text, facts.mention_names)

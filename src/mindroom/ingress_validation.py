@@ -27,7 +27,7 @@ from mindroom.dispatch_source import (
     source_kind_allows_trusted_original_sender,
     source_kind_from_content,
 )
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, persisted_owner_matrix_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
 from mindroom.matrix.guarded_rooms import guarded_room
@@ -194,6 +194,12 @@ class IngressValidator:
             and not _is_falling_back_reply(content)
             else None
         )
+        mentions = content.get("m.mentions")
+        listed = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
+        mentioned_ids = [
+            user_id for user_id in (listed if isinstance(listed, list) else ()) if isinstance(user_id, str)
+        ]
+        mention_names = self._mention_names(mentioned_ids)
         return IngressFacts(
             physical_sender=sender,
             source_kind=resolved_source_kind,
@@ -209,18 +215,19 @@ class IngressValidator:
             or _final_reply_original_event_id(sender_entity_name, source_dict),
             sender_entity_name=sender_entity_name,
             requester_entity_name=self.managed_entity_name_for_sender(acting_requester_id or lane_requester_id),
-            mention_names=self._mention_names(content.get("m.mentions")),
+            mention_names=mention_names,
+            aimed_at_owner=not mention_names and persisted_owner_matrix_id(self.deps.runtime_paths) in mentioned_ids,
             contact_refused=contact is not None and contact.requester_id is None,
         )
 
-    def _mention_names(self, mentions: object) -> tuple[str, ...]:
+    def _mention_names(self, user_ids: list[str]) -> tuple[str, ...]:
         """Return the display name, entity name and Matrix ID of each agent and team an event's pills mention."""
         config = self.deps.runtime.config
-        user_ids = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
+        registry = entity_identity_registry(config, self.deps.runtime_paths)
         return tuple(
             name
-            for user_id in (user_ids if isinstance(user_ids, list) else ())
-            if isinstance(user_id, str) and (entity := self.managed_entity_name_for_sender(user_id)) is not None
+            for user_id in user_ids
+            if (entity := registry.current_entity_name_for_user_id(user_id, include_router=False)) is not None
             for name in (config.entity_display_name(entity), entity, user_id[1:], user_id[1:].partition(":")[0])
         )
 

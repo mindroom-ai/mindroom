@@ -2280,6 +2280,27 @@ async def test_owner_device_runs_the_selection_chat_sends_in_an_agents_thread(co
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner_joined", [True, False])
+@pytest.mark.parametrize("body", ["hello there", "!help"])
+async def test_a_message_aimed_only_at_the_owner_gets_silence(tmp_path: Path, *, owner_joined: bool, body: str) -> None:
+    """A pill of the owner account targets no agent: the only agent neither answers nor runs the command."""
+    agents = {"general": AgentConfig(display_name="General")}
+    config = bind_runtime_paths(Config(agents=agents), test_runtime_paths(tmp_path))
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", *([ROUTER_AGENT_NAME] if owner_joined else []))
+    room.members_synced = True
+    event = _text_event(f"@MindRoom {body}")
+    event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, ROUTER_AGENT_NAME)]}
+
+    with patch.object(harness.dispatcher.deps.command_executor, "execute", new=AsyncMock()) as execute:
+        await harness.deliver(room, event)
+
+    execute.assert_not_awaited()
+    assert harness.runner.requests == []
+    assert harness.gateway.sent == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("first", ["general", "research"])
 async def test_two_bots_with_split_room_snapshots_answer_a_command_once(
     config: Config,

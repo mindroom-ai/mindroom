@@ -13,7 +13,7 @@ from mindroom.constants import (
     SKIP_MENTIONS_KEY,
     WAKE_MENTIONED_KEY,
 )
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, persisted_owner_matrix_id
 from mindroom.matrix.mentions import resolve_mentioned_user_ids_from_text
 from mindroom.matrix.room_membership import room_membership_is_complete
 from mindroom.matrix.visible_body import visible_content_from_content
@@ -140,9 +140,10 @@ def check_agent_mentioned(
     Returns (mentioned_agents, am_i_mentioned, has_non_agent_mentions).
     ``has_non_agent_mentions`` is True when the message explicitly tags a
     joined participant who is *not* a configured agent and not in
-    ``config.bot_accounts``; the owner account answers nobody, so a tag of it counts. While the member cache is unsynced (the
+    ``config.bot_accounts``. While the member cache is unsynced (the
     authoritative refresh failed) every such mention counts, so a lost
     membership fetch degrades to silence rather than an interjection.
+    The owner account answers nobody, so a tag of it counts wherever it is.
     """
     raw_content = event_source.get("content", {})
     content = visible_content_from_content(raw_content) if isinstance(raw_content, dict) else {}
@@ -155,9 +156,12 @@ def check_agent_mentioned(
         for uid in all_mentioned_ids
         if not registry.is_managed_user_id(uid, include_router=False) and uid not in config.bot_accounts
     ]
-    has_non_agent_mentions = bool(non_agent_mentions) and (
-        not room_membership_is_complete(room)
-        or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
+    has_non_agent_mentions = persisted_owner_matrix_id(runtime_paths) in all_mentioned_ids or (
+        bool(non_agent_mentions)
+        and (
+            not room_membership_is_complete(room)
+            or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
+        )
     )
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
