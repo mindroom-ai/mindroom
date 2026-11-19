@@ -640,7 +640,18 @@ def _delegating_turn(
     entity_ids(config, paths)
     identity = _identity()
     parent = ScriptedModel(
-        [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add one and two")), answer("Done")],
+        [
+            calls(
+                tool_call(
+                    "run_subagent",
+                    "delegate",
+                    agent_name="child",
+                    task="Add one and two",
+                    title=" Add\n numbers ",
+                ),
+            ),
+            answer("Done"),
+        ],
     )
     ScriptedAgents(models, by_session={identity.session_id: parent}).install(monkeypatch)
     runtime = _delegate_runtime_context(config, paths, execution_identity=identity)
@@ -684,6 +695,7 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
     assert (last.items[0].tool.tool_name, last.items[0].state) == ("add", "done")
     assert _text(last) == "Three"
     assert (last.caller_agent_name, last.agent_name) == ("leader", "child")
+    assert (last.task, last.title) == ("Add one and two", "Add numbers")
     assert last.parent_delegation_id is None
     assert not _OPEN
 

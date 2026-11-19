@@ -90,6 +90,8 @@ class SubagentSnapshot:
     usage: Mapping[str, int | float] | None = None
     # Set on the failed end a turn gets when a shutdown stops its attempt, which its job may continue with a later turn.
     interrupted_by_restart: bool = False
+    # Redacted; what the call that started the sub-agent named it, empty when it named nothing.
+    title: str = ""
 
 
 type SubagentSink = Callable[[SubagentSnapshot], None]
@@ -160,6 +162,7 @@ class _SubagentActivity:
     task: str
     thread_id: str | None
     started_at: float
+    title: str = ""
     status: _SubagentStatus = "running"
     ended_at: float | None = None
     result: str | None = None
@@ -199,6 +202,7 @@ class _SubagentActivity:
             model_name=child.model_name,
             source="workflow" if is_workflow else "delegate",
             task=_clip(child.task, _MAX_TASK_CHARACTERS),
+            title=child.title and redact_sensitive_text(child.title),
             thread_id=identity.resolved_thread_id or identity.thread_id,
             started_at=now,
         )
@@ -295,6 +299,7 @@ class _SubagentActivity:
             model_name=self.model_name,
             source=self.source,
             task=self.task,
+            title=self.title,
             thread_id=self.thread_id,
             status=self.status,
             started_at=self.started_at,

@@ -67,6 +67,7 @@ agents:
 ```python
 run_subagent(
     task: str,
+    title: str,
     agent_name: str | None = None,
     model: str | None = None,
     minimal: bool = False,
@@ -83,6 +84,7 @@ continue_subagent(subagent_id: str, message: str) -> str
 
 The child starts with no history from the caller's conversation but keeps its own configured tools, workspace, memory, and tool policy.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
+`title` names the run in a few words for people watching it, such as MindRoom Chat's background jobs bar; it is cut to one line of 80 characters, follow-ups keep it, and a call without one still runs.
 Omitting `agent_name` selects the caller itself, which still requires its own name in `delegate_to`.
 Set `model` to an alias from `models:`, or `name@level` for one of its [reasoning levels](../configuration/models.md#reasoning-levels), to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
 Set `minimal=True` to run the child in [minimal mode](agent-cli.md#minimal-subagents), which saves tokens when the child does not need its full system prompt.
@@ -113,10 +115,15 @@ Until the job ends, a follow-up to that child is refused as busy.
 A child turn that runs inside its parent's reply is reported as interrupted instead of being rerun; a pending approval of a child running as a background job is denied, and one that paused its parent's reply stays pending.
 
 ```python
-run_subagent(task="Independently review the proposed design and return its three main risks.", model="sonnet")
+run_subagent(
+    task="Independently review the proposed design and return its three main risks.",
+    title="Review the design",
+    model="sonnet",
+)
 
 run_subagent(
     agent_name="research",
+    title="Compare queue databases",
     task="Compare SQLite and PostgreSQL for a single-host task queue with 20 concurrent writers. Return three risks and cite sources.",
 )
 

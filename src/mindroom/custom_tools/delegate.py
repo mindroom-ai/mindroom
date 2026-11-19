@@ -107,10 +107,10 @@ class DelegateTools(Toolkit):
             *(() if self._resource_profiles else ("resource_profile",)),
         }
         description = self._build_run_subagent_description()
-        if not hidden:
-            return replace(function, description=description)
         properties = {name: value for name, value in function.parameters["properties"].items() if name not in hidden}
         parameters = closed_parameters(self.run_subagent, {**function.parameters, "properties": properties})
+        # Models always name the run; a call without a title, such as one stored before it, still runs.
+        parameters["required"] = [*parameters["required"], "title"]
         return replace(function, description=description, parameters=parameters)
 
     def _build_instructions(self) -> str:
@@ -228,6 +228,7 @@ class DelegateTools(Toolkit):
     async def run_subagent(
         self,
         task: str,
+        title: str = "",
         agent_name: str | None = None,
         model: str | None = None,
         minimal: bool = False,
@@ -246,6 +247,7 @@ class DelegateTools(Toolkit):
 
         Args:
             task: Self-contained task with relevant context, constraints, and expected output.
+            title: Short title of 3-6 words naming the task, shown to people watching the run.
             agent_name: Allowed subagent name; omitted or null selects yourself, if allowed.
             model: Configured model name from models; omitted or null uses normal model selection.
             minimal: True runs the child in token-efficient minimal mode, only for subagents listed as supporting it.
@@ -265,6 +267,7 @@ class DelegateTools(Toolkit):
             RUN_SUBAGENT,
             {
                 "task": task,
+                "title": title,
                 "agent_name": agent_name,
                 "model": model,
                 "minimal": minimal,
@@ -391,6 +394,7 @@ class DelegateTools(Toolkit):
             agent_mode=target.agent_mode,
             previous=target.previous_child,
             parent_tool_call_id=(parent.context.call_id or "") if parent is not None else "",
+            title=target.title,
             persona=target.persona,
             dedicated_worker=target.dedicated_worker,
             worker_resource_profile=target.resource_profile,

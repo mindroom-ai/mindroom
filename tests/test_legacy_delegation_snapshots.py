@@ -54,6 +54,7 @@ _MODEL_DEFAULTED_CHILD_FIELDS: dict[str, object] = {
     "cost_usd": None,
     "subagents_cost_usd": None,
     "tool_started_at": {},
+    "title": "",
 }
 _CHILD_FIELDS = {field.name for field in fields(DelegationChild)} - set(_MODEL_DEFAULTED_CHILD_FIELDS)
 _PAUSED_NOTICE = "I have tools to execute, but I need confirmation."

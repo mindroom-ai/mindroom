@@ -45,6 +45,8 @@ class DelegationTarget:
     agent_name: str
     task: str
     previous_child: DelegationChild | None = None
+    # What people watching the run see it as: one line, at most 80 characters; empty when the call named none.
+    title: str = ""
     agent_mode: AgentMode = "standard"
     persona: SubagentPersona | None = None
     model: str | None = None
@@ -204,9 +206,11 @@ def resolve_fresh_target(
     if isinstance(request, str):
         return request
     dedicated_worker, resource_profile = worker
+    title = args.get("title")
     return DelegationTarget(
         child_name,
         task,
+        title=" ".join(title.split())[:80] if isinstance(title, str) else "",
         agent_mode=request.agent_mode,
         persona=request.persona,
         model=request.model,

@@ -120,10 +120,11 @@ class TestDelegateTools:
         assert tuple(tools.functions) == DELEGATION_FUNCTIONS
         assert builtin_tool_registry().entries["delegate"].function_names == DELEGATION_FUNCTIONS
 
-    def test_schema_requires_task_and_allows_omitted_or_null_agent_name(self, tools: DelegateTools) -> None:
-        """The model must be able to request a self subagent using only its task."""
+    def test_schema_requires_task_and_title_and_allows_omitted_or_null_agent_name(self, tools: DelegateTools) -> None:
+        """The model must be able to request a self subagent using only its task and the title people see it by."""
         function = toolkit_offers(tools, "run_subagent")
-        assert function.parameters["required"] == ["task"]
+        assert function.parameters["required"] == ["task", "title"]
+        assert function.parameters["properties"]["title"]["type"] == "string"
         assert function.parameters["properties"]["agent_name"]["anyOf"] == [
             {"type": "string"},
             {"type": "null"},
