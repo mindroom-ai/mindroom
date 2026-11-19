@@ -221,6 +221,7 @@ It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does
 A change that only adds to the API bumps the minor version, so a plugin written for an earlier minor of the same major keeps working.
 A breaking change, one that removes or changes anything a plugin uses, bumps the major version.
 Anything a major bump removes or changes is first deprecated for at least 30 days, announced in this section with the date from which it may go.
+The hook filter `agents=(ROUTER_AGENT_NAME,)` is deprecated since plugin API 1.31 and may go from 2027-01-01; a hook says [`scope="room"` or `scope="service"`](hooks.md#the-hook-decorator) instead.
 
 A plugin states the version it needs as `mindroom_plugin_api` in its manifest, such as `"1.2"` for major 1 at minor 2 or later.
 MindRoom checks it before running any of the plugin's code and skips a plugin that needs another major or a later minor, logging `Failed to load plugin, skipping` with a reason such as `Plugin 'my-plugin' needs plugin API 1.3, but this MindRoom provides 1.2: upgrade MindRoom`.
@@ -253,7 +254,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.30",
+  "mindroom_plugin_api": "1.31",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -2272,7 +2273,7 @@ async def test_hook(plugin):
 | Call | What it does |
 | --- | --- |
 | `load_plugin(path, tmp_dir, *, config=None, settings=None)` | Loads the plugin at `path` with `settings` for the `with` block, keeping its data under `tmp_dir`, and yields a handle with `config` and `runtime_paths`. `config` is what a `config.yaml` holds, without `plugins`; one without `models` gets a `default` model that nothing calls. A config that does not validate or a plugin that fails to load, even only its routes, origin, or lifecycle module, raises, naming why, and the block's end restores the plugins loaded before it. |
-| `add_room(room_id, members, *, power_levels=None, direct=False, history_visibility="shared", key=None)` | Adds a room the router is joined to and returns it. `members` maps each joined user to their display name, `key` is the room key an agent's `rooms` or `members_of_rooms` names, and `direct` marks the members' joins as a direct message's. The router is a member too and test rooms have no name, so MindRoom also counts a room where one member is alone with the router as direct. The room's `sent` lists what hooks and `RoomMessenger` posted there, each with `text`, `thread_id`, `source` (`<plugin>:<event>`), `content`, and `mentions`. |
+| `add_room(room_id, members, *, power_levels=None, direct=False, history_visibility="shared", key=None)` | Adds a room MindRoom reads and returns it. `members` maps each joined user to their display name, `key` is the room key an agent's `rooms` or `members_of_rooms` names, and `direct` marks the members' joins as a direct message's. The room has exactly these members: an agent, a team, or MindRoom's own account is in it only when `members` lists its Matrix ID. Test rooms have no name, so MindRoom also counts a room of two members, such as a person alone with an agent, as direct. The room's `sent` lists what hooks and `RoomMessenger` posted there, each with `text`, `thread_id`, `source` (`<plugin>:<event>`), `content`, and `mentions`. |
 | `client(user_id=None)` | Returns a FastAPI `TestClient` of the plugin's routes, signed in as `user_id` when given, which works until the block ends. Its `websocket_connect` offers that session as `client_stream` expects, from an allowed origin. |
 | `sign_out(user_id)` | Ends the user's client sessions, so their clients answer 401. |
 | `await call_tool(tool, function, arguments, *, agent, sender, room)` | Runs one call as `agent` runs it for `sender` in `room`, through the `tool:*` hooks and with `current_plugin_context`, and returns its `status` (`ok`, `failed`, `declined`, ...), `value`, and `failure_text`. It raises `LookupError` for a tool or function the agent lacks and `PermissionError` for a function that may need approval. |

@@ -97,11 +97,34 @@ async def enrich_weather(ctx):
 | `required` | `bool` | `False` | For `agent:started` only: the bot does not start if this hook fails or times out |
 | `agents` | `Iterable[str] \| None` | `None` (all) | Only fire for these agent or team names |
 | `rooms` | `Iterable[str] \| None` | `None` (all) | Only fire for these room IDs |
+| `scope` | `"agent" \| "room" \| "service"` | `"agent"` | How often the hook runs for one event; see below |
 
 Hook functions must be `async`.
 Hooks with equal priority run in `plugins:` list order, then in source order.
 A hook with `agents` set never fires for events that carry no agent: `schedule:fired`, `reaction:received`, `config:reloaded`, and custom events.
 A hook with `rooms` set never fires for `config:reloaded` or for custom events emitted outside a room.
+
+`scope` says how often a hook runs, from plugin API 1.31:
+
+- `"agent"`, the default, runs the hook each time an agent or team emits the event.
+  Every agent and team in a room emits `message:received` and `reaction:received` for the same Matrix event, so the hook runs once for each of them.
+- `"room"` runs the hook for one MindRoom account in the room only: the one with the highest power level there, the lowest Matrix ID among equals.
+  In a room MindRoom created, that is MindRoom's own account.
+  A `message:received` or `reaction:received` hook therefore runs once per Matrix event, and still once when that account changes while the event is handled.
+  Any other event is emitted by the one agent or team it concerns, and the hook runs only when that is this account, so a room-scoped `message:after_response` hook sees only this account's replies.
+  Do not use this scope on `agent:started`, `agent:stopped`, or `bot:ready`, which belong to no single room.
+  `agents` cannot be set with this scope.
+- `"service"` runs the hook once per MindRoom process and is accepted only on `bot:ready` and `config:reloaded`.
+  A service-scoped `bot:ready` hook runs once when MindRoom has started, not once per agent, and its `ctx.rooms` lists every configured room and `ctx.joined_room_ids` every room an agent, a team, or MindRoom's own account is in.
+  Its `ctx.entity_name` and `ctx.entity_type` are both `"router"`.
+  `agents` cannot be set with this scope.
+
+`@hook` raises `ValueError` for `scope="service"` on any other event, and for `agents` together with `scope="room"` or `scope="service"`.
+
+`agents=(ROUTER_AGENT_NAME,)` is deprecated.
+It used to mean once per room or once per process, because the router account was in every room.
+MindRoom still accepts it, logs a warning naming the plugin and the hook, and registers the hook with `scope="service"` on `bot:ready` and `config:reloaded` and with `scope="room"` on every other event.
+Replace it with the scope it stands for.
 
 ## Execution modes
 
@@ -216,8 +239,8 @@ async def keep_prices_private(ctx):
 | `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary; the counts size the conversation history before and after a compaction that runs before a reply, and the whole model request before and after one that runs during a reply | None | 5000 |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before a scheduled task posts its message | `message_text`, `suppress` | 1000 |
 | `reaction:received` | Observer | `ReactionReceivedContext` | For reactions not consumed by a built-in handler (tool approval, stop, config confirmation, interactive question) | None | 500 |
-| `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router, after a human joins a room | None | 3000 |
-| `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
+| `room:member_joined` | Observer | `RoomMemberJoinedContext` | Once per join, after a human joins a room | None | 3000 |
+| `room:member_left` | Observer | `RoomMemberLeftContext` | Once per leave, after a human leaves a room | None | 3000 |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
 | `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
@@ -583,7 +606,7 @@ Without one, it returns a `{state_key: content}` dict for every event of that ty
 **`await ctx.put_room_state(room_id, event_type, state_key, content)`** writes one room state event and returns `True` on success or `False` on a Matrix error.
 
 Both return `None` or `False` when no Matrix client is available.
-When the current bot gets a Matrix error, MindRoom retries the call as the router.
+When the current bot gets a Matrix error, MindRoom retries the call as the MindRoom account with the highest power level in the room.
 Network errors raise in the hook.
 
 **`await ctx.get_latest_agent_message_snapshot(room_id, sender, *, thread_id=None)`** returns the latest visible message from `sender` in the given thread, with `content` and `origin_server_ts`.
@@ -593,7 +616,7 @@ It returns `None` when the sender has no visible message in that window or no re
 
 ### Matrix admin
 
-`ctx.matrix_admin` is a limited admin interface backed by the router account, or `None` when unavailable.
+`ctx.matrix_admin` is a limited admin interface backed by MindRoom's own account, the one that creates the rooms in `config.yaml`, or `None` when the deployment has no such account or it is not connected.
 Hooks never get the raw Matrix client.
 
 | Method | Returns |
