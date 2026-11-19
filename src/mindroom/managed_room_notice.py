@@ -9,7 +9,6 @@ from mindroom.authorization import (
     filter_responders_by_sender_permissions,
     is_sender_allowed_for_responder,
 )
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 
 if TYPE_CHECKING:
@@ -70,8 +69,6 @@ def managed_room_join_notice(
     membership_index: AgentReplyMembershipIndex,
 ) -> str | None:
     """Return the note an invited entity posts when the managed room it joined does not list it."""
-    if agent_name == ROUTER_AGENT_NAME:
-        return None
     configured_responders = configured_responder_entities_for_room(room, config, runtime_paths)
     if configured_responders is None or agent_user_id in {responder.full_id for responder in configured_responders}:
         return None

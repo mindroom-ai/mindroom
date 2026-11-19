@@ -2299,7 +2299,7 @@ async def test_orchestrator_initialize_registers_router_and_agents_with_the_flee
         "router": AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
             password=TEST_PASSWORD,
         ),
         "test_agent": AgentMatrixUser(

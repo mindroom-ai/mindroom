@@ -15,7 +15,7 @@ import httpx
 
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
-from mindroom.constants import resolve_avatar_path
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import set_user_avatar_from_file, user_has_avatar
 from mindroom.media_delivery import MAX_DECODED_PIXELS, SUPPORTED_IMAGE_FORMATS
@@ -188,10 +188,15 @@ async def _entity_avatar_path(
     entity_name: str,
     runtime_paths: RuntimePaths,
 ) -> Path | None:
-    """Return the avatar for an agent or team: its own file, a matching stock image, or a stable stock pick."""
+    """Return the avatar for an agent or team: its own file, a matching stock image, or a stable stock pick.
+
+    The owner account is shown as MindRoom, so without a file of its own it wears the root Space's picture.
+    """
     avatar_path = resolve_avatar_path(entity_type, entity_name, runtime_paths)
     if avatar_path.exists():
         return avatar_path
+    if entity_name == ROUTER_AGENT_NAME:
+        return await root_space_avatar_path(runtime_paths)
     if entity_type == "agents" and entity_name in _STOCK_AVATAR_NAMES:
         return await _stock_avatar_path(entity_name, runtime_paths)
     return await _stock_avatar_path(_stock_pick(f"{entity_type}/{entity_name}"), runtime_paths)

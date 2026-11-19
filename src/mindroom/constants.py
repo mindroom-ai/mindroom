@@ -21,7 +21,7 @@ from mindroom.providers.names import provider_route
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
-ROUTER_DISPLAY_NAME = "RouterAgent"
+ROUTER_DISPLAY_NAME = "MindRoom"
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 # "_shared" is the requester-store directory part for `user` scope in CredentialsManager.for_primary_runtime_scope.
 RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user", "_shared"})

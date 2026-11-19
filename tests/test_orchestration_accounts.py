@@ -350,7 +350,7 @@ async def test_account_preparation_validates_again_after_a_transient_validation_
 
     assert validations == ["validated", "validated"]
     assert users["general"].display_name == "GeneralAgent"
-    assert users[ROUTER_AGENT_NAME].display_name == "RouterAgent"
+    assert users[ROUTER_AGENT_NAME].display_name == "MindRoom"
 
 
 @pytest.mark.asyncio
@@ -495,6 +495,19 @@ def _roomless_config(paths: RuntimePaths, rooms: list[str]) -> Config:
         },
         paths,
     )
+
+
+@pytest.mark.asyncio
+async def test_owner_display_name_is_mindroom(tmp_path: Path) -> None:
+    """The owner account is shown as "MindRoom"; its next login syncs the name to an account registered earlier."""
+    paths = test_runtime_paths(tmp_path)
+    config = _roomless_config(paths, ["lobby"])
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, {})):
+        users = await _prepare(config, configured_entity_names(config), paths)
+
+    assert users[ROUTER_AGENT_NAME].display_name == "MindRoom"
+    assert config.entity_display_name(ROUTER_AGENT_NAME) == "MindRoom"
 
 
 @pytest.mark.asyncio

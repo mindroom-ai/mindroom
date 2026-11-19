@@ -573,7 +573,7 @@ async def test_personal_room_does_not_invite_owner(tmp_path: Path, monkeypatch: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner_persisted", [True, False])
-async def test_only_a_persisted_owner_account_is_a_member_and_state_writer(
+async def test_only_a_persisted_owner_account_is_a_member(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -588,7 +588,7 @@ async def test_only_a_persisted_owner_account_is_a_member_and_state_writer(
         del state.accounts[managed_account_key(ROUTER_AGENT_NAME)]
         save_matrix_state(state, owner.runtime_paths)
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-    assert (_power_levels(server, room_id)["users"].get(router) == 50) is owner_persisted
+    assert router not in _power_levels(server, room_id)["users"], "the owner account earns no power here"
 
     server.set_member(room_id, router, "join")
     assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
@@ -607,6 +607,25 @@ async def test_only_a_persisted_owner_account_is_a_member_and_state_writer(
     else:
         with pytest.raises(PersonalRoomValidationError, match="identity does not match"):
             await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+
+@pytest.mark.asyncio
+async def test_adoption_record_naming_router_still_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stored adoption record that names the router account loads, and the owner account keeps its place."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    router = "@mindroom_router:localhost"
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    server.set_member(room_id, router, "join")
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    data = read_personal_room(path).model_dump(mode="json")
+    data["adoption"] = {"creator_user_id": server.user_id, "agent_user_id": server.user_id, "router_user_id": router}
+    path.write_text(json.dumps(data))
+
+    assert read_personal_room(path).adoption.router_user_id == router
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+    assert server.kicks == []
+    assert retained_personal_rooms(owner.runtime_paths, ROUTER_AGENT_NAME, user_id=router) == {room_id}
 
 
 @pytest.mark.asyncio
@@ -804,7 +823,6 @@ _RECORD_RULE = (
     "because this room existed before it became a personal room, "
     "and only the agents its personal-room record lists can stay here."
 )
-_KEEP_ROUTER = "To keep RouterAgent here, ask an operator to list it in this room's personal-room record."
 
 
 @pytest.mark.asyncio
@@ -819,14 +837,14 @@ _KEEP_ROUTER = "To keep RouterAgent here, ask an operator to list it in this roo
         ),
         pytest.param(
             ("@mindroom_router:localhost",),
-            f"I removed RouterAgent {_RECORD_RULE} Inviting it here again will remove it again. {_KEEP_ROUTER}",
+            f"I removed MindRoom {_RECORD_RULE} Inviting it here again will remove it again.",
             id="router",
         ),
         pytest.param(
             ("@mindroom_blank:localhost", "@mindroom_router:localhost", "@mindroom_writer:localhost"),
-            f"I removed @mindroom_blank:localhost, RouterAgent, and Writer {_RECORD_RULE} "
+            f"I removed @mindroom_blank:localhost, MindRoom, and Writer {_RECORD_RULE} "
             "Inviting them here again will remove them again. "
-            f"To talk to @mindroom_blank:localhost and Writer, create a new room and invite them. {_KEEP_ROUTER}",
+            "To talk to @mindroom_blank:localhost and Writer, create a new room and invite them.",
             id="several-with-router-and-blank-name",
         ),
     ],
@@ -1595,54 +1613,16 @@ def _power_levels(server: MatrixServer, room_id: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_the_router_may_publish_a_personal_rooms_thread_mode_which_stays_closed_to_members(
+async def test_a_personal_rooms_thread_mode_stays_closed_to_members(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A new personal room gives the router the state level, and each reconciliation restores it; the type stays closed."""
+    """A personal room's thread mode is its agent's to publish: members stay below the state level."""
     server = MatrixServer()
     room_id = await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
-    router = RouterAccount(server, room_id)
     power = _power_levels(server, room_id)
-    assert power["users"][router.user_id] == 50
     assert power.get("users_default", 0) < power["state_default"]
     assert "io.mindroom.thread_mode" not in power["events"]
-    published = await router.room_put_state(room_id, "io.mindroom.thread_mode", {"mode": "thread"})
-    assert isinstance(published, nio.RoomPutStateResponse)
-
-    del power["users"][router.user_id]
-    await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
-    assert _power_levels(server, room_id)["users"][router.user_id] == 50
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("router_listed", [True, False])
-async def test_an_imported_room_gives_the_state_level_only_to_a_router_its_record_lists(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    router_listed: bool,
-) -> None:
-    """An imported room's record decides whether the router belongs there, and with it whether it gets the level."""
-    server = MatrixServer()
-    owner = service(tmp_path, server, monkeypatch, welcome="")
-    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-    router = "@mindroom_router:localhost"
-    del _power_levels(server, room_id)["users"][router]
-    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
-    record = read_personal_room(path)
-    record.adoption = PersonalRoomAdoption(
-        creator_user_id=server.user_id,
-        agent_user_id=server.user_id,
-        router_user_id=router if router_listed else None,
-    )
-    write_personal_room(path, record)
-    if not router_listed:
-        server.state[room_id] = [event for event in server.state[room_id] if event["state_key"] != router]
-
-    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
-
-    assert (_power_levels(server, room_id)["users"].get(router) == 50) is router_listed
 
 
 @pytest.mark.asyncio

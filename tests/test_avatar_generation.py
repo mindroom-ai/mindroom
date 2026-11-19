@@ -379,12 +379,12 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
     monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
     try:
         success = await generate_avatars._generate_missing_avatars(
-            generate_avatars.Config(),
+            generate_avatars.Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
             _runtime_paths(workspace_avatar_dir.parent),
-            {("agents", "router")},
+            {("agents", "general")},
         )
         assert success is True
-        assert (workspace_avatar_dir / "agents/router.png").read_bytes() == b"avatar-bytes"
+        assert (workspace_avatar_dir / "agents/general.png").read_bytes() == b"avatar-bytes"
         assert [path for path, _ in requests] == ["/v1/responses", "/v1/images/generations"]
         prompt_request, image_request = [payload for _, payload in requests]
         assert prompt_request["model"] == "gpt-6-astra"
@@ -1244,7 +1244,7 @@ async def test_set_room_avatars_in_matrix_requires_initialized_router_account(
 
     with pytest.raises(
         generate_avatars.AvatarSyncError,
-        match="Router account unavailable for avatar sync",
+        match="MindRoom owner account unavailable for avatar sync",
     ):
         await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))
 
@@ -1260,7 +1260,7 @@ async def test_set_room_avatars_in_matrix_wraps_missing_credentials(
         "create_agent_http_client",
         MagicMock(side_effect=ValueError("Saved access token missing")),
     )
-    with pytest.raises(generate_avatars.AvatarSyncError, match="Router account unavailable for avatar sync"):
+    with pytest.raises(generate_avatars.AvatarSyncError, match="MindRoom owner account unavailable for avatar sync"):
         await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))
 
 

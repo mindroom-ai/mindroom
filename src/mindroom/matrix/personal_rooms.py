@@ -79,9 +79,6 @@ _AGENT_REMOVAL_NOTICE = (
     "Inviting {pronoun} here again will remove {pronoun} again."
 )
 _AGENT_REMOVAL_ADVICE = " To talk to {agents}, create a new room and invite {pronoun}."
-# Nobody talks to the router directly, so a new room with it does not help;
-# only an operator listing it in the adoption record lets it stay.
-_ROUTER_REMOVAL_ADVICE = " To keep {router} here, ask an operator to list it in this room's personal-room record."
 # Retries for a removal a member event could not finish. After the last one,
 # the next member event in the room or a restart reconciliation of an eligible
 # owner tries again.
@@ -277,13 +274,9 @@ class PersonalRoomService:
                     source_room_id,
                     reinvite_departed_owner,
                 )
-                # Keep the validated room's MindRoom state power levels current, and the state level of a router the
-                # room admits. The room's steward publishes its thread mode and accounts, as in any room.
-                await ensure_managed_room_power_levels(
-                    self._client(),
-                    record.room_id,
-                    state_writer_ids=self._admitted_router_ids(record),
-                )
+                # Keep the validated room's MindRoom state power levels current. The room's steward publishes its
+                # thread mode and accounts, as in any room.
+                await ensure_managed_room_power_levels(self._client(), record.room_id)
                 if human_joined is None:
                     return record.room_id
                 await self._finish(record, path, source_room_id, human_joined=human_joined)
@@ -345,13 +338,6 @@ class PersonalRoomService:
         if not await invite_to_room(self._client(), record.room_id, record.user_id):
             msg = "Personal-room invite failed"
             raise RuntimeError(msg)
-
-    def _admitted_router_ids(self, record: PersonalRoomRecord) -> tuple[str, ...]:
-        """Return the persisted owner account a personal room admits; an imported room admits it only when listed."""
-        owner_id = persisted_owner_matrix_id(self.runtime_paths)
-        if owner_id is None or (record.adoption is not None and record.adoption.router_user_id != owner_id):
-            return ()
-        return (owner_id,)
 
     async def _observe_owner_membership(
         self,
@@ -592,21 +578,18 @@ class PersonalRoomService:
         """Explain why agents left an adopted room and what the owner can do instead."""
         config = self.runtime.config
         prepared = prepared_entity_names_by_user_id(config, self.runtime_paths)
-        entity_names = {user_id: prepared.get(user_id) for user_id in agent_ids}
-        router_removed = ROUTER_AGENT_NAME in entity_names.values()
         # A blank display name or an unprepared account shows the Matrix ID.
-        agents = sorted(
-            (name and config.entity_display_name(name)) or user_id
-            for user_id, name in entity_names.items()
-            if name != ROUTER_AGENT_NAME
-        )
-        router = config.entity_display_name(ROUTER_AGENT_NAME)
-        removed = sorted([*agents, router]) if router_removed else agents
+        names = {
+            user_id: (name and config.entity_display_name(name)) or user_id
+            for user_id in agent_ids
+            for name in (prepared.get(user_id),)
+        }
+        removed = sorted(names.values())
+        # Nobody talks to the owner account, so a new room with it helps nobody.
+        agents = sorted(name for user_id, name in names.items() if prepared.get(user_id) != ROUTER_AGENT_NAME)
         notice = _AGENT_REMOVAL_NOTICE.format(agents=join_names(removed, "and"), pronoun=_pronoun(removed))
         if agents:
             notice += _AGENT_REMOVAL_ADVICE.format(agents=join_names(agents, "and"), pronoun=_pronoun(agents))
-        if router_removed:
-            notice += _ROUTER_REMOVAL_ADVICE.format(router=router)
         return notice
 
     async def guest_membership_event(self, room: nio.MatrixRoom, user_id: str, membership: str) -> None:

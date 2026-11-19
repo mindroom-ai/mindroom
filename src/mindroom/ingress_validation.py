@@ -54,8 +54,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Every bot syncs on its own, so this bot can deliver a newcomer's first message just before the router's
-# sync applies their join. The first gate re-decides on each membership publication for this long; a
+# Every bot syncs on its own, so this bot can deliver a newcomer's first message just before the room
+# observer's sync applies their join. The first gate re-decides on each membership publication for this long; a
 # decision still unresolved then fails into the journal's retry, which also re-reads this bot's roster.
 _ROUTER_CATCH_UP_SECONDS = 1.0
 
@@ -310,7 +310,7 @@ class IngressValidator:
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
             return False
 
-        # The first gate is where a newcomer's first message meets a router that has not seen the join yet.
+        # The first gate is where a newcomer's first message meets an observer that has not seen the join yet.
         # A steward takes a message it may not answer itself, to route it.
         if not (
             await self._can_reply_once_router_catches_up(facts.run_requester_id, room)
@@ -355,9 +355,9 @@ class IngressValidator:
             yield False
 
     async def _can_reply_once_router_catches_up(self, sender_id: str, room: nio.MatrixRoom) -> bool:
-        """Decide reply access, deciding again on each router membership publication while it stays unresolved.
+        """Decide reply access, deciding again on each membership publication while it stays unresolved.
 
-        Only the router's published membership grants. The message itself proves only that its sender was joined
+        Only the room observer's published membership grants. The message itself proves only that its sender was joined
         when sending it, not that they still are, so waiting changes when the decision settles, never what it allows.
         """
         memberships = self.deps.runtime.agent_reply_memberships

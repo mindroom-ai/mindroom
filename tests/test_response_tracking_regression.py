@@ -45,7 +45,7 @@ def mock_router_agent() -> AgentMatrixUser:
     return AgentMatrixUser(
         agent_name="router",
         password=TEST_PASSWORD,
-        display_name="RouterAgent",
+        display_name="MindRoom",
         user_id="@mindroom_router:localhost",
     )
 

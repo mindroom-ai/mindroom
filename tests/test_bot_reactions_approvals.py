@@ -637,7 +637,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
@@ -676,7 +676,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
@@ -2131,7 +2131,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
@@ -2215,7 +2215,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
@@ -2339,7 +2339,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()

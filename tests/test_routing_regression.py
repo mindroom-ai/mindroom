@@ -1105,7 +1105,7 @@ class TestRoutingRegression:
         router_agent = AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
-            display_name="RouterAgent",
+            display_name="MindRoom",
             user_id="@mindroom_router:localhost",
         )
 
@@ -1247,7 +1247,7 @@ class TestRoutingRegression:
         router_agent = AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
-            display_name="RouterAgent",
+            display_name="MindRoom",
             user_id="@mindroom_router:localhost",
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
@@ -1333,7 +1333,7 @@ class TestRoutingRegression:
             AgentMatrixUser(
                 agent_name="router",
                 password=TEST_PASSWORD,
-                display_name="RouterAgent",
+                display_name="MindRoom",
                 user_id=ids["router"].full_id,
             ),
             tmp_path,
@@ -1418,7 +1418,7 @@ class TestRoutingRegression:
             AgentMatrixUser(
                 agent_name="router",
                 password=TEST_PASSWORD,
-                display_name="RouterAgent",
+                display_name="MindRoom",
                 user_id=ids["router"].full_id,
             ),
             tmp_path,
@@ -1496,7 +1496,7 @@ class TestRoutingRegression:
             AgentMatrixUser(
                 agent_name="router",
                 password=TEST_PASSWORD,
-                display_name="RouterAgent",
+                display_name="MindRoom",
                 user_id=ids["router"].full_id,
             ),
             tmp_path,
@@ -1583,7 +1583,7 @@ class TestRoutingRegression:
         router_agent = AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
-            display_name="RouterAgent",
+            display_name="MindRoom",
             user_id=ids["router"].full_id,
         )
         runtime = ready_runtime(test_config, runtime_paths)
@@ -1830,7 +1830,7 @@ class TestRoutingRegression:
         router_agent = AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
-            display_name="RouterAgent",
+            display_name="MindRoom",
             user_id="@mindroom_router:localhost",
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
@@ -2006,7 +2006,7 @@ class TestRoutingRegression:
         router_agent = AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
-            display_name="RouterAgent",
+            display_name="MindRoom",
             user_id="@mindroom_router:localhost",
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
@@ -2087,7 +2087,7 @@ class TestRoutingRegression:
         router_agent = AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
-            display_name="RouterAgent",
+            display_name="MindRoom",
             user_id="@mindroom_router:localhost",
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
@@ -2277,7 +2277,7 @@ class TestRoutingRegression:
         router_agent = AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
-            display_name="RouterAgent",
+            display_name="MindRoom",
             user_id="@mindroom_router:localhost",
         )
 

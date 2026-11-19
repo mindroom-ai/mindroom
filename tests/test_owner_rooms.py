@@ -74,7 +74,7 @@ async def test_router_gets_all_configured_rooms(
     router_user = AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
         user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-        display_name="RouterAgent",
+        display_name="MindRoom",
         password=TEST_PASSWORD,
     )
 
@@ -174,7 +174,7 @@ async def test_router_joins_rooms_on_start(
     router_user = AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
         user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-        display_name="RouterAgent",
+        display_name="MindRoom",
         password=TEST_PASSWORD,
     )
 
