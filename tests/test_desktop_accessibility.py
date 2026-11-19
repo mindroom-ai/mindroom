@@ -748,9 +748,10 @@ def test_mac_launch_invalidates_all_retained_app_observations() -> None:
 class NamedRunningApplication(FakeRunningApplication):
     """A running app with its own bundle identifier."""
 
-    def __init__(self, bundle_id: str) -> None:
+    def __init__(self, bundle_id: str, *, policy: int = 0) -> None:
         super().__init__()
         self.bundle_id = bundle_id
+        self.policy = policy
 
     def bundleIdentifier(self) -> str:
         return self.bundle_id
@@ -758,11 +759,18 @@ class NamedRunningApplication(FakeRunningApplication):
     def localizedName(self) -> str:
         return self.bundle_id
 
+    def activationPolicy(self) -> int:
+        return self.policy
+
 
 def test_all_apps_backend_lists_and_admits_every_running_app_but_mindroom() -> None:
     """Computer scope reaches any app and the primary screen, never MindRoom's own windows, and ends with the flag."""
     backend, _, workspace = _fake_mac_backend()
-    workspace.applications = [NamedRunningApplication(app) for app in ("com.example.Terminal", "chat.mindroom.menubar")]
+    workspace.applications = [
+        NamedRunningApplication("com.example.Terminal"),
+        NamedRunningApplication("chat.mindroom.menubar"),
+        NamedRunningApplication("com.example.BackgroundAgent", policy=2),  # Reachable by id, not listed.
+    ]
 
     assert [app.app_id for app in backend.list_apps()] == ["com.example.Editor"]  # Saved apps only.
     with pytest.raises(AccessibilityError, match="allowlist"):
@@ -776,6 +784,7 @@ def test_all_apps_backend_lists_and_admits_every_running_app_but_mindroom() -> N
     ]
     state = backend.get_app_state(PRIMARY_SCREEN_APP_ID)
     backend._require_allowed("com.example.NotRunning")
+    backend._require_allowed("com.example.BackgroundAgent")
     with pytest.raises(AccessibilityError, match="allowlist"):
         backend._require_allowed("chat.mindroom.menubar")
     backend.all_apps = False

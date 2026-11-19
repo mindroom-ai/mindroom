@@ -298,15 +298,16 @@ class MacAccessibilityBackend:
 
     def list_apps(self) -> list[DesktopApp]:
         """List configured bundle identifiers, revealing other running apps only with ``all_apps``."""
+        applications = [app for app in self._workspace.runningApplications() if app.bundleIdentifier() is not None]
         running = {
-            str(application.bundleIdentifier()): str(application.localizedName() or application.bundleIdentifier())
-            for application in self._workspace.runningApplications()
-            if application.bundleIdentifier() is not None
+            str(app.bundleIdentifier()): str(app.localizedName() or app.bundleIdentifier()) for app in applications
         }
         apps: list[DesktopApp] = []
         listed = self._allowed_app_ids
         if self.all_apps:
-            listed = listed | (running.keys() - MINDROOM_APP_IDS) | {PRIMARY_SCREEN_APP_ID}
+            # Only apps with a Dock presence; background agents and XPC services stay reachable by bundle id.
+            regular = {str(app.bundleIdentifier()) for app in applications if app.activationPolicy() == 0}
+            listed = listed | (regular - MINDROOM_APP_IDS) | {PRIMARY_SCREEN_APP_ID}
         for app_id in sorted(listed):
             if app_id == PRIMARY_SCREEN_APP_ID:
                 apps.append(DesktopApp(app_id, "Primary Screen", True))
