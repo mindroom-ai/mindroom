@@ -860,7 +860,9 @@ async def test_restore_reowns_router_task_and_fires_through_new_owner(tmp_path: 
     """A task the router owned, as its stored owner or its last writer, fires through the agent its message mentions."""
     config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
     room = _SharedRoom({ids["general"]: 100, ids["helper"]: 100})
-    workflow = _workflow().model_copy(update={"message": "@helper water the plants"})
+    # Both agents are joined and mentioned; the first one the text names wins, not the lower Matrix ID.
+    assert ids["general"] < ids["helper"]
+    workflow = _workflow().model_copy(update={"message": "@helper and @general water the plants"})
     content = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"}
     if owner_stored:
         content["owner"] = ids["router"]
