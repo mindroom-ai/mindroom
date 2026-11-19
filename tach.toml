@@ -4416,6 +4416,14 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.email_invites"
+depends_on = []
+
+[[modules]]
+path = "mindroom.email_invites.store"
+depends_on = []
+
+[[modules]]
 path = "mindroom.desktop.pairing"
 depends_on = ["mindroom.desktop.protocol"]
 
