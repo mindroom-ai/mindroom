@@ -47,15 +47,13 @@ class ShellOutputDestination:
 
 
 def format_shell_completion(stdout: str, stderr: str, *, return_code: int) -> str:
-    """Format completed output, leading a failure with its exit code and keeping both of its streams.
+    """Format completed output: stdout, then any stderr under ``Stderr:``; a failure leads with its exit code.
 
     The exit code comes first so a bounded job summary still shows that the command failed.
     """
-    if return_code == 0:
-        return stdout
-    lines = [f"Exit code {return_code}"]
+    lines = [f"Exit code {return_code}"] if return_code else []
     if stdout:
-        lines += ["Output:", stdout]
+        lines += ["Output:", stdout] if return_code else [stdout]
     if stderr:
         lines += ["Stderr:", stderr]
     return "\n".join(lines)
@@ -94,9 +92,8 @@ class CapturedShellStream:
 class ShellOutputCapture:
     """Own both output streams and publish only a complete supported result."""
 
-    def __init__(self, destination: ShellOutputDestination, cwd: str | None) -> None:
+    def __init__(self, destination: ShellOutputDestination) -> None:
         self.destination = destination
-        self.cwd = cwd
         self.stdout = CapturedShellStream(destination)
         try:
             self.stderr = CapturedShellStream(destination)
@@ -160,8 +157,6 @@ class ShellOutputCapture:
                 if selected is not None
                 else format_shell_completion(self.stdout.read(), self.stderr.read(), return_code=return_code)
             )
-            if self.cwd is not None:
-                output = f"[cwd: {self.cwd}]\n{output}"
             return cast("dict[str, dict[str, object]]", finalize_tool_output_file(request, output))
         except OSError:
             return {"mindroom_tool_output": {"status": "error", "error": "Failed to publish complete shell output."}}

@@ -90,15 +90,14 @@ _SHELL_ARGS_ERROR = (
 )
 _SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
 _WORKSPACE_CWD_NOTE = (
-    "The command runs in your agent workspace as its working directory "
-    "(echoed as a `[cwd: ...]` first line in the result). Always use relative paths or "
+    "The command runs in your agent workspace as its working directory. Always use relative paths or "
     "`$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` "
     "to the workspace, while local execution maps it to the host home."
 )
 _WORKDIR_CWD_NOTE = (
-    "The command runs in the workdir as its working directory (echoed as a `[cwd: ...]` first line in the result), "
-    "so relative paths name files there. `$MINDROOM_AGENT_WORKSPACE` is your agent workspace, which holds your "
-    "skills, subagent profiles, saved tool outputs, and delegation records; use it for files meant for the workspace."
+    "The command runs in the workdir as its working directory, so relative paths name files there. "
+    "`$MINDROOM_AGENT_WORKSPACE` is your agent workspace, which holds your skills, subagent profiles, saved tool "
+    "outputs, and delegation records; use it for files meant for the workspace."
 )
 # Working method distilled from RRSI harness-search runs on graded terminal tasks, where these habits
 # removed the most common silent failures of a shell agent (wrong field matched, merged file boundaries,
@@ -485,8 +484,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
         ) -> str | ToolOutputFileHandled:
             """Runs a shell command and returns the output or error.
 
-            The last ``tail`` lines of stdout are returned; on non-zero exit, useful
-            stdout is preserved together with stderr. A command still running after
+            The last ``tail`` lines of stdout, then of stderr, are returned; on
+            non-zero exit, all of stderr is kept. A command still running after
             ``timeout`` seconds is stopped with the processes it started, and its
             output so far is returned. Without ``timeout``, a call that runs as part
             of a background job has no time limit; that includes every call that
@@ -499,7 +498,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             server or anything else meant to keep running with
             ``nohup cmd > out.log 2>&1 &``, which keeps running after the command
             ends; in the foreground it would keep the call running until its job is
-            cancelled.
+            cancelled. Wait for something inside one command, such as
+            ``until <check>; do sleep 10; done`` with a ``timeout``, not with
+            repeated ``sleep`` calls: every call is a model turn.
 
             With ``mindroom_output_path``, capture the complete supported output
             within the redirect byte limit instead of applying ``tail``; a stopped
@@ -569,11 +570,6 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
                 )
-            message = result.message
-            if result.output_file_handled:
-                return ToolOutputFileHandled(message)
-            if cwd is None:
-                return message
-            return f"[cwd: {cwd}]\n{message}"
+            return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message
 
     return MindRoomShellTools

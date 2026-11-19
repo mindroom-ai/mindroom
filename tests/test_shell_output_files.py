@@ -116,8 +116,8 @@ async def test_output_ownership_is_independent_of_message_wording(
         },
     )
 
-    expected = display_message if start_fails else "complete"
-    assert destination.read_text().split("\n", 1)[-1] == expected
+    # The saved file holds the output alone, with no cwd line before it.
+    assert destination.read_text() == (display_message if start_fails else "complete")
 
 
 @pytest.mark.asyncio
@@ -147,23 +147,20 @@ async def test_plain_shell_output_still_honors_tail(shell_toolkit: AnyToolkit) -
     result = await _run(shell_toolkit, {"args": "printf 'one\\ntwo\\nthree\\n'", "tail": 2})
 
     assert result.status == "success"
-    assert str(result.result).splitlines()[1:] == ["two", "three"]
+    assert str(result.result).splitlines() == [
+        "[Showing the last 2 of 3 lines. Pass a larger tail, or narrow the command.]",
+        "two",
+        "three",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: AnyToolkit) -> None:
     """A failed command states its exit code before both output streams, locally and on a worker."""
     result = await _run(shell_toolkit, {"args": "echo partial; echo broken >&2; exit 7"})
 
     assert result.status == "success"
-    assert str(result.result).splitlines() == [
-        f"[cwd: {tmp_path}]",
-        "Exit code 7",
-        "Output:",
-        "partial",
-        "Stderr:",
-        "broken",
-    ]
+    assert str(result.result).splitlines() == ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
 
 
 @pytest.mark.asyncio
@@ -179,7 +176,7 @@ async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: 
 
     assert result.status == "success"
     assert json.loads(str(result.result))["mindroom_tool_output"]["exit_code"] == 3
-    assert (tmp_path / "receipt.txt").read_text().split("\n", 1)[-1] == (
+    assert (tmp_path / "receipt.txt").read_text() == (
         'Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}'
     )
 
@@ -465,8 +462,7 @@ def test_worker_subprocess_saves_supervised_capture(tmp_path: Path) -> None:
         },
     )
     assert "saved_to_file" in status
-    saved = (workspace / "worker.txt").read_bytes().split(b"\n", 1)[1]
-    assert saved == b"0123456789012345678\n" * 125000
+    assert (workspace / "worker.txt").read_bytes() == b"0123456789012345678\n" * 125000
 
 
 @pytest.mark.asyncio
@@ -634,7 +630,7 @@ async def test_capture_includes_descendant_output_within_grace(
         },
     )
     assert "saved_to_file" in str(result.result)
-    assert (tmp_path / "descendant.txt").read_text().split("\n", 1)[-1] == "earlylate"
+    assert (tmp_path / "descendant.txt").read_text() == "earlylate"
 
 
 @pytest.mark.asyncio

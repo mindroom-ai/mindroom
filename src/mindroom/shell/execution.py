@@ -88,18 +88,24 @@ class _OutputBuffer:
         self._trim_to_max_lines()
 
     def render(self, *, tail: int | None = None) -> str:
+        """Return the last ``tail`` retained lines, after one notice of what was left out."""
         output = self._rendered_text()
-        output_lines = output.split("\n") if output else []
-        if tail is not None:
-            output_lines = output_lines[-tail:]
+        all_lines = output.split("\n") if output else []
+        output_lines = all_lines if tail is None else all_lines[-tail:]
         output = "\n".join(output_lines)
-        if not self.truncated:
+        cuts = []
+        if len(output_lines) < len(all_lines):
+            cuts.append(f"Showing the last {len(output_lines)} of {len(all_lines)} lines")
+        if self.truncated:
+            cuts.append(f"{'output' if cuts else 'Output'} truncated to the last {self.max_bytes} bytes")
+        if not cuts:
             return output
-
-        notice = (
-            f"[Output truncated to the last {self.max_bytes} bytes. "
-            "Redirect command output to a file for complete results.]"
+        advice = (
+            "Redirect command output to a file for complete results."
+            if self.truncated
+            else "Pass a larger tail, or narrow the command."
         )
+        notice = f"[{'; '.join(cuts)}. {advice}]"
         return f"{notice}\n{output}" if output else notice
 
     def __len__(self) -> int:
@@ -260,8 +266,8 @@ async def run_command(
     """Run one shell command; return output, an error message, or a background handle.
 
     When the command completes within ``timeout`` seconds the last ``tail``
-    lines of stdout are returned; ``None`` waits however long it runs. On
-    non-zero exit, useful stdout is preserved together with stderr. When the
+    lines of stdout, then of any stderr, are returned; ``None`` waits however
+    long it runs. On non-zero exit, stdout is preserved with all of stderr. When the
     timeout is exceeded, ``on_timeout="kill"`` stops the command's whole
     process group and returns its output so far; otherwise the process keeps
     running under *registry* and a handle string is returned for
@@ -334,7 +340,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     capture = output_capture
     try:
         if capture is None and output_destination is not None:
-            capture = ShellOutputCapture(output_destination, cwd)
+            capture = ShellOutputCapture(output_destination)
         started_at = time.monotonic()
         process = await asyncio.create_subprocess_exec(
             *argv,
@@ -447,16 +453,10 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
             )
         finally:
             capture.close()
-    if return_code != 0:
-        return ShellRunResult(
-            message=format_shell_completion(
-                stdout_buf.render(tail=tail),
-                stderr_buf.render(),
-                return_code=return_code,
-            ),
-            handle=finished_handle,
-        )
-    return ShellRunResult(message=stdout_buf.render(tail=tail), handle=finished_handle)
+    # A failure keeps its whole stderr, which explains it; a success's stderr follows the same tail as its stdout.
+    errors = stderr_buf.render(tail=None if return_code else tail)
+    message = format_shell_completion(stdout_buf.render(tail=tail), errors, return_code=return_code)
+    return ShellRunResult(message=message, handle=finished_handle)
 
 
 async def _stop_timed_out_process(
