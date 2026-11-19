@@ -69,7 +69,7 @@ On timeout or service error, the message uses the raw-audio fallback.
 
 ## Voice Message Processing
 
-What appears in the room depends on whether the router is present and whether the responder is already clear.
+What appears in the room depends on whether the responder is already clear.
 Voice messages follow the same mention, thread, and access rules as text from the original sender.
 
 **Transcript.**
@@ -77,14 +77,14 @@ With `voice.visible_router_echo: true`, the agent or team that answers a voice m
 No transcript appears for a voice message nobody answers, or for one that could not be transcribed.
 
 **Responder already clear.**
-If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly without a router handoff.
+If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly.
 
-**Router must choose.**
-If several agents or teams can respond and none is targeted, the router routes on the transcript and tells the chosen responder with a hidden event, so no handoff message appears in the room.
+**Routing must choose.**
+If several agents or teams can respond and none is targeted, [routing](https://docs.mindroom.chat/configuration/router/#how-routing-works) picks one from the transcript and tells it with a hidden event, so no handoff message appears in the room.
 The chosen responder answers the voice message and still receives the original audio attachment.
 
-**No router, or router cannot reply to the sender.**
-Agents and teams handle the voice message directly with the same rules as text.
+**Sender is not routed.**
+When `router.access` leaves out the sender, agents and teams handle the voice message directly with the same rules as text.
 If several responders remain and none is targeted, nobody answers until the user mentions an agent or team.
 
 ## Transcript Normalization

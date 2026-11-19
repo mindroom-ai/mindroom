@@ -136,7 +136,7 @@ Every outbox delivery freezes the room membership epoch that authorized it, exce
 ### Invites
 
 Invites have no stable event ID for a journal row, so the pending room and inviter are persisted before background handling starts.
-That record only wakes unfinished work and never grants inviter authority: routers and agents re-read Nio's current inviter after the join fence is durable and immediately before requesting the join.
+That record only wakes unfinished work and never grants inviter authority: agents and teams re-read Nio's current inviter after the join fence is durable and immediately before requesting the join.
 
 ### Best-effort inputs
 

@@ -657,7 +657,7 @@ Users can change that per thread or per room, and the most specific choice wins:
 
 Thread and room overrides name models from the `models:` section and survive restarts.
 A Matrix client's model picker lists the configured models and changes the thread override like `!model`.
-The picker works in encrypted and unencrypted rooms when the router and at least one agent you may address are joined; teams alone do not qualify.
+The picker works in encrypted and unencrypted rooms when at least one agent you may address is joined; teams alone do not qualify.
 It shows each model's key, display name, provider, model ID, and icon, never API keys, hosts, local paths, or `extra_kwargs`.
 Catalogs with more than 256 models or over 64 KiB are not offered to the picker; `!model` still works.
 The client protocol is described in [Model Selection Protocol](../architecture/matrix.md#model-selection-protocol).

@@ -133,11 +133,11 @@ Neither the template's `agent` nor its `users` overrides may list `rooms`, becau
 
 ## Onboarding Behavior
 
-The router handles a join, a `commands` entry, or a `backfill` hit in an onboarding room like any [personal-room](personal-rooms.md#onboarding-behavior) trigger, with these differences:
+The MindRoom account handles a join, a `commands` entry, or a `backfill` hit in an onboarding room like any [personal-room](personal-rooms.md#onboarding-behavior) trigger, with these differences:
 
 1. MindRoom registers the agent's Matrix account and starts the agent without a restart; a failed registration leaves no agent behind.
 2. The usual personal-room flow runs with that user's own agent once the agent has finished its first sync.
-   Until then the trigger is pending, which does not hold up the onboarding room for anyone else, and the router logs `Personal agent is starting`.
+   Until then the trigger is pending, which does not hold up the onboarding room for anyone else, and MindRoom logs `Personal agent is starting`.
 3. The user keeps the agent, its account, and its room when they leave the onboarding room or are banned, and MindRoom has no command that removes them.
 
 A [bridge alias](authorization.md#bridge-aliases) onboards onto its person's agent, which gives the alias account its own personal room.

@@ -4,7 +4,7 @@ icon: lucide/shield
 
 # Authorization
 
-This page explains who may talk to agents, teams, and the router, who may administer MindRoom and manage credentials, and who may open the dashboard.
+This page explains who may talk to agents and teams, whose messages are routed, who may administer MindRoom and manage credentials, and who may open the dashboard.
 Use it to give people access to an agent, to work out why an agent ignored someone, or to map bridged identities to one person.
 
 <video controls playsinline preload="metadata" aria-label="New colleagues are invited to a room, and the agent answers everyone in it" style="width: 100%" poster="https://github.com/user-attachments/assets/e9d474d9-2d94-4c2a-be48-35c50edc1fd9" data-poster-light="https://github.com/user-attachments/assets/e9d474d9-2d94-4c2a-be48-35c50edc1fd9" data-poster-dark="https://github.com/user-attachments/assets/f6949b71-2746-4d4e-84ed-3a7ccb676d57">
@@ -20,7 +20,7 @@ Each kind of authority has its own setting, and no setting grants another kind.
 
 | Question | Decided by |
 | --- | --- |
-| Who may make the router, an agent, or a team join a room? | That entity's `accept_invites` ([agents](configuration/agents.md), [teams](configuration/teams.md), [router](configuration/router.md)) |
+| Who may make an agent or a team join a room? | That entity's `accept_invites` ([agents](configuration/agents.md), [teams](configuration/teams.md)) |
 | Who receives automatic invitations and Matrix room admin power? | `room_defaults` and `rooms.<key>.invite_users` / `admins` ([Room policy](rooms.md#room-policy)) |
 | Who may converse with a responder? | That responder's [`access`](#responder-access) |
 | Who may run administrative commands and manage any agent's credentials? | `administrators` |
@@ -74,14 +74,14 @@ authorization:
 | --- | --- | --- | --- |
 | `administrators` | list of Matrix user IDs | `[]` | Platform administrators; concrete IDs only, no wildcards |
 | `agents.<name>.credential_managers` | list of Matrix user IDs | `[]` | Users who may manage that agent's shared credentials and OAuth connections; concrete IDs only, no wildcards |
-| `<responder>.access` | object or null | `null` | Conversation access for an agent, team, or the router; see [Responder access](#responder-access) |
+| `<responder>.access` | object or null | `null` | Conversation access for an agent or team, or under `router:` for [routing](configuration/router.md); see [Responder access](#responder-access) |
 | `authorization.config_command_enabled` | bool | `false` | Enables [`!config`](chat-commands.md#config) for administrators |
 | `authorization.aliases` | map of Matrix user ID to list of IDs | `{}` | Bridge identities treated as one person; see [Bridge aliases](#bridge-aliases) |
 | `bot_accounts` | list of Matrix user IDs | `[]` | Non-MindRoom bots; see [Bot accounts](#bot-accounts) |
 
 ## Responder access
 
-`access` on an agent, team, or the router has three clauses, and a requester is allowed when any one matches.
+`access` on an agent, a team, or `router:` has three clauses, and a requester is allowed when any one matches.
 
 - `current_room_members` (bool): allow joined members of the room the message is in.
 - `members_of_rooms` (list of managed room keys): allow joined members of any listed managed room.
@@ -92,10 +92,10 @@ Defaults:
 - For agents and teams, omitting `access` or its `members_of_rooms` grants members of the responder's own managed `rooms`.
 - An explicit `members_of_rooms: []` turns that inferred grant off.
 - Only managed room keys grant membership; raw Matrix room IDs or aliases in `rooms` grant nothing, and `members_of_rooms` entries that are not managed room keys fail validation.
-- The router defaults to `current_room_members: true`.
+- `router.access` restricts whose messages are routed; unset, it restricts nothing, and set, it defaults to `current_room_members: true`.
 
 Platform administrators pass every responder's `access` check except that of a [personal agent](personal-agents.md), an agent another agent created, or a team that includes one, which admits an administrator only when its own `access` does.
-Every agent, team, and the router admits its own account.
+Every agent and team admits its own account.
 [Bridge aliases](#bridge-aliases) are resolved before matching.
 The same check covers every way of reaching a responder: messages, media, calls, reactions, approvals, external triggers, background scripts, delegation, attachments, and scheduled resumes.
 
@@ -108,8 +108,7 @@ A team's `access` covers requests to the team as a whole, so someone the team ad
 
 Only joined members count: a pending invitation does not, and leaving, being kicked, or being banned removes the grant.
 When MindRoom cannot confirm membership of a referenced room, the grant does not apply.
-The router tracks membership, so it must be joined to a room before `current_room_members` can allow anyone there.
-In an ad-hoc room an agent joined first, have the agent use its `invite_router` tool and retry after the router joins.
+Any MindRoom agent or team joined to a room tracks its membership, so `current_room_members` works in every room an agent is in and no other account needs inviting.
 
 ### Invitations
 
@@ -144,7 +143,7 @@ authorization:
       - "@signal_456:example.com"
 ```
 
-Aliases apply only to people; managed agents, teams, the router, `bot_accounts`, and MindRoom's internal account are never remapped.
+Aliases apply only to people; managed agents, teams, MindRoom's own accounts, and `bot_accounts` are never remapped.
 Each alias may appear only once, and a canonical ID cannot also be another user's alias.
 
 Upgrading from the retired access fields is covered in [Membership Access Migration](deployment/upgrades.md#membership-access-migration).
@@ -153,7 +152,7 @@ Upgrading from the retired access fields is covered in [Membership Access Migrat
 
 `bot_accounts` lists non-MindRoom bots, such as bridge bots, that MindRoom treats like agents rather than people when deciding whether to respond, so they do not trigger [multi-human thread protection](configuration/threads.md#bot-accounts).
 They still need `access` to talk to a responder.
-A bot account's message that the router hands to an agent, or a task it scheduled, runs as that bot account, so the agent and every agent or team its reply mentions apply their own `access` to it.
+A bot account's message that routing hands to an agent, or a task it scheduled, runs as that bot account, so the agent and every agent or team its reply mentions apply their own `access` to it.
 
 ```yaml
 bot_accounts:

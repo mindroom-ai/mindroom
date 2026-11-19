@@ -10,7 +10,7 @@ The path from a Matrix message to a delivered response; [Bot Runtime](bot-runtim
 ```text
 Matrix sync callback
   -> matrix/durable_ingestion.py                           (validate owned Nio work, commit its sequence and effects, then acknowledge)
-  -> bot.py (AgentBot runtime shell, for agents, teams, and the router)
+  -> bot.py (AgentBot runtime shell, for agents, teams, and the owner account)
   -> journal_dispatch.py + pending_event_worker.py         (fan admitted events out to callbacks; unsettled work is woken again)
   -> turns/ingress.py (owns one event to gate admission: onboarding command -> approval reply -> precheck -> claim -> normalize -> resolve -> admit)
        -> ingress_validation.py                                  (classify provenance once, dedup, echo drop; commands exit before batching)
@@ -51,7 +51,7 @@ Matrix sync callback
 | `api/config_lifecycle.py` | The dashboard API's published config snapshots: loads, commits published atomically with the file write, and the strict and last-good per-request readers |
 | `orchestration/config_updates.py` | The config update plan: the one decision of what a reload restarts, starts, removes, and re-authorizes |
 | `orchestration/entity_fleet.py` | The one owner of every managed bot's lifecycle: start, background retry, restart stop, removal, and process shutdown |
-| `orchestration/rooms.py` | Managed room setup through the router: room creation, policy, invitations, root Space, server emoji room, and bot memberships |
+| `orchestration/rooms.py` | Managed room setup through the owner account: room creation, policy, invitations, root Space, server emoji room, and bot memberships |
 | `orchestration/accounts.py` | Managed Matrix accounts: the internal user's and each configured entity's, localpart collisions checked before any is created, then the identity registry validated |
 | `orchestration/storage_preparation.py` | Every startup migration, in the one order they depend on, before anything reads the storage root |
 | `orchestration/turn_recovery.py` | When each bot replays the turn-journal work it left pending: once the bots its turns need completed their first sync |
@@ -60,9 +60,9 @@ Matrix sync callback
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
-| `bot.py` | AgentBot runtime shell of every agent, team, and the router: Matrix lifecycle, sync callbacks, and room behavior |
+| `bot.py` | AgentBot runtime shell of every agent, team, and the owner account: Matrix lifecycle, sync callbacks, and room behavior |
 | `bot_runtime_view.py` | One bot generation's runtime state: its run phase and admission fence, and the runtime's shared config, gate, and membership index read through its orchestrator |
-| `bot_room_lifecycle.py` | One bot's room joins and leaves: configured and invited rooms, durable pending invites, following rooms listed under a room, cleanup of rooms it no longer keeps, the router's welcome, and an entity's notice in a managed room |
+| `bot_room_lifecycle.py` | One bot's room joins and leaves: configured and invited rooms, durable pending invites, following rooms listed under a room, cleanup of rooms it no longer keeps, the owner account's welcome in configured rooms, and an entity's notice in a managed room |
 | `turns/ingress.py` | TurnIngress - owns one inbound text or media event from its Matrix callback to gate admission, including onboarding commands, approval replies, edits, and commands that bypass the gate |
 | `turns/dispatch.py` | TurnDispatcher - owns one turn from the coalescing gate's exit to its recorded outcome: prepare, decide, execute, record |
 | `turns/interactive_selection.py` | Admits an answer to an interactive question behind earlier ingress and runs its response after the gate |
@@ -466,8 +466,8 @@ Matrix sync callback
 | `credentials/policy.py` | Each credential service's placement per worker scope, and whether workers may receive it by grant or lease |
 | `credentials/environment.py` | Credentials the environment declares (provider keys, bootstrap values, seeds), read by the primary under its saved ones |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
-| `matrix/room_thread_mode.py` | Router-owned effective room thread-mode state for client view selection |
-| `matrix/room_accounts.py` | Router-owned room state listing the joined MindRoom accounts, so clients recognize agents by any user name |
+| `matrix/room_thread_mode.py` | The effective room thread-mode state a room's steward publishes for client view selection |
+| `matrix/room_accounts.py` | The room state a room's steward publishes listing the joined MindRoom accounts, so clients recognize agents by any user name |
 | `matrix/state.py` | `matrix_state.yaml` accounts, rooms, space, and server emoji room, changed only through `update_matrix_state` |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/server_features.py` | The unstable features a homeserver lists in `/_matrix/client/versions` |

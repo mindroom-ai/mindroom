@@ -93,7 +93,8 @@ Enable end-to-end encryption for the current room.
 
 `!encrypt` explains what enabling encryption means for the room without changing anything.
 `!encrypt confirm` enables encryption and is restricted to Matrix room admins.
-The responding bot also needs permission to change room state; if it lacks that permission, a room admin can enable encryption from their own Matrix client.
+A MindRoom account in the room also needs permission to change room state; otherwise the command answers `I need moderator rights in this room to enable encryption.`, and a room admin can enable encryption from their own Matrix client.
+Any other failure asks you to run the command again.
 People joining an encrypted room later cannot read messages sent before they joined.
 
 ### `!e2ee`

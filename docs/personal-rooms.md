@@ -24,7 +24,7 @@ personal_rooms:
   welcome_dispatch: true
 ```
 
-The router watches the onboarding rooms, so the selected agent does not need to join them.
+The MindRoom account watches the onboarding rooms, so the selected agent does not need to join them.
 To give each user their own agent instead of one shared agent, see [Personal Agents](personal-agents.md).
 The human must still be allowed to use the agent under its access rules; listing the onboarding rooms in `access.members_of_rooms`, as above, grants that (see [Responder access](authorization.md#responder-access)).
 
@@ -53,23 +53,22 @@ Templates accept only `{user}` (full Matrix user ID), `{room}` (room alias), and
 Avatars are set only on rooms that have none.
 The welcome is sent once, and changing `welcome` or `welcome_dispatch` later does not change a welcome that is already pending.
 
-`auto_join_requester: true` requires the router's Matrix account to be allowed to use the homeserver's Synapse-compatible admin join API.
+`auto_join_requester: true` requires the MindRoom account to be allowed to use the homeserver's Synapse-compatible admin join API.
 It applies only when MindRoom creates the room, and never joins someone who already joined, left, or was banned.
-When the join fails, the onboarding failure's `error` names the HTTP status and Matrix error code, such as `answered HTTP 403 M_FORBIDDEN` when the router's account is not a homeserver admin.
+When the join fails, the onboarding failure's `error` names the HTTP status and Matrix error code, such as `answered HTTP 403 M_FORBIDDEN` when the MindRoom account is not a homeserver admin.
 If the homeserver joins the owner itself within two seconds, as Tuwunel does with `rooms.invites.auto_accept`, a refused admin join is no failure and onboarding finishes on the first attempt.
 
 ## Onboarding Behavior
 
 - Joining an onboarding room, or sending one of the `commands` there, onboards only that human.
-- MindRoom's own router, agent, and team accounts, accounts listed in `bot_accounts`, and the internal `mindroom_user` account never get personal rooms.
+- MindRoom's own accounts, agent and team accounts, accounts listed in `bot_accounts`, and the internal `mindroom_user` account never get personal rooms.
 - A human who leaves or is banned from their personal room is not re-added by restarts or backfill.
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
-- When it onboards someone, MindRoom invites the router into the personal room it created, so [approval cards](tool-approval.md) work there without the agent inviting it first, unless [`router.accept_invites`](configuration/router.md) leaves out the agent; once the router has left, MindRoom does not invite it again.
-- The router gets power level 50 in the personal room, so it can publish the room's [thread mode](configuration/threads.md#thread-mode-resolution) there; other members keep their power level.
+- A personal room holds only the person and the agent: the agent posts its own [approval cards](tool-approval.md), transcripts and command replies and publishes the room's [thread mode](configuration/threads.md#thread-mode-resolution), so no other MindRoom account is invited.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
   Adopted rooms instead allow only the participants listed in their record, because an adopted room may share its earlier history.
-  Any other MindRoom agent invited there is removed with a notice suggesting a new room with that agent, or, for the router, an operator listing it in the room's record.
+  Any other MindRoom agent invited there is removed with a notice suggesting a new room with that agent.
 - Personal rooms survive restarts and room cleanup, even after `personal_rooms` is removed.
   Disabling the feature stops new onboarding but does not remove existing rooms or access.
 
@@ -122,7 +121,7 @@ For a room with shared history and one existing guest, a record looks like this:
 - `room_id` is required; an alias alone never adopts a room.
 - `source_room_id` is the onboarding room, and the requester must still be a member of it and allowed to use the agent.
 - `creator_user_id` must match the room's creator, and `agent_user_id` must match the selected agent's Matrix ID.
-- `router_user_id` (optional) must be this installation's router account and lets it stay in the room, including during room cleanup after onboarding is disabled.
+- `router_user_id` (optional, kept for records written by earlier releases) must be this installation's MindRoom account and lets it stay in the room, including during room cleanup after onboarding is disabled.
 - `expected_history_visibility` is `invited` (default), `joined`, or `shared` and must match the room's current setting; `world_readable` rooms cannot be adopted.
 - `additional_user_ids` (default `[]`) lists the only other participants allowed to stay joined, invited, or knocking; it does not invite anyone or grant power.
 - Set `welcome_completed: true` to skip the welcome; otherwise MindRoom sends the configured welcome.
@@ -130,5 +129,4 @@ For a room with shared history and one existing guest, a record looks like this:
 If the room's history setting stops matching the record, or anyone other than a MindRoom agent it does not list joins, is invited, or knocks, onboarding for that human fails with one of the log messages above until someone fixes the room.
 MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.
-Like every personal room, an adopted room has the power level of MindRoom's own state events, such as the router's room accounts list, set to 0 at each reconciliation, so the router and agents can publish them.
-The router gets power level 50 only in an adopted room whose record lists it in `router_user_id`.
+Like every personal room, an adopted room has the power level of MindRoom's own state events, such as the room accounts list, set to 0 at each reconciliation, so the room's agents can publish them.

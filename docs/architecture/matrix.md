@@ -31,26 +31,27 @@ Informational notices stay unmarked.
 
 ## Room Accounts List
 
-The router publishes which joined members of a room are MindRoom accounts, so clients can recognize agents and teams whose user names do not start with `mindroom_`, such as personal agents with a custom `matrix_username`.
-The room state event has type `io.mindroom.accounts`, the router's user ID as its state key, and the sorted user IDs of the joined router, agent, and team accounts of the router's installation:
+A room's steward, the MindRoom account with the highest power level there, publishes which joined members of the room are MindRoom accounts, so clients can recognize agents and teams whose user names do not start with `mindroom_`, such as personal agents with a custom `matrix_username`.
+The room state event has type `io.mindroom.accounts`, the publisher's own user ID as its state key, and the sorted user IDs of the joined owner, agent, and team accounts of the publisher's installation:
 
 ```json
 {"accounts":["@alice.mind:example.org","@mindroom_research:example.org","@mindroom_router:example.org"]}
 ```
 
-The router publishes it on startup and after every config reload, and updates it when one of those accounts joins or leaves the room.
+The steward publishes it on startup and after every config reload, and updates it when one of those accounts joins or leaves the room.
 Matrix accepts a state key that starts with `@` only from that user, but any member allowed to send the type can send it under another state key.
-So a client reads only the event keyed by a router's user ID, and trusts it only when its sender is a MindRoom router (`@mindroom_router:<server>`, or `@mindroom_router_<namespace>:<server>` for a namespaced installation) on the viewer's own homeserver.
-Each MindRoom installation in a room has its own router, which lists only its own accounts.
-The router can send the event only where the room's power levels allow it, which the rooms MindRoom creates do; managed rooms regain that power level at every startup, personal rooms regain it at startup while their owner is still in an onboarding room, other rooms keep the power levels they were created with, and a client that creates rooms should give the type power level 0 too.
+So a client reads only an event keyed by its sender's user ID.
+MindRoom Chat trusts the one keyed by the MindRoom owner account (`@mindroom_router:<server>`, or `@mindroom_router_<namespace>:<server>` for a namespaced installation) on the viewer's own homeserver, which is the steward of the rooms MindRoom creates.
+Each MindRoom installation in a room has its own steward, which lists only its own accounts.
+The steward can send the event only where the room's power levels allow it, which the rooms MindRoom creates do; managed rooms regain that power level at every startup, personal rooms regain it at startup while their owner is still in an onboarding room, other rooms keep the power levels they were created with, and a client that creates rooms should give the type power level 0 too.
 
 ## Model Selection Protocol
 
 See [Model Overrides in Chat](../configuration/models.md#model-overrides-in-chat).
 
 Discovery uses Olm-encrypted to-device events, including for unencrypted rooms, so it needs no room-state advertisement, state permissions, or external endpoint.
-One MindRoom account per room answers discovery on its own device: the router where it is joined, else the joined agent or team with the lowest Matrix ID.
-A room without the router therefore has a catalog, and a client sees one runtime per room.
+One MindRoom account per room answers discovery on its own device: the owner account where it is joined, else the joined agent or team with the lowest Matrix ID.
+A room without the owner account therefore has a catalog, and a client sees one runtime per room.
 The answering account authenticates the actual requesting device and requires the requester and itself to be currently joined, plus at least one configured, joined agent the requester may address.
 An included thread must be a readable, unredacted root in that room, whether or not it is encrypted.
 Replies go only to the authenticated device, and sending a catalog never verifies a previously untrusted device.

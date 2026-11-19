@@ -262,10 +262,10 @@ Gemini API docs call `gemini-nano-banana-2.1` Nano Banana 2.1, while Vertex AI d
 
 ### Core MindRoom (`src/mindroom/`)
 
-**MultiAgentOrchestrator** (`orchestrator.py`) is the heart of the system - it boots every configured entity (router, agents, teams), provisions Matrix users, and keeps sync loops alive with hot-reload support when `config.yaml` changes.
+**MultiAgentOrchestrator** (`orchestrator.py`) is the heart of the system - it boots every configured entity (the MindRoom owner account, agents, teams), provisions Matrix users, and keeps sync loops alive with hot-reload support when `config.yaml` changes.
 
 **Entity types**:
-- `router`: Built-in traffic director that greets rooms and decides which agent or team should answer
+- `router`: The MindRoom owner account. It creates and administers the rooms in `config.yaml` and posts their welcome; it cannot be mentioned, never answers and accepts no invites. Routing itself is done by each room's steward.
 - **Agents**: Single-specialty actors defined under `agents:` in `config.yaml`
 - **Teams**: Collaborative bundles of agents that coordinate or parallelize work
 
