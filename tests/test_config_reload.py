@@ -1680,7 +1680,7 @@ async def test_queued_config_reload_waits_for_in_flight_response(
 
     config = _runtime_bound_config(
         Config(
-            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            agents={"agent1": AgentConfig(display_name="Agent 1", rooms=["lobby"])},
             router=RouterConfig(model="default"),
         ),
         tmp_path,
@@ -1980,7 +1980,7 @@ def test_config_update_plan_restarts_running_entities_when_construction_prompts_
     """Construction-time root prompt overrides should restart running agents, teams, and router."""
     old_config = _runtime_bound_config(
         Config(
-            agents={"general": AgentConfig(display_name="General Agent")},
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
             teams={
                 "team1": TeamConfig(
                     display_name="Team 1",
@@ -1993,7 +1993,7 @@ def test_config_update_plan_restarts_running_entities_when_construction_prompts_
     )
     new_config = _runtime_bound_config(
         Config(
-            agents={"general": AgentConfig(display_name="General Agent")},
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
             teams={
                 "team1": TeamConfig(
                     display_name="Team 1",
@@ -2113,6 +2113,7 @@ def test_config_update_plan_drains_responses_only_for_restarts_or_reply_authoriz
     """Edits that restart nothing and leave reply authorization alone may publish during replies."""
     base = {
         "agents": {"general": {"display_name": "General"}},
+        "server_emoji": {"enabled": True},
         "models": {
             "default": {"provider": "openai", "id": "gpt-6.1-sol"},
             "fast": {"provider": "openai", "id": "gpt-6-luna"},

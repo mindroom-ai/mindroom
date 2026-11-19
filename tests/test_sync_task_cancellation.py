@@ -2326,6 +2326,7 @@ async def test_orchestrator_initialize_registers_router_and_agents_with_the_flee
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-6-luna"}},
                 "agents": {"test_agent": {"display_name": "Test Agent"}},
+                "server_emoji": {"enabled": True},
                 "background_tool_jobs": {"enabled": False},
             },
             runtime_paths,

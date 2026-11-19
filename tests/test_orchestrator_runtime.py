@@ -3135,6 +3135,7 @@ class TestMultiAgentOrchestrator:
         # A realtime call agent runs LiveKit in this process, so startup loads its plugins.
         mock_config = _runtime_bound_config(
             Config(
+                server_emoji={"enabled": True},
                 agents={"caller": AgentConfig(display_name="Caller", role="Voice agent")},
                 router=RouterConfig(model="default"),
                 calls=CallsConfig(
@@ -4142,6 +4143,7 @@ class TestMultiAgentOrchestrator:
         """Router replay must filter unready dependencies per durable obligation."""
         config = _runtime_bound_config(
             Config(
+                server_emoji={"enabled": True},
                 agents={
                     "general": AgentConfig(
                         display_name="General",
@@ -4194,7 +4196,10 @@ class TestMultiAgentOrchestrator:
     ) -> None:
         """One transient store failure must not strand this or any later ready bot."""
         config = _runtime_bound_config(
-            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            Config(
+                server_emoji={"enabled": True},
+                agents={"general": AgentConfig(display_name="General", role="General assistant")},
+            ),
             tmp_path,
         )
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
@@ -4270,6 +4275,7 @@ class TestMultiAgentOrchestrator:
         """A running stuck responder must not park unrelated durable router work."""
         config = _runtime_bound_config(
             Config(
+                server_emoji={"enabled": True},
                 agents={
                     "healthy": AgentConfig(display_name="Healthy", role="Available responder"),
                     "failed": AgentConfig(display_name="Failed", role="Unavailable responder"),
@@ -4315,7 +4321,7 @@ class TestMultiAgentOrchestrator:
         tmp_path: Path,
     ) -> None:
         """Ready callbacks must not await full recovered turns on the sync task."""
-        config = _runtime_bound_config(Config(), tmp_path)
+        config = _runtime_bound_config(Config(server_emoji={"enabled": True}), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
         orchestrator._runtime_ready_event.set()
         recovery_started = asyncio.Event()
@@ -4355,7 +4361,10 @@ class TestMultiAgentOrchestrator:
     ) -> None:
         """A newly ready bot's replay is not held behind another bot's drain; its own drain follows that pass."""
         config = _runtime_bound_config(
-            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            Config(
+                server_emoji={"enabled": True},
+                agents={"general": AgentConfig(display_name="General", role="General assistant")},
+            ),
             tmp_path,
         )
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
@@ -4400,7 +4409,10 @@ class TestMultiAgentOrchestrator:
     ) -> None:
         """A drain resolves its entity's current generation after the previous drain's awaits."""
         config = _runtime_bound_config(
-            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            Config(
+                server_emoji={"enabled": True},
+                agents={"general": AgentConfig(display_name="General", role="General assistant")},
+            ),
             tmp_path,
         )
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
@@ -5068,8 +5080,12 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_update_config_syncs_runtime_services_when_running(self, tmp_path: Path) -> None:
         """Hot reload should sync runtime services without global knowledge refresh work."""
-        current_config = _runtime_bound_config(Config(defaults={"enable_streaming": True}), tmp_path)
-        new_config = _runtime_bound_config(Config(defaults={"enable_streaming": False}), tmp_path)
+        current_config = _runtime_bound_config(
+            Config(server_emoji={"enabled": True}, defaults={"enable_streaming": True}), tmp_path
+        )
+        new_config = _runtime_bound_config(
+            Config(server_emoji={"enabled": True}, defaults={"enable_streaming": False}), tmp_path
+        )
         orchestrator = _MultiAgentOrchestrator(
             runtime_paths=TestAgentBot._runtime_paths(tmp_path),
             config=current_config,
@@ -5825,9 +5841,10 @@ async def test_grant_refresh_reads_through_the_synced_bots_only(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_reload_that_changes_reply_access_fails_room_grants_closed(tmp_path: Path) -> None:
     """A reload that changes who may be answered revokes room grants under the published config until a refresh."""
-    current_config = _runtime_bound_config(Config(), tmp_path)
+    current_config = _runtime_bound_config(Config(server_emoji={"enabled": True}), tmp_path)
     new_config = _runtime_bound_config(
         Config(
+            server_emoji={"enabled": True},
             router=RouterConfig(access=ResponderAccessConfig(current_room_members=False)),
         ),
         tmp_path,

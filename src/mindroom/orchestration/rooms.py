@@ -187,7 +187,7 @@ class RoomSetup:
         """Ensure the optional root Matrix Space exists and link the current managed rooms."""
         client = self.owner_client()
         config = self.config_provider()
-        if client is None or not config.matrix_space.enabled:
+        if client is None or not config.matrix_space.enabled or not room_ids:
             return
         root_space_id = await ensure_root_space(client, config, self.runtime_paths, room_ids, admin_user_ids=set())
         invite_user_ids = _root_space_user_ids_to_invite(config)
