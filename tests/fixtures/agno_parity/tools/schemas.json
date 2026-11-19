@@ -4662,21 +4662,40 @@
       },
       {
         "name": "edit_file",
-        "description": "Replace a specific text occurrence in a file. Uses fuzzy matching to handle whitespace/Unicode differences.\nThe old_text must match exactly one location in the file. If it matches\nzero or more than one location, an error is returned.",
+        "description": "Replace exact text in one file. Read it first.\nCopy each old_text from the current file; edits match the original, not each other's results.\nWithout replace_all, old_text must match one place. Whitespace/quote differences are tolerated.\nEdits must not overlap; merge nearby ones. If one fails, nothing is written.",
         "parameters": {
           "type": "object",
           "properties": {
             "path": {
               "type": "string",
-              "description": "File path (relative to working directory or absolute)."
+              "description": "File path, relative to working directory or absolute."
             },
-            "old_text": {
-              "type": "string",
-              "description": "The text to find and replace. Must be unique in the file."
-            },
-            "new_text": {
-              "type": "string",
-              "description": "The replacement text."
+            "edits": {
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "old_text": {
+                    "description": "Text to replace, copied exactly from the file.",
+                    "type": "string"
+                  },
+                  "new_text": {
+                    "description": "Replacement text.",
+                    "type": "string"
+                  },
+                  "replace_all": {
+                    "default": false,
+                    "description": "Replace every match, not just one.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "old_text",
+                  "new_text"
+                ],
+                "type": "object"
+              },
+              "description": "Non-empty list of replacements."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4692,9 +4711,7 @@
             }
           },
           "required": [
-            "path",
-            "old_text",
-            "new_text"
+            "path"
           ]
         },
         "strict": false,

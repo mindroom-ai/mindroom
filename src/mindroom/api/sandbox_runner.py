@@ -863,6 +863,7 @@ def _resolve_entrypoint(
             runtime_paths=runtime_paths,
             tools=tools,
             runs_in_worker=False,
+            in_sandbox_request=True,
             credential_overrides=credential_overrides,
             credentials_manager=credentials_manager or get_runtime_credentials_manager(runtime_paths),
             runtime_config=config,

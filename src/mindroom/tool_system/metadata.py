@@ -584,6 +584,7 @@ def _build_managed_tool_init_kwargs(
     saved_output_dir: Path | None,
     workspace_in_worker: bool | None,
     agent_state_root: Path | None,
+    in_sandbox_request: bool,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool.
 
@@ -619,6 +620,7 @@ def _build_managed_tool_init_kwargs(
         ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
         ToolManagedInitArg.AGENT_STATE_ROOT: lambda: agent_state_root,
         ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: path_tool_roots,
+        ToolManagedInitArg.IN_SANDBOX_REQUEST: lambda: in_sandbox_request,
     }
     return {init_arg.value: managed_values[init_arg]() for init_arg in metadata.managed_init_args}
 
@@ -768,6 +770,7 @@ def get_tool_by_name(
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     workspace_in_worker: bool | None = None,
+    in_sandbox_request: bool = False,
     worker_target: ResolvedWorkerTarget | None,
 ) -> AnyToolkit:
     """Get a tool instance by its name in ``tools``, the registry of the config the caller acts for.
@@ -780,6 +783,7 @@ def get_tool_by_name(
     worker runtimes leave it unset because their own storage root is the state they own.
     ``workspace_in_worker`` says whether the agent's workspace-path tools run in a worker, where attachments are saved;
     None follows the sandbox settings for those tools.
+    ``in_sandbox_request`` is set only by the sandbox runner building a toolkit for the request it executes.
     """
     factory = tools.factory(tool_name)
     metadata = tools.entries[tool_name]
@@ -863,6 +867,7 @@ def get_tool_by_name(
                 ),
                 workspace_in_worker=workspace_in_worker,
                 agent_state_root=agent_state_root,
+                in_sandbox_request=in_sandbox_request,
             ),
         )
         include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)

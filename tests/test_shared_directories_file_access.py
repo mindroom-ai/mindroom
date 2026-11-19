@@ -139,7 +139,7 @@ def test_coding_tool_reads_greps_and_lists_a_share(tmp_path: Path) -> None:
     assert str(share / "summary.md") in tool.find_files("*.md", str(share))
     assert tool.ls(str(share)) == str(share / "summary.md")
     assert "only read" in tool.write_file(str(share / "new.md"), "x")
-    assert "only read" in tool.edit_file(str(share / "summary.md"), "hello", "bye")
+    assert "only read" in tool.edit_file(str(share / "summary.md"), [{"old_text": "hello", "new_text": "bye"}])
     assert (share / "summary.md").read_text(encoding="utf-8").startswith("hello")
     assert tool.read_file(str(other / "secret.md")).startswith("Error")
 
@@ -217,7 +217,12 @@ _PATH_CALLS = (
     _PathCall("file", "search_files", "pattern", lambda tool, path: tool.search_files(path)),
     _PathCall("file", "search_content", "directory", lambda tool, path: tool.search_content("secret", path)),
     _PathCall("coding", "read_file", "file", lambda tool, path: tool.read_file(path)),
-    _PathCall("coding", "edit_file", "file", lambda tool, path: tool.edit_file(path, "secret", "planted")),
+    _PathCall(
+        "coding",
+        "edit_file",
+        "file",
+        lambda tool, path: tool.edit_file(path, [{"old_text": "secret", "new_text": "planted"}]),
+    ),
     _PathCall("coding", "write_file", "file", lambda tool, path: tool.write_file(path, "planted")),
     _PathCall("coding", "grep", "directory", lambda tool, path: tool.grep("secret", path)),
     _PathCall("coding", "find_files", "directory", lambda tool, path: tool.find_files("*.md", path)),
