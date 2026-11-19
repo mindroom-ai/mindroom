@@ -913,9 +913,8 @@ def _claims() -> EventJournalStore:
     async def room_event_owner(*key: str) -> str | None:
         return saved.get(key)
 
-    return cast(
-        "EventJournalStore", SimpleNamespace(claim_room_event=claim_room_event, room_event_owner=room_event_owner)
-    )
+    store = SimpleNamespace(claim_room_event=claim_room_event, room_event_owner=room_event_owner)
+    return cast("EventJournalStore", store)
 
 
 def _shared_room(config: Config, *entity_names: str) -> dict[str, nio.MatrixRoom]:

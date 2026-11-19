@@ -23,7 +23,6 @@ from mindroom.steward_duties import moderator_rights_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
     import nio
     import structlog
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_CHANGES: dict[tuple[Path, str], asyncio.Lock] = {}
+_CHANGES: dict[tuple[str, str], asyncio.Lock] = {}
 _USAGE = "Usage: `/auto_approve <minutes>`, `/auto_approve <hours>h`, `/auto_approve off`, or `/auto_approve` to show the current window"
 # A bare number counts minutes; five digits already exceed the longest window.
 _DURATION = re.compile(r"^(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?)?$")
@@ -144,17 +143,14 @@ async def handle_auto_approve_command(  # noqa: PLR0911 - one answer per outcome
         )
 
     # One change at a time per room, so what the room shows is what the windows here were when it was written.
-    changing = _CHANGES.setdefault((runtime_paths.storage_root, room.room_id), asyncio.Lock())
+    changing = _CHANGES.setdefault((str(runtime_paths.storage_root), room.room_id), asyncio.Lock())
     if requested == "off":
         async with changing:
             ended = end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
             # A window always ends here; an `off` with none open still clears what the room shows of a failed clear.
             published = await _publish_windows(put_room_state, runtime_paths, room.room_id, logger)
         if published is False:
-            return (
-                f"⚠️ Auto-approve for all your tool calls is off in {place}, but the room may still show it as on. "
-                "Run `/auto_approve off` again to retry."
-            )
+            return f"⚠️ Auto-approve for all your tool calls is off in {place}, but the room may still show it as on. Run `/auto_approve off` again to retry."
         if not ended:
             return f"Auto-approve for all your tool calls is not on in {place}."
         if published is None:

@@ -209,7 +209,11 @@ async def test_structured_selection_runs_on_the_runtime_it_names(tmp_path: Path)
             event,
             USER,
             command_parser.parse(event.body),
-            dispatch=MagicMock(target=MessageTarget.resolve(ROOM, "$root", "$command")),
+            dispatch=MagicMock(
+                target=MessageTarget.resolve(ROOM, "$root", "$command"),
+                requester_user_id=USER,
+                context=MagicMock(mentioned_agents=[], planning_thread_history=[]),
+            ),
             handled_turn=TurnRecord.create(["$command"]),
             acts_for_requester=False,
         )

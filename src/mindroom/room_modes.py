@@ -14,7 +14,6 @@ from mindroom.room_thread_modes import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
     import nio
 
@@ -22,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.room_thread_modes import RoomThreadMode
 
-_CHANGES: dict[tuple[Path, str], asyncio.Lock] = {}
+_CHANGES: dict[tuple[str, str], asyncio.Lock] = {}
 
 
 async def change_room_thread_mode(
@@ -50,7 +49,7 @@ async def change_room_thread_mode(
             set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=stored)
 
     # One change at a time per room, so a refused change restores the override no other change has replaced since.
-    async with _CHANGES.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
+    async with _CHANGES.setdefault((str(runtime_paths.storage_root), room_id), asyncio.Lock()):
         previous = resolve_room_thread_mode_override(runtime_paths, room_id)
         store(mode)
         current = await reconcile_room_thread_mode(client, config, runtime_paths, room_id, put_state=put_state)
