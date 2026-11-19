@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
+from mindroom.agent_cli.session import CONFIG_RELOAD_CALL
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.ai_run_metadata import model_payload, prior_usage_of, prompt_input_tokens, turn_usage
 from mindroom.authorization import is_sender_allowed_for_responder
@@ -250,7 +251,9 @@ async def settle_child_response(
     known = [usd for usd in (own_usd, child.subagents_cost_usd) if usd is not None]
     child.cost_usd = sum(known) if known else None
     content = response.handover_content
-    if response.status == RunStatus.completed:
+    if stopped := reload_stopped_child_result(child, response):
+        child.status, child.result = "failed", stopped
+    elif response.status == RunStatus.completed:
         child.status = "completed"
         child.result = content or "Agent completed the task but returned no content."
     elif response.status == RunStatus.cancelled:
@@ -531,6 +534,20 @@ async def observe_child_event(event: RunEvent) -> None:
 def delegation_grant(child: DelegationChild) -> _DelegationGrant:
     """Name the caller permission that authorizes this child: its delegate allowlist or its workflow tool."""
     return "dynamic_workflow" if child.persona is not None and child.persona.source_kind == "workflow" else "delegate"
+
+
+def reload_stopped_child_result(child: DelegationChild, response: RunRecord) -> str | None:
+    """Return what a child hands its caller when a config reload stopped its run ``response``, else None.
+
+    The stopped run is stored completed, so a follow-up turn replays it, and names how its caller resumes the child.
+    A run a refused call marked that ended another way, as one cancelled while its command still ran, was not stopped.
+    """
+    reason = (response.metadata or {}).get(CONFIG_RELOAD_CALL) if response.status == RunStatus.completed else None
+    if reason is None or delegation_grant(child) == "dynamic_workflow":
+        # A workflow participant cannot be continued outside its workflow.
+        return reason
+    resume = f'continue_subagent(subagent_id="{child.subagent_id}", message="continue")'
+    return f"{reason} Resume this subagent with {resume}."
 
 
 def caller_grants_child(caller_name: str, agent_name: str, config: Config, grant: _DelegationGrant) -> bool:

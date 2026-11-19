@@ -7,7 +7,6 @@ its full context stay reachable through `mindroom-agent` inside each Bash comman
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from functools import partial
 from typing import TYPE_CHECKING, NoReturn
 
 from mindroom.agent_cli.bash import minimal_bash_toolkit
@@ -211,7 +210,7 @@ def bind_minimal_owner(
         output_file_policy=build.surface.output_file_policy,
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
-        failure_message=partial(_failure, build, delegation_depth),
+        reload_ends_run=True,
     )
 
 

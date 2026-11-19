@@ -126,7 +126,7 @@ async def bind_standard_cli(
             output_file_policy=build.surface.output_file_policy,
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
-            failure_message=str,
+            reload_ends_run=False,
         )
     except Exception:
         # The CLI is optional in standard mode; never fail the response for it.

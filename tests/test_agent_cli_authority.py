@@ -137,7 +137,7 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
             output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
             delegation_depth=0,
             refresh_scheduler=None,
-            failure_message=str,
+            reload_ends_run=False,
         )
         async with owner._window("bash"):
             receipt = await owner.operation(
@@ -151,7 +151,11 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
             )
             receipt = await settled_receipt(owner, receipt["call_id"])
 
-    assert (receipt["status"], receipt["outcome"]) == ("failed", "Tool is unavailable or arguments are invalid")
+    assert receipt["status"] == "failed"
+    assert "This MindRoom call did not run: the configuration was reloaded" in receipt["outcome"]
+    # A standard turn's own tools still run: the refusal neither stops its run nor says the turn stopped.
+    assert "turn stopped" not in receipt["outcome"]
+    assert not owner.control_calls
     catalog.bind.assert_not_awaited()
 
 

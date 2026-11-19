@@ -394,6 +394,9 @@ depends_on = []
 visibility = [
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.turn",
+    "mindroom.agent_cli.cli_approval_recovery",
+    "mindroom.ai",
+    "mindroom.delegation.lifecycle",
     "mindroom.api.agent_cli",
     "mindroom.orchestrator",
 ]
@@ -401,11 +404,14 @@ visibility = [
 [[interfaces]]
 from = ["mindroom.agent_cli.session"]
 expose = [
+    "CONFIG_RELOAD_CALL",
     "CliAuthenticationError",
     "CliBashWindowRequiredError",
     "CliCallConflictError",
+    "CliCatalogReloadedError",
     "CliOperationError",
     "MAX_CLI_GRANT_LIFETIME_NS",
+    "RELOAD_STOPPED",
     "TurnToolBridge",
     "TurnToolRegistry",
     "cli_turn_owner",
@@ -760,6 +766,7 @@ depends_on = ["mindroom.path_confinement"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
+    "mindroom.agent_cli.session",
     "mindroom.agent_loop",
     "mindroom.agent_loop.build",
     "mindroom.agent_run_context",
@@ -8468,6 +8475,7 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.delegation.lifecycle"
 depends_on = [
+    "mindroom.agent_cli.session",
     "mindroom.agent_loop",
     "mindroom.ai_run_metadata",
     "mindroom.constants",
@@ -9405,6 +9413,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.agent_cli.cli_approval_recovery"
 depends_on = [
+    "mindroom.agent_cli.session",
     "mindroom.agent_cli.delegation",
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.lifetime",
