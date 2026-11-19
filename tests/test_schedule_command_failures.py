@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -102,14 +101,14 @@ async def _reply(
     responders: list[MatrixID] | None = None,
     acts_for_requester: bool = False,
     conversation_reader: ConversationReader | None = None,
-    other_writer: AsyncMock | None = None,
+    steward: AsyncMock | None = None,
 ) -> str:
     """Run one chat command through the command handler and return the reply it posts."""
     runtime_paths = schedule_runtime_paths(tmp_path)
     config = _config(runtime_paths)
     ids = entity_ids(config, runtime_paths)
     scheduled_tasks = MagicMock(spec=ScheduledTaskRuntime)
-    scheduled_tasks.other_state_writer.return_value = nullcontext(other_writer)
+    scheduled_tasks.room_steward.return_value = None if steward is None else SimpleNamespace(client=steward)
     context = make_test_command_handler_context(
         client=client,
         config=config,
@@ -176,28 +175,6 @@ async def test_schedule_mentioning_an_unavailable_agent(tmp_path: Path) -> None:
         "❌ Failed to schedule: The following agents or teams are not available in this thread: "
         f"{writer_id}\n\n💡 @writer is not available in this thread"
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("read", "reason"),
-    [
-        (AsyncMock(return_value=_STATE_ERROR), str(_STATE_ERROR)),
-        (AsyncMock(side_effect=_BROKEN_RESPONSE), "ClientPayloadError: Response payload is not completed"),
-    ],
-    ids=["error response", "broken-off response"],
-)
-async def test_schedule_whose_room_state_cannot_be_read(tmp_path: Path, read: AsyncMock, reason: str) -> None:
-    """A schedule that cannot choose its runner reports the failed room read, and nothing is saved."""
-    client = make_matrix_client_mock()
-    client.room_get_state = read
-    with patch("mindroom.scheduling.tasks.complete_prompt", new=_parse_returning(_workflow())):
-        reply = await _reply(tmp_path, "!schedule in 5 minutes check logs", client=client)
-
-    assert reply == (
-        f"❌ Failed to schedule: Could not read the state of room {ROOM_ID} to choose which bot runs the task: {reason}"
-    )
-    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -394,18 +371,30 @@ async def test_state_write_timeout_gives_no_moderator_advice(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_timeout_then_refusal_of_the_lent_writer_gives_no_moderator_advice(tmp_path: Path) -> None:
-    """A write that timed out is not explained by the room refusing the account that retried it."""
+@pytest.mark.parametrize(
+    ("write", "expected"),
+    [
+        (nio.RoomPutStateResponse(event_id="$cancelled", room_id=ROOM_ID), f"✅ Cancelled task `{TASK_ID}`"),
+        (_STATE_WRITE_REFUSED, "I need moderator rights in this room to save schedules."),
+    ],
+    ids=["written", "refused"],
+)
+async def test_schedule_state_is_written_by_the_room_steward(tmp_path: Path, write: object, expected: str) -> None:
+    """The room's steward writes a command's schedule state, and its refusal alone is the moderator-rights answer.
+
+    The answering agent never tries the write itself, whatever power it has.
+    """
     client = make_matrix_client_mock()
     _serve_task(client, _workflow())
-    client.room_put_state = AsyncMock(side_effect=TimeoutError("slow"))
-    other_writer = make_matrix_client_mock(user_id="@other:server")
-    other_writer.room_put_state = AsyncMock(return_value=_STATE_WRITE_REFUSED)
+    steward = make_matrix_client_mock(user_id="@steward:server")
+    steward.room_put_state = AsyncMock(return_value=write)
 
-    reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client, other_writer=other_writer)
+    reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client, steward=steward)
 
-    assert reply.startswith(f"❌ Failed to cancel task `{TASK_ID}`: Failed to persist scheduled task state")
-    assert "moderator rights" not in reply
+    assert reply == expected
+    steward.room_put_state.assert_awaited_once()
+    assert steward.room_put_state.await_args.kwargs["content"]["status"] == "cancelled"
+    client.room_put_state.assert_not_awaited()
 
 
 def _serve_pending_tasks(client: AsyncMock, *task_ids: str) -> None:

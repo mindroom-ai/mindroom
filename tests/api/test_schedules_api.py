@@ -1,5 +1,7 @@
 """Tests for schedule management API endpoints."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -13,10 +15,18 @@ from fastapi.testclient import TestClient
 from httpx import Response
 
 from mindroom.api import config_lifecycle, main
+from mindroom.config.main import Config
 from mindroom.matrix.state import update_matrix_state
 from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
 from tests.conftest import make_matrix_client_mock
-from tests.scheduling_helpers import SCHEDULE_WRITER_ID, scheduled_task_state_event, serve_stored_task
+from tests.runtime_fakes import bind_test_embedded_runtime
+from tests.scheduling_helpers import (
+    SCHEDULE_WRITER_ID,
+    scheduled_task_runtime,
+    scheduled_task_state_event,
+    scheduling_bot,
+    serve_stored_task,
+)
 
 
 def _task(
@@ -60,6 +70,31 @@ def _task(
     )
 
 
+class _EveryRoom(dict[str, nio.MatrixRoom]):
+    """A client's room cache that holds every room, so its bot has joined whichever room a request names."""
+
+    def __contains__(self, room_id: object) -> bool:
+        return True
+
+    def __missing__(self, room_id: str) -> nio.MatrixRoom:
+        return nio.MatrixRoom(room_id, "@mindroom_test_agent:localhost")
+
+
+def _lend_bots(*clients: AsyncMock) -> None:
+    """Lend the app a scheduled-task runtime whose running bots hold these clients."""
+    bots = [scheduling_bot(client, agent_name=f"agent{index}") for index, client in enumerate(clients)]
+    runtime = scheduled_task_runtime(main._app_runtime_paths(main.app), *bots, config=Config())
+    bind_test_embedded_runtime(main.app, scheduled_tasks=runtime)
+
+
+@contextmanager
+def _served_by(client: AsyncMock) -> Iterator[None]:
+    """Serve requests through one running bot on ``client`` that has joined every room."""
+    client.rooms = _EveryRoom()
+    _lend_bots(client)
+    yield
+
+
 def _record_test_room() -> None:
     """Record the configured ``test_room`` as created, so listing reads its tasks under ``!test_room:localhost``."""
     update_matrix_state(
@@ -99,7 +134,7 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     ]
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
+        _served_by(AsyncMock()),
         patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
     ):
         response = test_client.get("/api/schedules")
@@ -262,6 +297,55 @@ def test_list_schedules_filtered_by_alias_reads_only_that_room(test_client: Test
     client.room_get_state.assert_awaited_once_with("!lobby:localhost")
 
 
+def test_list_reads_room_through_joined_agent_without_owner_account(test_client: TestClient) -> None:
+    """The listing reads a room through a running agent that joined it, with no owner account running."""
+    _record_test_room()
+    outsider = make_matrix_client_mock(user_id="@mindroom_outsider:localhost")
+    outsider.rooms = {}
+    member = make_matrix_client_mock(user_id="@mindroom_member:localhost")
+    member.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse.from_dict(
+            [scheduled_task_state_event("abc12345", _stored(), room_id="!test_room:localhost")],
+            room_id="!test_room:localhost",
+        ),
+    )
+    _lend_bots(outsider, member)
+
+    with patch("mindroom.scheduling.tasks.persisted_bot_user_ids", return_value=frozenset({SCHEDULE_WRITER_ID})):
+        response = test_client.get("/api/schedules")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [(task["task_id"], task["room_id"]) for task in data["tasks"]] == [("abc12345", "!test_room:localhost")]
+    assert data["unreadable_rooms"] == []
+    outsider.room_get_state.assert_not_awaited()
+
+
+def test_room_with_no_joined_bot_is_unreadable(test_client: TestClient) -> None:
+    """A room no running bot has joined is listed as unreadable, and its tasks can be neither edited nor cancelled."""
+    _record_test_room()
+    outsider = make_matrix_client_mock(user_id="@mindroom_outsider:localhost")
+    outsider.rooms = {}
+    _lend_bots(outsider)
+    reason = "Unable to retrieve scheduled tasks: no running agent has joined room `!test_room:localhost`"
+
+    listing = test_client.get("/api/schedules")
+    edit = test_client.put("/api/schedules/abc12345", json={"room_id": "test_room", "message": "updated"})
+    cancel = test_client.delete("/api/schedules/abc12345", params={"room_id": "test_room"})
+
+    assert listing.status_code == 200
+    assert listing.json()["tasks"] == []
+    assert [(room["room_id"], room["error"]) for room in listing.json()["unreadable_rooms"]] == [
+        ("!test_room:localhost", reason),
+    ]
+    assert [(edit.status_code, edit.json()["detail"]), (cancel.status_code, cancel.json()["detail"])] == [
+        (500, reason),
+        (500, reason),
+    ]
+    outsider.room_get_state.assert_not_awaited()
+    outsider.room_put_state.assert_not_awaited()
+
+
 def test_list_schedules_without_rooms_needs_no_matrix_account(test_client: TestClient, temp_config_file: Path) -> None:
     """With no room configured, the list is empty before MindRoom has created its Matrix accounts."""
     _configure_agent_rooms(temp_config_file, [])
@@ -297,7 +381,7 @@ def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> N
     ]
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
+        _served_by(AsyncMock()),
         patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
     ):
         response = test_client.get("/api/schedules")
@@ -319,7 +403,7 @@ def test_list_schedules_describes_each_task_in_its_own_timezone(test_client: Tes
     ]
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
+        _served_by(AsyncMock()),
         patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
     ):
         response = test_client.get("/api/schedules")
@@ -361,7 +445,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     save_mock = AsyncMock(return_value=updated_task)
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
+        _served_by(AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
@@ -404,7 +488,7 @@ def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> Non
     )
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
+        _served_by(AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
@@ -424,7 +508,7 @@ def test_cancel_schedule_success(test_client: TestClient) -> None:
     """Cancel endpoint should return success wrapper."""
     cancel_mock = AsyncMock(return_value="✅ Cancelled task `abc12345`")
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
+        _served_by(AsyncMock()),
         patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
         response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
@@ -463,7 +547,7 @@ def test_update_schedule_cannot_switch_schedule_type(
     save_mock = AsyncMock()
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
+        _served_by(AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
@@ -484,7 +568,7 @@ def test_update_schedule_conflicting_fields(test_client: TestClient) -> None:
     )
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
+        _served_by(AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
@@ -508,7 +592,7 @@ def test_update_schedule_empty_message(test_client: TestClient) -> None:
     )
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
+        _served_by(AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
@@ -550,7 +634,7 @@ def _send_with(
     **kwargs: object,
 ) -> Response:
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=client),
+        _served_by(client),
         patch("mindroom.scheduling.tasks.persisted_bot_user_ids", return_value=frozenset({SCHEDULE_WRITER_ID})),
     ):
         return test_client.request(method, path, **kwargs)

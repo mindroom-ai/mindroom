@@ -12,10 +12,8 @@ from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import api_runtime_paths
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.client_room_admin import resolve_room_reference
 from mindroom.matrix.state import get_room_alias_from_id, resolve_room_id
-from mindroom.matrix.users import create_agent_http_client
 from mindroom.scheduling.errors import (
     ScheduledTaskNotFoundError,
     ScheduledTaskStateReadError,
@@ -36,6 +34,8 @@ from mindroom.scheduling.tasks import (
 
 if TYPE_CHECKING:
     import nio
+
+    from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 
@@ -107,15 +107,34 @@ def _unresolved_alias(alias: str, reason: object) -> UnreadableScheduleRoom:
     return UnreadableScheduleRoom(room_id=alias, room_alias=alias, error=f"Unable to resolve room alias: {reason}")
 
 
+def _room_client(request: Request, room_id: str) -> nio.AsyncClient:
+    """Return the live client of the room's steward, or raise that no running bot has joined the room to read it."""
+    steward = config_lifecycle.app_state(request.app).runtime.scheduled_tasks.room_steward(room_id)
+    if steward is None or steward.client is None:
+        msg = f"Unable to retrieve scheduled tasks: no running agent has joined room `{room_id}`"
+        raise ScheduledTaskStateReadError(msg)
+    return steward.client
+
+
 async def _room_ids(
-    client: nio.AsyncClient,
+    request: Request,
     room_refs: list[str],
     runtime_paths: RuntimePaths,
 ) -> tuple[list[str], list[UnreadableScheduleRoom]]:
     """Return the Matrix room IDs that room references name, and each alias the homeserver cannot resolve.
 
     A room key without a recorded room ID names a room not created yet, which holds no tasks.
+    Any running bot's client looks an alias up, since the room it names is not known yet.
     """
+    bots = config_lifecycle.app_state(request.app).runtime.scheduled_tasks.bots().values()
+    client = next((bot.client for bot in bots if bot.running and bot.client is not None), None)
+    if client is None:
+        # With no bot running nothing looks an alias up; the rooms MindRoom recorded are reported by their reader.
+        recorded = [(room_ref, resolve_room_id(room_ref, runtime_paths)) for room_ref in room_refs]
+        return (
+            list(dict.fromkeys(room_id for _ref, room_id in recorded if room_id.startswith("!"))),
+            [_unresolved_alias(ref, "no agent is running") for ref, room_id in recorded if room_id.startswith("#")],
+        )
     room_ids: list[str] = []
     unresolved_rooms: list[UnreadableScheduleRoom] = []
     for room_ref in room_refs:
@@ -164,37 +183,33 @@ async def list_schedules(
     if not room_refs:
         return ListSchedulesResponse(timezone=runtime_config.timezone, tasks=[], unreadable_rooms=[])
 
-    client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     tasks: list[ScheduledTaskReadModel] = []
-    try:
-        # A room that stays unreadable must neither look empty nor hide every other room's tasks.
-        room_ids, unreadable_rooms = await _room_ids(client, room_refs, runtime_paths)
-        for resolved_room_id in room_ids:
-            try:
-                room_tasks = await get_scheduled_tasks_for_room(
-                    client=client,
+    # A room that stays unreadable must neither look empty nor hide every other room's tasks.
+    room_ids, unreadable_rooms = await _room_ids(request, room_refs, runtime_paths)
+    for resolved_room_id in room_ids:
+        try:
+            room_tasks = await get_scheduled_tasks_for_room(
+                client=_room_client(request, resolved_room_id),
+                room_id=resolved_room_id,
+                runtime_paths=runtime_paths,
+                include_non_pending=include_cancelled,
+            )
+        except ScheduledTaskStateReadError as e:
+            unreadable_rooms.append(
+                UnreadableScheduleRoom(
                     room_id=resolved_room_id,
-                    runtime_paths=runtime_paths,
-                    include_non_pending=include_cancelled,
+                    room_alias=get_room_alias_from_id(resolved_room_id, runtime_paths=runtime_paths),
+                    error=str(e),
+                ),
+            )
+        else:
+            tasks.extend(
+                build_scheduled_task_read_model(
+                    task,
+                    timezone=scheduled_task_timezone(task.workflow, runtime_config),
                 )
-            except ScheduledTaskStateReadError as e:
-                unreadable_rooms.append(
-                    UnreadableScheduleRoom(
-                        room_id=resolved_room_id,
-                        room_alias=get_room_alias_from_id(resolved_room_id, runtime_paths=runtime_paths),
-                        error=str(e),
-                    ),
-                )
-            else:
-                tasks.extend(
-                    build_scheduled_task_read_model(
-                        task,
-                        timezone=scheduled_task_timezone(task.workflow, runtime_config),
-                    )
-                    for task in room_tasks
-                )
-    finally:
-        await client.close()
+                for task in room_tasks
+            )
 
     tasks.sort(key=scheduled_task_read_sort_key)
     return ListSchedulesResponse(
@@ -214,8 +229,8 @@ async def update_schedule(
     runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
     resolved_room_id = resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
-    client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     try:
+        client = _room_client(api_request, resolved_room_id)
         existing_task = await require_scheduled_task(client, resolved_room_id, task_id, runtime_paths)
         updated_workflow = build_edited_scheduled_workflow(
             existing_task.workflow,
@@ -237,8 +252,6 @@ async def update_schedule(
         )
     except SchedulingError as e:
         raise _http_error(e) from e
-    finally:
-        await client.close()
 
     return _to_response_task(
         build_scheduled_task_read_model(
@@ -259,10 +272,9 @@ async def cancel_schedule(
     runtime_paths = api_runtime_paths(request)
     resolved_room_id = resolve_room_id(room_id, runtime_paths=runtime_paths)
 
-    client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     try:
         await cancel_scheduled_task(
-            client=client,
+            client=_room_client(request, resolved_room_id),
             room_id=resolved_room_id,
             task_id=task_id,
             runtime_paths=runtime_paths,
@@ -270,7 +282,5 @@ async def cancel_schedule(
         )
     except SchedulingError as e:
         raise _http_error(e) from e
-    finally:
-        await client.close()
 
     return CancelScheduleResponse(success=True, message=f"Cancelled task `{task_id}`")

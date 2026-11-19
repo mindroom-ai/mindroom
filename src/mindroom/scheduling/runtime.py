@@ -23,12 +23,14 @@ from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import bound_log_context, get_logger
+from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.message_target import MessageTarget
 from mindroom.requester_identity import equivalent_requester_ids
+from mindroom.room_steward import room_steward
 from mindroom.runtime_shutdown import SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS
 from mindroom.scheduling import executor as scheduling_executor
 from mindroom.scheduling.errors import ScheduledTaskStateReadError, ScheduledTaskStorageError, SchedulingError
-from mindroom.scheduling.ownership import room_from_state, task_owner
+from mindroom.scheduling.ownership import legacy_router_task_owner, room_from_state
 from mindroom.scheduling.recurring_schedule import (
     RecurringCheckpointUnavailableError,
     complete_recurring_occurrence,
@@ -146,8 +148,10 @@ class ScheduledTaskRuntime:
         tasks = task_records_with_writers(room_id, response, self.runtime_paths)
         if not tasks:
             return 0
-        registry = entity_identity_registry(self.config_provider(), self.runtime_paths)
+        config = self.config_provider()
+        registry = entity_identity_registry(config, self.runtime_paths)
         router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
+        agent_ids = sorted(matrix_id.full_id for matrix_id in registry.current_ids.values())
         room = room_from_state(room_id, client.user_id, response.events)
         restored = 0
         for task, writer_id in tasks:
@@ -156,11 +160,31 @@ class ScheduledTaskRuntime:
             #   were stored.
             # Last legacy release: v2026.10.675 wrote scheduled-task state without an owner; replacement: the next
             #   release stores the owner's Matrix ID in the task's state content when the task is saved.
-            # Handling: The owner is decided by the current rule over the room's full state, with the task's latest
-            #   state writer standing in for its creator. The field is never written back, so a rewrite keeps the task
-            #   on this rule.
-            # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_restores_under_the_rule_over_its_writer.
-            owner_id = task.owner_id or task_owner(room, task.workflow, creator_id=writer_id, router_id=router_id)
+            # Handling: The task's latest state writer stands in for the bot that saved it. The field is never
+            #   written back, so a rewrite keeps the task on this rule.
+            # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_restores_under_its_writer.
+            owner_id: str | None = task.owner_id or writer_id
+            if owner_id == router_id:
+                # LEGACY_COMPAT: Scheduled tasks the router owned.
+                # Legacy format: Scheduled-task state whose "owner" is the router's Matrix ID, or that has no owner
+                #   and was last written by the router; the router ran every task in a room it could serve.
+                # Last legacy release: every release before the router-free change ships, v2026.11.411 the newest
+                #   when written; replacement: unreleased, the first release with this change stores the bot that
+                #   saves a task as its owner.
+                # Handling: The task runs under the first agent or team its message mentions that is joined and may
+                #   post its trigger, else the one with the lowest Matrix ID, read from the room's full state. The new
+                #   owner is never written back; a room with no such agent keeps the task pending and logs a warning.
+                # Coverage: tests/test_scheduled_task_runtime.py::test_restore_reowns_router_task_and_fires_through_new_owner.
+                mentioned = parse_mentions_in_text(task.workflow.message, config, self.runtime_paths)[1]
+                owner_id = legacy_router_task_owner(
+                    room,
+                    task.workflow,
+                    router_id=router_id,
+                    agent_ids=[*(user_id for user_id in mentioned if user_id in agent_ids), *agent_ids],
+                )
+                if owner_id is None:
+                    logger.warning("scheduled_task_of_router_skipped", room_id=room_id, task_id=task.task_id)
+                    continue
             owner = registry.current_entity_name_for_user_id(owner_id)
             if owner is None:
                 if not room.power_levels.can_user_send_state(client.user_id, SCHEDULED_TASK_EVENT_TYPE):
@@ -314,24 +338,9 @@ class ScheduledTaskRuntime:
         with self._tracked(bot):
             yield bot, client
 
-    @contextmanager
-    def other_state_writer(self, room_id: str, *, refused_user_id: str) -> Iterator[nio.AsyncClient | None]:
-        """Lend a ready bot, other than the refused account, whose power in the room lets it write schedule state."""
-        for name in self.bots():
-            bot = self._ready_bot(name)
-            client = None if bot is None else bot.client
-            room = None if client is None else client.rooms.get(room_id)
-            if (
-                bot is not None
-                and client is not None
-                and room is not None
-                and client.user_id != refused_user_id
-                and room.power_levels.can_user_send_state(client.user_id, SCHEDULED_TASK_EVENT_TYPE)
-            ):
-                with self._tracked(bot):
-                    yield client
-                return
-        yield None
+    def room_steward(self, room_id: str) -> AgentBot | None:
+        """Return the room's steward, which reads and writes its schedule state for the bots and the schedule API."""
+        return room_steward(self.bots(), room_id)
 
     def _ready_bot(self, entity_name: str) -> AgentBot | None:
         bot = self.bots().get(entity_name)

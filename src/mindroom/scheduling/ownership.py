@@ -1,21 +1,19 @@
-"""Which bot runs a scheduled task, decided once from the room's full state when the task is saved."""
+"""Which bot runs a scheduled task: the bot that saved it, or the heir of a task the router owned.
+
+A new task stores the Matrix ID of the bot that saves it as its owner, so every bot that restores a room agrees.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import aiohttp
 import nio
 
-from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
-from mindroom.entity_resolution import current_entity_id
-from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import scheduled_trigger_message_type
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
-    from mindroom.constants import RuntimePaths
     from mindroom.scheduling.tasks import ScheduledWorkflow
 
 
@@ -31,44 +29,24 @@ def room_from_state(room_id: str, own_user_id: str, events: Iterable[dict[str, o
     return room
 
 
-def task_owner(room: nio.MatrixRoom, workflow: ScheduledWorkflow, *, creator_id: str, router_id: str) -> str:
-    """Return the Matrix ID of the bot that runs a task: the router when it can serve the room, else its creator.
-
-    The rule reads only room state, never which bots run, so the owner does
-    not depend on which bot happens to be restarting.
-    """
-    if _may_send_trigger(room, router_id, workflow) and room.power_levels.can_user_send_state(
-        router_id,
-        SCHEDULED_TASK_EVENT_TYPE,
-    ):
-        return router_id
-    return creator_id
-
-
-async def decide_task_owner(
-    client: nio.AsyncClient,
-    room_id: str,
+def legacy_router_task_owner(
+    room: nio.MatrixRoom,
     workflow: ScheduledWorkflow,
-    runtime_paths: RuntimePaths,
-) -> str:
-    """Decide a new task's owner from the room's full state, with the saving bot as its creator.
+    *,
+    router_id: str,
+    agent_ids: Sequence[str],
+) -> str | None:
+    """Return the agent or team that runs a stored task the router owned, None where none can.
 
-    A synced room view can lack members a lazy-loading sync never sent, so
-    only the full state gives every bot that later reads the task the same answer.
+    ``agent_ids`` names the candidates in order of preference: those the task's message mentions, then every agent
+    and team by Matrix ID.
+    The first one that is joined and may post the task's trigger wins, read from the room's full state, never from
+    which bots run, so every bot that restores the room agrees.
     """
-    failure = f"Could not read the state of room {room_id} to choose which bot runs the task"
-    try:
-        response = await client.room_get_state(room_id)
-    except aiohttp.ClientError as exc:
-        # nio raises a response that broke off instead of answering it.
-        msg = f"{failure}: {type(exc).__name__}: {exc}"
-        raise SchedulingError(msg) from exc
-    if not isinstance(response, nio.RoomGetStateResponse):
-        msg = f"{failure}: {response}"
-        raise SchedulingError(msg)
-    room = room_from_state(room_id, client.user_id, response.events)
-    router_id = current_entity_id(ROUTER_AGENT_NAME, runtime_paths).full_id
-    return task_owner(room, workflow, creator_id=client.user_id, router_id=router_id)
+    return next(
+        (agent_id for agent_id in agent_ids if agent_id != router_id and _may_send_trigger(room, agent_id, workflow)),
+        None,
+    )
 
 
 def _may_send_trigger(room: nio.MatrixRoom, user_id: str, workflow: ScheduledWorkflow) -> bool:

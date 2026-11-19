@@ -2413,10 +2413,8 @@ depends_on = ["mindroom.script_runs.wire"]
 path = "mindroom.api.schedules"
 depends_on = [
     "mindroom.api.config_lifecycle",
-    "mindroom.constants",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.state",
-    "mindroom.matrix.users",
     "mindroom.scheduling.tasks",
 ]
 
@@ -5435,7 +5433,6 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.failure_text",
     "mindroom.config.resolution",
-    "mindroom.scheduling.ownership",
     "mindroom.tool_system.plugins",
 ]
 
@@ -5446,6 +5443,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.failure_text",
+    "mindroom.room_steward",
     "mindroom.scheduling.executor",
     "mindroom.scheduling.ownership",
     "mindroom.scheduling.recurring_schedule",
@@ -5454,15 +5452,8 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.scheduling.ownership"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.entity_resolution",
-    "mindroom.scheduling.executor",
-]
-visibility = [
-    "mindroom.scheduling.runtime",
-    "mindroom.scheduling.tasks",
-]
+depends_on = ["mindroom.scheduling.executor"]
+visibility = ["mindroom.scheduling.runtime"]
 
 [[modules]]
 path = "mindroom.scheduling.executor"

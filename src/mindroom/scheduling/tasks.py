@@ -50,7 +50,6 @@ from mindroom.scheduling.errors import (
     SchedulingError,
     refused_for_power,
 )
-from mindroom.scheduling.ownership import decide_task_owner
 from mindroom.steward_duties import moderator_rights_message
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
@@ -708,30 +707,6 @@ async def require_scheduled_task(
     return task
 
 
-async def _write_scheduled_task_state(
-    client: nio.AsyncClient,
-    room_id: str,
-    task_id: str,
-    content: dict[str, typing.Any],
-) -> tuple[str, bool] | None:
-    """Write one scheduled-task state event as one account; None once it landed.
-
-    A failure returns its reason and whether the room refused the write for lack of power.
-    """
-    try:
-        response = await client.room_put_state(
-            room_id=room_id,
-            event_type=SCHEDULED_TASK_EVENT_TYPE,
-            content=content,
-            state_key=task_id,
-        )
-    except Exception as exc:
-        return f"{type(exc).__name__}: {exc!s}", False
-    if isinstance(response, nio.RoomPutStateResponse):
-        return None
-    return str(response), isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
-
-
 async def _put_scheduled_task_state_content(
     client: nio.AsyncClient,
     room_id: str,
@@ -739,27 +714,28 @@ async def _put_scheduled_task_state_content(
     content: dict[str, typing.Any],
     writers: ScheduledTaskRuntime | None = None,
 ) -> None:
-    """Write scheduled-task state, falling back on rejection to another bot whose room power allows it."""
-    failure = await _write_scheduled_task_state(client, room_id, task_id, content)
-    if failure is None:
+    """Write scheduled-task state as the room's steward, whose power there no other running bot exceeds.
+
+    ``client`` writes where no runtime names a steward.
+    The steward's refusal for lack of power is the moderator-rights answer; any other failure may succeed on a retry.
+    """
+    steward = None if writers is None else writers.room_steward(room_id)
+    writer = client if steward is None or steward.client is None else steward.client
+    try:
+        outcome: object = await writer.room_put_state(
+            room_id=room_id,
+            event_type=SCHEDULED_TASK_EVENT_TYPE,
+            content=content,
+            state_key=task_id,
+        )
+    except Exception as exc:
+        outcome = f"{type(exc).__name__}: {exc!s}"
+    if isinstance(outcome, nio.RoomPutStateResponse):
         return
-    reason, refused = failure
-
-    if writers is not None:
-        with writers.other_state_writer(room_id, refused_user_id=client.user_id) as writer:
-            if writer is not None:
-                writer_failure = await _write_scheduled_task_state(writer, room_id, task_id, content)
-                if writer_failure is None:
-                    logger.info("scheduled_task_state_persisted_via_room_writer", room_id=room_id, task_id=task_id)
-                    return
-                # Power is what is missing only when the room refused every account that tried.
-                refused = refused and writer_failure[1]
-                reason = f"{reason}; {writer.user_id} write failed ({writer_failure[0]})"
-
-    if refused:
-        logger.warning("scheduled_task_state_refused", room_id=room_id, task_id=task_id, error=reason)
+    if isinstance(outcome, nio.RoomPutStateError) and outcome.status_code == "M_FORBIDDEN":
+        logger.warning("scheduled_task_state_refused", room_id=room_id, task_id=task_id, error=str(outcome))
         raise ScheduledTaskStateRefusedError(moderator_rights_message("save schedules"))
-    msg = f"Failed to persist scheduled task state for task `{task_id}`: {reason}."
+    msg = f"Failed to persist scheduled task state for task `{task_id}`: {outcome}."
     raise ScheduledTaskStorageError(msg)
 
 
@@ -814,21 +790,19 @@ async def _save_pending_scheduled_task(
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
-    runtime_paths: RuntimePaths,
     task_runtime: ScheduledTaskRuntime | None = None,
 ) -> str:
-    """Decide a new task's owner, persist the task with it as pending, and return the owner; its runner is not started."""
-    owner_id = await decide_task_owner(client, room_id, workflow, runtime_paths)
+    """Persist a new task as pending, owned by the bot that saves it, and return that owner; its runner is not started."""
     await persist_scheduled_task_state(
         client=client,
         room_id=room_id,
         task_id=task_id,
         workflow=workflow,
         config=config,
-        owner_id=owner_id,
+        owner_id=client.user_id,
         writers=task_runtime,
     )
-    return owner_id
+    return client.user_id
 
 
 def _raise_unless_editable(task: ScheduledTaskRecord) -> None:
@@ -1236,7 +1210,6 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 task_id=task_id,
                 workflow=workflow_result,
                 config=config,
-                runtime_paths=runtime_paths,
                 task_runtime=runtime.task_runtime,
             )
             if runtime.task_runtime is not None:
@@ -1450,7 +1423,6 @@ async def schedule_approved_tool_call(
                 task_id,
                 workflow,
                 config,
-                runtime.runtime_paths,
                 task_runtime=runtime.task_runtime,
             )
         except SchedulingError as e:
