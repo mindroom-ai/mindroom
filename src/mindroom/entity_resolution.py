@@ -353,13 +353,17 @@ def _persisted_entity_matrix_id(entity_name: str, domain: str, state: MatrixStat
     return MatrixID.parse(matrix_account_user_id(account, domain))
 
 
-def owner_matrix_id(runtime_paths: RuntimePaths) -> str:
-    """Return the owner account's Matrix ID: its persisted account's, else the one its generated username gives."""
-    domain = runtime_matrix_domain(runtime_paths)
+def persisted_owner_matrix_id(runtime_paths: RuntimePaths) -> str | None:
+    """Return the owner account's Matrix ID once its account is persisted: the only ID that may gain privileges."""
     account = matrix_state.matrix_state_for_runtime(runtime_paths).get_account(managed_account_key(ROUTER_AGENT_NAME))
-    if account is not None:
-        return matrix_account_user_id(account, domain)
-    return MatrixID.from_username(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths), domain).full_id
+    return None if account is None else matrix_account_user_id(account, runtime_matrix_domain(runtime_paths))
+
+
+def owner_matrix_id(runtime_paths: RuntimePaths) -> str:
+    """Return the owner account's Matrix ID for bookkeeping: its persisted one, else its generated username's."""
+    domain = runtime_matrix_domain(runtime_paths)
+    generated = MatrixID.from_username(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths), domain)
+    return persisted_owner_matrix_id(runtime_paths) or generated.full_id
 
 
 def _validate_unique_entity_ids(current_ids: dict[str, MatrixID]) -> None:

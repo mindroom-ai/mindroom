@@ -27,6 +27,7 @@ from mindroom.event_journal import EventClass, EventKind
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, send_message_result
+from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.personal_room_store import (
     PersonalRoomAdoption,
     PersonalRoomRecord,
@@ -560,130 +561,52 @@ async def test_owner_invited_agents_keep_the_room_valid(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_a_personal_room_invites_the_router_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Approval cards need the router, so a personal room invites it, and never again once it has left."""
+async def test_personal_room_does_not_invite_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The asking agent posts its own approval cards, so a personal room invites no other MindRoom account."""
     server = MatrixServer()
     owner = service(tmp_path, server, monkeypatch, welcome="")
-    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-    assert server.membership(room_id, "@mindroom_router:localhost") == "invite"
 
-    server.set_member(room_id, "@mindroom_router:localhost", "leave")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+    assert server.membership(room_id, "@mindroom_router:localhost") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_persisted", [True, False])
+async def test_only_a_persisted_owner_account_is_a_member_and_state_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    owner_persisted: bool,
+) -> None:
+    """The owner's generated ID is anyone's to register until its account is persisted, so it earns no place before."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    router = "@mindroom_router:localhost"
+    if not owner_persisted:
+        state = MatrixState.load(owner.runtime_paths)
+        del state.accounts[managed_account_key(ROUTER_AGENT_NAME)]
+        save_matrix_state(state, owner.runtime_paths)
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    assert (_power_levels(server, room_id)["users"].get(router) == 50) is owner_persisted
+
+    server.set_member(room_id, router, "join")
     assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+    assert server.kicks == ([] if owner_persisted else [(room_id, router)])
 
-    assert server.membership(room_id, "@mindroom_router:localhost") == "leave"
-    assert not server.kicks
-
-
-@pytest.mark.asyncio
-async def test_a_refused_router_invite_holds_up_only_itself_and_is_retried(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The owner is joined and welcomed despite a refused router invite, and the retry sends that invite again."""
-    server = MatrixServer()
-    server.refused_invites.add("@mindroom_router:localhost")
-    owner = service(tmp_path, server, monkeypatch, auto_join_requester=True)
-
-    async def admin_join(_client: MatrixServer, room_id: str, user_id: str) -> str | None:
-        server.set_member(room_id, user_id, "join")
-        return None
-
-    monkeypatch.setattr("mindroom.matrix.personal_rooms.admin_join_room_user_failure", admin_join)
-    with pytest.raises(RuntimeError, match="router invite"):
-        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-
-    room_id = server.aliases["#personal_481a6d9da9e7b569dd3c:localhost"]
-    assert server.membership(room_id, "@alice:localhost") == "join"
-    assert [message["room_id"] for message in server.messages.values()] == [room_id]
-    assert server.membership(room_id, "@mindroom_router:localhost") is None
-
-    server.refused_invites.clear()
-    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
-
-    assert server.create_count == len(server.messages) == 1
-    assert server.membership(room_id, "@mindroom_router:localhost") == "invite"
-
-
-@pytest.mark.asyncio
-async def test_a_router_invite_that_never_returns_fails_the_attempt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The client retries a rate-limited invite without end, so a time limit fails the attempt instead of the lock waiting."""
-    server = MatrixServer()
-    owner = service(tmp_path, server, monkeypatch, welcome="")
-    invite = server.room_invite
-
-    async def hang_for_router(room_id: str, user_id: str) -> object:
-        if user_id == "@mindroom_router:localhost":
-            await asyncio.Event().wait()
-        return await invite(room_id, user_id)
-
-    monkeypatch.setattr(server, "room_invite", hang_for_router)
-    monkeypatch.setattr("mindroom.matrix.personal_rooms._ROUTER_INVITE_TIMEOUT_SECONDS", 0.01)
-    with pytest.raises(TimeoutError):
-        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-
-    room_id = server.aliases["#personal_481a6d9da9e7b569dd3c:localhost"]
-    assert server.membership(room_id, "@alice:localhost") == "invite"
-    assert server.membership(room_id, "@mindroom_router:localhost") is None
-
-
-@pytest.mark.asyncio
-async def test_an_unreadable_router_membership_is_not_taken_for_one(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The client parses an error other than 404 as a state response, which must not count as the router being a member."""
-    server = MatrixServer()
-    owner = service(tmp_path, server, monkeypatch, welcome="")
-    read_state = server.room_get_state_event
-
-    async def forbid_router_membership(room_id: str, event_type: str, state_key: str = "") -> object:
-        if state_key == "@mindroom_router:localhost":
-            return nio.RoomGetStateEventResponse({"errcode": "M_FORBIDDEN"}, event_type, state_key, room_id)
-        return await read_state(room_id, event_type, state_key)
-
-    monkeypatch.setattr(server, "room_get_state_event", forbid_router_membership)
-    with pytest.raises(RuntimeError, match="router membership unavailable"):
-        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-
-
-@pytest.mark.asyncio
-async def test_a_personal_room_does_not_invite_a_router_that_refuses_the_agent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A router whose accept_invites leaves out the agent would never join, so no invite is left pending."""
-    server = MatrixServer()
-    owner = service(tmp_path, server, monkeypatch, welcome="")
-    owner.runtime.config.router.accept_invites = False
-
-    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-
-    assert server.membership(room_id, "@mindroom_router:localhost") is None
-
-
-@pytest.mark.asyncio
-async def test_an_imported_room_does_not_invite_an_unlisted_router(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An imported room would remove a router its record does not list, so it is not invited there."""
-    server = MatrixServer()
-    owner = service(tmp_path, server, monkeypatch, welcome="")
-    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-    server.state[room_id] = [
-        event for event in server.state[room_id] if event["state_key"] != "@mindroom_router:localhost"
-    ]
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
     record = read_personal_room(path)
-    record.adoption = PersonalRoomAdoption(creator_user_id=server.user_id, agent_user_id=server.user_id)
+    record.adoption = PersonalRoomAdoption(
+        creator_user_id=server.user_id,
+        agent_user_id=server.user_id,
+        router_user_id=router,
+    )
     write_personal_room(path, record)
-
-    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
-
-    assert server.membership(room_id, "@mindroom_router:localhost") is None
+    if owner_persisted:
+        assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+    else:
+        with pytest.raises(PersonalRoomValidationError, match="identity does not match"):
+            await owner.ensure("@alice:localhost", "!lobby:localhost", server)
 
 
 @pytest.mark.asyncio
