@@ -58,6 +58,7 @@ from mindroom.egress_broker.env import EgressAgentScope, egress_agent_scope
 from mindroom.egress_broker.key_access import egress_key_access
 from mindroom.egress_broker.oauth_reuse import set_oauth_reuse
 from mindroom.egress_broker.oauth_source import broker_credential_context
+from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.secrets import delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log
 from mindroom.egress_broker.user_services import (
@@ -86,8 +87,9 @@ if TYPE_CHECKING:
     from mindroom.config.egress_broker import EgressBrokerConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.egress_broker.secrets import OAuthAccess
+    from mindroom.egress_broker.secrets import OAuthAccess, OAuthStatus
     from mindroom.oauth import OAuthProvider
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 router = APIRouter(
     prefix="/api/connections/egress",
@@ -241,6 +243,15 @@ class EgressCredentialService(EgressSourceStatus):
     github_app_repositories: GitHubAppRepositories | None
 
 
+class OAuthLogin(BaseModel):
+    """A preset's login the caller connected for the agent's tools, or could connect, which a new service could use."""
+
+    provider: str
+    display_name: str
+    connected: bool
+    account_label: str | None
+
+
 class EgressCredentialAgent(BaseModel):
     """One agent with its egress services.
 
@@ -255,7 +266,8 @@ class EgressCredentialAgent(BaseModel):
     of the caller, everyone's on a `shared` agent, or the global store of an `unscoped` one. `scope_agents` names
     the caller's agents that share a `user` store, this one included, and is empty for any other scope.
     `managers` is a shared or unscoped agent's credential managers, as Matrix IDs; it is empty for the rest, and
-    for an agent with none only administrators manage it.
+    for an agent with none only administrators manage it. `oauth_logins` are the presets' logins of the caller's
+    own that a new service of a personal agent they manage could use; empty for any other agent.
     """
 
     agent_name: str
@@ -267,6 +279,7 @@ class EgressCredentialAgent(BaseModel):
     managers: list[str]
     services: list[EgressCredentialService]
     inactive_services: list[InactiveUserService]
+    oauth_logins: list[OAuthLogin] = []
 
 
 class EgressCredentialsResponse(BaseModel):
@@ -302,22 +315,7 @@ async def egress_services_for_agent(
     services = await asyncio.to_thread(agent_services, config, manager, target)
 
     async def row(name: str, service: EgressService) -> EgressCredentialService:
-        oauth_part = await egress_oauth_status(
-            request,
-            name,
-            service,
-            target,
-            config=config,
-            runtime_paths=runtime_paths,
-            manager=manager,
-            can_manage=can_manage,
-            connection_status=lambda provider: oauth.connection_status(
-                request,
-                resolve_oauth_credential_context(provider, runtime_paths, manager, target, config=config),
-                refresh=False,
-            ),
-            reuse_target=lambda _provider: target,
-        )
+        oauth_part = await _listed_oauth_status(request, name, service, target, can_manage=can_manage)
         sources = await egress_service_status(manager, target, service, name, oauth_part)
         return EgressCredentialService(
             name=name,
@@ -341,6 +339,66 @@ async def egress_services_for_agent(
         (functools.partial(row, name, service) for name, service in services.items()),
         limited=True,
     )
+
+
+async def _listed_oauth_status(
+    request: Request,
+    name: str,
+    service: EgressService,
+    target: ResolvedWorkerTarget,
+    *,
+    can_manage: bool,
+) -> OAuthStatus | None:
+    """Return service `name`'s OAuth status as the personal listing shows it, read without a token refresh."""
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    config, runtime_paths = snapshot.runtime_config, snapshot.runtime_paths
+    if config is None:
+        return None
+    manager = get_runtime_credentials_manager(runtime_paths)
+    return await egress_oauth_status(
+        request,
+        name,
+        service,
+        target,
+        config=config,
+        runtime_paths=runtime_paths,
+        manager=manager,
+        can_manage=can_manage,
+        connection_status=lambda provider: oauth.connection_status(
+            request,
+            resolve_oauth_credential_context(provider, runtime_paths, manager, target, config=config),
+            refresh=False,
+        ),
+        reuse_target=lambda _provider: target,
+    )
+
+
+async def _oauth_logins(request: Request, target: ResolvedWorkerTarget) -> list[OAuthLogin]:
+    """List the presets' logins the caller connected for a personal agent's tools, or could connect, by provider.
+
+    It is the caller's own connection as a new preset service would show it, read like the rows, so a service
+    account, a shared sandbox, or a connection that needs a reset never shows. It holds no token.
+    """
+    presets = {name: EgressService.model_validate({"preset": name}) for name in EGRESS_PRESETS}
+    statuses = await load_concurrently(
+        (
+            functools.partial(_listed_oauth_status, request, name, service, target, can_manage=True)
+            for name, service in presets.items()
+        ),
+        limited=True,
+    )
+    return [
+        OAuthLogin(
+            provider=status.provider,
+            display_name=status.display_name,
+            connected=status.connected,
+            account_label=status.account_label if status.connected else None,
+        )
+        for status in statuses
+        if status is not None
+        and (status.connected or status.can_connect)
+        and not (status.service_account or status.unavailable_reason or status.reset_required)
+    ]
 
 
 async def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCredentialAgent]:
@@ -387,6 +445,8 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
             managers=list(agent.credential_managers) if is_shared else [],
             services=services,
             inactive_services=inactive,
+            # Only a personal agent's own manager can let commands use their own login.
+            oauth_logins=await _oauth_logins(request, target) if can_manage and not is_shared else [],
         )
 
     # Agents load concurrently, like their rows, so the page waits for the slowest agent instead of all of them.

@@ -1183,6 +1183,25 @@ def test_personal_account_label_never_reaches_a_shared_agent(oauth_egress_portal
     assert _egress_row(portal, "alice", "personal", "gh")["oauth"]["account_label"] is None
 
 
+def test_listing_offers_the_callers_own_logins_on_a_personal_agent_they_manage(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """A personal agent lists the presets' logins its caller connected, or could connect, for a new service to use."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "bob", "personal", "gh", "github")
+
+    def logins(user: str, agent: str) -> dict[str, tuple[bool, str | None]]:
+        listed = _listed_agents(portal, user)[agent]["oauth_logins"]
+        assert all(set(login) == {"provider", "display_name", "connected", "account_label"} for login in listed)
+        return {login["provider"]: (login["connected"], login["account_label"]) for login in listed}
+
+    assert logins("bob", "personal") == {"github": (True, "alice@example.com"), "google_drive": (False, None)}
+    # A requester-scoped login is the caller's own: Alice has not connected hers.
+    assert logins("alice", "personal") == {"github": (False, None), "google_drive": (False, None)}
+    # A shared agent offers no personal login, not even to its credential manager.
+    assert logins("bob", "shared_dev") == {}
+
+
 _GITHUB_TOKEN_RESPONSE = {
     "access_token": "gho-user-access",
     "refresh_token": "ghr-user-refresh",
