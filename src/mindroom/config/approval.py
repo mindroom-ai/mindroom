@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from mindroom.config.legacy_fields import RETIRED_FILE_FUNCTIONS
 
 _ApprovalAction = Literal["auto_approve", "require_approval"]
 _MAX_TIMEOUT_DAYS = 36500.0
@@ -42,12 +39,6 @@ class ApprovalRuleConfig(BaseModel):
         """Reject blank match globs for direct model construction too."""
         if not value.strip():
             msg = "tool_approval.rules[].match must not be empty"
-            raise ValueError(msg)
-        # A rule for a retired file function would gate nothing, so it fails instead of silently letting calls through.
-        retired = [name for name in RETIRED_FILE_FUNCTIONS if fnmatchcase(name, value)]
-        if retired and not any(fnmatchcase(name, value) for name in {*RETIRED_FILE_FUNCTIONS.values(), "delete_file"}):
-            replacements = ", ".join(f"{name} is now {RETIRED_FILE_FUNCTIONS[name]}" for name in retired)
-            msg = f"tool_approval.rules[].match {value!r} only names retired file tool functions ({replacements})"
             raise ValueError(msg)
         return value
 

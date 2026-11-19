@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from pydantic import ValidationError
 
-from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.contacts import ContactsConfig
 from mindroom.config.listening import ListenConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
@@ -220,14 +219,43 @@ def test_openclaw_compat_brings_filesystem() -> None:
     assert "filesystem" in Config.expand_tool_names(["openclaw_compat"])
 
 
-@pytest.mark.parametrize("match", ["save_file", "search_*", "replace_file_chunk", "list_files"])
-def test_approval_rules_naming_only_retired_file_functions_fail(match: str) -> None:
-    """A rule that would gate nothing after the rename fails, naming the replacement."""
-    with pytest.raises(ValidationError, match=r"retired file tool functions .* is now "):
-        ApprovalRuleConfig(match=match, action="require_approval")
+def _load_rules(tmp_path: Path, *matches: str) -> Config:
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": ["python"]}},
+        "tool_approval": {"rules": [{"match": match, "action": "require_approval"} for match in matches]},
+    }
+    return Config.validate_with_runtime(data, runtime_paths)
 
 
-@pytest.mark.parametrize("match", ["*_file", "write_file", "*", "grep"])
-def test_approval_rules_matching_a_current_function_still_load(match: str) -> None:
-    """A rule that also matches a current function keeps loading."""
-    assert ApprovalRuleConfig(match=match, action="require_approval").match == match
+@pytest.mark.parametrize(
+    ("match", "lost"),
+    [
+        ("save_file", "save_file is now write_file"),
+        ("search_*", "search_files is now find_files, search_content is now grep"),
+        ("replace_file_chunk", "replace_file_chunk is now edit_file"),
+        # It still matches read_file, but neither of the two writes it used to gate.
+        ("*a*", "save_file is now write_file, replace_file_chunk is now edit_file, search_files is now find_files"),
+        ("*_chunk", "replace_file_chunk is now edit_file, read_file_chunk is now read_file"),
+    ],
+)
+def test_an_approval_rule_that_stops_gating_a_renamed_function_fails(tmp_path: Path, match: str, lost: str) -> None:
+    """A glob that matched a retired function and misses its replacement fails, naming the rule and the new name."""
+    expected = rf"tool_approval\.rules\[1\]\.match {re.escape(repr(match))} .*{re.escape(lost)}"
+    with pytest.raises(ConfigRuntimeValidationError, match=expected):
+        _load_rules(tmp_path, "run_shell_command", match)
+
+
+def test_a_later_rule_matching_the_replacement_does_not_rescue_an_earlier_one(tmp_path: Path) -> None:
+    """The first matching rule decides, so each rule is checked alone: a catch-all after it may decide otherwise."""
+    with pytest.raises(ConfigRuntimeValidationError, match=r"rules\[0\]\.match 'save_file'"):
+        _load_rules(tmp_path, "save_file", "*")
+    with pytest.raises(ConfigRuntimeValidationError, match=r"rules\[1\]\.match 'save_file'"):
+        _load_rules(tmp_path, "write_file", "save_file")
+
+
+@pytest.mark.parametrize("match", ["*_file", "write_file", "*", "grep", "read_file*", "list_files", "*_files"])
+def test_approval_rules_that_keep_gating_what_they_gated_load(tmp_path: Path, match: str) -> None:
+    """A rule that matches each replacement loads, and so does list_files, which the python toolkit still offers."""
+    assert _load_rules(tmp_path, match).tool_approval.rules[0].match == match

@@ -52,7 +52,7 @@ from mindroom.config.legacy_access import (
     persist_access_migration,
     validate_access_migration_source,
 )
-from mindroom.config.legacy_fields import rename_legacy_knowledge_reranker
+from mindroom.config.legacy_fields import rename_legacy_knowledge_reranker, renamed_file_functions_a_glob_misses
 from mindroom.config.matrix import (
     EventJournalConfig,
     MatrixSpaceConfig,
@@ -1512,6 +1512,22 @@ class Config(BaseModel):
                 tools=tools,
             )
         self._validate_listen_tools(tools)
+        # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
+        elsewhere = {
+            function
+            for name in tools
+            if name != "filesystem" and (metadata := tools.get(name)) is not None
+            for function in metadata.function_names or ()
+        }
+        for index, rule in enumerate(self.tool_approval.rules):
+            if missed := renamed_file_functions_a_glob_misses(rule.match, elsewhere):
+                msg = (
+                    f"tool_approval.rules[{index}].match {rule.match!r} no longer matches the filesystem functions "
+                    f"it gated ({missed}); name the new functions in the rule."
+                )
+                raise ToolConfigOverrideError(msg)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
         """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.
