@@ -410,25 +410,16 @@ class ApprovalStore(PrincipalRows):
             payload=payload,
         )
 
-    async def unavailable_notice_principal(self, approval_id: str) -> str | None:
-        """Return the principal whose account began one approval's unavailable-owner notice, None before any did."""
-        return await self._read(approval_continuations.unavailable_notice_principal, approval_id)
+    async def unavailable_notice(self, approval_id: str) -> tuple[str, str, bool] | None:
+        """Return the principal and delivery of one approval's unavailable-owner notice and whether it is acknowledged."""
+        return await self._read(approval_continuations.unavailable_notice, approval_id)
 
-    async def discard_unavailable_approval_continuation(
-        self,
-        approval_id: str,
-        *,
-        notice_principal_id: str,
-    ) -> tuple[PostCommitEffect, ...] | None:
+    async def discard_unavailable_approval_continuation(self, approval_id: str) -> tuple[PostCommitEffect, ...] | None:
         """Release sources after permanent owner loss and visible card cleanup, ending the reply the approval paused.
 
         Returns the work its commit left for afterwards, or ``None`` when the run may not be discarded.
         """
-        return await self._write(
-            _discard_unavailable_approval_continuation,
-            approval_id,
-            notice_principal_id=notice_principal_id,
-        )
+        return await self._write(_discard_unavailable_approval_continuation, approval_id)
 
     @property
     def signals(self) -> ApprovalSignals:
@@ -597,8 +588,6 @@ def _discard_unavailable_approval_continuation(
     transaction: Transaction,
     principal_id: str,
     approval_id: str,
-    *,
-    notice_principal_id: str,
 ) -> tuple[PostCommitEffect, ...] | None:
     """Release a run whose owner is permanently gone, ending the reply it paused."""
     # The owner that could settle the reply is gone; the notice is what the room sees.
@@ -610,7 +599,6 @@ def _discard_unavailable_approval_continuation(
             transaction,
             principal_id,
             approval_id=approval_id,
-            notice_principal_id=notice_principal_id,
         ),
         end=lambda discarded: replies.approval_finished(
             transaction,

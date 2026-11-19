@@ -342,8 +342,8 @@ def reserve_reply_cards(
         if _reply_identity(card.payload) != (continuation_id, expected_generation, card.tool_call_id):
             msg = f"Approval delivery {card.delivery_id!r} changed exact-call identity"
             raise ValueError(msg)
-    sender = cards[0].sender_principal_id or card_principal_id
-    membership_epoch = _claim_membership(transaction, sender, continuation.room_id)
+    sender = cards[0].sender_principal_id
+    membership_epoch = _claim_membership(transaction, card_principal_id, continuation.room_id, sender)
     if membership_epoch is None:
         return False
     invoking_agents = {call.tool_call_id: call.invoking_agent for call in continuation.calls}
@@ -393,8 +393,11 @@ def _reply_identity(payload: Mapping[str, object]) -> tuple[str, int, str] | Non
     return continuation_id, generation, tool_call_id
 
 
-def _claim_membership(transaction: Transaction, principal_id: str, room_id: str) -> int | None:
-    """Hold the card sender's current membership of a room for a reservation, or None after a departure fence."""
+def _claim_membership(transaction: Transaction, principal_id: str, room_id: str, sender: str | None) -> int | None:
+    """Hold the ledger's epoch of a room for a reservation, or None once the account that sends the card left it."""
+    claim_active = membership_state.claim_active_membership_epoch
+    if sender is not None and claim_active(transaction, sender, room_id=room_id) is None:
+        return None
     epoch = transaction.fetchone(
         "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
         (principal_id, room_id),
@@ -434,7 +437,7 @@ def reserve_detached_card(
         raise ValueError(msg)
     if grant_scope is not None:
         approval_grants.lock(transaction, principal_id)
-    membership_epoch = _claim_membership(transaction, card.sender_principal_id or principal_id, room_id)
+    membership_epoch = _claim_membership(transaction, principal_id, room_id, card.sender_principal_id)
     if membership_epoch is None:
         return False
     if not approval_calls.insert_detached(
@@ -602,10 +605,19 @@ def _retire(transaction: Transaction, principal_id: str, delivery_id: str) -> No
 
 
 def sender_of(transaction: Transaction, principal_id: str, *, delivery_id: str) -> tuple[str | None, str] | None:
-    """Return a card's sender principal, None for a card the router sent before upgrade, with its room."""
+    """Return a card's sender principal, None for a card the router sent before upgrade, with its room.
+
+    A grant's revocation edit is a delivery of the card that gave the grant.
+    """
     row = transaction.fetchone(
-        "SELECT sender_principal_id AS sender, room_id FROM approval_cards WHERE principal_id = ? AND delivery_id = ?",
-        (principal_id, delivery_id),
+        """
+        SELECT sender_principal_id AS sender, room_id FROM approval_cards
+        WHERE principal_id = ? AND delivery_id = COALESCE((
+            SELECT delivery_id FROM approval_grants
+            WHERE principal_id = ? AND 'approval-grant-revoked:' || grant_id = ?
+        ), ?)
+        """,
+        (principal_id, principal_id, delivery_id, delivery_id),
     )
     return None if row is None else (cast("str | None", row["sender"]), str(row["room_id"]))
 
@@ -666,10 +678,8 @@ def retire_receipts(transaction: Transaction, principal_id: str) -> None:
         _retire(transaction, principal_id, str(row["delivery_id"]))
 
 
-# A card's outbox rows belong to the card principal's current, unfenced membership of the room.
-_CURRENT_MEMBERSHIP = """(
-    initial.membership_epoch = COALESCE(membership.membership_epoch, 0) AND COALESCE(membership.departure_fenced, 0) = 0
-)"""
+# A card is current while the account that sends it is in the room; the ledger that keeps its rows leaves no room.
+_CURRENT_MEMBERSHIP = "COALESCE(membership.departure_fenced, 0) = 0"
 
 
 def card_event_of(alias: str) -> str:
@@ -881,7 +891,7 @@ def deny_for_departed_card_owner(
     """Fail the paused replies a departed sender's cards wait on, and deny every call those cards show.
 
     A card never attempted is deleted outright; an attempted one keeps its
-    terminal-edit debt under the membership that inherited the room.
+    terminal-edit debt, as the ledger that holds it never leaves a room.
     """
     transaction.execute(
         """
@@ -905,15 +915,12 @@ def deny_for_departed_card_owner(
     rows = transaction.fetchall(
         """
         SELECT cards.principal_id, cards.delivery_id, cards.owner_id, cards.generation, cards.tool_call_id,
-               initial.attempted, membership.membership_epoch AS current_membership_epoch
+               initial.attempted
         FROM approval_cards AS cards
         JOIN matrix_delivery_outbox AS initial
           ON initial.principal_id = cards.principal_id
          AND initial.delivery_id = cards.delivery_id
          AND initial.stage = 'initial'
-        JOIN room_membership AS membership
-          ON membership.principal_id = COALESCE(cards.sender_principal_id, cards.principal_id)
-         AND membership.room_id = cards.room_id
         WHERE COALESCE(cards.sender_principal_id, cards.principal_id) = ? AND cards.room_id = ?
           AND cards.kind = 'request' AND cards.retired = 0
         """,
@@ -930,11 +937,6 @@ def deny_for_departed_card_owner(
         )
         if not bool(row["attempted"]):
             _delete_unattempted(transaction, card_principal_id, delivery_id)
-            continue
-        transaction.execute(
-            "UPDATE matrix_delivery_outbox SET membership_epoch = ? WHERE principal_id = ? AND delivery_id = ?",
-            (int(row["current_membership_epoch"]), card_principal_id, delivery_id),
-        )
 
 
 def expire_for_departed_responder(

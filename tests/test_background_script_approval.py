@@ -176,10 +176,12 @@ async def _wait_for_pending_card(journal: EventJournalStore) -> ApprovalCardView
 
 @pytest.mark.asyncio
 async def test_background_approval_fails_closed_when_room_departure_is_fenced(tmp_path: Path) -> None:
-    """A room that cannot publish a card must not hold the script call until timeout."""
+    """A room the asking account left cannot publish its card and must not hold the script call until timeout."""
     manager, journal, initial_sent = await _approval_manager(tmp_path)
     cards = journal.principal("router@shared")
-    await admit_room_membership(cards, "!room:localhost", "leave", source=DepartureSource.LOCAL)
+    manager.transport.responder_principal_id = lambda _entity_name: "watcher@shared"
+    watcher = journal.principal("watcher@shared")
+    await admit_room_membership(watcher, "!room:localhost", "leave", source=DepartureSource.LOCAL)
 
     try:
         decision = await asyncio.wait_for(

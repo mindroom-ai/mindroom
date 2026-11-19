@@ -96,7 +96,7 @@ class ToolApprovalTransportError(RuntimeError):
 
 
 class UnverifiableApprovalCardError(ToolApprovalTransportError):
-    """A legacy approval action target cannot be authenticated by Matrix."""
+    """An approval action target no account of the room may read cannot be authenticated by Matrix."""
 
 
 def _scheduled_call_target(task_id: str, execute_at_ns: int) -> dict[str, object]:
@@ -713,7 +713,7 @@ class ApprovalManager:
                 if before_consume is not None:
                     await before_consume()
                 logger.warning(
-                    "unverifiable_legacy_approval_action_ignored",
+                    "unverifiable_approval_action_ignored",
                     room_id=room_id,
                     card_event_id=card_event_id,
                     transport_reason=exc.reason,

@@ -13,7 +13,7 @@ from mindroom.approval.tool_approval import ToolApprovalTransportError
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DeliveryStage
 from mindroom.event_journal.identity import agent_of_principal, matrix_user_of_principal
-from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError
+from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
@@ -130,16 +130,21 @@ class ApprovalMatrixTransport:
         self,
         continuation: ApprovalContinuation,
         reason: str,
-    ) -> ApprovalDeliveryView | None:
-        """Durably send or adopt one unavailable-owner notice through the room's poster, or the account that began it."""
+    ) -> bool:
+        """Durably send or adopt one unavailable-owner notice through the room's poster, or the account that began it.
+
+        An acknowledged notice is delivered whether or not the account that posted it still runs.
+        """
         cards = self.cards()
-        first = None if cards is None else await cards.approvals.unavailable_notice_principal(continuation.approval_id)
-        bot = self.room_poster(continuation.room_id) if first is None else self.bots().get(agent_of_principal(first))
+        first = None if cards is None else await cards.approvals.unavailable_notice(continuation.approval_id)
+        if first is not None and first[2]:
+            return True
+        bot = self.room_poster(continuation.room_id) if first is None else self.bots().get(agent_of_principal(first[0]))
         if bot is None or bot.client is None:
-            return None
+            return False
         client = bot.client
         if not can_send_to_encrypted_room(client, continuation.room_id, operation="send_approval_notice"):
-            return None
+            return False
         store = bot.journal_principal()
         content = build_message_content(
             reason,
@@ -178,14 +183,18 @@ class ApprovalMatrixTransport:
                 delivery_event_type=claimed.event_type,
             )
 
-        delivery_id = await store.approvals.enqueue_unavailable_approval_notice(
-            approval_id=continuation.approval_id,
-            room_id=continuation.room_id,
-            thread_id=continuation.thread_id,
-            payload=content,
+        delivery_id = (
+            first[1]
+            if first is not None
+            else await store.approvals.enqueue_unavailable_approval_notice(
+                approval_id=continuation.approval_id,
+                room_id=continuation.room_id,
+                thread_id=continuation.thread_id,
+                payload=content,
+            )
         )
         if delivery_id is None:
-            return None
+            return False
         try:
             delivered = await MatrixDeliveryWorker(
                 store=store,
@@ -201,8 +210,8 @@ class ApprovalMatrixTransport:
                 room_id=continuation.room_id,
                 exc_info=True,
             )
-            return None
-        return store if delivered is not None else None
+            return False
+        return delivered is not None
 
     async def _approval_thread_relation(
         self,
@@ -250,17 +259,17 @@ class ApprovalMatrixTransport:
     async def pinned_delivery(self, delivery_id: str | None) -> tuple[SendDelivery, ResolveDelivered, str | None]:
         """Pin the one client a card's deliveries go out through, with its device, before a delivery is claimed.
 
-        A sender that is not ready raises, so nothing is claimed; one whose bot no longer exists refuses for good.
+        A sender that is not ready, or has no bot while it is replaced, raises: nothing is claimed and a later pass retries.
         """
         client = None
         if delivery_id is not None:
             cards = self.cards()
             card = None if cards is None else await cards.approvals.approval_card_sender(delivery_id=delivery_id)
-            bot = None if card is None else self.bots().get(_sender_entity(card[0]))
-            if card is None or (bot is not None and self.sender_bot(*card) is None):
+            bot = None if card is None else self.sender_bot(*card)
+            if bot is None:
                 msg = f"The sender of approval delivery {delivery_id!r} is not ready"
                 raise ToolApprovalTransportError(msg)
-            client = None if bot is None else bot.client
+            client = bot.client
         send = partial(self._send_approval_delivery, client)
         return (
             send,
@@ -271,8 +280,8 @@ class ApprovalMatrixTransport:
     async def _send_approval_delivery(self, client: nio.AsyncClient | None, claimed: MatrixDelivery) -> str:
         """Send one already-frozen approval event or deterministic edit through the pinned client of its sender."""
         if client is None:
-            msg = f"The sender of approval delivery {claimed.delivery_id!r} no longer exists"
-            raise PermanentDeliveryError(msg)
+            msg = f"Approval delivery {claimed.delivery_id!r} has no pinned sender"
+            raise ToolApprovalTransportError(msg)
         response = await send_room_event_result(
             client,
             claimed.room_id,
@@ -306,10 +315,10 @@ class ApprovalMatrixTransport:
         With no such bot nothing says the event is a card, so an ordinary reply goes on as text.
         """
         cards, refused, failed = self.cards(), None, None
-        for bot in self.bots().values():
-            if not bot.running or bot.client is None or room_id not in bot.client.rooms:
-                continue
-            response = await bot.client.room_get_event(room_id, card_event_id)
+        # The fleet changes while a reader waits on Matrix, so the readers are named before the first read.
+        joined = [bot.client for bot in self.bots().values() if bot.running and bot.client is not None]
+        for client in [client for client in joined if room_id in client.rooms]:
+            response = await client.room_get_event(room_id, card_event_id)
             event = response.event if isinstance(response, nio.RoomGetEventResponse) else None
             source = None if event is None or isinstance(event, nio.MegolmEvent) else event.source
             if not isinstance(source, dict):

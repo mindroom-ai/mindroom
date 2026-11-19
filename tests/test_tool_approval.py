@@ -516,7 +516,7 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, erro
     cards.approvals.resolve_approval_call.assert_not_awaited()
     cards.acknowledge_matrix_delivery.assert_not_awaited()
     warning.assert_called_once()
-    assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
+    assert warning.call_args.args == ("unverifiable_approval_action_ignored",)
     assert warning.call_args.kwargs["room_id"] == "!room:localhost"
     assert warning.call_args.kwargs["card_event_id"] == "$approval"
     assert error_code in warning.call_args.kwargs["transport_reason"]
@@ -1115,7 +1115,6 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
     assert client.room_send.await_args.kwargs["tx_id"] == transaction_id
     principal.approvals.discard_unavailable_approval_continuation.assert_awaited_once_with(
         "approval-removed",
-        notice_principal_id="router@localhost",
     )
     # A discard the journal refused leaves the cleanup incomplete, so it is tried again later.
     assert (recovery._startup_cleanup_retry is None) is discarded
@@ -1348,7 +1347,7 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
     """A stale notice attempt must not permanently strand its continuation."""
     journal = EventJournalStore.open_sqlite(tmp_path / "approval-stale-notice.db")
     principal = journal.principal("agent@removed")
-    notice_store = journal.principal("router@localhost")
+    notice_store = journal.principal("poster@localhost")
     approval_id = "approval-stale-notice"
     source_event_id = "$source"
     reason = "Requesting agent 'removed' is no longer available."
@@ -1452,7 +1451,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
     """After a router rejoin, Matrix refusal leaves the owner and notice queued for retry."""
     journal = EventJournalStore.open_sqlite(tmp_path / "approval-notice-refusal.db")
     principal = journal.principal("agent@removed")
-    notice_store = journal.principal("router@localhost")
+    notice_store = journal.principal("poster@localhost")
     approval_id = "approval-refused-notice"
     source_event_id = "$refused-source"
     await principal.admit(

@@ -12,10 +12,11 @@ import nio
 import pytest
 
 from mindroom.approval.inbound import parse_approval_response_event
+from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.response import plan_approval_calls, publish_generation
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
-from mindroom.approval.transport import _approval_delivery_content
+from mindroom.approval.transport import ApprovalMatrixTransport, _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import (
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
+    from mindroom.approval.manager import ApprovalActionResult
 
 
 @pytest.mark.asyncio
@@ -1083,6 +1084,71 @@ async def test_revocation_ack_waits_for_original_edit_and_recovers_after_restart
         assert delivered[0].payload["auto_approval"]["revoked_at"] is None
         assert delivered[1].payload["auto_approval"]["revoked_at"] is not None
         assert delivered[1].edits_event_id == "$card-first"
+    finally:
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_revocation_edit_goes_out_after_restart_through_the_account_that_sent_the_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revocation left unsent is sent after a restart by the account whose card gave the grant, not another one."""
+    journal = EventJournalStore.open_sqlite(tmp_path / "revoked.db")
+    manager = _manager(journal, tmp_path)
+    fake_send = manager.transport.send_approval_delivery
+
+    async def send(delivery: MatrixDelivery) -> str:
+        if delivery.delivery_id.startswith("approval-grant-revoked:"):
+            msg = "Matrix temporarily unavailable"
+            raise TimeoutError(msg)
+        return await fake_send(delivery)
+
+    manager.transport.send_approval_delivery = send
+    manager.transport.sender_device_id = AsyncMock(return_value="agent-device")
+    try:
+        card = await _card(journal, manager, "first")
+        await _approve(manager, card)
+        grant = await manager.cards.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        assert grant is not None
+        await manager.handle_grant_revocation(
+            room_id="!room:test",
+            sender_id="@human:test",
+            card_event_id=card,
+            grant_id=grant.grant_id,
+            authorize_responder=lambda _agent: True,
+            before_consume=None,
+        )
+    finally:
+        await manager.shutdown()
+    bots = {}
+    for name in ("other", "agent"):
+        client = MagicMock(spec=nio.AsyncClient, user_id=f"@{name}:test", device_id=f"{name}-device")
+        client.rooms = {"!room:test": MagicMock()}
+        bots[name] = MagicMock(agent_name=name, running=True, client=client)
+    sent: list[tuple[nio.AsyncClient, dict]] = []
+
+    async def send_event(
+        client: nio.AsyncClient,
+        room_id: str,
+        _type: str,
+        content: dict,
+        **_options: object,
+    ) -> object:
+        sent.append((client, content))
+        return nio.RoomSendResponse("$revoked", room_id)
+
+    monkeypatch.setattr("mindroom.approval.transport.send_room_event_result", send_event)
+    cards = journal.principal("router@shared")
+    transport = ApprovalMatrixTransport(bots=lambda: bots, room_poster=lambda _room_id: None, cards=lambda: cards)
+    manager = ApprovalManager(test_runtime_paths(tmp_path), transport=transport, cards=cards)
+    try:
+        assert (await manager.recover_cards_on_startup()).complete
+
+        [(client, content)] = sent
+        assert client is bots["agent"].client
+        assert content["m.new_content"]["auto_approval"]["revoked_at"] is not None
     finally:
         await manager.shutdown()
         await journal.close()

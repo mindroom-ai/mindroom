@@ -55,6 +55,14 @@ _REPLACED_TABLES = ("approval_cards", "approval_grants", "scheduled_call_approva
 _TOMBSTONE_DELIVERY_PREFIX = "legacy-tombstone:"
 
 
+def _open_ledger_rooms(transaction: Transaction, tables: frozenset[str]) -> None:
+    """Lift the departure fence of the router's principal, which now keeps the books of every account's cards."""
+    if "room_membership" in tables:
+        transaction.execute(
+            "UPDATE room_membership SET departure_fenced = 0 WHERE substr(principal_id, 1, 7) = 'router@'",
+        )
+
+
 def upgrade_approval_records(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Convert an earlier release's approval tables to one row per call and card, inside the schema transaction."""
     tables = inspector.tables()
@@ -63,11 +71,13 @@ def upgrade_approval_records(transaction: Transaction, inspector: SchemaInspecto
         # Legacy format: approval_cards rows with no sender_principal_id column; the router sent and edited every card.
         # Last legacy release: v2026.11.385; replacement: the next release records the principal that sends each card.
         # Handling: the column is added, NULL on every stored card; a NULL sender is the router account wherever a card
-        # is sent, edited or verified, and the first startup expires each such pending card.
+        # is sent, edited or verified, and the first startup expires each such pending card. The router's principal
+        # becomes the ledger of every account's cards, so the rooms it had left take cards again at their old epoch.
         # Coverage: tests/test_legacy_approval_records.py::test_pending_router_card_is_ended_once_at_upgrade,
         # tests/test_legacy_approval_records.py::test_the_sender_column_is_added_to_a_current_card_table.
         if "approval_cards" in tables and "sender_principal_id" not in inspector.columns("approval_cards"):
             transaction.execute("ALTER TABLE approval_cards ADD COLUMN sender_principal_id TEXT")
+            _open_ledger_rooms(transaction, tables)
         return
     legacy = _Legacy.load(transaction, tables)
     for table in (*_DROPPED_TABLES, *_REPLACED_TABLES):
@@ -78,6 +88,7 @@ def upgrade_approval_records(transaction: Transaction, inspector: SchemaInspecto
     converted = _Converted()
     converted.build(legacy)
     converted.insert(transaction)
+    _open_ledger_rooms(transaction, tables)
     for call in converted.pending_jobs:
         approval_calls.resolve_call(transaction, call, requested="denied", reason=JOB_ENDED_REASON, metadata=None)
     logger.warning(

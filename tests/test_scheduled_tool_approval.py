@@ -642,25 +642,6 @@ async def test_cancelling_the_task_denies_its_pending_card(
 
 
 @pytest.mark.asyncio
-async def test_new_room_tenure_does_not_inherit_the_approval(
-    journal_database: Callable[[], EventJournalStore],
-    tmp_path: Path,
-) -> None:
-    """Leaving and rejoining the room voids an approval given under the old membership."""
-    journal = journal_database()
-    manager = _manager(journal, tmp_path, [])
-    try:
-        await _armed(manager)
-        cards = journal.principal("router@shared")
-        await admit_room_membership(cards, _ROOM, "leave")
-        await admit_room_membership(cards, _ROOM, "join")
-
-        assert await _claim(manager) == "left_room"
-    finally:
-        await manager.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_direct_call_to_the_tool_still_asks_for_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,

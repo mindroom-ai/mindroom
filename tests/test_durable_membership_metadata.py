@@ -81,6 +81,8 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
 ) -> None:
     """State join and semantic leave/rejoin each carry their own atomic tenure effect."""
     bot, call_manager = await _router_with_call_manager(tmp_path)
+    # The bot stands for any account here: the owner account's own principal keeps one epoch as the approval ledger.
+    monkeypatch.setattr(journal_ops, "ROUTER_AGENT_NAME", "")
     account = bot.agent_user.user_id
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", ROOM, "#grant:localhost", "Grant")

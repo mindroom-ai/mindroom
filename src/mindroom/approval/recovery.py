@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.approval.manager import ApprovalManager
-    from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView, EventJournalStore
+    from mindroom.event_journal import ApprovalContinuation, EventJournalStore
 
 logger = get_logger(__name__)
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
@@ -36,7 +36,7 @@ _UPGRADE_REASON = "MindRoom was upgraded while this approval was pending. Ask ag
 class ApprovalRecovery:
     """Retain startup gates across transport binding; the manager owns task shutdown."""
 
-    deliver_unavailable_notice: Callable[[ApprovalContinuation, str], Awaitable[ApprovalDeliveryView | None]]
+    deliver_unavailable_notice: Callable[[ApprovalContinuation, str], Awaitable[bool]]
     journal_provider: Callable[[], EventJournalStore] | None = None
     entity_configured: Callable[[str], bool] | None = None
     entity_permanently_unavailable: Callable[[str], bool] | None = None
@@ -150,21 +150,17 @@ class ApprovalRecovery:
             return False
         if self.cancel_delegations is not None:
             await self.cancel_delegations(current, reason)
-        notice_store = await self.deliver_unavailable_notice(current, reason)
-        if notice_store is None:
+        if not await self.deliver_unavailable_notice(current, reason):
             return False
         # No bot of the gone entity is there to run what the discard's commit left for afterwards; the conversation
         # its approval held learns of the end from the approval signals.
-        effects = await store.approvals.discard_unavailable_approval_continuation(
-            current.approval_id,
-            notice_principal_id=notice_store.principal_id,
-        )
+        effects = await store.approvals.discard_unavailable_approval_continuation(current.approval_id)
         return effects is not None
 
     async def end_cards_without_sender(self) -> int:
         """Expire every pending card the router sent before cards recorded their sender; return how many it found.
 
-        Each paused turn resumes as after a timeout; a later call finds none, as every newer card records its sender.
+        Each paused turn resumes as after a timeout; a later call finds only a card whose edit waits for a router bot.
         """
         if self.manager is None:
             return 0

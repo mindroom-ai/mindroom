@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal.history_recovery import (
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
@@ -293,13 +294,15 @@ def _apply_membership_effect(
     ):
         raise IngestionBatchIntegrityError
     state = _claim_membership_state(transaction, principal_id, room_id)
-    if admission.membership != "join" and admission.previous_membership == "join":
+    # The owner account's principal is the approval ledger: it sends no card, and no departure advances its epoch.
+    fences = agent_of_principal(principal_id) != ROUTER_AGENT_NAME
+    if fences and admission.membership != "join" and admission.previous_membership == "join":
         if state.departure_fenced:
             raise IngestionBatchIntegrityError
         _advance_membership_epoch(transaction, principal_id, room_id)
     transaction.execute(
         "UPDATE room_membership SET departure_fenced = ? WHERE principal_id = ? AND room_id = ?",
-        (int(admission.membership != "join"), principal_id, room_id),
+        (int(fences and admission.membership != "join"), principal_id, room_id),
     )
     transaction.execute(
         """
@@ -739,7 +742,7 @@ def _advance_membership_epoch(
               SELECT 1 FROM approval_cards AS cards
               WHERE cards.principal_id = delivery.principal_id
                 AND cards.delivery_id = delivery.delivery_id
-                AND (cards.kind = 'request' OR cards.sender_principal_id IS NOT NULL)
+                AND cards.kind = 'request'
           )
         """,
         (principal_id, room_id),

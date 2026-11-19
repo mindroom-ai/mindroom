@@ -147,7 +147,7 @@ def insert_scope(transaction: Transaction, principal_id: str, *, delivery_id: st
 
 
 def _current(transaction: Transaction, room_id: str, responder_principal_id: str, responder_epoch: int) -> bool:
-    # The responder asks and sends the card, so its membership alone keeps a grant: the owner account may come and go.
+    # The ledger's epoch in a grant's scope never changes, so the membership of the responder alone ages a grant.
     return _epoch(transaction, responder_principal_id, room_id) == responder_epoch
 
 

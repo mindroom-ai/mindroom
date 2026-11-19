@@ -125,7 +125,6 @@ from mindroom.event_journal import (
     turn_rows,
 )
 from mindroom.event_journal import reads as journal_reads
-from mindroom.event_journal.matrix_delivery import PermanentDeliveryError
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.final_delivery import Completed, Failed, FailureCause, FinalDeliveryOutcome, TurnEnding
@@ -681,11 +680,6 @@ async def _no_delivered_event(*_target: object) -> str | None:
     return None
 
 
-async def _sender_gone(_delivery: MatrixDelivery) -> str:
-    msg = "The sender of this approval delivery no longer exists"
-    raise PermanentDeliveryError(msg)
-
-
 async def _no_sources_to_wake(_entity_name: str, _room_id: str, _source_event_ids: tuple[str, ...]) -> None:
     return None
 
@@ -706,15 +700,12 @@ class FakeApprovalTransport:
     resolve_approval_action_delivery: Callable[[str, str], Awaitable[str | None]] = _no_delivered_event
     sender_bot: Callable[[str | None, str], object | None] = lambda _sender, _room_id: None
     sender_device_id: Callable[[str | None], Awaitable[str | None]] = _no_device
-    # Whether the bot of every card's sender no longer exists, so each delivery is refused for good.
-    sender_gone: bool = False
     wake_continuation_sources: Callable[[str, str, tuple[str, ...]], Awaitable[None]] = _no_sources_to_wake
     responder_principal_id: Callable[[str], str | None] = lambda _entity_name: None
 
     async def pinned_delivery(self, delivery_id: str | None) -> tuple[Any, Any, str | None]:
         """Return the send and adoption methods a test set, with the device it named."""
-        send = _sender_gone if self.sender_gone else self.send_approval_delivery
-        return send, self.resolve_approval_delivery, await self.sender_device_id(delivery_id)
+        return self.send_approval_delivery, self.resolve_approval_delivery, await self.sender_device_id(delivery_id)
 
 
 def approval_transport_for_test(
@@ -731,7 +722,7 @@ def approval_transport_for_test(
     if cards is None:
         cards = MagicMock(principal_id="router@@mindroom_router:localhost")
         cards.approvals.approval_card_sender = AsyncMock(return_value=(None, "!room:localhost"))
-        cards.approvals.unavailable_notice_principal = AsyncMock(return_value=None)
+        cards.approvals.unavailable_notice = AsyncMock(return_value=None)
 
     def bots() -> dict[str, Any]:
         found = {name: bot for name in entities if (bot := bot_provider(name)) is not None}

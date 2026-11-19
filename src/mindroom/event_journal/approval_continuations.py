@@ -99,14 +99,23 @@ def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> 
     return f"approval-unavailable:{approval_id}:{membership_epoch}"
 
 
-def unavailable_notice_principal(transaction: Transaction, _principal_id: str, approval_id: str) -> str | None:
-    """Return the principal that first enqueued one approval's unavailable-owner notice, whoever posts for the room now."""
+def unavailable_notice(transaction: Transaction, _principal_id: str, approval_id: str) -> tuple[str, str, bool] | None:
+    """Return the principal and delivery of one approval's unavailable-owner notice and whether Matrix acknowledged it.
+
+    The attempt an account began stands, whoever posts for the room now, until its history shows it was never sent.
+    """
     prefix = _unavailable_notice_delivery_id(approval_id, 0)[:-1]
     row = transaction.fetchone(
-        "SELECT principal_id FROM matrix_delivery_outbox WHERE substr(delivery_id, 1, ?) = ? ORDER BY created_at_ns",
+        """
+        SELECT principal_id, delivery_id, acknowledged_event_id FROM matrix_delivery_outbox
+        WHERE substr(delivery_id, 1, ?) = ? AND (retired = 0 OR acknowledged_event_id IS NOT NULL)
+        ORDER BY acknowledged_event_id IS NULL, created_at_ns
+        """,
         (len(prefix), prefix),
     )
-    return None if row is None else str(row["principal_id"])
+    if row is None:
+        return None
+    return str(row["principal_id"]), str(row["delivery_id"]), row["acknowledged_event_id"] is not None
 
 
 def enqueue_unavailable_notice(
@@ -855,45 +864,16 @@ def may_discard_unavailable(
     principal_id: str,
     *,
     approval_id: str,
-    notice_principal_id: str,
 ) -> ApprovalContinuation | None:
-    """Lock a permanently unavailable owner's paused run whose visible card cleanup is done, so it may end."""
-    observed = get(transaction, principal_id, approval_id=approval_id)
-    if observed is None or observed.state != "failing":
-        return None
-    membership_epoch = membership_state.claim_active_membership_epoch(
-        transaction,
-        notice_principal_id,
-        room_id=observed.room_id,
-    )
-    if membership_epoch is None:
-        return None
+    """Lock a permanently unavailable owner's paused run whose visible card cleanup is done, so it may end.
+
+    Its acknowledged notice stands whether or not the account that posted it is still in the room.
+    """
     continuation = get_locked(transaction, principal_id, approval_id=approval_id)
-    if continuation is None or continuation.state != "failing" or continuation.room_id != observed.room_id:
+    notice = unavailable_notice(transaction, principal_id, approval_id)
+    if continuation is None or continuation.state != "failing" or notice is None or not notice[2]:
         return None
-    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
-    # The membership row is already held before the cross-principal
-    # continuation lock. The helper's membership claim is therefore reentrant;
-    # its new lock is only the outbox row, preserving membership ->
-    # continuation -> delivery order against router departure.
-    ownership = outbox.claim_active_delivery_ownership(
-        transaction,
-        notice_principal_id,
-        delivery_id=delivery_id,
-        stage=DeliveryStage.FINAL,
-        expected_room_id=continuation.room_id,
-    )
-    if ownership is None:
-        return None
-    delivered = transaction.fetchone(
-        """
-        SELECT 1 AS present FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
-          AND acknowledged_event_id IS NOT NULL
-        """,
-        (notice_principal_id, delivery_id, DeliveryStage.FINAL.value),
-    )
-    return None if delivered is None else continuation
+    return continuation
 
 
 def get_locked(

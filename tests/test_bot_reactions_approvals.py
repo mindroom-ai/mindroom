@@ -2103,7 +2103,7 @@ class TestAgentBot(AgentBotTestBase):
             warning.assert_not_called()
         else:
             warning.assert_called_once()
-            assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
+            assert warning.call_args.args == ("unverifiable_approval_action_ignored",)
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")

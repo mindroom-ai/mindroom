@@ -100,3 +100,5 @@ Add an `auto_approve` rule for such a function to keep it available.
 ## Who Posts the Card
 
 The agent or team whose turn asks for approval posts the card and edits it when the call is decided.
+A card is denied when the agent or team that posted it leaves the room.
+Whether the router account is in the room, or leaves it, changes nothing for a card.
