@@ -3814,6 +3814,7 @@ def test_presets_are_served_as_the_config_model_expands_them(egress_portal: dict
         "display_name": "GitHub",
         "description": "GitHub API, gh CLI, and git over HTTPS",
         "oauth_provider": "github",
+        "read_only_supported": False,
         "rules": [
             {"host": "api.github.com", "port": None, "path_prefix": "/"},
             {"host": "uploads.github.com", "port": None, "path_prefix": "/"},
@@ -3821,6 +3822,8 @@ def test_presets_are_served_as_the_config_model_expands_them(egress_portal: dict
         ],
         "placeholder_env": {"GH_TOKEN": "mindroom-brokered", "GITHUB_TOKEN": "mindroom-brokered"},
     }
+    # The new-service consent asks how much the account may do where the preset offers read only.
+    assert by_id["atlassian"]["read_only_supported"] is True
     assert by_id["google_gmail"]["rules"] == [
         {"host": "gmail.googleapis.com", "port": None, "path_prefix": "/"},
         {"host": "www.googleapis.com", "port": None, "path_prefix": "/gmail/"},
@@ -3829,7 +3832,15 @@ def test_presets_are_served_as_the_config_model_expands_them(egress_portal: dict
     assert by_id["openai"]["placeholder_env"] == {"OPENAI_API_KEY": "mindroom-brokered"}
     assert by_id["google_sheets"]["placeholder_env"] == {}
     for preset in presets:
-        assert set(preset) == {"id", "display_name", "description", "oauth_provider", "rules", "placeholder_env"}
+        assert set(preset) == {
+            "id",
+            "display_name",
+            "description",
+            "oauth_provider",
+            "read_only_supported",
+            "rules",
+            "placeholder_env",
+        }
         assert all(set(rule) == {"host", "port", "path_prefix"} for rule in preset["rules"])
     assert "x-access-token" not in response.text
     # The account login select offers the registry's providers, the ones a saved service is checked against.

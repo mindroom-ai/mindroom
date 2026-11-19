@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   PASSED_THROUGH,
+  accountReuseDescription,
   deleteServiceWarning,
   passThroughCaption,
   personalScopeLine,
@@ -23,6 +24,7 @@ import {
   type RowAgent,
   type ServiceEditing,
 } from "./egressRowText";
+import { AccountReuseDialog, REUSE_BODY } from "./EgressServiceItem";
 import { EgressServiceRows, keyPath, servicePath } from "./EgressServiceRows";
 import { EgressServiceTable } from "./EgressServiceTable";
 import {
@@ -33,10 +35,13 @@ import {
 import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
 import type {
   AuthoredEgressService,
+  EgressAccess,
   EgressCredentialAgent,
   EgressCredentialList,
   EgressCredentialService,
   EgressLogRecord,
+  EgressOAuthLogin,
+  EgressPreset,
   EgressPresetCatalog,
 } from "./types";
 
@@ -419,9 +424,9 @@ function AgentSection({
       ...agent.services.map((service) => service.name),
       ...agent.inactive_services.map((service) => service.name),
     ]);
-  // The caller's own logins connected for the tools that no service of this
-  // personal agent has yet, an ignored one included. Only accounts that belong
-  // to each user (GitHub, Atlassian); the others have their account choice.
+  // The caller's own connected logins whose preset's hosts no service of this
+  // personal agent covers, nor an ignored one with that login. Only accounts
+  // of each user's own (GitHub, Atlassian); the others have their own choice.
   const logins =
     agent.can_manage && !agent.shared ? (agent.oauth_logins ?? []) : [];
   const suggestions = logins.flatMap((login) => {
@@ -431,32 +436,45 @@ function AgentSection({
     const own = catalog?.oauth_providers.some(
       (option) => option.id === login.provider && option.requester_scoped,
     );
-    const taken = [
-      ...agent.services.map((service) => service.oauth?.provider),
-      ...agent.inactive_services.map((service) => service.oauth_provider),
-    ].includes(login.provider);
+    const hosts = preset?.rules.map((rule) => rule.host) ?? [];
+    const taken =
+      agent.services.some((s) => s.rules.some((r) => hosts.includes(r.host))) ||
+      agent.inactive_services.some((s) => s.oauth_provider === login.provider);
     return preset && own && login.connected && !taken
       ? [{ login, preset }]
       : [];
   });
-  // Use it adds the preset's service, whose row then asks to let commands use the account.
-  const addLogin = (presetId: string, provider: string) => {
-    setError(null);
-    const name = freeName(presetId);
-    write(
-      servicePath(agent.agent_name, name),
-      "PUT",
-      { preset: presetId },
-      { "If-None-Match": "*" },
-    ).then(
-      (counts) => {
-        if (!counts) return;
-        onChanged();
-        setSignInNext({ name, provider, toolsAccount: true });
-      },
-      (cause) =>
-        setError(errorText(cause, "Could not add the service. Try again.")),
-    );
+  // Asked before a service is added to use a connected login: nothing is written before Continue.
+  const [consent, setConsent] = useState<{
+    name: string;
+    login: EgressOAuthLogin;
+    preset?: EgressPreset;
+    resolve: (allow: (() => Promise<unknown>) | null) => void;
+  } | null>(null);
+  const [access, setAccess] = useState<EgressAccess>("read");
+  const readOnly = consent?.preset?.read_only_supported === true;
+  const confirmAccount = (
+    name: string,
+    login: EgressOAuthLogin,
+    preset?: EgressPreset,
+  ) =>
+    new Promise<(() => Promise<unknown>) | null>((resolve) => {
+      setAccess("read");
+      setConsent({ name, login, preset, resolve });
+    });
+  const addLogin = async (preset: EgressPreset, login: EgressOAuthLogin) => {
+    const name = freeName(preset.id);
+    const allow = await confirmAccount(name, login, preset);
+    if (!allow) return;
+    try {
+      const path = servicePath(agent.agent_name, name);
+      const create = { "If-None-Match": "*" };
+      if (await write(path, "PUT", { preset: preset.id }, create))
+        await allow();
+    } catch (cause) {
+      setError(errorText(cause, "Could not use the account. Try again."));
+      onChanged();
+    }
   };
 
   const pendingEdit = editor?.pendingEdit;
@@ -598,9 +616,8 @@ function AgentSection({
             onSave={save}
             // A service that gets an account of its own signs in to it next, from its row.
             logins={logins}
-            onSignIn={(name, provider, toolsAccount) =>
-              setSignInNext({ name, provider, toolsAccount })
-            }
+            confirmAccount={confirmAccount}
+            onSignIn={(name, provider) => setSignInNext({ name, provider })}
             saveKey={saveKey}
             onDelete={
               editor.kind === "edit" ? () => remove(editor.name) : undefined
@@ -625,12 +642,39 @@ function AgentSection({
             className="ml-auto"
             disabled={saving || editor !== null}
             aria-label={`Use your ${login.display_name} account for ${agent.agent_display_name}`}
-            onClick={() => addLogin(preset.id, login.provider)}
+            onClick={() => void addLogin(preset, login)}
           >
             Use it
           </Button>
         </div>
       ))}
+      {consent && (
+        <AccountReuseDialog
+          open
+          title={`Use your ${consent.login.display_name} account for Agent Keys?`}
+          description={accountReuseDescription({
+            provider: consent.login.display_name,
+            account:
+              consent.login.account_label ??
+              `the connected ${consent.login.display_name} account`,
+            service: consent.preset?.display_name ?? consent.name,
+            sharedAgent: null,
+            unscoped: false,
+            readOnly: readOnly && access === "read",
+            oneAgent: false,
+          })}
+          confirmLabel="Let commands use it"
+          access={access}
+          onAccessChange={readOnly ? setAccess : null}
+          onCancel={() => setConsent(consent.resolve(null) ?? null)}
+          onContinue={() => {
+            const reuse = `${keyPath(agent.agent_name, consent.name)}/oauth-reuse`;
+            const body = readOnly ? { ...REUSE_BODY, access } : REUSE_BODY;
+            consent.resolve(() => write(reuse, "PUT", body).then(onChanged));
+            setConsent(null);
+          }}
+        />
+      )}
       {agent.services.length || agent.inactive_services.length ? (
         <EgressServiceTable label={`Services for ${agent.agent_display_name}`}>
           {groups.map((group) => (

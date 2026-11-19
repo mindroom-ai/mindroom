@@ -152,14 +152,18 @@ export interface EgressServiceEditorProps {
   onSave: (name: string, service: AuthoredEgressService) => Promise<void>;
   /** The caller's own logins a new service that takes a key can use instead; personal page only. */
   logins?: readonly EgressOAuthLogin[];
+  /** Asks before anything is saved to let commands use one of `logins`; resolves to what allows it, or `null`. */
+  confirmAccount?: (
+    name: string,
+    login: EgressOAuthLogin,
+    preset: EgressPreset | undefined,
+  ) => Promise<(() => Promise<unknown>) | null>;
   /**
    * Called after a save that gives the service an account of its own it has
    * not signed in to, with that account's login as the form resolved it, so
    * the page can ask to sign in next. Leave it out where nothing signs in.
-   * With `toolsAccount`, the new service uses one of `logins` instead of a
-   * key, and the page asks next to let commands use it.
    */
-  onSignIn?: (name: string, provider: string, toolsAccount?: boolean) => void;
+  onSignIn?: (name: string, provider: string) => void;
   /**
    * Save the API key typed in the form for the service of that name, called
    * after `onSave` succeeds and only when a key was typed. Without it the form
@@ -198,6 +202,7 @@ export function EgressServiceEditor({
   logins = [],
   onDirtyChange,
   onSave,
+  confirmAccount,
   onSignIn,
   saveKey,
   onDelete,
@@ -404,32 +409,26 @@ export function EgressServiceEditor({
     !limiting && offersSeparateAccount(form, options, preset);
   const takesKey = !limiting && !choosesAccount;
   const toolsAccount = toolsAccountUse(login, agentServices, name);
-  // A new service that would take a key offers the caller's own login of its
-  // preset first, chosen when it is connected, until a token is picked.
+  // A new service that would take a key offers the caller's own connected
+  // login of its preset first, until a token is picked.
   const offeredLogin =
     !editing && saveKey && takesKey
-      ? logins.find((option) => option.provider === login)
+      ? logins.find((option) => option.provider === login && option.connected)
       : undefined;
-  const [pasteKey, setPasteKey] = useState<boolean | null>(null);
-  const usesLogin =
-    offeredLogin !== undefined && !(pasteKey ?? !offeredLogin.connected);
-  const loginOption = (use: boolean, label: string, note?: string) => (
-    <div>
-      <label className="flex items-start gap-2 text-sm">
-        <input
-          type="radio"
-          name={`${id}-login`}
-          className="mt-0.5 h-4 w-4"
-          checked={usesLogin === use}
-          disabled={disabled}
-          onChange={() => setPasteKey(!use)}
-        />
-        {label}
-      </label>
-      {note && use === usesLogin && (
-        <p className="pl-6 text-xs text-muted-foreground">{note}</p>
-      )}
-    </div>
+  const [pasteKey, setPasteKey] = useState(false);
+  const usesLogin = offeredLogin !== undefined && !pasteKey;
+  const loginOption = (use: boolean, label: string) => (
+    <label className="flex items-start gap-2 text-sm">
+      <input
+        type="radio"
+        name={`${id}-login`}
+        className="mt-0.5 h-4 w-4"
+        checked={usesLogin === use}
+        disabled={disabled}
+        onChange={() => setPasteKey(!use)}
+      />
+      {label}
+    </label>
   );
   const loginChoice = offeredLogin && (
     <div
@@ -437,17 +436,10 @@ export function EgressServiceEditor({
       aria-label="Account or key"
       className="max-w-md space-y-1"
     >
-      {offeredLogin.connected
-        ? loginOption(
-            true,
-            `Use your connected ${offeredLogin.display_name} account${offeredLogin.account_label ? ` (${offeredLogin.account_label})` : ""}`,
-            "You confirm right after saving.",
-          )
-        : loginOption(
-            true,
-            `Connect your ${offeredLogin.display_name} account`,
-            "You sign in right after saving.",
-          )}
+      {loginOption(
+        true,
+        `Use your connected ${offeredLogin.display_name} account${offeredLogin.account_label ? ` (${offeredLogin.account_label})` : ""}`,
+      )}
       {loginOption(false, "Paste a token instead")}
     </div>
   );
@@ -603,6 +595,11 @@ export function EgressServiceEditor({
     }
     setConfirmingSave(false);
     setBusy("save");
+    // A connected account is confirmed before anything is written, a retry included.
+    const allow = usesLogin
+      ? await confirmAccount?.(current.name, offeredLogin, preset)
+      : undefined;
+    if (allow === null) return setBusy(null);
     // A limit saved without a change goes back exactly as it was stored, so a
     // preset stays a preset and nothing the form cannot show is lost.
     const authored =
@@ -617,7 +614,6 @@ export function EgressServiceEditor({
         const login = serviceLogin(current, presetOf(presets, current.preset));
         if (login && signsInAfterSave(current, initial, presets))
           onSignIn?.(current.name, login);
-        if (usesLogin) onSignIn?.(current.name, offeredLogin.provider, true);
         setSavedSignature(signature);
       }
     } catch (cause) {
@@ -627,17 +623,20 @@ export function EgressServiceEditor({
       setBusy(null);
       return;
     }
-    if (takesKey && !usesLogin && saveKey && apiKey.trim() !== "") {
-      try {
+    try {
+      if (allow) await allow();
+      else if (takesKey && !usesLogin && saveKey && apiKey.trim() !== "")
         await saveKey(apiKey, current.name);
-      } catch (cause) {
-        const reason = errorText(cause, "Could not save the key.");
-        setServerError(
-          `The service was saved, but its key was not: ${reason}${reason.endsWith(".") ? "" : "."} Paste the key again and save to retry.`,
-        );
-        setBusy(null);
-        return;
-      }
+    } catch (cause) {
+      const reason = errorText(
+        cause,
+        allow ? "Could not allow the account." : "Could not save the key.",
+      );
+      setServerError(
+        `The service was saved, but ${allow ? "commands cannot use the account yet" : "its key was not"}: ${reason}${reason.endsWith(".") ? "" : "."} ${allow ? "Save" : "Paste the key again and save"} to retry.`,
+      );
+      setBusy(null);
+      return;
     }
     onClose();
   };
@@ -910,7 +909,7 @@ export function EgressServiceEditor({
             "Save all changes"
           ) : limiting ? (
             "Save limit"
-          ) : signsIn || (usesLogin && !offeredLogin.connected) ? (
+          ) : signsIn ? (
             "Save and sign in"
           ) : (
             "Save service"

@@ -3252,10 +3252,14 @@ describe("using the connected account", () => {
     connected: true,
     account_label: "example-user",
   };
+  const githubPreset = egressPresets.presets.find(
+    (preset) => preset.id === "github",
+  )!;
   // The GitHub service once saved, as the listing sends it: the account serves only the tools.
   const added = (oauth: Partial<EgressCredentialService["oauth"]>) =>
     credentialService({
       source: "user",
+      rules: githubPreset.rules,
       oauth: oauthStatus({
         connected: true,
         account_label: "example-user",
@@ -3270,20 +3274,30 @@ describe("using the connected account", () => {
   const REUSE = `${KEY}/oauth-reuse`;
   let listing: EgressCredentialAgent[];
   let calls: { method: string; path: string; body: unknown }[];
-  let afterSave: EgressCredentialService;
+  let answers: Record<string, () => Response>;
 
   const writes = () => calls.filter((call) => call.method !== "GET");
+  const ok = () => new Response(null, { status: 204 });
 
   beforeEach(() => {
     calls = [];
-    afterSave = added({});
-    listing = [{ ...agents[2], oauth_logins: [login] }];
-    vi.spyOn(window, "open").mockReturnValue({
-      closed: false,
-      close: vi.fn(),
-      location: { href: "about:blank" },
-      document: document.implementation.createHTMLDocument(),
-    } as unknown as Window);
+    // Personal Mind already lets commands use the account for its own `github`.
+    listing = [
+      {
+        ...agents[0],
+        services: [added({ reuse_enabled: true, reuse_access: "read_write" })],
+        oauth_logins: [login],
+      },
+      { ...agents[2], oauth_logins: [login] },
+    ];
+    answers = {
+      [`PUT ${ADDED}`]: () => {
+        listing = [listing[0], { ...listing[1], services: [added({})] }];
+        return ok();
+      },
+      [`PUT ${REUSE}`]: ok,
+      [`PUT ${KEY}`]: ok,
+    };
     vi.mocked(fetch).mockImplementation(async (input, options) => {
       const path = String(input);
       const method = options?.method ?? "GET";
@@ -3295,18 +3309,8 @@ describe("using the connected account", () => {
       if (path === "/api/connections/me") return json(identity);
       if (path === "/api/connections/egress") return json({ agents: listing });
       if (path === PRESETS) return json(egressPresets);
-      if (method === "PUT" && path === ADDED) {
-        listing = [{ ...listing[0], services: [afterSave] }];
-        return new Response(null, { status: 204 });
-      }
-      if (method === "PUT" && (path === REUSE || path === KEY))
-        return new Response(null, { status: 204 });
-      if (method === "POST" && path === `${KEY}/connect`)
-        return json({
-          provider: "github",
-          auth_url: "https://github.example.com/authorize",
-          completion_origin: "https://portal.example.com",
-        });
+      const answer = answers[`${method} ${path}`];
+      if (answer) return answer();
       throw new Error(`Unexpected request: ${method} ${path}`);
     });
   });
@@ -3324,16 +3328,21 @@ describe("using the connected account", () => {
     return form;
   }
 
-  /** The row's question, answered once: the account is allowed with the approval bypass acknowledged. */
-  async function allowOnce() {
+  /** The question, asked before anything is written; Continue adds the service and allows the account. */
+  async function allowFirst(
+    written: { method: string; path: string; body: unknown }[],
+  ) {
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveAccessibleName(
       "Use your GitHub account for Agent Keys?",
     );
     expect(dialog).toHaveTextContent("example-user");
+    expect(writes()).toEqual(written);
     await pressInDialog("Let commands use it");
     await waitFor(() =>
-      expect(writes().slice(1)).toEqual([
+      expect(writes()).toEqual([
+        ...written,
+        { method: "PUT", path: ADDED, body: { preset: "github" } },
         {
           method: "PUT",
           path: REUSE,
@@ -3343,7 +3352,17 @@ describe("using the connected account", () => {
     );
   }
 
-  it("the form starts on the connected account and asks once after saving", async () => {
+  /** The question, cancelled: nothing is written. */
+  async function cancelFirst() {
+    expect(await screen.findByRole("dialog")).toHaveAccessibleName(
+      "Use your GitHub account for Agent Keys?",
+    );
+    await pressInDialog("Cancel");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(writes()).toEqual([]);
+  }
+
+  it("the form starts on the connected account and asks before saving", async () => {
     const form = await openGithubForm();
     expect(
       within(form).getByRole("radio", {
@@ -3352,19 +3371,19 @@ describe("using the connected account", () => {
     ).toBeChecked();
     expect(within(form).queryByLabelText("API key")).toBeNull();
     fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
-    await allowOnce();
-    expect(writes()[0]).toMatchObject({ method: "PUT", path: ADDED });
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await allowFirst([]);
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "Add service" })).toBeNull(),
+    );
   });
 
-  it("cancelling the question leaves the row to Let commands use it", async () => {
+  it("cancelling the form's question writes nothing and keeps the form", async () => {
     const form = await openGithubForm();
     fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
-    await pressInDialog("Cancel");
+    await cancelFirst();
     expect(
-      await screen.findByRole("button", { name: "Let commands use GitHub" }),
-    ).toBeVisible();
-    expect(writes().map((call) => call.path)).toEqual([ADDED]);
+      within(form).getByRole("button", { name: "Save service" }),
+    ).toBeEnabled();
   });
 
   it("Paste a token instead keeps the key field and asks nothing", async () => {
@@ -3385,41 +3404,51 @@ describe("using the connected account", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("a login not connected yet connects after the same question", async () => {
-    listing = [
-      {
-        ...agents[2],
-        oauth_logins: [{ ...login, connected: false, account_label: null }],
-      },
-    ];
-    afterSave = added({ connected: false, account_label: null });
+  it("after a key that failed, picking the account asks and writes only the allowance", async () => {
+    answers[`PUT ${KEY}`] = () => json({ detail: "Key refused" }, 422);
     const form = await openGithubForm();
-    // A key stays the default until the account is picked.
-    expect(within(form).getByLabelText("API key")).toBeVisible();
     fireEvent.click(
-      within(form).getByRole("radio", { name: "Connect your GitHub account" }),
+      within(form).getByRole("radio", { name: "Paste a token instead" }),
     );
+    fireEvent.change(within(form).getByLabelText("API key"), {
+      target: { value: "example-token" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
+    expect(
+      await within(form).findByText(/its key was not: Key refused/),
+    ).toBeVisible();
+    const before = writes();
     fireEvent.click(
-      within(form).getByRole("button", { name: "Save and sign in" }),
+      within(form).getByRole("radio", {
+        name: "Use your connected GitHub account (example-user)",
+      }),
     );
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveAccessibleName(
-      "Use your GitHub account for Agent Keys?",
-    );
-    await pressInDialog("Continue");
+    fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
+    expect(await screen.findByRole("dialog")).toBeVisible();
+    expect(writes()).toEqual(before);
+    await pressInDialog("Let commands use it");
     await waitFor(() =>
-      expect(writes().slice(1)).toEqual([
+      expect(writes()).toEqual([
+        ...before,
         {
           method: "PUT",
           path: REUSE,
           body: { acknowledge_approval_bypass: true },
         },
-        { method: "POST", path: `${KEY}/connect`, body: {} },
       ]),
     );
   });
 
-  it("the agent suggests the connected account, and Use it adds and allows it", async () => {
+  it("a login not connected yet leaves the form as it was", async () => {
+    listing = [
+      { ...agents[2], oauth_logins: [{ ...login, connected: false }] },
+    ];
+    const form = await openGithubForm();
+    expect(within(form).queryByRole("radiogroup")).toBeNull();
+    expect(within(form).getByLabelText("API key")).toBeVisible();
+  });
+
+  it("Use it asks before anything is written, then adds and allows the account", async () => {
     await renderPage();
     expect(
       await screen.findByText(
@@ -3431,12 +3460,7 @@ describe("using the connected account", () => {
         name: "Use your GitHub account for Bare Agent",
       }),
     );
-    await allowOnce();
-    expect(writes()[0]).toEqual({
-      method: "PUT",
-      path: ADDED,
-      body: { preset: "github" },
-    });
+    await allowFirst([]);
     await waitFor(() =>
       expect(
         screen.queryByRole("button", {
@@ -3446,8 +3470,56 @@ describe("using the connected account", () => {
     );
   });
 
+  it("cancelling Use it writes nothing, though another agent already allows the account", async () => {
+    await renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Use your GitHub account for Bare Agent",
+      }),
+    );
+    await cancelFirst();
+  });
+
+  it("an allowance that fails after the service was added is shown", async () => {
+    answers[`PUT ${REUSE}`] = () => json({ detail: "Not allowed now" }, 409);
+    await renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Use your GitHub account for Bare Agent",
+      }),
+    );
+    await pressInDialog("Let commands use it");
+    expect(await screen.findByText("Not allowed now")).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "Let commands use GitHub" }),
+    ).toBeVisible();
+  });
+
   it.each<[string, Partial<EgressCredentialAgent>]>([
     ["has a GitHub service", { services: [added({})] }],
+    [
+      "has an administrator's GitHub key and a repository limit",
+      {
+        services: [
+          credentialService({
+            source: "config",
+            rules: [{ host: "api.github.com", port: null, path_prefix: "/" }],
+            key_configured: true,
+            configured: true,
+            active_source: "key",
+          }),
+          credentialService({
+            name: "github-limited",
+            display_name: "GitHub limit",
+            source: "user",
+            restrict_only: true,
+            rules: [
+              { host: "api.github.com", port: null, path_prefix: "/repos/x/" },
+            ],
+          }),
+        ],
+      },
+    ],
     [
       "has an ignored GitHub service of another name",
       {
@@ -3478,7 +3550,7 @@ describe("using the connected account", () => {
   ])("no suggestion when the agent %s", async (_case, changes) => {
     // Personal Mind, with no GitHub service, still gets the suggestion.
     const control = { ...agents[0], services: [], oauth_logins: [login] };
-    listing = [control, { ...listing[0], ...changes }];
+    listing = [control, { ...listing[1], ...changes }];
     await renderPage();
     expect(
       await screen.findByRole("button", {

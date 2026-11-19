@@ -293,6 +293,7 @@ export interface EgressPreset {
   description: string;
   /** The OAuth provider the preset signs in with, if any. */
   oauth_provider: string | null;
+  read_only_supported?: boolean; // As a service's; absent from older servers.
   rules: EgressRuleSummary[];
   placeholder_env: Record<string, string>;
 }
