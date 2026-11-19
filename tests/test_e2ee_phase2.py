@@ -371,7 +371,7 @@ class TestEncryptCommand:
         # The agent's own next sends are encrypted before its sync shows the change.
         assert client.rooms["!room:localhost"].encrypted is (written is True)
         assert ("now enabled" in response) is (written is True)
-        assert written or response == failure_reply
+        assert written is True or response == failure_reply
 
 
 class TestE2EECommand:
