@@ -22,6 +22,7 @@ from mindroom.matrix.room_accounts import reconcile_room_accounts
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestration import rooms as rooms_module
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.room_modes import change_room_thread_mode
@@ -317,7 +318,7 @@ async def test_setup_publishes_after_agents_join(room_state: RoomState, monkeypa
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
     snapshot = await read_room_state(client, ROOM_ID)
     assert snapshot is not None
-    monkeypatch.setattr(setup, "_reconcile_room_policies", AsyncMock(return_value={ROOM_ID: snapshot}))
+    monkeypatch.setattr(rooms_module, "reconcile_managed_rooms", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
     bot = AsyncMock()
     bot.agent_name = "agent2"
@@ -398,7 +399,7 @@ async def test_existing_state_is_not_resent_on_reconciliation(
     assert snapshot is not None
     setup = _room_setup(room_state)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
-    monkeypatch.setattr(setup, "_reconcile_room_policies", AsyncMock(return_value={ROOM_ID: snapshot}))
+    monkeypatch.setattr(rooms_module, "reconcile_managed_rooms", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
     await setup.setup([])
     assert not _writes(client, EVENT_TYPE)
@@ -487,7 +488,7 @@ async def test_setup_defers_reconciliation_until_admission_reopens(
     client.room_get_state.reset_mock()
     setup = _room_setup(room_state, publication_allowed=lambda: False)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
-    monkeypatch.setattr(setup, "_reconcile_room_policies", AsyncMock(return_value={ROOM_ID: snapshot}))
+    monkeypatch.setattr(rooms_module, "reconcile_managed_rooms", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
     await setup.setup([])
     client.room_get_state.assert_not_awaited()
@@ -583,7 +584,7 @@ async def test_fresh_setup_repairs_another_writers_mode(
     client.room_get_state.reset_mock()
     setup = _room_setup(room_state)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
-    monkeypatch.setattr(setup, "_reconcile_room_policies", AsyncMock(return_value={ROOM_ID: snapshot}))
+    monkeypatch.setattr(rooms_module, "reconcile_managed_rooms", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
     await setup.setup([])
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
@@ -763,7 +764,7 @@ async def test_startup_admission_reopens_during_joins(
     gate_open = False
     setup = _room_setup(room_state, publication_allowed=lambda: gate_open)
     monkeypatch.setattr(setup, "ensure_rooms_exist", AsyncMock(return_value={"room": ROOM_ID}))
-    monkeypatch.setattr(setup, "_reconcile_room_policies", AsyncMock(return_value={ROOM_ID: snapshot}))
+    monkeypatch.setattr(rooms_module, "reconcile_managed_rooms", AsyncMock(return_value={ROOM_ID: snapshot}))
     monkeypatch.setattr(setup, "_ensure_room_invitations", AsyncMock())
 
     async def join(name: str) -> None:

@@ -134,7 +134,12 @@ class RoomSetup:
         for bot in bots:
             if bot.agent_name == ROUTER_AGENT_NAME:
                 await bot.ensure_rooms()
-        snapshots = await self._reconcile_room_policies(room_ids)
+        client = self.owner_client()
+        snapshots = (
+            {}
+            if client is None
+            else await reconcile_managed_rooms(client, self.config_provider(), self.runtime_paths, room_ids)
+        )
         await self._ensure_room_invitations(snapshots)
         all_rooms = load_rooms(runtime_paths=self.runtime_paths)
         all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
@@ -175,13 +180,6 @@ class RoomSetup:
         room_ids = await ensure_all_rooms_exist(client, self.config_provider(), self.runtime_paths)
         logger.info("ensured_room_existence", room_count=len(room_ids))
         return room_ids
-
-    async def _reconcile_room_policies(self, room_ids: dict[str, str]) -> dict[str, RoomStateSnapshot]:
-        """Wire the owner's fresh policy reconciliation into startup and reload."""
-        client = self.owner_client()
-        if client is None:
-            return {}
-        return await reconcile_managed_rooms(client, self.config_provider(), self.runtime_paths, room_ids)
 
     async def link_root_space(self, room_ids: dict[str, str]) -> None:
         """Ensure the optional root Matrix Space exists and link the current managed rooms."""

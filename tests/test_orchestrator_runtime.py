@@ -2965,7 +2965,7 @@ class TestMultiAgentOrchestrator:
         router_joined = False
         reconciliation_join_states: list[bool] = []
 
-        async def record_room_reconciliation(_room_ids: dict[str, str]) -> dict:
+        async def record_room_reconciliation(*_args: object) -> dict:
             reconciliation_join_states.append(router_joined)
             return {}
 
@@ -2989,11 +2989,10 @@ class TestMultiAgentOrchestrator:
                 "ensure_rooms_exist",
                 new=AsyncMock(return_value={"lobby": "!room1:localhost"}),
             ),
-            patch.object(
-                orchestrator._rooms,
-                "_reconcile_room_policies",
-                new=AsyncMock(side_effect=record_room_reconciliation),
-            ),
+            patch.object(orchestrator._rooms, "owner_client", new=MagicMock(return_value=AsyncMock())),
+            patch.object(orchestrator._rooms, "link_root_space", new=AsyncMock()),
+            patch.object(orchestrator._rooms, "ensure_server_emoji_room", new=AsyncMock()),
+            patch("mindroom.orchestration.rooms.reconcile_managed_rooms", new=record_room_reconciliation),
             patch.object(orchestrator._rooms, "_ensure_room_invitations", new=AsyncMock()),
             patch("mindroom.orchestration.rooms.get_rooms_for_entity", return_value=["lobby"]),
             patch("mindroom.orchestration.rooms.resolve_room_aliases", return_value=["!room1:localhost"]),
@@ -5081,10 +5080,12 @@ class TestMultiAgentOrchestrator:
     async def test_update_config_syncs_runtime_services_when_running(self, tmp_path: Path) -> None:
         """Hot reload should sync runtime services without global knowledge refresh work."""
         current_config = _runtime_bound_config(
-            Config(server_emoji={"enabled": True}, defaults={"enable_streaming": True}), tmp_path
+            Config(server_emoji={"enabled": True}, defaults={"enable_streaming": True}),
+            tmp_path,
         )
         new_config = _runtime_bound_config(
-            Config(server_emoji={"enabled": True}, defaults={"enable_streaming": False}), tmp_path
+            Config(server_emoji={"enabled": True}, defaults={"enable_streaming": False}),
+            tmp_path,
         )
         orchestrator = _MultiAgentOrchestrator(
             runtime_paths=TestAgentBot._runtime_paths(tmp_path),
