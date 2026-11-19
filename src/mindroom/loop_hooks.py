@@ -6,7 +6,9 @@ participation gate, the approval receipt, mid-turn compaction, the run's checkpo
 portable tool search, the tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
 and ``HookTurn`` holds what every run takes from its turn. Every run has the approval receipt hook; the hook adds
-the receipt only to the runs the bound approval continuation names (``mindroom.approval.receipt``).
+the receipt only to the runs the bound approval continuation names (``mindroom.approval.receipt``). Every agent run
+likewise has the hook that publishes a delegated child's usage, which does nothing in any other run
+(``mindroom.delegation.lifecycle.child_usage_hook``).
 
 The loop lets a hook's exception fail the run, so a mistake in a hook the run depends on surfaces. A hook whose
 work a reply can do without catches and logs that work's failures itself: mid-turn compaction sends the request
@@ -26,6 +28,7 @@ from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.tools import failed_answer
 from mindroom.approval.receipt import approval_receipt_hook
+from mindroom.delegation.lifecycle import child_usage_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.run_checkpoint import checkpoint_hooks
 from mindroom.history.types import HistoryScope
@@ -120,6 +123,8 @@ def agent_loop_hooks(
         steering=steering,
         skill_review_capture=skill_review_capture,
     )
+    # First, so a delegated child's usage shows before a compaction the request may wait for.
+    hooks = replace(hooks, before_request=(child_usage_hook(turn.config), *hooks.before_request))
     memory_copy = turn.memory_copy
     if memory_copy is None:
         return hooks

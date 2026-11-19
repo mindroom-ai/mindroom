@@ -862,6 +862,8 @@ depends_on = [
     "mindroom.model_usage",
     "mindroom.llm",
     "mindroom.delegation.cost",
+    "mindroom.providers.identity",
+    "mindroom.providers.names",
 ]
 
 [[modules]]
@@ -1394,6 +1396,7 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.ai_runtime",
     "mindroom.approval.receipt",
+    "mindroom.delegation.lifecycle",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.run_checkpoint",
     "mindroom.history.types",
@@ -8462,6 +8465,7 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.delegation.lifecycle"
 depends_on = [
+    "mindroom.agent_loop",
     "mindroom.ai_run_metadata",
     "mindroom.constants",
     "mindroom.delegation.activity",
@@ -8493,6 +8497,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.delegation.targets",
     "mindroom.delegation.continuation",
+    "mindroom.loop_hooks",
 ]
 
 [[modules]]

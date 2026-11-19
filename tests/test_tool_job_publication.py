@@ -125,6 +125,53 @@ def test_a_subagent_job_is_published_under_its_agents_name() -> None:
     assert (jobs[0]["kind"], jobs[0]["tool"]) == ("subagent", "worker")
 
 
+def test_job_state_names_the_subagent_and_run_of_a_delegation_job() -> None:
+    """A client finds a subagent job's live frames by the child's subagent ID and the run the frames name."""
+    job = replace(completed_delegation_job(), status="running")
+    job.adapter["child"] = {**job.adapter["child"], "subagent_id": "s1", "delegation_id": "d1"}
+    (state,) = _jobs_state_content([job])["jobs"]  # type: ignore[misc]
+    assert (state["subagent"], state["run"]) == ("s1", "d1")
+    assert "tool_call_id" not in state
+
+
+def test_job_state_names_the_tool_call_of_a_tool_job() -> None:
+    """A client finds a tool job's call in the reply's tool trace by its call ID; a job without one names none."""
+    job = _job("job_1")
+    job.adapter["tool_call_id"] = "call_1"
+    named, unnamed = _jobs_state_content([job, _job("job_2")])["jobs"]  # type: ignore[misc]
+    assert named["tool_call_id"] == "call_1"
+    assert "tool_call_id" not in unnamed
+    assert "subagent" not in named
+    assert "run" not in named
+
+
+@pytest.mark.parametrize("value", ["", None, 7, ["call_1"]])
+def test_job_state_leaves_out_a_join_key_that_is_not_a_non_empty_string(value: object) -> None:
+    """A join key a client cannot use is left out, so the client shows the job by its name alone."""
+    tool_job = _job("job_1")
+    tool_job.adapter["tool_call_id"] = value
+    subagent_job = replace(completed_delegation_job(), status="running")
+    subagent_job.adapter["child"] = {**subagent_job.adapter["child"], "subagent_id": value, "delegation_id": value}
+    for job in (tool_job, subagent_job):
+        (state,) = _jobs_state_content([job])["jobs"]  # type: ignore[misc]
+        assert set(state) == {"job_id", "thread_id", "kind", "tool", "status", "started_at"}
+
+
+def test_job_state_never_carries_arguments_or_progress() -> None:
+    """Room state is not encrypted: neither kind of job publishes its arguments, its task, or its progress."""
+    tool_job = replace(_job("job_1"), progress="read /secret/path")
+    tool_job.adapter["tool_call_id"] = "call_1"
+    subagent_job = replace(completed_delegation_job(), status="running", progress="Calling shell")
+    content = _jobs_state_content([tool_job, subagent_job])
+    allowed = {"job_id", "thread_id", "kind", "tool", "status", "started_at", "subagent", "run", "tool_call_id"}
+    for state in content["jobs"]:  # type: ignore[union-attr]
+        assert set(state) <= allowed
+    published = json.dumps(content)
+    assert "do not publish" not in published
+    assert "read /secret/path" not in published
+    assert "Inspect files" not in published
+
+
 def test_hundreds_of_live_jobs_with_the_longest_ids_fit_in_a_state_update_listing_the_newest() -> None:
     """300 live jobs with maximum-length fields still make a state update the homeserver accepts, listing the newest.
 

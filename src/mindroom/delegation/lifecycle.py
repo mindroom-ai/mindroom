@@ -11,7 +11,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from mindroom.ai_run_metadata import model_payload, prior_usage_of, turn_usage
+from mindroom.agent_loop.model_loop import SendRequest
+from mindroom.ai_run_metadata import model_payload, prior_usage_of, prompt_input_tokens, turn_usage
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
     from mindroom.agent_modes import AgentMode
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
@@ -89,6 +91,10 @@ class ChildRunObservation:
     audit: ChildAudit
     parent: ChildRunObservation | None = None
     response: RunRecord | None = None
+    # The live record of the child's own run that last reached a request, in which the loop counts each request that
+    # ends, a cut-off one too; what an attempt that hands over no terminal record, such as a cancelled one, used is
+    # read here. Another run's loop in this context, such as a turn one of the child's tools runs, never replaces it.
+    running: RunRecord | None = None
     # The tail of what the child said and which tools it called, reported as its caller's progress.
     activity: str = ""
     # The ID the child's turn carries in its hooks and tool calls, also across a continuation that starts a new run.
@@ -99,8 +105,8 @@ class ChildRunObservation:
     # What the subagent turns whose results the child's run received cost, which its settlement adds to its own.
     subagent_cost: SubagentCost = field(default_factory=SubagentCost)
 
-    def owns(self, record: AnyRunRecord) -> TypeGuard[RunRecord]:
-        """Return whether a terminal record is of the child's current run and session, the run this context streams."""
+    def owns(self, record: AnyRunRecord | None) -> TypeGuard[RunRecord]:
+        """Return whether a record is of the child's current run and session, the run this context streams."""
         child = self.child
         return isinstance(record, RunRecord) and record.run_id == child.run_id and record.session_id == child.session_id
 
@@ -239,12 +245,8 @@ async def settle_child_response(
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
-    own_usd = run_cost_usd(
-        turn_usage(prior_usage_of(response), response.metrics),
-        model_provider=response.model_provider,
-        model_id=response.model,
-        prices=model_prices(config),
-    )
+    tokens, own_usd = _own_usage(response, config)
+    _publish(child.delegation_id, lambda feed: feed.usage(tokens, own_usd))
     known = [usd for usd in (own_usd, child.subagents_cost_usd) if usd is not None]
     child.cost_usd = sum(known) if known else None
     content = response.handover_content
@@ -307,6 +309,48 @@ async def finish_child_turn(
     if not child.record_locator:
         return ""
     return await finish_child_record(child, config=config, runtime_paths=runtime_paths)
+
+
+def _own_usage(record: RunRecord, config: Config) -> tuple[tuple[int, int] | None, float | None]:
+    """Return the input and output tokens the turn of ``record``'s run has used, its earlier runs included, and their cost.
+
+    The input tokens are whole prompts, cached tokens included, so runs on providers that count their cache
+    differently compare; the tokens are None for a record without usage. The cost is at ``config``'s prices, None
+    when none of the usage is of a priced model, and leaves out what the turn's subagents cost.
+    """
+    usage = turn_usage(prior_usage_of(record), record.metrics)
+    provider, model_id = record.model_provider, record.model
+    cost = run_cost_usd(usage, model_provider=provider, model_id=model_id, prices=model_prices(config))
+    if usage is None:
+        return None, cost
+    input_tokens = prompt_input_tokens(usage, provider=provider, model_id=model_id, config=config)
+    return (input_tokens, usage.tokens.output_tokens), cost
+
+
+def child_usage_hook(config: Config) -> BeforeRequestHook:
+    """Return the loop hook that publishes what a child's turn has used so far before each request of its run.
+
+    The loop has counted every request that ended by then in the run's record, so a request's usage shows once the
+    tool calls it made have ended; the last request's shows when the attempt ends, however it ends
+    (``child_run_context``). The hook does nothing outside a child's run, or for a run the child does not own, and a
+    failure to publish is logged and never reaches the run.
+    """
+
+    async def publish_usage(state: LoopState) -> SendRequest:
+        observation, record = _CHILD_RUN.get(), state.record
+        if observation is not None and observation.owns(record):
+            observation.running = record
+            _publish_usage(observation, config)
+        return SendRequest()
+
+    return publish_usage
+
+
+def _publish_usage(observation: ChildRunObservation, config: Config) -> None:
+    """Publish what the child's turn has used as its live record counts it, unless the child has moved to a new run."""
+    record = observation.running
+    if observation.owns(record):
+        _publish(observation.child.delegation_id, lambda feed: feed.usage(*_own_usage(record, config)))
 
 
 def _publish(delegation_id: str, update: Callable[[ActivityFeed], object]) -> None:
@@ -435,6 +479,8 @@ async def child_run_context(
                     await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
             finally:
                 _CHILD_RUN.reset(token)
+                # An attempt cancelled during a tool call reaches no further request and hands over no record.
+                _publish_usage(observation, config)
                 _publish_exit(child, cancelled=cancelled, reason=reason)
 
 

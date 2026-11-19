@@ -151,7 +151,8 @@ class _Stream:
         """Send the latest snapshot as the next frame; return the outcome, None when nothing changed.
 
         The frame is a snapshot first, after a failed send, after the caps cut the transcript, when only meta changed,
-        every 10 s, at the run's end, and when a delta would not fit; otherwise a delta from what landed last.
+        every 10 s, at the run's end, and when a delta would not fit; otherwise a delta from what landed last. Each
+        frame's meta carries the run's usage, which alone sends no frame: it goes out with the next one.
         """
         snapshot, landed = self.snapshot, self.landed
         self.dirty = False
@@ -198,7 +199,12 @@ class _Stream:
     ) -> _Frame:
         """Return the next frame of the run's stream, carrying either a whole snapshot, ``docs``, or a ``delta``."""
         frame: _Frame = {"v": FRAME_VERSION, "run": snapshot.delegation_id, "sid": self.sid, "seq": self.seq + 1}
-        frame["meta"] = _run_meta(snapshot, full=docs is not None)
+        meta = _run_meta(snapshot, full=docs is not None)
+        if snapshot.usage is not None:
+            # Not in ``_run_meta``, whose change alone sends a snapshot: each tool call changes the usage, and its
+            # frame stays the delta that adds its row.
+            meta["usage"] = dict(snapshot.usage)
+        frame["meta"] = meta
         if docs is not None:
             frame["snapshot"] = docs.to_json()
         else:
@@ -207,22 +213,34 @@ class _Stream:
         return frame
 
     def _fitted_snapshot(self, snapshot: SubagentSnapshot, fits: Callable[[_Frame], bool]) -> tuple[_Frame, LiveDocs]:
-        """Return a snapshot frame within the size limit: without previews if need be, then without the oldest text."""
+        """Return a snapshot frame within the size limit: without previews if need be, then without the oldest text.
+
+        The run's usage never costs the previews: a frame that would fit with them if it left the usage out keeps
+        both, without that much of the oldest text when the text is long enough.
+        """
+        text_length = sum(len(item.text) for item in snapshot.items if item.kind == "text")
 
         def built(previews: bool, text_cut: int) -> tuple[_Frame, LiveDocs]:
             self.fit = (previews, text_cut)
             docs = _run_docs(snapshot, previews=previews, text_cut=text_cut)
             return self._frame(snapshot, docs=docs), docs
 
+        def cut(previews: bool) -> tuple[_Frame, LiveDocs]:
+            """Return the frame with the least cut of the oldest text that fits, else with a cut that does not."""
+
+            def fits_cut(text_cut: int) -> bool:
+                return fits(built(previews, text_cut)[0])
+
+            return built(previews, bisect_left(range(text_length + 1), True, lo=1, key=fits_cut))
+
         frame, docs = built(self.previews, 0)
         if self.previews and not fits(frame):
-            frame, docs = built(False, 0)
-        if fits(frame):
-            return frame, docs
-        # The least cut of the oldest text that fits; the frame without any text always fits, as the caps bound the rest.
-        text_length = sum(len(item.text) for item in snapshot.items if item.kind == "text")
-        text_cut = bisect_left(range(text_length + 1), True, lo=1, key=lambda cut: fits(built(False, cut)[0]))
-        return built(False, text_cut)
+            if fits({**frame, "meta": _run_meta(snapshot, full=True)}):
+                frame, docs = cut(True)
+            if not fits(frame):
+                frame, docs = built(False, 0)
+        # The frame without any text always fits, as the caps bound the rest.
+        return (frame, docs) if fits(frame) else cut(False)
 
 
 class _Publisher:

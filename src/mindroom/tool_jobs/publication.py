@@ -46,8 +46,10 @@ class _PublishingBot(Protocol):
 
 
 def _job_state(job: BackgroundJob) -> dict[str, object]:
-    # Room state is not encrypted, so it names the job and never carries its arguments or results.
-    return {
+    # Room state is not encrypted, so it names the job and never carries its arguments, progress or results. Its only
+    # other fields are opaque IDs a client joins to what it already holds: a subagent job's child and run, which that
+    # child's live frames name, and a tool job's call, which the reply's tool trace names.
+    state: dict[str, object] = {
         "job_id": job.job_id,
         "thread_id": job.owner.resolved_thread_id,
         "kind": "subagent" if job.kind == "delegation" else "tool",
@@ -55,6 +57,13 @@ def _job_state(job: BackgroundJob) -> dict[str, object]:
         "status": job.status,
         "started_at": job.created_at,
     }
+    if job.kind == "delegation":
+        child = job.adapter["child"]
+        join_keys = {"subagent": child.get("subagent_id"), "run": child.get("delegation_id")}
+    else:
+        join_keys = {"tool_call_id": job.adapter.get("tool_call_id")}
+    state.update({key: value for key, value in join_keys.items() if isinstance(value, str) and value})
+    return state
 
 
 def _jobs_state_content(

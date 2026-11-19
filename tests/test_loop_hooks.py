@@ -84,7 +84,8 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     """Both runs share one policy; the leader has no gate, job definitions, tool search, or skill capture.
 
     The job definitions project first, so the participation decision and mid-turn compaction see the definitions the
-    request sends. The approval receipt joins the request before mid-turn compaction sizes it, on every run.
+    request sends. The approval receipt joins the request before mid-turn compaction sizes it, on every run. An
+    agent's run publishes a delegated child's usage before any of them, so before a compaction the request waits for.
     """
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -111,6 +112,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     leader = leader_loop_hooks(_built_team(model), turn)
 
     assert _stages(agent.before_request) == [
+        "child_usage_hook",
         "job_definitions_hook",
         "participation_hook",
         "approval_receipt_hook",
