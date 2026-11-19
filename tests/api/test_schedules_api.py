@@ -1,5 +1,6 @@
 """Tests for schedule management API endpoints."""
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -8,6 +9,7 @@ from typing import Literal
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
+import httpx
 import nio
 import pytest
 import yaml
@@ -17,6 +19,7 @@ from httpx import Response
 from mindroom.api import config_lifecycle, main
 from mindroom.config.main import Config
 from mindroom.matrix.state import update_matrix_state
+from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
 from tests.conftest import make_matrix_client_mock
 from tests.runtime_fakes import bind_test_embedded_runtime
@@ -80,11 +83,12 @@ class _EveryRoom(dict[str, nio.MatrixRoom]):
         return nio.MatrixRoom(room_id, "@mindroom_test_agent:localhost")
 
 
-def _lend_bots(*clients: AsyncMock) -> None:
-    """Lend the app a scheduled-task runtime whose running bots hold these clients."""
+def _lend_bots(*clients: AsyncMock) -> ScheduledTaskRuntime:
+    """Lend the app a scheduled-task runtime whose running bots, ``agent0`` onwards, hold these clients."""
     bots = [scheduling_bot(client, agent_name=f"agent{index}") for index, client in enumerate(clients)]
     runtime = scheduled_task_runtime(main._app_runtime_paths(main.app), *bots, config=Config())
     bind_test_embedded_runtime(main.app, scheduled_tasks=runtime)
+    return runtime
 
 
 @contextmanager
@@ -321,13 +325,59 @@ def test_list_reads_room_through_joined_agent_without_owner_account(test_client:
     outsider.room_get_state.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("test_client")
+async def test_a_stopping_bot_waits_for_the_read_it_is_lent_for_and_is_not_lent_again() -> None:
+    """A bot's stop waits for the listing that reads through its client, and the next listing reads through another."""
+    _record_test_room()
+    state = nio.RoomGetStateResponse.from_dict(
+        [scheduled_task_state_event("abc12345", _stored(), room_id="!test_room:localhost")],
+        room_id="!test_room:localhost",
+    )
+    reading, finish = asyncio.Event(), asyncio.Event()
+
+    async def held_read(_room_id: str) -> nio.RoomGetStateResponse:
+        reading.set()
+        await finish.wait()
+        return state
+
+    # At equal power the lower Matrix ID is the room's steward.
+    steward = make_matrix_client_mock(user_id="@mindroom_a:localhost")
+    steward.rooms = _EveryRoom()
+    steward.room_get_state = AsyncMock(side_effect=held_read)
+    other = make_matrix_client_mock(user_id="@mindroom_b:localhost")
+    other.rooms = _EveryRoom()
+    other.room_get_state = AsyncMock(return_value=state)
+    runtime = _lend_bots(steward, other)
+
+    with patch("mindroom.scheduling.tasks.persisted_bot_user_ids", return_value=frozenset({SCHEDULE_WRITER_ID})):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://localhost") as http:
+            listing = asyncio.create_task(http.get("/api/schedules"))
+            await asyncio.wait_for(reading.wait(), timeout=2)
+            stopping = asyncio.create_task(runtime.release({"agent0"}))
+            await asyncio.sleep(0.01)
+            stop_waited = not stopping.done()
+            finish.set()
+            first = await asyncio.wait_for(listing, timeout=2)
+            await asyncio.wait_for(stopping, timeout=2)
+            second = await http.get("/api/schedules")
+
+    assert stop_waited
+    assert [[task["task_id"] for task in response.json()["tasks"]] for response in (first, second)] == [
+        ["abc12345"],
+        ["abc12345"],
+    ]
+    steward.room_get_state.assert_awaited_once()
+    other.room_get_state.assert_awaited_once()
+
+
 def test_room_with_no_joined_bot_is_unreadable(test_client: TestClient) -> None:
     """A room no running bot has joined is listed as unreadable, and its tasks can be neither edited nor cancelled."""
     _record_test_room()
     outsider = make_matrix_client_mock(user_id="@mindroom_outsider:localhost")
     outsider.rooms = {}
     _lend_bots(outsider)
-    reason = "Unable to retrieve scheduled tasks: no running agent has joined room `!test_room:localhost`"
+    reason = "Unable to retrieve scheduled tasks: no agent that joined room `!test_room:localhost` is running right now"
 
     listing = test_client.get("/api/schedules")
     edit = test_client.put("/api/schedules/abc12345", json={"room_id": "test_room", "message": "updated"})
@@ -362,7 +412,7 @@ def test_list_while_no_bot_runs_reports_each_recorded_room_and_alias(
         ("#elsewhere:localhost", "Unable to resolve room alias: no agent is running"),
         (
             "!test_room:localhost",
-            "Unable to retrieve scheduled tasks: no running agent has joined room `!test_room:localhost`",
+            "Unable to retrieve scheduled tasks: no agent that joined room `!test_room:localhost` is running right now",
         ),
     ]
 

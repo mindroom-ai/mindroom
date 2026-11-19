@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -93,7 +94,7 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
     # A detached context's bot is the only bot of its room, so it is the room's steward.
     steward = SimpleNamespace(client=kwargs.get("client"))
     scheduled_tasks = MagicMock(spec=ScheduledTaskRuntime)
-    scheduled_tasks.room_steward.return_value = steward
+    scheduled_tasks.lend_client.side_effect = lambda _room_id, _own: nullcontext(steward.client)
     kwargs.setdefault("scheduled_tasks", scheduled_tasks)
     kwargs.setdefault(
         "put_room_state",

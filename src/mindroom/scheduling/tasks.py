@@ -7,6 +7,7 @@ import hashlib
 import json
 import typing
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -726,22 +727,19 @@ async def _put_scheduled_task_state_content(
     A room without a steward, or whose steward lacks the power, gets the moderator-rights answer; any other failure
     may succeed on a retry.
     """
-    writer = client
-    if writers is not None:
-        steward = writers.room_steward(room_id)
-        if steward is None or steward.client is None:
+    with nullcontext(client) if writers is None else writers.lend_client(room_id, client) as writer:
+        if writer is None:
             logger.warning("scheduled_task_state_refused", room_id=room_id, task_id=task_id, error="no steward")
             raise ScheduledTaskStateRefusedError(moderator_rights_message("save schedules"))
-        writer = steward.client
-    try:
-        outcome: object = await writer.room_put_state(
-            room_id=room_id,
-            event_type=SCHEDULED_TASK_EVENT_TYPE,
-            content=content,
-            state_key=task_id,
-        )
-    except Exception as exc:
-        outcome = f"{type(exc).__name__}: {exc!s}"
+        try:
+            outcome: object = await writer.room_put_state(
+                room_id=room_id,
+                event_type=SCHEDULED_TASK_EVENT_TYPE,
+                content=content,
+                state_key=task_id,
+            )
+        except Exception as exc:
+            outcome = f"{type(exc).__name__}: {exc!s}"
     if isinstance(outcome, nio.RoomPutStateResponse):
         return
     if isinstance(outcome, nio.RoomPutStateError) and outcome.status_code == "M_FORBIDDEN":

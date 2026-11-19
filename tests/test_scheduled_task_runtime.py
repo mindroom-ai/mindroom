@@ -380,6 +380,28 @@ async def test_removed_agent_fails_each_task_it_runs_and_says_so_where_it_posts(
 
 
 @pytest.mark.asyncio
+async def test_removed_agent_alone_in_its_room_stores_its_own_tasks_failure_while_it_stops(tmp_path: Path) -> None:
+    """A removed agent is fenced before its tasks are failed, and still writes that failure where it is the steward."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path)
+    room = _SharedRoom({ids["general"]: 100})
+    removed_bot = scheduling_bot(room.client(ids["general"]), agent_name="general")
+    runtime = _runtime(runtime_paths, config, {"general": removed_bot})
+    workflow = _workflow(due=False)
+    await _save_task(runtime, removed_bot.client, workflow)
+
+    with (
+        patch.object(scheduling_runtime._TaskRunner, "run_once", _wait_forever),
+        patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as notice,
+    ):
+        runtime.start_new_task(TASK_ID, workflow, owner_id=ids["general"])
+        await runtime.release({"general"})
+        await runtime.fail_removed({"general"})
+
+    assert room.task()["content"]["status"] == "failed"
+    notice.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_removal_settles_every_task_within_one_bound_however_many_the_agent_runs(tmp_path: Path) -> None:
     """Ordinary homeserver latency per task must not leave a removed agent's later tasks pending without a notice."""
     config, runtime_paths, ids = _config_and_ids(tmp_path)
@@ -976,6 +998,72 @@ async def test_unnamed_scheduled_prompt_is_routed_in_process(tmp_path: Path) -> 
     # The owner account, the room's steward here, only stored the task's state.
     assert room.task()["sender"] == ids["router"]
     assert room.task()["content"]["owner"] == ids["general"]
+
+
+def _due_task_under_a_steward(
+    tmp_path: Path,
+) -> tuple[_SharedRoom, ScheduledTaskRuntime, dict[str, AgentBot], dict[str, str]]:
+    """Return a room where ``general`` owns a due task and ``helper``, with more power, is the steward."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
+    room = _SharedRoom({ids["general"]: 50, ids["helper"]: 100})
+    bots = {name: scheduling_bot(room.client(ids[name]), agent_name=name) for name in ("general", "helper")}
+    content = {"task_id": TASK_ID, "workflow": _workflow().model_dump_json(), "status": "pending"}
+    room._put("com.mindroom.scheduled.task", TASK_ID, {**content, "owner": ids["general"]}, ids["helper"])
+    return room, _runtime(runtime_paths, config, bots), bots, ids
+
+
+@pytest.mark.asyncio
+async def test_a_steward_stop_waits_for_the_final_status_write_it_is_lent_for(tmp_path: Path) -> None:
+    """A steward that starts stopping while another bot's runner writes through it lets that write land first."""
+    room, runtime, bots, ids = _due_task_under_a_steward(tmp_path)
+    writing, finish = asyncio.Event(), asyncio.Event()
+    write_state = bots["helper"].client.room_put_state.side_effect
+
+    async def held_write(**kwargs: Any) -> object:  # noqa: ANN401
+        writing.set()
+        await finish.wait()
+        return await write_state(**kwargs)
+
+    bots["helper"].client.room_put_state.side_effect = held_write
+
+    with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()):
+        runtime.start_new_task(TASK_ID, _workflow(), owner_id=ids["general"])
+        _runner, task = runtime._runners[TASK_ID]
+        await asyncio.wait_for(writing.wait(), timeout=2)
+        stopping = asyncio.create_task(runtime.release({"helper"}))
+        await asyncio.sleep(0.01)
+        stop_waited = not stopping.done()
+        finish.set()
+        await asyncio.wait_for(asyncio.gather(stopping, task), timeout=2)
+
+    assert stop_waited
+    assert (room.task()["sender"], room.task()["content"]["status"]) == (ids["helper"], "completed")
+
+
+@pytest.mark.asyncio
+async def test_a_final_status_write_refused_while_the_steward_restarts_lands_once_it_is_back(tmp_path: Path) -> None:
+    """A stopping steward is never lent: the owner's refused write is retried, and lands through the replacement."""
+    room, runtime, bots, ids = _due_task_under_a_steward(tmp_path)
+    refused = asyncio.Event()
+
+    async def refuse(**_kwargs: object) -> nio.RoomPutStateError:
+        refused.set()
+        return nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+
+    bots["general"].client.room_put_state.side_effect = refuse
+    await runtime.release({"helper"})
+    bots["helper"].client.room_put_state.side_effect = RuntimeError("session closed")
+
+    with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()) as execute:
+        runtime.start_new_task(TASK_ID, _workflow(), owner_id=ids["general"])
+        _runner, task = runtime._runners[TASK_ID]
+        await asyncio.wait_for(refused.wait(), timeout=2)
+        assert room.task()["content"]["status"] == "pending"
+        bots["helper"] = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
+        await asyncio.wait_for(task, timeout=2)
+
+    execute.assert_awaited_once()
+    assert (room.task()["sender"], room.task()["content"]["status"]) == (ids["helper"], "completed")
 
 
 @pytest.mark.asyncio

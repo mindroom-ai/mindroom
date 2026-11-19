@@ -331,9 +331,28 @@ class ScheduledTaskRuntime:
         with self._tracked(bot):
             yield bot, client
 
-    def room_steward(self, room_id: str) -> AgentBot | None:
-        """Return the room's steward, which reads and writes its schedule state for the bots and the schedule API."""
-        return room_steward(self.bots(), room_id)
+    @contextmanager
+    def lend_client(
+        self,
+        room_id: str | None = None,
+        own: nio.AsyncClient | None = None,
+    ) -> Iterator[nio.AsyncClient | None]:
+        """Lend the client of the room's steward, or of any running bot for no room, among the bots not stopping.
+
+        The steward reads and writes the room's schedule state for the bots and the schedule API.
+        The loan counts as that bot's operation in flight, so its stop waits for it within the stop's bound.
+        A stopping bot is lent only to itself, as the bot whose ``own`` client asks: a removed bot stores its tasks'
+        failure this way.
+        None is lent where no such bot runs.
+        """
+        bots = {name: bot for name, bot in self.bots().items() if bot not in self._fenced or bot.client is own}
+        running = (bot for bot in bots.values() if bot.running and bot.client is not None)
+        bot = next(running, None) if room_id is None else room_steward(bots, room_id)
+        if bot is None or bot.client is None:
+            yield None
+            return
+        with self._tracked(bot):
+            yield bot.client
 
     def _ready_bot(self, entity_name: str) -> AgentBot | None:
         bot = self.bots().get(entity_name)
@@ -492,8 +511,9 @@ class _TaskRunner:
             )
 
     async def _save_status(self, task: ScheduledTaskRecord, status: str) -> None:
-        """Persist a one-time task's final status; a write cut off by its owner's stop is retried once it runs again.
+        """Persist a one-time task's final status; a write that fails while a bot stops is retried once it runs again.
 
+        The stopping bot is the task's owner, or the room's steward the write would go through.
         The write holds the task's state lock, so an edit still writing cannot land after it and revive the task.
         """
         while True:
@@ -502,7 +522,8 @@ class _TaskRunner:
                     async with scheduled_task_state_lock(client, self.room_id, self.task_id):
                         await _save_task_status(client, task, status, writers=self.runtime)
                 except Exception:
-                    if bot not in self.runtime._fenced:
+                    stopping = self.runtime._fenced
+                    if bot not in stopping and not any(other in stopping for other in self.runtime.bots().values()):
                         logger.exception(
                             "Failed to persist one-time task final state",
                             task_id=self.task_id,
@@ -512,6 +533,7 @@ class _TaskRunner:
                 else:
                     return
             logger.warning("scheduled_task_status_write_interrupted_by_owner_stop", task_id=self.task_id, status=status)
+            await asyncio.sleep(_OWNER_POLL_INTERVAL_SECONDS)
 
     async def run_cron(self, workflow: ScheduledWorkflow) -> None:
         """Run a recurring task based on its cron schedule.

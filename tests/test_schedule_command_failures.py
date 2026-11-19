@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -109,7 +110,7 @@ async def _reply(
     ids = entity_ids(config, runtime_paths)
     scheduled_tasks = MagicMock(spec=ScheduledTaskRuntime)
     # The answering agent is the only bot of its room, and so its steward, unless a test names another.
-    scheduled_tasks.room_steward.return_value = SimpleNamespace(client=steward or client)
+    scheduled_tasks.lend_client.side_effect = lambda _room_id, _own: nullcontext(steward or client)
     context = make_test_command_handler_context(
         client=client,
         config=config,
