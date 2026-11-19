@@ -72,6 +72,7 @@ def claim_membership_epoch(
     """
     current_epoch, departure_fenced = _claim_membership_row(transaction, principal_id, room_id)
     # The owner account's epoch never advances, so a history walk also claims the projection it started under.
-    if expected_projection_generation not in (None, projection_generation(transaction, principal_id, room_id)):
+    generation = expected_projection_generation
+    if generation is not None and generation != projection_generation(transaction, principal_id, room_id):
         return False
     return current_epoch == expected_membership_epoch and not departure_fenced
