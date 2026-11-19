@@ -700,10 +700,11 @@ def prepare_child_turn(
     worker_resource_profile: ScriptResourceProfileName | None = None,
     parent_tool_call_id: str = "",
     parent_requirement_id: str = "",
+    title: str = "",
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 
-    A follow-up keeps the mode, persona, and worker choice of the child it continues, and its requested model, checked
+    A follow-up keeps the title, mode, persona, and worker choice of the child it continues, and its requested model, checked
     again against the owner's budget.
     """
     delegation_id = uuid4().hex
@@ -717,6 +718,7 @@ def prepare_child_turn(
         subagent_id, previous_delegation_id = previous.subagent_id, previous.delegation_id
         model, agent_mode, persona = previous.requested_model_name, previous.agent_mode, previous.persona
         dedicated_worker, worker_resource_profile = previous.dedicated_worker, previous.worker_resource_profile
+        title = previous.title
     # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
     turn_model = resolve_turn_model(
         config,
@@ -735,6 +737,7 @@ def prepare_child_turn(
         caller_agent_name=caller_name,
         child_agent_name=agent_name,
         task=task,
+        title=title,
         session_id=session_id,
         run_id=uuid4().hex,
         model_name=turn_model.model_name,
