@@ -90,9 +90,11 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
         "controller_identity",
         MagicMock(side_effect=AssertionError("the test did not expect a Desktop controller lookup")),
     )
-    kwargs.setdefault("scheduled_tasks", MagicMock(spec=ScheduledTaskRuntime))
     # A detached context's bot is the only bot of its room, so it is the room's steward.
     steward = SimpleNamespace(client=kwargs.get("client"))
+    scheduled_tasks = MagicMock(spec=ScheduledTaskRuntime)
+    scheduled_tasks.room_steward.return_value = steward
+    kwargs.setdefault("scheduled_tasks", scheduled_tasks)
     kwargs.setdefault(
         "put_room_state",
         partial(put_room_state_as_steward, SimpleNamespace(room_steward=lambda _room_id: steward)),

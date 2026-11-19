@@ -12,8 +12,8 @@ import nio
 import pytest
 
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.config.agent import AgentConfig
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import EventJournalStore

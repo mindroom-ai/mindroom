@@ -346,6 +346,27 @@ def test_room_with_no_joined_bot_is_unreadable(test_client: TestClient) -> None:
     outsider.room_put_state.assert_not_awaited()
 
 
+def test_list_while_no_bot_runs_reports_each_recorded_room_and_alias(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """With no bot running, a recorded room is unreadable and an alias only the homeserver knows is unresolved."""
+    _configure_agent_rooms(temp_config_file, ["test_room", "elsewhere", "#elsewhere:localhost"])
+    _record_test_room()
+
+    response = test_client.get("/api/schedules")
+
+    assert response.status_code == 200
+    assert response.json()["tasks"] == []
+    assert [(room["room_id"], room["error"]) for room in response.json()["unreadable_rooms"]] == [
+        ("#elsewhere:localhost", "Unable to resolve room alias: no agent is running"),
+        (
+            "!test_room:localhost",
+            "Unable to retrieve scheduled tasks: no running agent has joined room `!test_room:localhost`",
+        ),
+    ]
+
+
 def test_list_schedules_without_rooms_needs_no_matrix_account(test_client: TestClient, temp_config_file: Path) -> None:
     """With no room configured, the list is empty before MindRoom has created its Matrix accounts."""
     _configure_agent_rooms(temp_config_file, [])
