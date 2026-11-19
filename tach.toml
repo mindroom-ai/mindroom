@@ -4225,6 +4225,7 @@ visibility = [
 path = "mindroom.matrix.room_reconciliation"
 depends_on = ["mindroom.matrix.room_power"]
 visibility = [
+    "mindroom.email_invites.policy",
     "mindroom.external_triggers.executor",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
@@ -4239,6 +4240,7 @@ path = "mindroom.matrix.room_power"
 depends_on = []
 visibility = [
     "mindroom.call_transcripts.router_room",
+    "mindroom.email_invites.policy",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.personal_rooms",
     "mindroom.matrix.room_reconciliation",
@@ -4279,6 +4281,7 @@ visibility = [
     "mindroom.contacts.flow",
     "mindroom.matrix.room_accounts",
     "mindroom.room_tree.note",
+    "mindroom.email_invites.policy",
 ]
 
 [[modules]]
@@ -4427,6 +4430,15 @@ depends_on = []
 [[modules]]
 path = "mindroom.email_invites.mail"
 depends_on = []
+
+[[modules]]
+path = "mindroom.email_invites.policy"
+depends_on = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.room_power",
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.matrix.state",
+]
 
 [[modules]]
 path = "mindroom.config.email_invites"

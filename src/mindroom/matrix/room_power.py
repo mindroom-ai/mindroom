@@ -74,3 +74,9 @@ def send_power_level(power_levels_content: Mapping[str, object], event_type: str
         return level
     default = power_levels_content.get("events_default")
     return default if type(default) is int else 0
+
+
+def invite_power_level(power_levels_content: Mapping[str, object]) -> int:
+    """Return the power level inviting users needs: the `invite` entry, else 0 as the spec defaults it."""
+    level = power_levels_content.get("invite")
+    return level if type(level) is int else 0
