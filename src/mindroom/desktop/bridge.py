@@ -814,7 +814,7 @@ class DesktopBridge:
         if command.action == "list_apps":
             reject_unexpected_parameters(parameters, allowed=frozenset())
             apps = await asyncio.to_thread(self.provider.list_apps) if self.provider is not None else []
-            # Computer scope lists every running app, so the reply keeps the prefix that fits, primary screen first.
+            # Computer scope lists every running Dock app, so the reply keeps the prefix that fits, primary screen first.
             listed = sorted((app.to_result() for app in apps), key=lambda app: app["id"] != PRIMARY_SCREEN_APP_ID)
 
             def reply(dropped: int) -> dict[str, object]:

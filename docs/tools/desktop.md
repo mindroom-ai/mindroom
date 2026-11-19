@@ -213,7 +213,7 @@ Leases are never saved or renewed automatically, so a restarted bridge is observ
 
 **Full control of this Mac** in the macOS app gives the paired agent control of every app and the `primary-screen` target with no expiry, until a person turns it off.
 It is a preference of the macOS app and is never saved in the bridge's setup: each time access starts for that pairing, the app grants the running bridge control until revoked over the whole computer, and at launch the app starts access by itself.
-While that grant is live, `list_apps` returns every running app plus `primary-screen`, any bundle ID except MindRoom's own can be inspected, launched, and controlled, and `status` reports `control_scope` as `computer`.
+While that grant is live, `list_apps` returns the saved apps, every running app with a Dock icon, and `primary-screen`; any bundle ID except MindRoom's own can be inspected, launched, and controlled, and `status` reports `control_scope` as `computer`.
 A list too long for one reply keeps `primary-screen` and the apps that fit, and sets `apps_truncated`; the bundle ID of any installed app is valid as `app` even when the list omits it.
 When the grant ends, the bridge is observe-only for the saved apps again, and an action that was still running returns its receipt without a new observation of an app that is no longer saved.
 **Revoke** in the macOS app or its menu ends it at once and turns the preference off, **Stop Access** ends it until access starts again, and turning the switch off does both.

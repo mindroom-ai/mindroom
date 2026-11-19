@@ -29,6 +29,8 @@ class _RunningApplication(Protocol):
 
     def isActive(self) -> bool: ...  # noqa: N802
 
+    def activationPolicy(self) -> int: ...  # noqa: N802
+
     def activateWithOptions_(self, options: int) -> bool: ...  # noqa: N802
 
 

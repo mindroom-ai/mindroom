@@ -48,6 +48,9 @@ class FakeRunningApplication:
     def isActive(self) -> bool:
         return self.active
 
+    def activationPolicy(self) -> int:
+        return 0  # Regular: has a Dock icon.
+
     def activateWithOptions_(self, options: int) -> bool:
         self.activation_options.append(options)
         if self.activation_hook is not None:
