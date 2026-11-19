@@ -5615,7 +5615,7 @@ async def test_command_replay_does_not_repeat_mutation_after_visible_response(co
     handled_turn = TurnRecord.create([event.event_id])
 
     with (
-        patch("mindroom.commands.handler.handle_model_command", return_value="✅ Model changed") as mutate,
+        patch("mindroom.commands.handler.handle_model_command", return_value=("✅ Model changed", None)) as mutate,
         patch.object(harness.turn_store, "record_responded_turn"),
     ):
         await harness.dispatcher.deps.command_executor.execute(
@@ -5698,7 +5698,7 @@ async def test_mutating_command_retries_checkpointed_result_without_reapplying(c
     async def fail_send(_request: SendTextRequest) -> None:
         return None
 
-    with patch("mindroom.commands.handler.handle_model_command", return_value="✅ Model changed") as mutate:
+    with patch("mindroom.commands.handler.handle_model_command", return_value=("✅ Model changed", None)) as mutate:
         with (
             patch.object(harness.gateway, "send_text", new=fail_send),
             pytest.raises(RuntimeError, match="did not return a Matrix event ID"),
