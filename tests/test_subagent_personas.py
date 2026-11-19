@@ -48,7 +48,7 @@ def _toolkits(*names: str, tools: ToolRegistry | None = None) -> dict[str, tuple
 
 _CRITIC = """---
 description: Finds the three biggest risks.
-tools: [file]
+tools: [filesystem]
 skills: [triage]
 knowledge: [docs]
 model: haiku
@@ -73,8 +73,8 @@ def _function(name: str, toolkit: str | None) -> ToolFunction:
 def test_inline_persona_keeps_prompt_bytes() -> None:
     """Braces and trailing whitespace survive validation and serialization unchanged."""
     prompt = "Use {braces} and {{x}}\n"
-    persona = inline_persona(prompt, ["file"], None, None)
-    assert persona == SubagentPersona(source_kind="inline", source_name="", system_prompt=prompt, tools=("file",))
+    persona = inline_persona(prompt, ["filesystem"], None, None)
+    assert persona == SubagentPersona(source_kind="inline", source_name="", system_prompt=prompt, tools=("filesystem",))
     assert SubagentPersona.from_dict(json.loads(json.dumps(asdict(persona)))) == persona
 
 
@@ -84,7 +84,7 @@ def test_inline_persona_keeps_prompt_bytes() -> None:
         ("", None),
         ("x" * (64 * 1024 + 1), None),
         (None, None),
-        ("ok", "file"),
+        ("ok", "filesystem"),
         ("ok", [1]),
         ("ok", [""]),
     ],
@@ -104,9 +104,9 @@ def test_empty_tool_list_means_no_tools() -> None:
     """An explicit empty tool list keeps no tools instead of falling back to all of them."""
     persona = inline_persona("P", [], None, None)
     assert persona.tools == ()
-    assert not persona_allows((), "file", "read_file")
-    _, disabled = persona_tool_policy(persona.tools, lambda: ["file", "shell"], None)
-    assert disabled == frozenset({"file", "shell", "dynamic_tools"})
+    assert not persona_allows((), "filesystem", "read_file")
+    _, disabled = persona_tool_policy(persona.tools, lambda: ["filesystem", "shell"], None)
+    assert disabled == frozenset({"filesystem", "shell", "dynamic_tools"})
 
 
 def test_parse_profile_reads_frontmatter_and_body() -> None:
@@ -119,7 +119,7 @@ def test_parse_profile_reads_frontmatter_and_body() -> None:
             source_kind="profile",
             source_name="critic",
             system_prompt="You are a hostile reviewer.\nReturn three risks.",
-            tools=("file",),
+            tools=("filesystem",),
             skills=("triage",),
             knowledge=("docs",),
         ),
@@ -141,7 +141,7 @@ def test_parse_profile_defaults_optional_fields() -> None:
 @pytest.mark.parametrize(
     "content",
     [
-        "---\ntools: [file]\n---\nBody\n",
+        "---\ntools: [filesystem]\n---\nBody\n",
         "---\ndescription: D\nrole: extra\n---\nBody\n",
         "---\ndescription: D\nmode: fast\n---\nBody\n",
         "---\ndescription: D\n---\n\n",
@@ -268,7 +268,7 @@ def _resolve(workspace: Path, **arguments: object) -> PersonaRequest | str:
         "model": None,
         "minimal": False,
         "workspace_root": lambda: workspace,
-        "available_toolkits": lambda: _toolkits("file", "shell"),
+        "available_toolkits": lambda: _toolkits("filesystem", "shell"),
         "available_skills": lambda: ["research", "writing"],
         "available_knowledge": lambda: ["docs", "faq"],
         "cap": None,
@@ -294,7 +294,7 @@ def test_resolve_persona_request_mode_and_model_rules(tmp_path: Path) -> None:
 
 def test_empty_authoring_arguments_mean_a_plain_copy_or_the_named_profile(tmp_path: Path) -> None:
     """A model that fills every optional argument with empty values starts a plain copy, or runs its profile."""
-    _profile_file(tmp_path, "critic.md", "---\ndescription: Critic.\ntools: [file]\n---\nCritic prompt.\n")
+    _profile_file(tmp_path, "critic.md", "---\ndescription: Critic.\ntools: [filesystem]\n---\nCritic prompt.\n")
 
     plain = _resolve(tmp_path, system_prompt="", tools=[], skills=[], knowledge=[], profile="")
     profiled = _resolve(tmp_path, system_prompt="", tools=[], skills=[], knowledge=[], profile="critic")
@@ -302,20 +302,22 @@ def test_empty_authoring_arguments_mean_a_plain_copy_or_the_named_profile(tmp_pa
     assert plain == PersonaRequest(persona=None, model=None, agent_mode="standard")
     assert isinstance(profiled, PersonaRequest)
     assert profiled.persona is not None
-    assert (profiled.persona.source_name, profiled.persona.tools) == ("critic", ("file",))
+    assert (profiled.persona.source_name, profiled.persona.tools) == ("critic", ("filesystem",))
 
 
 def test_minimal_persona_with_tools_must_keep_shell(tmp_path: Path) -> None:
     """A minimal persona that lists its tools is refused up front unless it keeps shell."""
-    refused = _resolve(tmp_path, system_prompt="P", tools=["file"], minimal=True)
+    refused = _resolve(tmp_path, system_prompt="P", tools=["filesystem"], minimal=True)
 
     assert refused == (
         "Cannot delegate: a minimal subagent runs its tools through shell, so its tools must include shell or "
         "shell.run_shell_command; use standard mode for a subagent without shell."
     )
-    assert isinstance(_resolve(tmp_path, system_prompt="P", tools=["file", "shell"], minimal=True), PersonaRequest)
     assert isinstance(
-        _resolve(tmp_path, system_prompt="P", tools=["file", "shell.run_shell_command"], minimal=True),
+        _resolve(tmp_path, system_prompt="P", tools=["filesystem", "shell"], minimal=True), PersonaRequest
+    )
+    assert isinstance(
+        _resolve(tmp_path, system_prompt="P", tools=["filesystem", "shell.run_shell_command"], minimal=True),
         PersonaRequest,
     )
     assert isinstance(_resolve(tmp_path, system_prompt="P", minimal=True), PersonaRequest)
@@ -377,8 +379,8 @@ def test_render_profile_listing_empty() -> None:
 
 def test_validate_persona_tools_accepts_subset_and_function_entries() -> None:
     """Toolkit and toolkit.function entries pass when the caller has the toolkit."""
-    validate_persona_tools(("file", "gmail.search_emails"), _toolkits("file", "gmail"), cap=None)
-    validate_persona_tools(None, _toolkits("file"), cap=None)
+    validate_persona_tools(("filesystem", "gmail.search_emails"), _toolkits("filesystem", "gmail"), cap=None)
+    validate_persona_tools(None, _toolkits("filesystem"), cap=None)
     validate_persona_tools((), _toolkits(), cap=None)
 
 
@@ -386,14 +388,14 @@ def test_validate_persona_tools_accepts_subset_and_function_entries() -> None:
 def test_validate_persona_tools_rejects_unknown_toolkit_and_function(entry: str) -> None:
     """Entries outside the caller's toolkits, or unknown functions, fail with the available names."""
     with pytest.raises(PersonaError) as error:
-        validate_persona_tools((entry,), _toolkits("file", "gmail"), cap=None)
-    assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: file, gmail."
+        validate_persona_tools((entry,), _toolkits("filesystem", "gmail"), cap=None)
+    assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: filesystem, gmail."
 
 
 def test_persona_allows_whole_toolkits_and_single_functions() -> None:
     """Toolkit entries keep every function of that concrete toolkit; function entries keep one."""
-    entries = ("gmail.search_emails", "file")
-    assert persona_allows(entries, "file", "read_file")
+    entries = ("gmail.search_emails", "filesystem")
+    assert persona_allows(entries, "filesystem", "read_file")
     assert persona_allows(entries, "gmail", "search_emails")
     assert not persona_allows(entries, "gmail", "send_email")
     assert not persona_allows(entries, "shell", "run_shell_command")
@@ -406,28 +408,30 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
         return function.name != "write_file"
 
     visible, disabled = persona_tool_policy(
-        ("gmail.search_emails", "file"),
-        lambda: ["file", "gmail", "shell"],
+        ("gmail.search_emails", "filesystem"),
+        lambda: ["filesystem", "gmail", "shell"],
         caller_filter,
     )
 
     assert visible is not None
-    assert visible(_function("read_file", "file"))
-    assert not visible(_function("write_file", "file"))
+    assert visible(_function("read_file", "filesystem"))
+    assert not visible(_function("write_file", "filesystem"))
     assert not visible(_function("generated", None))
     assert visible(_function("get_skill_instructions", None))
     assert disabled == frozenset({"shell", "dynamic_tools"})
-    assert persona_tool_policy(None, lambda: ["file"], caller_filter) == (caller_filter, frozenset())
+    assert persona_tool_policy(None, lambda: ["filesystem"], caller_filter) == (caller_filter, frozenset())
 
 
 def test_function_level_cap_admits_only_named_functions() -> None:
     """A cap that names one function admits that function, not its whole toolkit or a sibling."""
-    cap = ("gmail.search_emails", "file")
-    validate_persona_tools(("gmail.search_emails", "file"), _toolkits("gmail", "file"), cap)
+    cap = ("gmail.search_emails", "filesystem")
+    validate_persona_tools(("gmail.search_emails", "filesystem"), _toolkits("gmail", "filesystem"), cap)
     for entry in ("gmail", "gmail.send_email", "calculator"):
         with pytest.raises(PersonaError) as error:
-            validate_persona_tools((entry,), _toolkits("gmail", "file", "calculator"), cap)
-        assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: gmail.search_emails, file."
+            validate_persona_tools((entry,), _toolkits("gmail", "filesystem", "calculator"), cap)
+        assert (
+            str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: gmail.search_emails, filesystem."
+        )
 
 
 def test_mcp_function_entries_are_not_checked_against_bridge_metadata() -> None:
@@ -452,14 +456,14 @@ def test_mcp_function_entries_are_not_checked_against_bridge_metadata() -> None:
 
 def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path) -> None:
     """A copy without tools inherits its parent's cap minus delegate at the maximum depth, and refuses any other loss."""
-    cap = inline_persona("P", ["delegate", "file"], None, None)
-    at_max_depth = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: _toolkits("file"))
+    cap = inline_persona("P", ["delegate", "filesystem"], None, None)
+    at_max_depth = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: _toolkits("filesystem"))
     lost_file = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: _toolkits("delegate"))
 
     assert isinstance(at_max_depth, PersonaRequest)
     assert at_max_depth.persona is not None
-    assert at_max_depth.persona.tools == ("file",)
-    assert lost_file == "Cannot delegate: unknown tool 'file'. Your tools: delegate."
+    assert at_max_depth.persona.tools == ("filesystem",)
+    assert lost_file == "Cannot delegate: unknown tool 'filesystem'. Your tools: delegate."
 
 
 def test_inline_persona_reads_skills() -> None:
@@ -527,12 +531,12 @@ def test_persona_naming_tools_but_no_skills_gets_none(tmp_path: Path) -> None:
     def unread() -> list[str]:
         pytest.fail("the caller's skills were read for a persona naming none")
 
-    named_tools = _resolve(tmp_path, system_prompt="P", tools=["file"], available_skills=unread)
+    named_tools = _resolve(tmp_path, system_prompt="P", tools=["filesystem"], available_skills=unread)
     neither = _resolve(tmp_path, system_prompt="P", available_skills=unread)
     copy_with_tools = _resolve(
         tmp_path,
         system_prompt="Q",
-        tools=["file"],
+        tools=["filesystem"],
         cap=inline_persona("P", None, ["research"], None),
         available_skills=unread,
     )
@@ -558,7 +562,7 @@ def test_inherited_skills_keep_only_those_the_caller_still_has(tmp_path: Path) -
 
 def test_cap_from_a_parent_listing_only_tools_admits_no_skills(tmp_path: Path) -> None:
     """A parent that lists tools but no skills keeps none, so a copy it authors cannot name any."""
-    cap = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+    cap = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("filesystem",))
 
     refused = _resolve(tmp_path, system_prompt="Q", skills=["research"], cap=cap)
 
@@ -567,7 +571,7 @@ def test_cap_from_a_parent_listing_only_tools_admits_no_skills(tmp_path: Path) -
 
 def test_cap_from_a_parent_listing_only_tools_admits_no_knowledge(tmp_path: Path) -> None:
     """A parent that lists tools but no knowledge searches none, so a copy it authors cannot name any."""
-    cap = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+    cap = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("filesystem",))
 
     refused = _resolve(tmp_path, system_prompt="Q", knowledge=["docs"], cap=cap)
 
@@ -580,7 +584,7 @@ def test_copy_that_omits_everything_inherits_its_parents_tools_skills_and_knowle
         source_kind="inline",
         source_name="",
         system_prompt="P",
-        tools=("file",),
+        tools=("filesystem",),
         skills=("research",),
         knowledge=("docs",),
     )
@@ -590,7 +594,7 @@ def test_copy_that_omits_everything_inherits_its_parents_tools_skills_and_knowle
     assert isinstance(request, PersonaRequest)
     assert request.persona is not None
     assert (request.persona.tools, request.persona.skills, request.persona.knowledge) == (
-        ("file",),
+        ("filesystem",),
         ("research",),
         ("docs",),
     )
@@ -624,13 +628,13 @@ def test_inline_persona_reads_knowledge() -> None:
 
 def test_knowledge_follows_an_explicit_tool_list() -> None:
     """Like skills, a persona that lists tools but no knowledge bases keeps none, and one that lists neither keeps all."""
-    named_tools = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+    named_tools = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("filesystem",))
     neither = SubagentPersona(source_kind="inline", source_name="", system_prompt="P")
     named = SubagentPersona(
         source_kind="inline",
         source_name="",
         system_prompt="P",
-        tools=("file",),
+        tools=("filesystem",),
         knowledge=("docs",),
     )
 
@@ -643,7 +647,7 @@ def test_authored_knowledge_must_be_caller_knowledge(tmp_path: Path) -> None:
     def unread() -> list[str]:
         pytest.fail("the caller's knowledge bases were read for a persona naming none")
 
-    subset = _resolve(tmp_path, system_prompt="P", tools=["file"], knowledge=["faq"])
+    subset = _resolve(tmp_path, system_prompt="P", tools=["filesystem"], knowledge=["faq"])
     unknown = _resolve(tmp_path, system_prompt="P", knowledge=["wiki"])
 
     assert isinstance(subset, PersonaRequest)
@@ -680,7 +684,7 @@ def test_profile_cannot_combine_with_inline_knowledge(tmp_path: Path) -> None:
 
 def test_persona_tool_policy_keeps_knowledge_search() -> None:
     """An explicit tool list still offers knowledge search, which loads only when the persona keeps a base."""
-    visible, _disabled = persona_tool_policy(("file",), lambda: ["file"], None)
+    visible, _disabled = persona_tool_policy(("filesystem",), lambda: ["filesystem"], None)
 
     assert visible is not None
     assert visible(_function("search_knowledge_base", None))

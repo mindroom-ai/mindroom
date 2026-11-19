@@ -125,6 +125,7 @@ visibility = [
 path = "mindroom.dynamic_workflows"
 depends_on = [
     "mindroom.failure_text",
+    "mindroom.config.tool_aliases",
 ]
 
 [[modules]]
@@ -1726,6 +1727,7 @@ depends_on = [
     "mindroom.turn_model",
     "mindroom.config.resolution",
     "mindroom.tool_system.plugins",
+    "mindroom.config.tool_aliases",
 ]
 
 [[modules]]

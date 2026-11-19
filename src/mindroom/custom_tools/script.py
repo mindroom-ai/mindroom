@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManagerError
 from mindroom.tool_system.authoring import Toolkit
@@ -176,5 +177,5 @@ def _public_run(run: ScriptRunRecord) -> dict[str, object]:
 
 
 def _normalized_allowed_tools(allowed_tools: list[str] | None) -> tuple[str, ...] | None:
-    normalized = (name.strip() for name in allowed_tools or ())
+    normalized = (canonical_tool_name(name.strip()) for name in allowed_tools or ())
     return tuple(dict.fromkeys(name for name in normalized if name)) or None
