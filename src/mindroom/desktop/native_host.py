@@ -51,6 +51,8 @@ _IMMEDIATE_NATIVE_ACTIONS = frozenset(
     {
         "status",
         "dashboard_configuration",
+        # Grant shares revoke's ordered lane, so a revoke sent after a grant always lands after it.
+        "grant_control",
         "revoke_control",
         "decide_shell",
         "grant_shell",

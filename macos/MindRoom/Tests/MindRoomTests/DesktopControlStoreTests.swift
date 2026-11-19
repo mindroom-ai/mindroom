@@ -1039,6 +1039,30 @@ final class DesktopControlStoreTests: XCTestCase {
         }
     }
 
+    func testSwitchingOffShowsARevokeFailureButNotAStoppedBridge() async throws {
+        for (code, shown) in [("not_running", false), ("busy", true)] {
+            let defaults = try fullControlDefaults()
+            defaults.set(fullControlStatus(bridge: "control").pairingIdentity, forKey: fullControlKey)
+            var revoked = false
+            let store = DesktopControlStore(
+                request: { action, _, _ in
+                    XCTAssertEqual(action, "revoke_control")
+                    revoked = true
+                    throw DesktopBridgeProcessError.helper(
+                        DesktopBridgeErrorPayload(code: code, message: "Revoke failed.", recovery: nil, retryable: true)
+                    )
+                },
+                defaults: defaults, loginItem: FakeLoginItem().item
+            )
+            store.turnOffFullControl()
+            await waitFor { revoked }
+            await Task.yield()
+
+            XCTAssertFalse(store.fullControl, "The preference clears at once either way")
+            XCTAssertEqual(store.errorMessage, shown ? "Revoke failed." : nil)
+        }
+    }
+
     func testAnotherPairingOrLosingThePrimaryScreenForgetsFullControl() async throws {
         let paired = fullControlStatus(bridge: "stopped")
         let changes = [

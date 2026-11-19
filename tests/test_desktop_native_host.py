@@ -2086,7 +2086,7 @@ def test_stream_drains_one_oversized_record_before_next_request(tmp_path: Path) 
     assert f'"request_id":"{request_id}"' in output
 
 
-@pytest.mark.parametrize("immediate_action", ["revoke_control", "decide_shell", "revoke_shell"])
+@pytest.mark.parametrize("immediate_action", ["grant_control", "revoke_control", "decide_shell", "revoke_shell"])
 def test_stream_caps_regular_requests_and_preserves_revoke_lane(immediate_action: str) -> None:
     class SaturatedHost:
         def __init__(self) -> None:
@@ -2188,6 +2188,28 @@ def test_revoke_bypasses_slow_lifecycle_operation(tmp_path: Path) -> None:
         return runtime.revoked
 
     assert asyncio.run(scenario()) == 1
+
+
+def test_grant_does_not_queue_behind_slow_lifecycle_operation(tmp_path: Path) -> None:
+    """A grant that waited on the lock could land after a later revoke; it must run at once, in order."""
+
+    async def scenario() -> list[object]:
+        runtime = FakeRuntime()
+        host = _host(tmp_path, runtime)
+        await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
+        await host.handle(_request("start"))
+        await host._lock.acquire()
+        try:
+            await asyncio.wait_for(
+                host.handle(_request("grant_control", until_revoked=True, scope="computer")),
+                timeout=0.1,
+            )
+        finally:
+            host._lock.release()
+        await host.shutdown()
+        return runtime.grants
+
+    assert asyncio.run(scenario()) == ["computer"]
 
 
 def test_host_remains_available_when_config_path_is_a_directory(tmp_path: Path) -> None:

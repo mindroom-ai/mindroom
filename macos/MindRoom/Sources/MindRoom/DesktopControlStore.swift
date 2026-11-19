@@ -580,9 +580,22 @@ final class DesktopControlStore: ObservableObject {
         revokeQuietly()
     }
 
-    /// Always sent, because the published status can lag behind a grant; a stopped bridge has nothing to revoke.
+    /// Always sent, because the published status can lag behind a grant; only a stopped bridge, with nothing
+    /// to revoke, stays silent. Any other failure is shown so the user can retry or stop access.
     private func revokeQuietly() {
-        Task { _ = try? await request("revoke_control", [:], .seconds(35)) }
+        Task {
+            do {
+                _ = try await request("revoke_control", [:], .seconds(35))
+            } catch DesktopBridgeProcessError.notRunning {
+            } catch let DesktopBridgeProcessError.helper(error) where error.code == "not_running" {
+            } catch let DesktopBridgeProcessError.helper(error) {
+                errorMessage = error.message
+                errorCode = error.code
+                recovery = error.recovery
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
     func requestPermission(_ permission: String) {
         perform("request_permission", parameters: ["permission": permission])
