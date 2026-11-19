@@ -41,11 +41,7 @@ def hook(
     required: bool = False,
     scope: HookScope = "agent",
 ) -> Callable[[HookCallback], HookCallback]:
-    """Annotate an async function as a MindRoom hook.
-
-    ``scope`` says how often it runs: ``"agent"`` on every bot's emission, ``"room"`` once per room event on the
-    room's steward, ``"service"`` once per process (``bot:ready`` and ``config:reloaded`` only).
-    """
+    """Annotate an async function as a MindRoom hook; ``scope`` is how often it runs, as docs/hooks.md says."""
     event_name = validate_event_name(event)
     if required and event_name != EVENT_AGENT_STARTED:
         msg = "required hooks are only supported for agent:started"

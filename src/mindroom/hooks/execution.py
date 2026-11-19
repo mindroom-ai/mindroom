@@ -314,10 +314,7 @@ async def emit(
 
 
 async def emit_service_bot_ready(orchestrator: OrchestratorRuntime) -> None:
-    """Emit the runtime's own ``bot:ready``, once per process start, to the service-scoped hooks.
-
-    Its context names the router entity with every configured room and every room a bot's client has joined.
-    """
+    """Emit the runtime's one ``bot:ready`` for service-scoped hooks: the router entity, with the rooms bots joined."""
     if not orchestrator.hook_registry_state.registry.has_hooks(EVENT_BOT_READY):
         return
     bindings = orchestrator.service_hook_bindings()

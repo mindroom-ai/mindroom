@@ -291,11 +291,7 @@ def _owner_matrix_admin(orchestrator: OrchestratorRuntime) -> HookMatrixAdmin | 
 
 
 def service_hook_bindings(orchestrator: OrchestratorRuntime, registry_state: HookRegistrySource) -> HookBindings:
-    """Return the bindings of the hooks a runtime emits for itself, which no one bot backs.
-
-    Each message goes out as the poster of its room, and room state is read and written as the room's steward.
-    The runtime started when its first bot did.
-    """
+    """Return the bindings of a runtime's own hooks: each room's poster sends, and its steward reads and writes state."""
     started = (bot.hook_context.runtime.runtime_started_at for bot in orchestrator.agent_bots.values())
     return HookBindings(
         registry=registry_state.registry,
