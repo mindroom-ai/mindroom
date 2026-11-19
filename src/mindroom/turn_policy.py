@@ -580,9 +580,7 @@ class TurnPolicy:
             if candidate.full_id in joined
         ]
         desktop_agent = desktop_room_agent(config, self.deps.runtime_paths, room, requester_user_id)
-        if (names_me and command.type is CommandType.MODEL) or (
-            command.type is CommandType.DESKTOP and desktop_agent == self.deps.agent_name
-        ):
+        if names_me or (command.type is CommandType.DESKTOP and desktop_agent == self.deps.agent_name):
             aimed_at = [me]
         elif mentioned_agents:
             aimed_at = [candidate for candidate in candidates if candidate in mentioned_agents]

@@ -79,6 +79,7 @@ _COMMAND_DOCS = {
     CommandType.HI: ("/hi", "Show welcome message"),
 }
 _WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
+_MAX_LEADING_MENTIONS = 16
 _COMPACT_COMMAND_DOC_OVERRIDES = {
     CommandType.SCHEDULE: ("/schedule <time> <message>", "Schedule tasks and reminders"),
     CommandType.HELP: ("/help [topic]", "Get detailed help"),
@@ -123,8 +124,6 @@ def get_compact_command_entries(
         for cmd_type in (command_types or _WELCOME_COMMAND_TYPES)
     ]
 
-
-_MAX_LEADING_MENTIONS = 16
 
 COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
     {

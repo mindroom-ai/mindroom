@@ -317,7 +317,7 @@ class CommandTurnExecutor:
             dispatch,
             command,
             source_event_id=event.event_id,
-            names_me=model_selection_names_runtime(content, client.user_id),
+            names_me=is_model and model_selection_names_runtime(content, client.user_id),
         ):
             return False
         await self.execute(

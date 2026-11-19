@@ -262,9 +262,7 @@ class EventJournalStore:
 
     async def room_event_owner(self, room_id: str, event_id: str, purpose: str) -> str | None:
         """Return the owner saved for one room event's purpose, saving none."""
-        return await self.backend.read(
-            lambda transaction: room_claims.saved_owner(transaction, room_id, event_id, purpose),
-        )
+        return await self.backend.read(lambda t: room_claims.saved_owner(t, room_id, event_id, purpose))
 
     async def generation(self, *, new_generation: str) -> str:
         """Return this database's identity, minting it the first time it is opened.

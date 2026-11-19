@@ -37,9 +37,8 @@ async def change_room_thread_mode(
 
     The mode is written through the given client, or through ``put_state`` for a client that only answers.
 
-    The republish reads the override again under its per-room lock, so changes made at once leave the published state
-    matching the override stored last. Return whether the room's state shows the result; the override stays stored
-    either way, except that a refused write, None, restores the override the room's clients show.
+    Changes to one room run one at a time, so a refused write, None, restores the override the room's clients show.
+    Return whether the room's state shows the result; the override stays stored after any other failure.
     """
 
     def store(stored: RoomThreadMode | None) -> None:
@@ -48,7 +47,6 @@ async def change_room_thread_mode(
         else:
             set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=stored)
 
-    # One change at a time per room, so a refused change restores the override no other change has replaced since.
     async with _CHANGES.setdefault((str(runtime_paths.storage_root), room_id), asyncio.Lock()):
         previous = resolve_room_thread_mode_override(runtime_paths, room_id)
         store(mode)
