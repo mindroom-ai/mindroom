@@ -252,6 +252,28 @@ async def test_a_room_without_the_owner_account_is_read_and_posted_to_by_its_age
 
 
 @pytest.mark.asyncio
+async def test_a_bot_that_never_syncs_holds_back_only_the_rooms_no_synced_bot_is_in(tmp_path: Path) -> None:
+    """A room whose steward and poster synced is read and posted to; a room without them is unknown, not empty."""
+    config = _config(enabled=True)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), lambda: config, _Sleeps())
+    service = coordinator.service()
+    assert service is not None
+    agent = _router(user_id="@mindroom_code:example.org")
+    stuck = _router(synced=False)
+    stuck.client.rooms = {}
+    agent.client.room_send.return_value = nio.RoomSendResponse("$row", ROOM)
+    _bind(coordinator, config, {ROUTER_AGENT_NAME: stuck, "code": agent})
+
+    assert service._room.poster_joined(ROOM) is True
+    assert (await service.live(ROOM, ANN)).call is None
+    assert await service._room.post_row(ROOM, "call1") == "$row"
+    assert service._room.poster_joined("!nobody:example.org") is None
+    stuck.first_sync_complete = True
+    assert service._room.poster_joined("!nobody:example.org") is False
+    await coordinator.stop()
+
+
+@pytest.mark.asyncio
 async def test_binding_waits_for_a_running_bot_and_for_call_transcripts_to_be_on(tmp_path: Path) -> None:
     """Nothing binds without a running bot, or while off; a later bind replaces a stopped bot."""
     paths = test_runtime_paths(tmp_path)

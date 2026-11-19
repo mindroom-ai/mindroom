@@ -193,7 +193,7 @@ def _room(
     """
     asked = [] if titles is None else titles
     return CallRoom(
-        ready=lambda: client is not None,
+        ready=lambda _room_id: client is not None,
         reader=partial(_in_room, client),
         poster=partial(_in_room, poster or client),
         retitle=lambda *request: asked.append(request),
@@ -670,7 +670,7 @@ async def test_switching_off_while_the_sidecar_uploads_sends_nothing() -> None:
     client = FakeRouterClient(state={ROOM: [_member(ANN)]}, upload_gate=asyncio.Event())
     on = True
     room = CallRoom(
-        ready=lambda: on,
+        ready=lambda _room_id: on,
         reader=partial(_in_room, client),
         poster=partial(_in_room, client),
         retitle=lambda *_: None,

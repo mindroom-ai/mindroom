@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import SupervisedLoop
@@ -105,20 +104,13 @@ class CallTranscriptsRuntimeCoordinator:
         if room is None:
             # Only who is in the room and their names are read through it; an agent's view never posts or retitles.
             room = CallRoom(
-                ready=lambda: self._agent_client(agent_name) is not None,
-                reader=partial(self._agent_client, agent_name),
+                ready=lambda _room_id: _synced_client(self.bots().get(agent_name)) is not None,
+                reader=lambda _room_id: _synced_client(self.bots().get(agent_name)),
                 poster=lambda _room_id: None,
                 retitle=lambda *_: None,
             )
             self._agent_rooms[agent_name] = room
         return room
-
-    def _agent_client(self, agent_name: str, room_id: str | None = None) -> nio.AsyncClient | None:
-        """Return the agent's client once its bot runs and has synced its rooms, for a room only if it is in it."""
-        bot = self.bots().get(agent_name)
-        if bot is None or not bot.running or not bot.first_sync_complete or bot.client is None:
-            return None
-        return bot.client if room_id is None or room_id in bot.client.rooms else None
 
     def _made_service(self) -> CallTranscriptService:
         if self._service is None:
@@ -126,8 +118,8 @@ class CallTranscriptsRuntimeCoordinator:
                 CallTranscriptStore(self.runtime_paths.storage_root),
                 CallRoom(
                     ready=self._ready,
-                    reader=lambda room_id: _client(room_steward(self.bots(), room_id)),
-                    poster=lambda room_id: _client(room_poster(self.bots(), room_id)),
+                    reader=lambda room_id: _synced_client(room_steward(self.bots(), room_id)),
+                    poster=lambda room_id: _synced_client(room_poster(self.bots(), room_id)),
                     retitle=self._retitle,
                 ),
                 SpeechTranscriber(self.config_provider, self.runtime_paths),
@@ -136,22 +128,24 @@ class CallTranscriptsRuntimeCoordinator:
             )
         return self._service
 
-    def _ready(self) -> bool:
-        """Return whether rooms can be read and posted to: bound, call transcripts on, every running bot synced.
+    def _ready(self, room_id: str) -> bool:
+        """Return whether the room can be read and posted to: bound, call transcripts on, its steward and poster synced.
 
-        A bot that has not synced does not know its rooms yet, and a room it alone is in would read as having no agent.
+        A room without them has no agent only once every running bot has synced: one that has not does not know its
+        rooms yet, and a room it alone is in would read as having no agent.
         """
-        running = [bot for bot in self.bots().values() if bot.running]
+        bots = self.bots()
+        acting = [bot for bot in (room_steward(bots, room_id), room_poster(bots, room_id)) if bot is not None]
         return (
             self._bound
             and self.config_provider().calls.transcripts.enabled
-            and bool(running)
-            and all(bot.first_sync_complete for bot in running)
+            and any(bot.running for bot in bots.values())
+            and all(bot.first_sync_complete for bot in acting or bots.values() if bot.running)
         )
 
     def _retitle(self, room_id: str, thread_id: str, event_id: str, body: str) -> None:
         """Have the room's poster summarize the thread now, whatever its count, counting the message it just posted."""
-        poster = room_poster(self.bots(), room_id) if self._ready() else None
+        poster = room_poster(self.bots(), room_id) if self._ready(room_id) else None
         if poster is not None:
             poster.post_response_effects.retitle_thread(room_id, thread_id, event_id=event_id, body=body)
 
@@ -175,5 +169,6 @@ class CallTranscriptsRuntimeCoordinator:
         return _IDLE_SECONDS
 
 
-def _client(bot: AgentBot | None) -> nio.AsyncClient | None:
-    return None if bot is None else bot.client
+def _synced_client(bot: AgentBot | None) -> nio.AsyncClient | None:
+    """Return the bot's client once it runs and has synced its rooms."""
+    return bot.client if bot is not None and bot.running and bot.first_sync_complete else None

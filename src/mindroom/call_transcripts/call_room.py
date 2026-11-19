@@ -81,8 +81,8 @@ class _StateRead:
 class CallRoom:
     """The rooms calls are in, as their MindRoom accounts see them; while not ready nothing can be told or posted."""
 
-    ready: Callable[[], bool]
-    """Whether the runtime's accounts can read and post now."""
+    ready: Callable[[str], bool]
+    """Whether the runtime's accounts can read and post in a room now."""
     reader: Callable[[str], nio.AsyncClient | None]
     """The client that reads a room, its steward's; None for a room no account is in."""
     poster: Callable[[str], nio.AsyncClient | None]
@@ -98,11 +98,11 @@ class CallRoom:
 
     def poster_joined(self, room_id: str) -> bool | None:
         """Return whether an account that posts call messages is joined to the room; None while not ready."""
-        return self.poster(room_id) is not None if self.ready() else None
+        return self.poster(room_id) is not None if self.ready(room_id) else None
 
     async def is_member(self, room_id: str, user_id: str) -> bool | None:
         """Return whether the person is joined to the room; nobody is a member of a room no account is in."""
-        if not self.ready():
+        if not self.ready(room_id):
             return None
         client = self.reader(room_id)
         if client is None:
@@ -112,7 +112,7 @@ class CallRoom:
 
     async def may_post(self, room_id: str, user_id: str) -> bool | None:
         """Return whether the room's power levels let the person send messages, as the room's message event type."""
-        if not self.ready():
+        if not self.ready(room_id):
             return None
         client = self.reader(room_id)
         if client is None:
@@ -127,7 +127,7 @@ class CallRoom:
 
     async def poster_may_post(self, room_id: str) -> bool | None:
         """Return whether the room's power levels let its poster send messages; no poster may not."""
-        if not self.ready():
+        if not self.ready(room_id):
             return None
         client = self.poster(room_id)
         return False if client is None else await self.may_post(room_id, client.user_id)
@@ -137,7 +137,7 @@ class CallRoom:
 
         None when the room cannot be read, such as while not ready or in a room no account is in.
         """
-        client = self.reader(room_id) if self.ready() else None
+        client = self.reader(room_id) if self.ready(room_id) else None
         if client is None:
             return None
         state = await self._state(client, room_id)
@@ -240,7 +240,7 @@ class CallRoom:
         It goes out only if that client is still the room's poster's, checked last before the send, after any upload:
         once call transcripts are off or the poster stopped, a message being prepared is not sent.
         """
-        client = self.poster(room_id) if self.ready() else None
+        client = self.poster(room_id) if self.ready(room_id) else None
         if client is None:
             return None
         try:
@@ -250,7 +250,7 @@ class CallRoom:
                 content,
                 operation=operation,
                 transaction_id=transaction_id,
-                write_allowed=lambda: self.ready() and self.poster(room_id) is client,
+                write_allowed=lambda: self.ready(room_id) and self.poster(room_id) is client,
                 sidecar_required=sidecar_required,
             )
         except _MATRIX_ERRORS as error:
