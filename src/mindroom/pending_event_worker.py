@@ -5,11 +5,12 @@ rooms: its rotating cursor never decides which event in a room runs next.
 Each room keeps its own page position across bounded passes and cooldowns.
 
 A running turn is a pending row that stays pending until its owner hands it
-back, so neither reader goes over those rows again on every wake. A room's
-lane resumes behind the last row it read, and while turns are in flight
-discovery reads only what was admitted after its last finished scan. What sits
-before either position is reopened by a rewind: a retry, a lost owner, or the
-whole scan the deferral sweep sends discovery back for.
+back, so discovery does not go over those rows again on every wake: while
+turns are in flight it reads only what was admitted after its last finished
+scan, and the whole scan the deferral sweep asks for covers the rest. A room's
+lane still starts each pass at the front of its room, because a commit is
+visible before anything announces it and an older source it made runnable has
+to run before the room's newer ones.
 """
 
 from __future__ import annotations
@@ -57,8 +58,6 @@ class _RoomProgress:
 
     cursor: int | None = None
     rewind_before: int | None = None
-    # Discovery's rewind: the room's next lane starts behind it; a running lane keeps its page.
-    reopen_before: int | None = None
     admitted_through: int = 0
     deferred_count: int = 0
 
@@ -238,17 +237,9 @@ class PendingEventWorker:
             if not self.deferral_is_live(event):
                 self._reclaim_deferral(event)
 
-    def _reopen_rooms(self, rooms: dict[str, int]) -> None:
-        """Queue discovered rooms; a lane already past a room's first unowned event goes back for it."""
-        for room_id, first_receipt in rooms.items():
-            self._queue_room(room_id)
-            progress = self._rooms[room_id]
-            previous = progress.reopen_before
-            progress.reopen_before = first_receipt - 1 if previous is None else min(previous, first_receipt - 1)
-
-    async def _discover_rooms(self, *, whole_backlog: bool = False) -> tuple[dict[str, int], bool]:
-        """Find rooms, and each one's first unowned receipt, without passing global scan slices to their lanes."""
-        rooms: dict[str, int] = {}
+    async def _discover_rooms(self, *, whole_backlog: bool = False) -> tuple[set[str], bool]:
+        """Find rooms without passing global scan slices to their lanes."""
+        rooms: set[str] = set()
         origin = None if whole_backlog else self._scan_cursor
         # New work is admitted behind everything a finished scan saw. While turns are in
         # flight, the rows before that point are those turns, whose owners announce what
@@ -281,7 +272,7 @@ class PendingEventWorker:
                     reached_origin = True
                     break
                 if event.event_id not in self._deferred:
-                    rooms[event.room_id] = min(event.receipt_order, rooms.get(event.room_id, event.receipt_order))
+                    rooms.add(event.room_id)
             if page.reached_end and not reached_origin:
                 tail = page.resume_after
             if reached_origin or (page.reached_end and wrapped):
@@ -309,10 +300,10 @@ class PendingEventWorker:
         if self._stopped or generation != self._stop_generation:
             return 0
         self._queue_lost_owners()
-        self._reopen_rooms(rooms)
+        rooms.update(self._ready_rooms)
         return sum(
             await asyncio.gather(
-                *(self._drain_room(room_id, stop_generation=generation) for room_id in tuple(self._ready_rooms)),
+                *(self._drain_room(room_id, stop_generation=generation) for room_id in rooms),
             ),
         )
 
@@ -354,7 +345,8 @@ class PendingEventWorker:
         if self._stopped:
             return
         self._queue_lost_owners()
-        self._reopen_rooms(rooms)
+        for room_id in rooms:
+            self._queue_room(room_id)
         started = self._start_ready_rooms() or started
         if more_remains:
             if started:
@@ -377,10 +369,7 @@ class PendingEventWorker:
         active = self._lanes.get(room_id)
         if self._stopped or self._room_is_backing_off(room_id) or (active is not None and not active.done()):
             return None
-        progress = self._rooms.setdefault(room_id, _RoomProgress())
-        reopen_before, progress.reopen_before = progress.reopen_before, None
-        if reopen_before is not None and progress.cursor is not None:
-            progress.cursor = min(progress.cursor, reopen_before)
+        self._rooms.setdefault(room_id, _RoomProgress())
         self._ready_rooms.discard(room_id)
         lane = asyncio.create_task(self._run_room(room_id), name=f"pending_event_lane_{room_id}")
         self._lanes[room_id] = lane
@@ -537,7 +526,7 @@ class PendingEventWorker:
                 if self._apply_rewind(progress):
                     continue
                 if page.reached_end:
-                    # The cursor stays behind the last row read: what is before it is owned or done.
+                    progress.cursor = None
                     return _RoomPass(len(seen))
             return _RoomPass(len(seen), more=True)
         except Exception:

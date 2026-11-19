@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -56,7 +57,7 @@ from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, request_envelope
 from tests.journal_helpers import admit_dispatch_event
-from tests.journal_membership_helpers import admit_room_membership
+from tests.journal_membership_helpers import admit_room_membership, room_membership_admission
 from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import corrupt
@@ -4178,17 +4179,18 @@ class TestInFlightTurnsAreNotReread:
     """A wake costs what is new, however many turns the bot already has running."""
 
     @staticmethod
-    async def _admit(store: PrincipalStore, event: nio.Event) -> None:
+    async def _admit(store: PrincipalStore, event: nio.Event, room_id: str = ROOM) -> None:
         # Unprojected: these rows are only ever paged, and there are many of them.
-        await store.admit(_inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE))
+        await store.admit(_inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE))
 
-    async def test_a_wake_reads_new_work_not_the_turns_already_in_flight(self, alice: PrincipalStore) -> None:
+    async def test_a_wake_reads_new_work_not_the_turns_in_flight_in_other_rooms(self, alice: PrincipalStore) -> None:
         """Every running turn is a pending row its owner will hand back by itself.
 
-        Discovery restarted at the front of the backlog on every wake, and the
-        room's lane at the front of the room, so each new event paged through
-        every in-flight turn twice only to skip it: with N turns running and N
-        more events arriving, N squared rows, each one joined and decoded.
+        Discovery restarted at the front of the backlog on every wake, so each
+        new event paged through every in-flight turn of every room only to skip
+        it: with N turns running and N more events arriving, N squared rows,
+        each one joined and decoded. A lane still reads its own room from the
+        front, which is what keeps that room's callbacks in receipt order.
         """
         in_flight = _BATCH_SIZE + 2
         wakes = 5
@@ -4199,7 +4201,7 @@ class TestInFlightTurnsAreNotReread:
             return not event.event_id.startswith("$busy")
 
         for index in range(in_flight):
-            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index))
+            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), f"!busy{index % 8}:example.org")
         store = _CountingReplayView(alice)
         worker = PendingEventWorker(store=store, handle=handle)
         try:
@@ -4213,7 +4215,7 @@ class TestInFlightTurnsAreNotReread:
 
             assert handled[in_flight:] == [f"$new{index}" for index in range(wakes)]
             assert len(await alice.pending(limit=in_flight + wakes)) == in_flight
-            # Discovery and the lane each read the new row; nothing reads the turns behind it.
+            # Discovery and the room's lane each read the new row; nothing reads the other rooms' turns.
             assert store.rows_read <= 4 * wakes
         finally:
             await worker.stop()
@@ -4489,6 +4491,78 @@ class TestInFlightTurnsAreNotReread:
 
             assert handled == ["$busy", "$source-1", "$new"]
         finally:
+            stop_following()
+            await worker.stop()
+
+    async def test_a_reader_ahead_of_the_departure_signal_still_runs_the_freed_source_first(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A commit is visible to readers before its signals are published, so the lane cannot lean on the signal.
+
+        The departure and the room's next message commit in one batch. A wake
+        that reads between that commit and the writer publishing it sees the new
+        message and the freed source together, with no rewind yet.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id == "$new"
+
+        await _ApprovalContinuations.admit_sources(alice)
+        await self._admit(alice, text_event("$busy", ts=2_000))
+        await paused_for_approval(
+            alice,
+            replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="live"),
+        )
+        await _ApprovalContinuations.remember_card(journal_store.principal("router@shared"))
+        worker = PendingEventWorker(store=alice, handle=handle, runtime_generation="live")
+        stop_following = journal_store.approval_signals.follow_paused_replies(
+            "agent@alice",
+            paused=lambda _reply: None,
+            ended=lambda _approval_id: None,
+            freed=lambda room_id: worker.wake(room_id=room_id),
+        )
+        writes = cast("Any", journal_store.backend)._writes
+        apply, committed, publish = writes.apply, threading.Event(), threading.Event()
+
+        def apply_then_wait(operations: Any) -> Any:  # noqa: ANN401 - the backend's own batch types
+            outcomes = apply(operations)
+            if len(operations) == 2:
+                committed.set()
+                assert publish.wait(SETTLE_TIMEOUT_SECONDS)
+            return outcomes
+
+        try:
+            await _dispatch_worker_pass(worker)
+            assert handled == ["$busy"]
+
+            router = journal_store.principal("router@shared")
+            departure = await room_membership_admission(router, ROOM, "leave")
+            assert departure is not None
+            writes.apply = apply_then_wait
+            batch = asyncio.gather(
+                router.admit_ingestion_batch(departure),
+                self._admit(alice, text_event("$new", ts=3_000)),
+            )
+            await _eventually(committed.is_set)
+            # A callback that ran settles through the writer, so the pass may need the barrier gone to finish.
+            ahead = asyncio.ensure_future(_dispatch_worker_pass(worker))
+            await _eventually(lambda: ahead.done() or handled != ["$busy"])
+            publish.set()
+            await asyncio.gather(ahead, batch)
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: not worker._room_is_backing_off(ROOM))
+            await _dispatch_worker_pass(worker)
+
+            assert handled == ["$busy", "$source-1", "$new"]
+        finally:
+            publish.set()
+            writes.apply = apply
             stop_following()
             await worker.stop()
 
