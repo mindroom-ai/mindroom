@@ -30,6 +30,7 @@ from mindroom.response_turn import ResponseTurnContext
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.turn_continuation import CONFIG_RELOAD_CALL
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, runtime_paths_for
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
@@ -153,6 +154,72 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
 
     assert (receipt["status"], receipt["outcome"]) == ("failed", "Tool is unavailable or arguments are invalid")
     catalog.bind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize("rebuilds_on_reload", [True, False])
+async def test_a_reload_that_lands_while_a_cli_call_binds_stops_the_run_like_one_before_it(
+    tmp_path: Path,
+    rebuilds_on_reload: bool,
+) -> None:
+    """The authority check after a binding's awaits raises the same reload signal as the one before them."""
+    runtime = _runtime_context(tmp_path)
+    reloaded = runtime.config.model_copy(deep=True)
+    reloaded.agents["helper"].tools = ["calculator"]
+    current = [runtime.config]
+    runtime = replace(
+        runtime,
+        orchestrator=ready_runtime(runtime.config, runtime.runtime_paths),
+        config_provider=lambda: current[0],
+    )
+    session = ConversationSession(session_id="session-1", kind="agent", owner_id="helper")
+    catalog = PreparedAgentToolCatalog(
+        run=RunContext(run_id="generation-1", user_id=runtime.requester_id, session=session),
+        runtime_context=runtime,
+        store=None,
+        middleware=(),
+        max_tool_calls_per_turn=None,
+    )
+
+    async def bind_through_a_reload(*_args: object, **_kwargs: object) -> object:
+        current[0] = reloaded
+        return object()
+
+    catalog.bind = AsyncMock(side_effect=bind_through_a_reload)
+    async with response_cli_lifetime() as lifetime:
+        owner = bind_response_owner(
+            catalog,
+            lifetime=lifetime,
+            response_context=_turn_context(),
+            context_documents={},
+            output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+            delegation_depth=0,
+            refresh_scheduler=None,
+            failure_message=str,
+            rebuilds_on_reload=rebuilds_on_reload,
+        )
+        async with owner._window("bash"):
+            receipt = await owner.operation(
+                window="bash",
+                operation=ToolCallOperation(
+                    operation="tools.call",
+                    call_id=uuid4(),
+                    toolkit="calculator",
+                    function="add",
+                ),
+            )
+            receipt = await settled_receipt(owner, receipt["call_id"])
+        controls = [call.tool_name for call in owner.control_calls]
+
+    catalog.bind.assert_awaited_once()
+    if rebuilds_on_reload:
+        assert receipt["status"] == "cancelled"
+        assert str(receipt["outcome"]).startswith("This call did not run: MindRoom's configuration was reloaded.")
+        assert controls == [CONFIG_RELOAD_CALL]
+    else:
+        assert (receipt["status"], receipt["outcome"]) == ("failed", "Tool is unavailable or arguments are invalid")
+        assert controls == []
 
 
 @pytest.mark.parametrize(

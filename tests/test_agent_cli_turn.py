@@ -34,6 +34,7 @@ from mindroom.agent_cli.protocol import (
 from mindroom.agent_cli.session import (
     CliAuthenticationError,
     CliBashWindowRequiredError,
+    CliCatalogReloadedError,
     CliOperationError,
     CliTurnOwner,
     TurnToolRegistry,
@@ -1358,6 +1359,49 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
     assert calls == ["new binding"]
     assert (await owner.get_call(receipts[0]["call_id"]))["parent_bash_call_id"] == "new-bash"
     await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refused_check", [1, 2], ids=["before_binding", "at_dispatch"])
+async def test_a_config_reload_at_any_authority_check_of_a_bash_call_stops_the_provider_run(
+    tmp_path: Path,
+    refused_check: int,
+) -> None:
+    """A Bash call a reload refuses, also at dispatch after a wait, never runs and ends the run at its batch."""
+    ran: list[str] = []
+    checks: list[ToolKey] = []
+
+    async def run_shell_command(args: str) -> str:
+        ran.append(args)
+        return "ran"
+
+    async def authorize(key: ToolKey, _arguments: dict[str, object]) -> None:
+        checks.append(key)
+        if len(checks) == refused_check:
+            msg = "This call did not run: MindRoom's configuration was reloaded."
+            raise CliCatalogReloadedError(msg)
+
+    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
+    catalog.store = create_agent_state_storage("helper", tmp_path)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    owner.shell_env = _SHELL_ENV
+
+    async with response_cli_lifetime():
+        await capture_bash_batch(owner, ("bash-1", {"command": "work"}))
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            outcome = await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "work"}, "bash-1")
+    await owner.close()
+
+    assert len(checks) == refused_check
+    assert ran == []
+    assert outcome.content == "This call did not run: MindRoom's configuration was reloaded."
+    assert outcome.stop_after_call
+    assert outcome.is_error
 
 
 @pytest.mark.asyncio

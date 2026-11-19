@@ -713,7 +713,11 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
     await h.respond([_bash_call("calculator", "action", {"value": "exact value"}), "done"])
     assert len(decisions) == 1
     assert effects == (["exact value"] if decision == "allow" else [])
-    assert h.shell.receipts[-1]["status"] == ("completed" if decision == "allow" else "failed")
+    # A call a reload refused while it waited is cancelled with that reason, and its run stops for a rebuild.
+    refused = "cancelled" if decision == "revoke" else "failed"
+    assert h.shell.receipts[-1]["status"] == ("completed" if decision == "allow" else refused)
+    if decision == "revoke":
+        assert "MindRoom's configuration was reloaded" in str(h.shell.receipts[-1]["outcome"])
     assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
 
 

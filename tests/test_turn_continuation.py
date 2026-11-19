@@ -151,13 +151,14 @@ _RELOAD = ReportedCall("config-reload", CONFIG_RELOAD_CALL, None)
 
 
 def test_a_config_reload_continues_the_turn_on_its_model() -> None:
-    """A reload that refused a minimal turn's call continues the turn with a notice, without naming a model."""
+    """A reload that refused a minimal turn's call continues the turn on its own prompt, without naming a model."""
     decision = continuation_decision_from_tools([_RELOAD], original_prompt="Solve the problem", continuation_count=0)
 
     assert decision.limit_message is None
     assert decision.continuation is not None
     assert decision.continuation.model_name is None
-    assert decision.continuation.prompt.startswith("Solve the problem\n\n[SYSTEM NOTICE - CONFIGURATION RELOADED]\n")
+    # The refused call's result already says what happened, and a notice here would replay in later turns.
+    assert decision.continuation.prompt == "Solve the problem"
 
 
 def test_a_model_switch_names_the_model_of_a_turn_a_reload_also_stopped() -> None:
