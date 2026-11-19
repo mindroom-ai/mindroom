@@ -393,9 +393,12 @@ async def test_auto_approve_off_says_when_the_room_refuses_to_show_it(tmp_path: 
     await _send(tmp_path, "!auto_approve 30")
 
     reply, runtime_paths = await _send(tmp_path, "!auto_approve off", put_room_state=AsyncMock(return_value=None))
+    again, _ = await _send(tmp_path, "!auto_approve off", put_room_state=AsyncMock(return_value=None))
 
     assert reply == "I need moderator rights in this room to show that auto-approve is off."
     assert _window(runtime_paths) is None
+    # The room still shows the window, so a repeat that is refused says so too.
+    assert again == reply
 
 
 @pytest.mark.asyncio

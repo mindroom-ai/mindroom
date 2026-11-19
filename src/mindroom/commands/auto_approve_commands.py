@@ -151,10 +151,10 @@ async def handle_auto_approve_command(  # noqa: PLR0911 - one answer per outcome
             published = await _publish_windows(put_room_state, runtime_paths, room.room_id, logger)
         if published is False:
             return f"⚠️ Auto-approve for all your tool calls is off in {place}, but the room may still show it as on. Run `/auto_approve off` again to retry."
-        if not ended:
-            return f"Auto-approve for all your tool calls is not on in {place}."
         if published is None:
             return moderator_rights_message("show that auto-approve is off")
+        if not ended:
+            return f"Auto-approve for all your tool calls is not on in {place}."
         return (
             f"✅ Auto-approve for all your tool calls is off in {place}; they follow the usual approval rules again. "
             "A tool you auto-approved from an approval card stays approved until you stop it on that card or its time ends."
