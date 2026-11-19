@@ -358,7 +358,8 @@ class TestEditFile:
         """An old_text copied with read_file's gutter is told to drop it."""
         (tmp_base / "app.ini").write_text("[server]\nhost = 0.0.0.0\nport = 8080\n")
         result = tools.edit_file(
-            "app.ini", [{"old_text": "host", "new_text": "h"}, {"old_text": old_text, "new_text": "z"}]
+            "app.ini",
+            [{"old_text": "host", "new_text": "h"}, {"old_text": old_text, "new_text": "z"}],
         )
         assert result == (
             "Error: edits[1] not found in the file; don't copy read_file's \"N| \" line-number prefix."

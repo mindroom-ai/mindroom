@@ -22,8 +22,9 @@ import shutil
 import subprocess
 import threading
 import unicodedata
-from contextlib import AbstractContextManager, contextmanager, suppress
-from dataclasses import dataclass
+from contextlib import AbstractContextManager, contextmanager
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from glob import has_magic
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Optional, cast
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _MAX_LINES = 2000
 _MAX_BYTES = 50 * 1024  # 50KB
@@ -64,6 +66,8 @@ _MAX_HINT_CHARS = 200
 _MAX_LISTED_RANGES = 10
 _EDITS_SHAPE = 'Pass edits=[{"old_text": "...", "new_text": "..."}].'
 _NO_CHANGES = "\nNo changes written."
+# read_file's "N| " gutter, or the one space after it, at the start of each line.
+_READ_FILE_GUTTER = re.compile(r"^(?: *\d+\| ?| )", re.MULTILINE)
 # The default of edit_file's edits, so a call that leaves them out differs from one that sends null.
 _OMITTED: Any = cast("Any", object())
 _WORKER_LOCK_TIMEOUT_SECONDS = 10.0
@@ -444,28 +448,40 @@ def _line_ranges(text: str, spans: list[tuple[int, int]]) -> str:
     return label + ", ".join(words)
 
 
-def _closest_line_hint(content: str, old_text: str) -> str:
-    """Name the file's line most like old_text's first non-blank line, or return nothing."""
-    first = next((line.strip() for line in old_text.splitlines() if line.strip()), "")
+def _not_found_hint(content: str, edit: _Edit) -> str:
+    """Say why old_text matched nothing: a copied read_file gutter, an edit already applied, or the lines most like it."""
+    unprefixed = _READ_FILE_GUTTER.sub("", edit.old_text)
+    if unprefixed != edit.old_text and _find_all_matches(content, unprefixed):
+        return "; don't copy read_file's \"N| \" line-number prefix."
+    if edit.new_text.strip() and (applied := _find_all_matches(content, edit.new_text)):
+        where = _line_ranges(content, [(applied[0].start, applied[0].end)])
+        return f", but its new_text is already at {where}; this edit may already be applied."
+    first = next((line.strip() for line in edit.old_text.splitlines() if line.strip()), "")
     lines = content.splitlines()
     stripped = [line.strip() for line in lines]
-    close = difflib.get_close_matches(first, stripped, n=1, cutoff=0.6) if first else []
-    if not close:
-        return ""
-    index = stripped.index(close[0])
-    return f"\nClosest line {index + 1}: {lines[index].rstrip()[:_MAX_HINT_CHARS]}"
+    close = difflib.get_close_matches(first, stripped, n=3, cutoff=0.6) if first else []
+    cut = _MAX_HINT_CHARS if len(close) == 1 else _MAX_HINT_CHARS // 2
+    hits = [f"{index + 1}: {lines[index].rstrip()[:cut]}" for index in sorted(map(stripped.index, close))]
+    if len(hits) > 1:
+        return f".\nClosest lines: {' | '.join(hits)}"
+    return f".\nClosest line {hits[0]}" if hits else "."
 
 
 def _edits_argument(edits: object, legacy: dict[str, object]) -> list[_Edit] | str:
     """Return the edits a call asked for, a call in the old flat shape as one edit, or why not."""
+    if isinstance(edits, str) and edits.strip():
+        try:
+            edits = json.loads(edits)
+        except ValueError:
+            return (
+                "edits must be a JSON array, but it arrived as a string that is not valid JSON "
+                f"(it starts {edits[:30]!r}). Send edits as an array: {_EDITS_SHAPE.removeprefix('Pass ')}"
+            )
     if legacy:
         # Calls written for the old flat shape send one old_text and new_text, which the schema no longer shows.
         if edits is not _OMITTED or set(legacy) != {"old_text", "new_text"}:
             return f"edit_file takes path and edits, not {', '.join(sorted(legacy))}. {_EDITS_SHAPE}"
         edits = [legacy]
-    if isinstance(edits, str):
-        with suppress(ValueError):
-            edits = json.loads(edits)
     if not edits or edits is _OMITTED:
         return f"edits is empty. {_EDITS_SHAPE}"
     try:
@@ -486,7 +502,7 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
             return f"{f'edits[{index}].' if many else ''}old_text is empty."
         matches = _find_all_matches(content, edit.old_text)
         if not matches:
-            return f"{who} not found in the file.{_closest_line_hint(content, edit.old_text)}"
+            return f"{who} not found in the file{_not_found_hint(content, edit)}"
         if len(matches) > 1 and not edit.replace_all:
             lines = _line_ranges(content, [(match.start, match.end) for match in matches])
             return (
@@ -497,6 +513,14 @@ def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult,
     spans.sort(key=lambda span: span[0].start)
     for (first, first_index), (second, second_index) in itertools.pairwise(spans):
         if second.start < first.end:
+            sides = sorted([(first_index, first), (second_index, second)], key=lambda s: not edits[s[0]].replace_all)
+            (covering, _), (other_index, other) = sides
+            if edits[covering].replace_all:
+                line = content.count("\n", 0, other.start) + 1
+                return (
+                    f"edits[{covering}] (replace_all) already replaces the text edits[{other_index}] targets at line "
+                    f"{line}. Drop edits[{other_index}], or merge them into one edit."
+                )
             low, high = sorted((first_index, second_index))
             return f"edits[{low}] and edits[{high}] overlap. Merge them into one edit."
     return spans
@@ -527,7 +551,8 @@ def _apply_edits(content: str, edits: list[_Edit]) -> tuple[str, int, str] | str
         if bom and match.start == 0:
             new_text = bom + new_text.removeprefix(bom)
         parts += [text[position : match.start], new_text]
-        landed.append((match.start + shift, match.start + shift + len(new_text)))
+        if new_text != text[match.start : match.end]:
+            landed.append((match.start + shift, match.start + shift + len(new_text)))
         shift += len(new_text) - (match.end - match.start)
         position = match.end
     parts.append(text[position:])
@@ -771,6 +796,15 @@ class CodingTools(Toolkit):
     def _file_lock(self, resolved: Path) -> AbstractContextManager[None]:
         return _directory_lock(resolved) if self.in_sandbox_request else _primary_file_lock(resolved)
 
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Show edit_file's edits as required and non-empty; a call in the old flat shape still runs."""
+        if function.name != "edit_file":
+            return function
+        parameters = deepcopy(dict(function.parameters))
+        parameters["required"] = [*parameters["required"], "edits"]
+        parameters["properties"]["edits"]["minItems"] = 1
+        return replace(function, parameters=parameters)
+
     @shared_directory_aware("path", writes=False)
     def read_file(
         self,
@@ -809,7 +843,8 @@ class CodingTools(Toolkit):
 
         Copy each old_text from the current file; edits match the original, not each other's results.
         Without replace_all, old_text must match one place. Whitespace/quote differences are tolerated.
-        Edits must not overlap; merge nearby ones. If one fails, nothing is written.
+        Edits must not overlap, and a replace_all edit already covers every match; merge nearby ones.
+        If one fails, nothing is written.
 
         Args:
             path: File path, relative to working directory or absolute.
