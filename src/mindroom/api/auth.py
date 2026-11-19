@@ -368,6 +368,7 @@ async def _verified_trusted_upstream_jwt_claims(
     if not token:
         raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
     if len(token.encode("utf-8")) > _JWT_MAX_BYTES:
+        logger.warning("Trusted upstream JWT rejected", detail=invalid_detail, error="too_large")
         raise HTTPException(status_code=401, detail=invalid_detail)
 
     try:
@@ -387,11 +388,12 @@ async def _verified_trusted_upstream_jwt_claims(
             options={"require": list(required_claims)},
         )
     except PyJWTError as exc:
+        # PyJWT messages can quote unverified header text such as `kid`, so log only the class and a missing claim.
         logger.warning(
             "Trusted upstream JWT rejected",
             detail=invalid_detail,
             error=type(exc).__name__,
-            reason=str(exc),
+            claim=getattr(exc, "claim", None),
         )
         raise HTTPException(status_code=401, detail=invalid_detail) from exc
     return claims
@@ -1046,7 +1048,7 @@ async def _require_service_jwt(
         failed_check = "common_name"
     else:
         return
-    logger.warning("Service JWT rejected", audience_env=audience_env, failed_check=failed_check)
+    logger.warning("Service JWT rejected", detail=invalid_detail, failed_check=failed_check)
     raise HTTPException(status_code=401, detail=invalid_detail)
 
 
