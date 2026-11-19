@@ -88,7 +88,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     payload = _parse_payload(body)
     if trigger_snapshot.allowed_kinds and payload.kind not in trigger_snapshot.allowed_kinds:
         raise HTTPException(status_code=422, detail="External trigger kind is not allowed")
-    target_bot = _require_trigger_target_bot(request, trigger_snapshot)
+    _runtime, target_bot = _require_trigger_target(request, trigger_snapshot)
     try:
         async with target_bot.admission_fence():
             config_lifecycle.rebind_current_request_snapshot(request)
@@ -103,8 +103,10 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
             payload = _parse_payload(body)
             if trigger_snapshot.allowed_kinds and payload.kind not in trigger_snapshot.allowed_kinds:
                 raise HTTPException(status_code=422, detail="External trigger kind is not allowed")
-            target_bot = _require_trigger_target_bot(request, trigger_snapshot)
-            runtime = _require_external_trigger_runtime_binding(request, trigger_snapshot)
+            runtime, current_target_bot = _require_trigger_target(request, trigger_snapshot)
+            if current_target_bot is not target_bot:
+                # Only the fenced bot is held open; the target changed or its bot was replaced while this waited.
+                raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
             _validate_snapshot_policy_and_auth(
                 trigger_snapshot,
                 config,
@@ -505,22 +507,18 @@ async def _release_event_id_best_effort(
         )
 
 
-def _require_external_trigger_runtime_binding(
+def _require_trigger_target(
     request: Request,
     snapshot: TriggerDeliverySnapshot,
-) -> ExternalTriggerRuntime:
+) -> tuple[ExternalTriggerRuntime, AgentBot]:
+    """Return the bound runtime and the running bot of the trigger's target, which posts the trigger and answers it."""
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.config_generation != snapshot.config_generation:
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
-    return runtime
-
-
-def _require_trigger_target_bot(request: Request, snapshot: TriggerDeliverySnapshot) -> AgentBot:
-    """Return the running bot of the trigger's target, which posts the trigger and answers it."""
-    target_bot = _require_external_trigger_runtime_binding(request, snapshot).target_bot(snapshot.target.agent)
+    target_bot = runtime.target_bot(snapshot.target.agent)
     if target_bot is None:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
-    return target_bot
+    return runtime, target_bot
 
 
 async def _require_external_trigger_runtime_ready(

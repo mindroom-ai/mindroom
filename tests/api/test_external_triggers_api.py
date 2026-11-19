@@ -235,8 +235,10 @@ def _bind_runtime(
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]] | None = None,
+    keep_target_bot: bool = False,
 ) -> object:
     client = object()
+    bound = config_lifecycle.app_state(api_main.app).external_trigger_runtime
     admission_gate = response_admission_gate or ResponseAdmissionGate()
     runtime_config = config_lifecycle.require_api_state(api_main.app).snapshot.runtime_config
     assert runtime_config is not None
@@ -263,6 +265,8 @@ def _bind_runtime(
             wait_for_admission_or_shutdown or wait_for_admission,
         ),
     )
+    if keep_target_bot and bound is not None:
+        target_bot = bound.target_bot("")
     api_main.bind_external_trigger_runtime(
         api_main.app,
         runtime_config=runtime_config,
@@ -905,11 +909,16 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize(("owner_authorized", "same_target_bot", "status"), [(False, True, 403), (True, False, 503)])
 async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authorization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    owner_authorized: bool,
+    same_target_bot: bool,
+    status: int,
 ) -> None:
-    """A request queued behind reload must not deliver from its stale authorized snapshot."""
+    """A request queued behind reload delivers neither from its stale snapshot nor through a bot it holds no fence of."""
     private_key = Ed25519PrivateKey.generate()
     config_path = tmp_path / "config.yaml"
     initial_config = _write_runtime_config(config_path)
@@ -956,17 +965,18 @@ async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authoriza
             )
             await asyncio.wait_for(wait_started.wait(), timeout=1)
 
-            _write_runtime_config(config_path, owner_authorized=False)
+            _write_runtime_config(config_path, owner_authorized=owner_authorized)
             assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
             _bind_runtime(
                 ready_snapshots,
                 response_admission_gate=gate,
                 wait_for_admission_or_shutdown=wait_for_admission,
+                keep_target_bot=same_target_bot,
             )
             gate.reopen()
             response = await request_task
 
-        assert response.status_code == 403
+        assert response.status_code == status
         execute.assert_not_awaited()
         assert not (runtime_paths.control_state_root / "external_triggers" / "replay").exists()
     finally:

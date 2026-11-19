@@ -39,7 +39,7 @@ class ExternalTriggerRuntimeCoordinator:
             api_main.app,
             runtime_config=config,
             is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-            target_bot=lambda entity_name: bot if _running(bot := bots.get(entity_name)) else None,
+            target_bot=lambda entity_name: _running(bots.get(entity_name)),
         )
 
     def unbind(self) -> None:
@@ -56,11 +56,12 @@ class ExternalTriggerRuntimeCoordinator:
         bots: Mapping[str, AgentBot],
     ) -> bool:
         """Return whether the trigger's target, which posts and answers it, is currently joined to its room."""
-        target_bot = bots.get(snapshot.target.agent)
-        if not snapshot.enabled or target_bot is None or target_bot.client is None or not target_bot.running:
+        target_bot = _running(bots.get(snapshot.target.agent))
+        if not snapshot.enabled or target_bot is None or target_bot.client is None:
             return False
         return snapshot.resolved_room_id in (await get_joined_rooms(target_bot.client) or ())
 
 
-def _running(bot: AgentBot | None) -> bool:
-    return bot is not None and bot.running and bot.client is not None
+def _running(bot: AgentBot | None) -> AgentBot | None:
+    """Return the bot while it runs with a client: the one test of a trigger target for binding and readiness."""
+    return bot if bot is not None and bot.running and bot.client is not None else None
