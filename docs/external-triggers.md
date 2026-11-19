@@ -230,7 +230,7 @@ A successful request returns `202` with `accepted: true`, the `event_id`, and th
 | `413` | `External trigger body exceeds configured limit` | Shrink the body or raise `max_body_bytes`. |
 | `422` | `External trigger kind is not allowed` | `kind` is not in the trigger's `allowed_kinds`; other `422` responses list invalid body fields. |
 | `429` | `External trigger replay limit reached` | Too many recent events for one trigger; wait for older entries to expire. |
-| `503` | `External trigger target runtime is not available` | The target bot is not running or not joined to the room yet; retry later. |
+| `503` | `External trigger target runtime is not available` | The target bot is not running or not joined to the room yet, or it changed while the request waited for a reload; retry later. |
 
 ## Watcher Behavior
 

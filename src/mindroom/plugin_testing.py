@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
@@ -235,6 +235,7 @@ class LoadedPlugin:
             config=config,
             runtime_paths=runtime_paths,
             hook_context=_StandIn("router hooks", send_message=self._send),
+            admission_fence=nullcontext,
         )
         self._app = FastAPI()
         state = ensure_app_state(self._app)
