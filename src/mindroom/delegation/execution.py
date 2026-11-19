@@ -409,7 +409,9 @@ async def _execute_child(
             continuation_count=0,
         )
         if decision.continuation is not None:
-            note_child_run_id(child, uuid4().hex, runtime_paths, model_name=decision.continuation.model_name)
+            # Only a model switch stops a resumed run, so the continuation names its model.
+            model_name = decision.continuation.model_name or child.model_name
+            note_child_run_id(child, uuid4().hex, runtime_paths, model_name=model_name)
             return await _start_child_envelope(
                 child,
                 observation,

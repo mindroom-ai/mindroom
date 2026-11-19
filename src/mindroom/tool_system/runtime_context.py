@@ -162,6 +162,12 @@ class ToolRuntimeContext:
         """Return the managed runtime's current config or this detached snapshot."""
         return self.config_provider() if self.config_provider is not None else self.config
 
+    def on_current_config(self) -> ToolRuntimeContext:
+        """Return this context as a turn starting now holds it: the current config, with its plugins and hooks."""
+        config = self.current_config
+        plugins = config_plugins(config, self.runtime_paths)
+        return replace(self, config=config, plugins=plugins, hooks=replace(self.hooks, registry=plugins.hooks))
+
     @property
     def recipient(self) -> str:
         """The entity whose Matrix account answers this turn: its team transport, or the agent itself."""

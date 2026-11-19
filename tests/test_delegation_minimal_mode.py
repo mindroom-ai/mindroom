@@ -46,9 +46,10 @@ from tests.test_delegation_direct_audit import _identity
 from tests.test_mode_commands import _CLI_DEPLOYMENT_ENV
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -476,12 +477,14 @@ async def _run_minimal_child_through_reloads(
     *,
     bash_calls: int,
     reload_every_command: bool = False,
+    cli_call: Callable[[LiveTurnTools], Awaitable[object]] | None = None,
 ) -> tuple[str, list[Config], list[Config], ScriptedModel]:
     """Run a minimal child whose config reloads after its first shell command, or after every one.
 
-    Returns the child's result, the config each command's catalog ran under, the reloaded configs, and its model.
+    Each command lists the child's tools, or makes ``cli_call``, which the first reload precedes. Returns the child's
+    result, the config each command's catalog ran under, the reloaded configs, and its model.
     """
-    config = _config(helper_tools=["shell"])
+    config = _config(helper_tools=["shell", "calculator"])
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
     current = [config]
@@ -489,15 +492,23 @@ async def _run_minimal_child_through_reloads(
     live = replace(_live_context(config, paths), config_provider=lambda: current[0])
     ran_under: list[Config] = []
 
+    def reload_config() -> None:
+        reloaded.append(current[0].model_copy(deep=True))
+        reload(reloaded[-1])
+        current[0] = reloaded[-1]
+
     async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
         owner = shell_cli_owner(live.orchestrator.agent_cli_registry)
-        listing = await owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list"))
         ran_under.append(owner.catalog.runtime_context.config)
+        if cli_call is not None:
+            if not reloaded:
+                # The reload lands while this command runs, before its CLI call.
+                reload_config()
+            return str(await cli_call(owner))
+        listing = await owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list"))
         if reload_every_command or not reloaded:
             # The reload lands while the child runs, between its Bash calls.
-            reloaded.append(current[0].model_copy(deep=True))
-            reload(reloaded[-1])
-            current[0] = reloaded[-1]
+            reload_config()
         return str(listing)
 
     bash = [calls(tool_call("bash", f"bash-{turn}", command="mindroom-agent tools list")) for turn in range(bash_calls)]
@@ -541,28 +552,81 @@ async def test_a_running_minimal_subagent_continues_on_rebuilt_tools_after_a_rel
     assert ran_under[1] is reloaded[0]
     assert ran_under[0] is not reloaded[0]
     assert len(child.requests) == 4
-    refused, rebuilt = str(child.requests[2].messages), str(child.requests[3].messages)
-    assert "CONFIGURATION RELOADED" in refused
-    assert "did not run" in refused
-    assert "no longer permits" not in rebuilt
+    # The continued attempt reads the refused call and the notice, and no later call is refused.
+    continued, final = str(child.requests[2].messages), str(child.requests[3].messages)
+    assert "so this call did not run" in continued
+    assert "CONFIGURATION RELOADED" in continued
+    assert "no longer permits" not in final
+    assert final.count("so this call did not run") == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
-async def test_a_reload_that_removes_a_running_minimal_subagents_shell_ends_its_turn(
+async def test_a_cli_call_a_reload_refuses_inside_a_running_bash_runs_after_the_rebuild(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rebuilt agent has no shell, so the turn ends with the minimal-mode error and no call ran on the old tools."""
+    """A reload during a Bash call refuses the CLI calls its command still makes, and the next attempt runs them."""
+    receipts: list[dict[str, object]] = []
+
+    async def is_prime(owner: LiveTurnTools) -> object:
+        call_id = uuid4()
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(
+                operation="tools.call",
+                toolkit="calculator",
+                function="is_prime",
+                arguments={"n": 7},
+                call_id=call_id,
+            ),
+        )
+        receipts.append(await settled_receipt(owner, str(call_id)))
+        return receipts[-1]["outcome"]
+
+    result, ran_under, reloaded, child = await _run_minimal_child_through_reloads(
+        tmp_path,
+        monkeypatch,
+        _add_reranker,
+        bash_calls=2,
+        cli_call=is_prime,
+    )
+
+    assert "Child answer" in result, result
+    assert [receipt["status"] for receipt in receipts] == ["failed", "completed"]
+    # The refused call's receipt names no reason, as any refusal's; the continued attempt's notice does.
+    assert "CONFIGURATION RELOADED" in str(child.requests[1].messages)
+    assert ran_under[1] is reloaded[0]
+    assert ran_under[0] is not reloaded[0]
+    assert len(child.requests) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize(
+    ("reload", "error"),
+    [
+        (lambda config: setattr(config.agents["helper"], "tools", []), "Minimal mode requires the agent's"),
+        (lambda config: config.agents.pop("helper"), "Unknown agent: helper"),
+    ],
+    ids=["shell_removed", "agent_removed"],
+)
+async def test_a_reload_that_takes_a_running_minimal_subagents_shell_ends_its_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reload: Callable[[Config], object],
+    error: str,
+) -> None:
+    """The rebuilt agent has no shell, so the turn ends with its error and no call ran on the old tools."""
     result, ran_under, _reloaded, child = await _run_minimal_child_through_reloads(
         tmp_path,
         monkeypatch,
-        lambda config: setattr(config.agents["helper"], "tools", []),
+        reload,
         bash_calls=3,
     )
 
     assert "Child answer" not in result, result
-    assert "minimal" in result.lower(), result
+    assert error in result, result
     assert len(ran_under) == 1
     assert len(child.requests) == 2
 

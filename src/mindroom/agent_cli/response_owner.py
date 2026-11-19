@@ -30,6 +30,11 @@ if TYPE_CHECKING:
 
 __all__ = ["bind_response_owner", "tool_catalog"]
 
+_RELOADED = (
+    "MindRoom's configuration was reloaded, so this call did not run. "
+    "This step ends here, and the task continues once the tools are rebuilt from the current configuration."
+)
+
 
 def tool_catalog(
     build: AgentBuild,
@@ -68,10 +73,13 @@ def bind_response_owner(
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     failure_message: Callable[[str], str],
+    rebuilds_on_reload: bool = False,
 ) -> LiveTurnTools:
     """Register the response's owner and grant on its first attempt, or rebind its catalog after a rebuild.
 
-    The owner runs as the catalog's tool runtime, for the catalog's run.
+    The owner runs as the catalog's tool runtime, for the catalog's run. With ``rebuilds_on_reload``, the response's
+    next attempt builds its catalog from the current config, so a call a config reload refuses stops the run for that
+    attempt instead of leaving every later call refused.
     """
     runtime = catalog.runtime_context
     assert runtime.orchestrator is not None
@@ -91,6 +99,8 @@ def bind_response_owner(
         try:
             check_prepared_catalog_authority(current.runtime_context)
         except PermissionError as exc:
+            if rebuilds_on_reload and new_owner.stop_for_rebuild():
+                raise PermissionError(_RELOADED) from exc
             raise PermissionError(failure_message(str(exc))) from exc
         cache_key = (id(current), key)
         binding = bindings.get(cache_key)

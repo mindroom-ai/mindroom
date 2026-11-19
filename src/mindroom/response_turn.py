@@ -293,8 +293,8 @@ class TurnContinuationRunState:
             active_model_name=None,
         )
 
-    def advance(self, *, continuation_prompt: str, active_model_name: str) -> TurnContinuationRunState:
-        """Return the continuation state for one more same-turn attempt, on the model a switch moved the turn to."""
+    def advance(self, *, continuation_prompt: str, active_model_name: str | None) -> TurnContinuationRunState:
+        """Return the state for one more same-turn attempt, on the model a switch moved the turn to, if one did."""
         return replace(
             self.next_attempt(),
             active_prompt=continuation_prompt,
@@ -302,7 +302,7 @@ class TurnContinuationRunState:
             active_current_timestamp_ms=None,
             active_current_prompt_is_structured=False,
             active_current_event_id=None,
-            active_model_name=active_model_name,
+            active_model_name=active_model_name or self.active_model_name,
         )
 
     def next_attempt(self) -> TurnContinuationRunState:

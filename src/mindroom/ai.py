@@ -140,6 +140,7 @@ if TYPE_CHECKING:
     from mindroom.llm.usage import RunMetrics
     from mindroom.response_turn import TurnRunState
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -337,6 +338,9 @@ class _AgentRunContext:
     runtime_paths: RuntimePaths
     # The turn's record, where the run's mid-turn compaction notes the calls a fold summarized.
     turn_recorder: TurnRecorder
+    # The tool runtime context the attempt's agent was built under, whose config is ``config`` unless a caller's
+    # approval overlay replaced it.
+    tool_context: ToolRuntimeContext | None
 
     @property
     def agent_name(self) -> str:
@@ -548,17 +552,21 @@ async def _start_agent_run(
     spec = prepared.spec
     hooks = _agent_loop_hooks(run_context, storage)
     if build.surface.mode == "minimal":
-        spec, hooks = await minimal_attempt(
-            build,
-            spec,
-            hooks,
-            run=run,
-            storage=storage,
-            response_context=run_context.turn,
-            context_documents=prepared.cli_context,
-            delegation_depth=run_context.turn.delegation_depth,
-            refresh_scheduler=run_context.turn.refresh_scheduler,
-        )
+        tool_context = run_context.tool_context
+        with tool_runtime_context(tool_context):
+            spec, hooks = await minimal_attempt(
+                build,
+                spec,
+                hooks,
+                run=run,
+                storage=storage,
+                response_context=run_context.turn,
+                context_documents=prepared.cli_context,
+                delegation_depth=run_context.turn.delegation_depth,
+                refresh_scheduler=run_context.turn.refresh_scheduler,
+                # An approval overlay cannot be laid over a reloaded config, so its turn keeps refusing instead.
+                rebuilds_on_reload=tool_context is not None and tool_context.config is run_context.config,
+            )
     elif build.surface.cli_shell:
         await bind_standard_cli(
             build,
@@ -1028,13 +1036,35 @@ async def _prepare_agent_run_context(
     if ctx.delegation_depth == 0 and ctx.agent_mode != "minimal":
         # Only a top-level standard reply can collect jobs, so only it hears which ended.
         ctx = replace(ctx, transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items))
-    prepared_run = await _prepare_agent_and_prompt(
-        ctx,
-        runtime_paths=runtime_paths,
-        config=config,
-        scope_context=scope_context,
-        current_event_id=continuation.active_current_event_id,
-    )
+    tool_context = get_tool_runtime_context()
+    if (
+        ctx.agent_mode == "minimal"
+        and tool_context is not None
+        and tool_context.config is config
+        and tool_context.current_config is not config
+    ):
+        # A reload replaced the turn's config, and a minimal turn's tools refuse calls under any but the current one
+        # (``check_prepared_catalog_authority``): this attempt builds its agent as a turn starting now would.
+        tool_context = tool_context.on_current_config()
+        config = tool_context.config
+        knowledge = await resolve_agent_knowledge_access_async(
+            ctx.entity_label,
+            config,
+            runtime_paths,
+            refresh_scheduler=ctx.refresh_scheduler,
+            execution_identity=ctx.execution_identity,
+            only=ctx.persona.kept_knowledge if ctx.persona is not None else None,
+        )
+        # A build handed to the turn was made from the config the reload replaced.
+        ctx = replace(ctx, knowledge=knowledge.knowledge, reusable_build=None)
+    with tool_runtime_context(tool_context):
+        prepared_run = await _prepare_agent_and_prompt(
+            ctx,
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=scope_context,
+            current_event_id=continuation.active_current_event_id,
+        )
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready", overwrite=True)
         note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
@@ -1063,6 +1093,7 @@ async def _prepare_agent_run_context(
         config=config,
         runtime_paths=runtime_paths,
         turn_recorder=turn_recorder,
+        tool_context=tool_context,
     )
 
 

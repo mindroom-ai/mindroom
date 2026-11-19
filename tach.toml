@@ -433,6 +433,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.invocation",
+    "mindroom.turn_continuation",
 ]
 visibility = [
     "mindroom.agent_cli.response_owner",
@@ -882,6 +883,7 @@ path = "mindroom.turn_continuation"
 depends_on = []
 visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
+    "mindroom.agent_cli.turn",
     "mindroom.response_turn",
     "mindroom.delegation.execution",
 ]

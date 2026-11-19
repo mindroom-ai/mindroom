@@ -1,4 +1,4 @@
-"""Tests for same-turn continuation decisions after a thread-model switch."""
+"""Tests for same-turn continuation decisions after a thread-model switch or a config reload."""
 
 from __future__ import annotations
 
@@ -6,8 +6,10 @@ import json
 
 import pytest
 
+from mindroom.llm.events import ReportedCall
 from mindroom.llm.runs import ToolExecution
 from mindroom.turn_continuation import (
+    CONFIG_RELOAD_CALL,
     TURN_CONTINUATION_LIMIT,
     continuation_decision_from_tools,
 )
@@ -143,3 +145,41 @@ def test_model_switch_at_the_limit_returns_limit_message() -> None:
         f"Model switching did not produce a final answer after {TURN_CONTINUATION_LIMIT} continuation attempts. "
         "The last request selected `large` with timing `after-toolcall`."
     )
+
+
+_RELOAD = ReportedCall("config-reload", CONFIG_RELOAD_CALL, None)
+
+
+def test_a_config_reload_continues_the_turn_on_its_model() -> None:
+    """A reload that refused a minimal turn's call continues the turn with a notice, without naming a model."""
+    decision = continuation_decision_from_tools([_RELOAD], original_prompt="Solve the problem", continuation_count=0)
+
+    assert decision.limit_message is None
+    assert decision.continuation is not None
+    assert decision.continuation.model_name is None
+    assert decision.continuation.prompt.startswith("Solve the problem\n\n[SYSTEM NOTICE - CONFIGURATION RELOADED]\n")
+
+
+def test_a_model_switch_names_the_model_of_a_turn_a_reload_also_stopped() -> None:
+    """The rebuilt attempt of a turn that both switched and reloaded runs on the switched model."""
+    decision = continuation_decision_from_tools(
+        [_model_switch_execution("after-toolcall").call, _RELOAD],
+        original_prompt="Solve the problem",
+        continuation_count=0,
+    )
+
+    assert decision.continuation is not None
+    assert decision.continuation.model_name == "large"
+
+
+def test_config_reload_at_the_limit_returns_limit_message() -> None:
+    """Reloads that keep stopping a turn end it with a visible message at the continuation limit."""
+    decision = continuation_decision_from_tools(
+        [_RELOAD],
+        original_prompt="Solve the problem",
+        continuation_count=TURN_CONTINUATION_LIMIT,
+    )
+
+    assert decision.continuation is None
+    assert decision.limit_message is not None
+    assert f"{TURN_CONTINUATION_LIMIT} continuation attempts" in decision.limit_message

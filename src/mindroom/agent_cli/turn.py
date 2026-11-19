@@ -36,7 +36,7 @@ from mindroom.agent_cli.session import (
 from mindroom.agent_cli.shell_contract import bound_agent_cli_shell_env
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown
-from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReportedCall, ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import (
@@ -52,6 +52,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import tool_outcome
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata, tool_definition
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.turn_continuation import CONFIG_RELOAD_CALL
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -60,7 +61,6 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.session import CliTurnOwner
     from mindroom.agent_cli.shell_contract import AgentCliShellEnv
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.llm.events import ReportedCall
     from mindroom.llm.runs import RunRequirement
     from mindroom.tool_system.agent_tool_calls import (
         PreparedAgentToolBinding,
@@ -404,7 +404,13 @@ class LiveTurnTools(TurnToolBridge):
                 msg = "Bash binding is unavailable"
                 raise ValueError(msg)
             await self.checkpoint.persist(call_id)
-            await self._authorize(key, arguments)
+            try:
+                await self._authorize(key, arguments)
+            except PermissionError as exc:
+                if not self.control_calls:
+                    raise
+                # A config reload refused the call (``stop_for_rebuild``): it never runs, and the run stops here.
+                return ToolOutcome(content=str(exc), stop_after_call=True, is_error=True)
             binding = await self.catalog.bind(key)
 
             async def authorize() -> None:
@@ -776,6 +782,17 @@ class LiveTurnTools(TurnToolBridge):
                         "outcome": {"error": "Tool result projection failed; execution status is retained"},
                     },
                 )
+
+    def stop_for_rebuild(self) -> bool:
+        """Stop the live attempt's run after its batch, so the response's next attempt rebuilds the tools.
+
+        A config reload replaced what the catalog was built from. False once no attempt is live, as for a background
+        job's call after the response ended, which nothing rebuilds for.
+        """
+        if self._binding_retired:
+            return False
+        self.control_calls.append(ReportedCall("config-reload", CONFIG_RELOAD_CALL, None))
+        return True
 
     async def retire_binding(self) -> None:
         """Retire this attempt while retaining receipts and the response grant.

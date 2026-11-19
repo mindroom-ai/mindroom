@@ -196,6 +196,7 @@ def bind_minimal_owner(
     context_documents: Mapping[str, str],
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    rebuilds_on_reload: bool = False,
 ) -> LiveTurnTools:
     """Bind the real managed turn to ``catalog``: its owner and grant on the first attempt, its catalog afterwards."""
     lifetime = current_cli_lifetime()
@@ -212,6 +213,7 @@ def bind_minimal_owner(
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         failure_message=partial(_failure, build, delegation_depth),
+        rebuilds_on_reload=rebuilds_on_reload,
     )
 
 
@@ -226,11 +228,13 @@ async def minimal_attempt(
     context_documents: Mapping[str, str],
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    rebuilds_on_reload: bool = False,
 ) -> tuple[AgentSpec, LoopHooks]:
     """Bind the attempt's CLI owner, then return the spec and hooks of a run that offers only its Bash facade.
 
     Each provider batch is checkpointed before its Bash calls run. The build's tool policy runs around the calls
-    Bash makes through the CLI, not around Bash itself.
+    Bash makes through the CLI, not around Bash itself. ``rebuilds_on_reload`` says the caller's next attempt builds
+    from the current config (``bind_response_owner``).
     """
     lifetime = current_cli_lifetime()
     runtime = get_tool_runtime_context()
@@ -252,6 +256,7 @@ async def minimal_attempt(
             context_documents=context_documents,
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
+            rebuilds_on_reload=rebuilds_on_reload,
         )
     except BaseException as exc:
         await catalog.close()
