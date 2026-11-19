@@ -123,8 +123,9 @@ _REAL_WEBSITE_HINT = (
 )
 # Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
 _CANVAS_LIBRARIES_HINT = (
-    "Canvas pages may load scripts, styles, and fonts from https://cdn.jsdelivr.net/npm/ at a pinned version, "
-    'such as <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>, '
+    "For packages show_canvas's libraries do not cover, canvas pages may load scripts, styles, and fonts from "
+    "https://cdn.jsdelivr.net/npm/ at a pinned version, "
+    'such as <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>, '
     "or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and "
     "code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked."
 )
@@ -499,7 +500,7 @@ class ChatUITools(Toolkit):
         Design it like a polished web app. Fetch, XHR, and WebSockets are always
         blocked. External images, scripts, styles, and fonts are blocked too
         unless your instructions name a source that works; embed images as data: URLs.
-        ``libraries`` loads Chart.js, D3, Mermaid, or KaTeX from Chat, without jsDelivr.
+        For Chart.js, D3, Mermaid, or KaTeX, pass ``libraries``, never a CDN address.
         The panel resizes from narrow to full width, so use a responsive layout.
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
