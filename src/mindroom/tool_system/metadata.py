@@ -721,17 +721,34 @@ def resolve_tool_settings(
         tool_metadata=tools.entries,
     )
     resolved_credentials_manager = _resolve_tool_credentials_manager(metadata, runtime_paths, credentials_manager)
-    stored_credentials = (
-        load_scoped_credentials(
-            tool_name,
+
+    def stored(service: str) -> dict[str, Any] | None:
+        if resolved_credentials_manager is None:
+            return None
+        return load_scoped_credentials(
+            service,
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
             allowed_shared_services=allowed_shared_services,
             primary_built_tool=primary_owns_tool_settings(tool_name, tools, runtime_paths=runtime_paths),
         )
-        if resolved_credentials_manager is not None
-        else None
-    )
+
+    stored_credentials = stored(tool_name)
+    # LEGACY_COMPAT: Dashboard settings stored for the file and coding tools.
+    # Legacy format: a stored settings document under service file or coding, saved from the Tools dashboard, holding
+    #   Agno FileTools switches or an include_tools or exclude_tools filter.
+    # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit reads service filesystem.
+    # Handling: Refuse to resolve the toolkit's settings while such a document holds any setting, so the toolkit is
+    #   not built and grants no workspace write until the operator saves it again under filesystem or deletes it.
+    # Coverage:
+    #   tests/api/test_plugin_room_agents.py::test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant.
+    for alias, name in TOOL_ALIASES.items():
+        if name == tool_name and any(not key.startswith("_") for key in stored(alias) or ()):
+            msg = (
+                f"{tool_name}: settings stored under '{alias}' no longer apply; "
+                f"save them again under '{tool_name}' or delete them."
+            )
+            raise ToolConfigOverrideError(msg)
     credentials = {**(stored_credentials or {}), **(credential_overrides or {})}
     safe_tool_init_overrides = sanitize_tool_init_overrides(
         tool_name,

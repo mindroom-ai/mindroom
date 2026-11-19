@@ -32,6 +32,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
 from mindroom.runtime_resolution import ResolvedAgentRuntime, resolve_agent_runtime
+from mindroom.tool_system.catalog import ToolConfigOverrideError, get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, normal_worker_key
 from tests.access_schema_support import joined_members_response
@@ -548,6 +549,28 @@ async def test_a_setting_saved_on_the_dashboard_counts_like_an_authored_one(tmp_
     )
 
     assert _access(await room.agents(ALICE)) == [("helper", "read", "none")]
+
+
+@pytest.mark.parametrize("service", ["file", "coding"])
+@pytest.mark.asyncio
+async def test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant(
+    tmp_path: Path,
+    service: str,
+) -> None:
+    """A dashboard document saved for file or coding is never guessed at: no toolkit and no grant until it is moved."""
+    room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=[service], access={"users": [ALICE]})})
+    manager = get_runtime_credentials_manager(room.paths)
+    manager.save_credentials(service, {"_source": "ui"})
+    assert _access(await room.agents(ALICE)) == [("helper", "write", "none")]
+
+    manager.save_credentials(service, {"_source": "ui", "exclude_tools": ["write_file", "edit_file"]})
+
+    assert _access(await room.agents(ALICE)) == []
+    message = f"under '{service}'.*save them again under 'filesystem' or delete them"
+    with pytest.raises(ToolConfigOverrideError, match=message):
+        await room.agent(ALICE, room.ids["helper"])
+    with pytest.raises(ToolConfigOverrideError, match=message):
+        get_tool_by_name("filesystem", room.paths, tools=builtin_tool_registry(), worker_target=None)
 
 
 @pytest.mark.asyncio
