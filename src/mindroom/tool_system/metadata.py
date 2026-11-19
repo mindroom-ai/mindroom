@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.legacy_fields import retired_tool_override
-from mindroom.config.models import canonical_tool_name
+from mindroom.config.models import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
@@ -1114,6 +1114,8 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
         tool_dict.pop("factory", None)
         tool_dict.pop("mcp_server_id", None)
         tool_dict.pop("dependency_extra", None)
+        if aliases := sorted(alias for alias, name in TOOL_ALIASES.items() if name == metadata.name):
+            tool_dict["aliases"] = aliases
         tools.append(tool_dict)
 
     tools.sort(key=lambda tool: (tool["category"], tool["name"]))

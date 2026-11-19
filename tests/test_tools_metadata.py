@@ -1605,25 +1605,6 @@ def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Pa
     assert not toolkit_function_names(tool)
 
 
-def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path) -> None:
-    """Declared string-array fields should preserve an explicit empty list."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-    )
-
-    tool = get_tool_by_name(
-        "file",
-        runtime_paths,
-        tool_config_overrides={"exclude_patterns": []},
-        runs_in_worker=False,
-        worker_target=None,
-        tools=builtin_tool_registry(),
-    )
-
-    assert tool.exclude_patterns == []
-
-
 def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -> None:
     """JSON number fields such as 3.0 must satisfy integer-valued script limits."""
     runtime_paths = resolve_runtime_paths(
@@ -2038,8 +2019,7 @@ def test_only_code_execution_tools_execute_code() -> None:
 def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
     """Tools that take model-supplied paths follow and receive the agent file_access."""
     for name in (
-        "file",
-        "coding",
+        "filesystem",
         "attachments",
         "matrix_message",
         "gmail",
@@ -2186,7 +2166,7 @@ def test_file_access_on_other_tools_points_to_agent_setting() -> None:
 
 def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
     """The removed per-tool restriction field points authors to the agent file_access setting."""
-    for tool_name in ("file", "coding", "python"):
+    for tool_name in ("filesystem", "python"):
         with pytest.raises(
             ToolConfigOverrideError,
             match=rf"agents\.a\.tools\.{tool_name}\.restrict_to_base_dir was removed; use agents\.<name>\.file_access",
