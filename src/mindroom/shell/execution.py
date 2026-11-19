@@ -11,10 +11,13 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import functools
 import itertools
 import os
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -336,8 +339,9 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
         if capture is None and output_destination is not None:
             capture = ShellOutputCapture(output_destination, cwd)
         started_at = time.monotonic()
+        spawn_argv = _idle_launch_argv(argv, env, cwd)
         process = await asyncio.create_subprocess_exec(
-            *argv,
+            *spawn_argv,
             stdin=stdin,
             stdout=asyncio.subprocess.PIPE,
             stderr=stderr,
@@ -357,7 +361,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     # command starts later inherit the priority.
     with contextlib.suppress(OSError):
         os.setpriority(os.PRIO_PGRP, process.pid, 19)
-    if sys.platform == "linux":
+    if sys.platform == "linux" and spawn_argv is argv:
         _schedule_process_tree_idle(process.pid)
 
     stdout_buf = _OutputBuffer()
@@ -764,18 +768,44 @@ async def _await_reader_tasks_with_grace(
                 await task
 
 
-def _schedule_process_tree_idle(pid: int) -> None:
-    """Move every thread of ``pid`` and of its descendants to ``SCHED_IDLE``; what they start later inherits it.
+@functools.cache
+def _idle_launcher() -> str | None:
+    """Return a ``chrt`` that can start a program at ``SCHED_IDLE``, or ``None`` when there is none or it fails."""
+    chrt = shutil.which("chrt")
+    if chrt is None:
+        return None
+    # A sandbox that refuses the policy makes chrt exit without running the program; then commands start directly.
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        if subprocess.run([chrt, "-i", "0", chrt, "-m"], capture_output=True, timeout=5, check=False).returncode == 0:
+            return chrt
+    return None
+
+
+def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> list[str]:
+    """Return *argv* behind ``chrt -i 0`` on Linux, so the command and everything it starts run at ``SCHED_IDLE``.
 
     Nice 19 lowers a command's CPU share, but the kernel still counts a CPU that runs it as busy when it places
     MindRoom's waking event loop. It counts a CPU that runs only idle-policy threads as free, and a waking normal thread
     preempts them at once.
+    chrt execs the program in the same process with the same environment. A program that cannot be found starts
+    directly instead, so the spawn fails with the same error as before; so does every command when chrt is missing.
+    """
+    if sys.platform != "linux" or not argv or (chrt := _idle_launcher()) is None:
+        return argv
+    # Like Popen, look a bare name up on the command's PATH and a path with a slash up in the command's directory.
+    program = str(Path(cwd, argv[0])) if cwd and os.sep in argv[0] else argv[0]
+    if shutil.which(program, path=os.pathsep.join(os.get_exec_path(env))) is None:
+        return argv
+    return [chrt, "-i", "0", *argv]
+
+
+def _schedule_process_tree_idle(pid: int) -> None:
+    """Move every thread of ``pid`` and of its descendants to ``SCHED_IDLE``; what they start later inherits it.
+
+    This is the fallback for a command that did not start behind chrt (see ``_idle_launch_argv``).
     A busy event loop gives the command time to fork and start threads before this runs, so the walk sets each thread
     before it reads that thread's children: whatever the thread starts afterwards inherits the policy. It misses a
     thread started during the walk by a thread it has not reached yet, and a process whose parent already exited.
-    Setting the policy before the command runs needs a launcher process, which needs more code to keep the command's
-    environment and how a program that cannot start is reported: glibc's ``posix_spawn`` refuses ``SCHED_IDLE``, and
-    ``preexec_fn`` would turn off vfork.
     """
     pending = [pid]
     while pending:

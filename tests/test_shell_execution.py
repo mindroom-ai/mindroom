@@ -397,6 +397,45 @@ async def test_a_command_and_the_children_it_starts_run_at_the_lowest_cpu_priori
     assert message == "19 True"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
+@pytest.mark.asyncio
+async def test_a_process_the_command_leaves_behind_before_its_policy_could_be_set_runs_at_the_idle_policy(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A busy event loop can let a shell background a build and exit before MindRoom gets to the command."""
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def spawn_then_let_the_shell_exit(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await original_spawn(*args, **kwargs)
+        deadline = time.monotonic() + 10
+        while Path(f"/proc/{process.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z":
+            assert time.monotonic() < deadline, "the shell never exited"
+            await asyncio.sleep(0.01)
+        return process
+
+    monkeypatch.setattr("mindroom.shell.execution.asyncio.create_subprocess_exec", spawn_then_let_the_shell_exit)
+    orphan = int(await _run(registry, ["/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"], tmp_path))
+    try:
+        assert os.sched_getscheduler(orphan) == os.SCHED_IDLE
+    finally:
+        os.kill(orphan, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
+@pytest.mark.asyncio
+async def test_a_missing_program_reports_the_same_error_as_a_direct_spawn(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """Starting commands behind chrt must not turn a missing program into a command that exits 127."""
+    with pytest.raises(FileNotFoundError) as direct:
+        await asyncio.create_subprocess_exec("./no-such-program", cwd=tmp_path)
+
+    assert await _run(registry, ["./no-such-program"], tmp_path) == f"Error: {direct.value}"
+
+
 def _process_group_threads(pgid: int) -> list[int]:
     threads = []
     for thread in Path("/proc").glob("[0-9]*/task/[0-9]*"):
