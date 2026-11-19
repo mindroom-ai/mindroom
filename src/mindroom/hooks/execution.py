@@ -198,8 +198,11 @@ async def _invoke_hook(hook: RegisteredHook, context: HookContext) -> _HookInvoc
     timeout_seconds = _effective_timeout_ms(hook) / 1000
     started_at = time.monotonic()
     try:
-        async with asyncio.timeout(timeout_seconds):
+        async with asyncio.timeout(timeout_seconds) as deadline:
             result = await hook.callback(context)
+        if deadline.expired():
+            # The hook caught the cancellation its deadline sent and returned anyway, so it timed out.
+            raise TimeoutError  # noqa: TRY301
     except asyncio.CancelledError:
         raise
     except (Exception, SystemExit) as error:
@@ -366,6 +369,9 @@ async def emit_tool_result_transform(registry: HookRegistry, context: ToolResult
     Each hook returns a ``str`` to replace the text the hook before it left, or ``None`` to keep it. One that fails,
     times out, or returns anything else, or a run nested too deeply, stops the chain and withholds the result: None.
     """
+    hooks = _eligible_hooks(registry, EVENT_TOOL_RESULT_TRANSFORM, context)
+    if not hooks:
+        return context.result
     log_kwargs = {"tool_name": context.tool_name, "agent_name": context.agent_name}
     depth = _EMIT_DEPTH.get()
     if depth >= _MAX_EMIT_DEPTH:
@@ -374,7 +380,7 @@ async def emit_tool_result_transform(registry: HookRegistry, context: ToolResult
     token = _EMIT_DEPTH.set(depth + 1)
     try:
         text = context.result
-        for hook in _eligible_hooks(registry, EVENT_TOOL_RESULT_TRANSFORM, context):
+        for hook in hooks:
             hook_context = _bind_hook_context(registry, hook, replace(context, result=text))
             invocation = await _invoke_hook(hook, hook_context)
             if not invocation.succeeded or not isinstance(invocation.value, str | None):

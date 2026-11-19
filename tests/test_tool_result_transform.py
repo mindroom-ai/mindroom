@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -22,11 +24,17 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.execution import _EMIT_DEPTH, _MAX_EMIT_DEPTH
 from mindroom.hooks.types import default_timeout_ms_for_event
+from mindroom.llm.events import ReportedCall
 from mindroom.llm.media import Image
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call, run_tool_call
 from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome, ToolValue
+from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.agent_tool_helpers import detached_policy, tool_policy
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 _WITHHELD = "The result of fetch_page was withheld because a result check failed."
 
@@ -42,20 +50,51 @@ def _registry(*callbacks: object) -> HookRegistry:
     return HookRegistry.from_plugins([plugin])
 
 
-async def _model_reads(registry: HookRegistry, value: object) -> ToolOutcome:
-    """Run ``fetch_page`` returning ``value`` through the policy, and return the outcome the model reads."""
-
-    async def fetch_page(url: str) -> object:
+def _function(value: object, name: str = "fetch_page") -> ToolFunction:
+    async def entrypoint(url: str) -> object:
         del url
         return value
 
-    function = ToolFunction(name="fetch_page", description=None, parameters={}, entrypoint=fetch_page)
+    return ToolFunction(name=name, description=None, parameters={}, entrypoint=entrypoint)
+
+
+_CALL_CONTEXT = ToolCallContext(run_id="run", session_id="session", user_id=None)
+
+
+async def _model_reads(registry: HookRegistry, value: object, name: str = "fetch_page") -> ToolOutcome:
+    """Run a tool returning ``value`` through the policy, and return the outcome the model reads."""
     return await execute_tool_call(
-        function,
+        _function(value, name),
         {"url": "https://example.test"},
-        ToolCallContext(run_id="run", session_id="session", user_id=None),
+        _CALL_CONTEXT,
         middleware=(detached_policy(registry),),
     )
+
+
+class _Recorder:
+    """A reply's durable record of its tool calls: what a later attempt replays."""
+
+    def __init__(self) -> None:
+        self.started_calls: list[str] = []
+        self.finished_results: list[object] = []
+
+    async def started(self, tool_name: str, _args: Mapping[str, object]) -> str:
+        self.started_calls.append(tool_name)
+        return tool_name
+
+    async def finished(self, _call_id: str, _tool_name: str, _args: Mapping[str, object], result: object) -> None:
+        self.finished_results.append(result)
+
+
+@hook(EVENT_TOOL_RESULT_TRANSFORM)
+async def _prefix(ctx: ToolResultTransformContext) -> str:
+    return f"[checked] {ctx.result}"
+
+
+@hook(EVENT_TOOL_RESULT_TRANSFORM)
+async def _broken(_ctx: ToolResultTransformContext) -> str:
+    msg = "checker unavailable"
+    raise RuntimeError(msg)
 
 
 def test_the_event_is_a_builtin_transformer_with_a_generous_timeout() -> None:
@@ -305,3 +344,134 @@ async def test_without_transform_hooks_the_result_is_the_tool_s_own_object() -> 
 
     assert await tool_policy(_registry(observe))("fetch_page", read, {}) is value
     assert await tool_policy(HookRegistry.empty())("fetch_page", read, {}) is value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("check", "recorded"),
+    [(_prefix, "[checked] raw page"), (_broken, _WITHHELD)],
+)
+async def test_the_reply_s_record_of_the_call_keeps_only_the_checked_result(check: object, recorded: str) -> None:
+    """The record a later attempt replays gets the replacement or the withheld notice, never the raw text."""
+    recorder = _Recorder()
+
+    with recording_tool_calls(recorder):
+        outcome = await _model_reads(_registry(check), "raw page")
+
+    assert outcome.content == recorded
+    assert recorder.started_calls == ["fetch_page"]
+    [finished] = recorder.finished_results
+    finished_text = finished.content if isinstance(finished, ToolValue) else finished
+    assert finished_text == recorded
+
+
+@pytest.mark.asyncio
+async def test_a_call_stopped_during_its_check_stays_started_in_the_reply_s_record() -> None:
+    """A Stop while the check runs propagates and records no result, raw or checked."""
+    recorder = _Recorder()
+    checking = asyncio.Event()
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def slow(_ctx: ToolResultTransformContext) -> None:
+        checking.set()
+        await asyncio.sleep(10)
+
+    with recording_tool_calls(recorder):
+        task = asyncio.create_task(_model_reads(_registry(slow), "raw page"))
+        await checking.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert recorder.started_calls == ["fetch_page"]
+    assert recorder.finished_results == []
+
+
+@pytest.mark.asyncio
+async def test_a_hook_that_swallows_its_deadline_and_returns_withholds_the_result() -> None:
+    """A hook that catches the cancellation its timeout sends and returns anyway has timed out."""
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM, timeout_ms=10)
+    async def stubborn(_ctx: ToolResultTransformContext) -> None:
+        try:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            return
+        return
+
+    outcome = await _model_reads(_registry(stubborn), "raw page")
+
+    assert outcome.content == _WITHHELD
+    assert outcome.is_error
+
+
+@pytest.mark.asyncio
+async def test_a_returned_oauth_prompt_stays_a_connection_prompt_when_a_hook_rewrites_it() -> None:
+    """A hook sees the prompt but cannot rewrite it, so the call is still classified as needing a connection."""
+    seen: list[str] = []
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def prefix(ctx: ToolResultTransformContext) -> str:
+        seen.append(ctx.result)
+        return f"[checked] {ctx.result}"
+
+    prompt = json.dumps({"oauth_connection_required": True, "provider": "github", "connect_url": "https://x.test"})
+    result = await run_tool_call(
+        _function(prompt),
+        {"url": "u"},
+        _CALL_CONTEXT,
+        middleware=(detached_policy(_registry(prefix)),),
+    )
+
+    assert result.status == "connection_required"
+    assert result.value == prompt
+    assert seen == [prompt]
+
+
+@pytest.mark.asyncio
+async def test_a_model_switch_keeps_its_result_and_continuation_when_a_hook_rewrites_it() -> None:
+    """A result that stops the run is read after the call, so a rewrite keeps it as it is."""
+    payload = json.dumps(
+        {"tool": "thread_model", "action": "switch", "status": "ok", "when": "after-toolcall", "model": "large"},
+    )
+    switch = ToolOutcome(content=payload, stop_after_call=True)
+
+    outcome = await _model_reads(_registry(_prefix), switch, name="switch_thread_model")
+
+    assert outcome.content == payload
+    assert outcome.stop_after_call
+    decision = continuation_decision_from_tools(
+        [ReportedCall(tool_call_id="c1", tool_name="switch_thread_model", tool_args={}, result=outcome.content)],
+        original_prompt="hi",
+        continuation_count=0,
+    )
+    assert decision.continuation is not None
+    assert decision.continuation.model_name == "large"
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_result_that_stopped_the_run_still_stops_it() -> None:
+    """The switch already took effect, so the withheld notice keeps the stop."""
+    outcome = await _model_reads(_registry(_broken), ToolOutcome(content="switched", stop_after_call=True))
+
+    assert outcome.content == _WITHHELD
+    assert outcome.is_error
+    assert outcome.stop_after_call
+
+
+@pytest.mark.asyncio
+async def test_a_deeply_nested_call_no_hook_applies_to_keeps_its_result() -> None:
+    """The depth guard withholds only when a hook would check the call."""
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM, agents=["another-agent"])
+    async def elsewhere(_ctx: ToolResultTransformContext) -> str:
+        return "replaced"
+
+    token = _EMIT_DEPTH.set(_MAX_EMIT_DEPTH)
+    try:
+        outcome = await _model_reads(_registry(elsewhere), "raw page")
+    finally:
+        _EMIT_DEPTH.reset(token)
+
+    assert outcome.content == "raw page"
+    assert not outcome.is_error

@@ -37,7 +37,11 @@ from mindroom.hooks import (
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
-from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.oauth.providers import (
+    OAuthConnectionRequired,
+    is_oauth_connection_required_result,
+    oauth_connection_required_payload,
+)
 from mindroom.redaction import REDACTED
 from mindroom.secret_requests import secret_holder, temporary_secrets
 from mindroom.timing import elapsed_ms_since, emit_timing_event
@@ -431,25 +435,39 @@ async def _emit_after_call(
     await emit(resolved_context.hooks.registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
-async def _transformed_result(
-    result: _ToolHookResult,
+def _checked_results(
+    func: Callable[..., Awaitable[_ToolHookResult]],
     resolved_context: _ResolvedToolContext,
     arguments: dict[str, Any],
     tool_name: str,
-) -> _ToolHookResult:
-    """Return ``result`` with the text the model reads as the result-transform hooks leave it, or a withheld notice.
+) -> Callable[..., Awaitable[_ToolHookResult]]:
+    """Return ``func`` with each successful result as the result-transform hooks leave its text, or withheld.
 
-    A value with media keeps its media and flags; any other value stays itself unless a hook replaced its text.
+    The call's record then gets only the checked result. A value with media keeps its media and flags; any other
+    value stays itself unless a hook replaced its text. A control result, an OAuth connection prompt or an outcome
+    that stops the run, is read after the call, so a hook can keep or withhold it but not rewrite it.
     """
-    text = result.content if isinstance(result, ToolValue) else str(result)
-    kwargs = resolved_context.call_hook_context_kwargs(EVENT_TOOL_RESULT_TRANSFORM, arguments)
-    context = ToolResultTransformContext(**kwargs, tool_name=tool_name, result=text)
-    transformed = await emit_tool_result_transform(resolved_context.hooks.registry, context)
-    if transformed is None:
-        return ToolOutcome(content=_WITHHELD_RESULT_TEMPLATE.format(tool_name=tool_name), is_error=True)
-    if transformed == text:
-        return result
-    return replace(result, content=transformed) if isinstance(result, ToolValue) else transformed
+
+    async def checked(**kwargs: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
+        result = await func(**kwargs)
+        if _answered_failure(result):
+            return result
+        text = result.content if isinstance(result, ToolValue) else str(result)
+        stops = isinstance(result, ToolOutcome) and result.stop_after_call
+        control = stops or is_oauth_connection_required_result(text if isinstance(result, ToolValue) else result)
+        context_kwargs = resolved_context.call_hook_context_kwargs(EVENT_TOOL_RESULT_TRANSFORM, arguments)
+        context = ToolResultTransformContext(**context_kwargs, tool_name=tool_name, result=text)
+        transformed = await emit_tool_result_transform(resolved_context.hooks.registry, context)
+        if transformed is None:
+            withheld = _WITHHELD_RESULT_TEMPLATE.format(tool_name=tool_name)
+            return ToolOutcome(content=withheld, is_error=True, stop_after_call=stops)
+        if transformed == text or control:
+            if control and transformed != text:
+                logger.info("Kept a control tool result a result-transform hook rewrote", tool_name=tool_name)
+            return result
+        return replace(result, content=transformed) if isinstance(result, ToolValue) else transformed
+
+    return checked
 
 
 async def _run_before_hooks(
@@ -667,10 +685,6 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         timing.emit_finish(ready, tool_name=tool_name, agent_name=resolved_context.agent_name, outcome=outcome)
 
     async def answer(result: _ToolHookResult, outcome: str) -> _ToolHookResult:
-        # Only a successful result reaches the result-transform hooks; what they leave is what everything after reads.
-        if outcome == "success" and has_transform_hooks:
-            result = await _transformed_result(result, resolved_context, hook_arguments, tool_name)
-            outcome = "result_withheld" if _answered_failure(result) else outcome
         ready = timing.result_ready()
         _record_answer(tool_name, args, result, ready, resolved_context)
         await finish(outcome, ready, result=_observed(result))
@@ -733,11 +747,15 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         await finish("blocked_before_body", timing.result_ready(), error=stopped, blocked=True)
         raise
 
+    # Given secrets are masked before the result-transform hooks see the result, and the record gets what they leave.
+    tool = _without_given_secrets(func, given)
+    if has_transform_hooks:
+        tool = _checked_results(tool, resolved_context, hook_arguments, tool_name)
     tool_body_started_at = time.perf_counter()
     try:
         with collected_tool_environment(environment):
             result = await _call_recorded_tool(
-                _without_given_secrets(func, given),
+                tool,
                 args,
                 tool_name=tool_name,
                 agent_name=resolved_context.agent_name,
