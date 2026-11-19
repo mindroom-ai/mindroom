@@ -57,6 +57,7 @@ class Harness:
     personal_rooms: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
+        """Build the config, the client and the fakes."""
         self.config = bind_runtime_paths(
             Config(
                 agents={"code": AgentConfig(display_name="Code", role="Write code", include_default_tools=False)},
@@ -385,3 +386,14 @@ async def test_revoke_after_use_reports_claimant(harness: Harness) -> None:
     used = store.find_by_code(harness.paths, code)
     assert used is not None
     assert used.revoked is False
+
+
+@pytest.mark.asyncio
+async def test_resend_at_cap_keeps_old_link(harness: Harness) -> None:
+    """A resend that a cap refuses leaves the link already sent working."""
+    harness.smtp = False
+    codes = [_code_from(await harness.call("invite_by_email", BAS, "alice@example.com")) for _ in range(3)]
+    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    assert result == "Error: limit reached: at most 3 mails per address per day."
+    assert store.find_by_code(harness.paths, codes[-1]) is not None
+    assert len(harness.rows()) == 1

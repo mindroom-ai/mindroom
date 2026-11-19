@@ -37,19 +37,15 @@ async def may_invite(
         return True
     try:
         membership = await get_room_membership(client, room_id, user_id)
-        if membership is None:
-            return None
         if membership != "join":
-            return False
+            return None if membership is None else False
         power_levels = await client.room_get_state_event(room_id, "m.room.power_levels")
-        if not isinstance(power_levels, nio.RoomGetStateEventResponse) or not isinstance(power_levels.content, dict):
-            logger.warning("email_invite_power_levels_unreadable", room_id=room_id, error=str(power_levels))
-            return None
         creators = await read_room_creators(client, room_id)
     except (aiohttp.ClientError, TimeoutError):
         logger.warning("email_invite_room_state_unreadable", room_id=room_id, exc_info=True)
         return None
-    if creators is None:
+    if creators is None or not isinstance(power_levels, nio.RoomGetStateEventResponse):
+        logger.warning("email_invite_room_state_unreadable", room_id=room_id, error=str(power_levels))
         return None
     return user_power_level(power_levels.content, user_id, creators) >= invite_power_level(power_levels.content)
 
