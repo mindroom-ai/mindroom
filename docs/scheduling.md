@@ -386,7 +386,7 @@ Each run keeps its agenda and report, and a run that reached review also its pat
 | `model` | the agent's model | A key of `models` to run both prompts with |
 
 `dreaming` needs `memory_backend: file` and something to work from: [auto-flush](memory.md#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](thread-exports.md) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
-It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+It also needs a tool that writes workspace files, such as `filesystem` or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
 Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.
 
 ### `exploration`

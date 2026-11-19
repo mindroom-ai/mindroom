@@ -14,11 +14,11 @@ What a person may do there follows the agent's tools, as its turns build them wi
 
 | Access | When |
 |--------|------|
-| `read` | The agent has a tool that takes local file paths or runs code, such as `file`, `coding`, `shell`, or `python` |
+| `read` | The agent has a tool that takes local file paths or runs code, such as `filesystem`, `shell`, or `python` |
 | `write` | One of those tools can change files in the workspace, and the person may post messages in the room |
 
-A tool can change files when the agent's settings leave on one of its writing functions, such as `save_file` or `replace_file_chunk` of `file` or `write_file` or `edit_file` of `coding`, or when it runs code, as `shell`, `python`, and `script` do.
-So `file` with `enable_save_file: false` and `enable_replace_file_chunk: false`, and without `all: true`, gives only `read`, and `include_tools` or `exclude_tools` can take writing functions away.
+A tool can change files when the agent's settings leave on one of its writing functions, such as `write_file`, `edit_file`, or `delete_file` of `filesystem`, or when it runs code, as `shell`, `python`, and `script` do.
+So `filesystem` with `exclude_tools: [write_file, edit_file]`, and without `enable_delete_file: true`, gives only `read`.
 A tool changes files in the workspace where it runs in the primary process, in a dedicated Docker or Kubernetes worker, or on a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](deployment/sandbox-proxy.md#filesystem-isolation-and-agent-data); on a `static_runner` that sees only its own storage it changes that storage instead, so it gives only `read`.
 An agent with none of these tools opens no workspace.
 The agent sees a saved file on its next tool call; nothing needs restarting.
