@@ -163,7 +163,6 @@ visibility = [
     "mindroom.journal_dispatch",
     "mindroom.turns.ingress",
     "mindroom.voice.ingress",
-    "mindroom.voice.visible_voice_echo",
 ]
 
 [[modules]]
@@ -4560,7 +4559,6 @@ visibility = [
     "mindroom.thread_export.execution",
     "mindroom.thread_tags",
     "mindroom.visible_response_reconciliation",
-    "mindroom.voice.visible_voice_echo",
 ]
 
 [[modules]]
