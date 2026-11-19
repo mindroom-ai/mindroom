@@ -23,10 +23,11 @@ from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation import lifecycle as delegation_lifecycle
 from mindroom.delegation import recovery as delegation_recovery
+from mindroom.delegation.activity import ActivityFeed
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import SUBAGENT_BUSY
-from mindroom.delegation.state import RESTART_INTERRUPTION_REASON
+from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, TERMINAL_CHILD_STATUSES
 from mindroom.event_journal import ApprovalDecisionMetadata, BackgroundApprovalDecision, CallKey, tool_job_run_id
 from mindroom.event_journal.replies import ReplyStopped
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT
@@ -456,6 +457,47 @@ async def test_the_frames_say_a_restart_cut_a_turn_short_and_not_that_its_contin
     await asyncio.wait_for(continued.wait(), JOB_TEST_TIMEOUT)
     assert len({snapshot.delegation_id for snapshot in snapshots}) == 2
     assert ends() == [("failed", True), ("completed", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_whose_settlement_fails_still_ends_the_cut_short_turns_frames_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shutdown that cannot settle the turn it stopped still ends its feed, as cancelled, instead of leaving it running."""
+    snapshots: list[Any] = []
+    ended = asyncio.Event()
+
+    def sink(snapshot: Any) -> None:  # noqa: ANN401
+        snapshots.append(snapshot)
+        if snapshot.status in TERMINAL_CHILD_STATUSES:
+            ended.set()
+
+    async def unreadable(*_args: object) -> None:
+        msg = "storage unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr(delegation_lifecycle, "_subagent_sink", lambda *_: sink)
+    with registered_probe_tools() as probe:
+        conversation = _Conversation(tmp_path, monkeypatch, config=delegating_config(child_tools=[PROBE_TOOL]))
+        await conversation.open(calls(tool_call("read_file", "read", path="a")), _hang("shell"), answer("Continued"))
+        try:
+            await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
+            await asyncio.wait_for(probe.running.wait(), JOB_TEST_TIMEOUT)
+            monkeypatch.setattr(delegation_recovery, "read_child_run", unreadable)
+            await conversation.restart()
+            await asyncio.wait_for(ended.wait(), JOB_TEST_TIMEOUT)
+        finally:
+            monkeypatch.undo()
+            await conversation.close()
+
+    [terminal] = [snapshot for snapshot in snapshots if snapshot.status in TERMINAL_CHILD_STATUSES]
+    assert (terminal.status, terminal.result_preview, terminal.interrupted_by_restart) == (
+        "cancelled",
+        "Delegation cancelled.",
+        False,
+    )
+    assert ActivityFeed.find(terminal.delegation_id) is None
 
 
 @pytest.mark.asyncio

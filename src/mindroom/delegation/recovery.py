@@ -6,6 +6,7 @@ import asyncio
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.delegation.activity import ActivityFeed
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.hooks import after_delegation
@@ -164,14 +165,19 @@ async def interrupt_stopped_child(
     keeps that turn as the restart left it, for a follow-up to continue.
     """
     shutdown = job_stopped_by_shutdown()
-    await interrupt_child(
-        child,
-        config=config,
-        runtime_paths=runtime_paths,
-        reason=RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
-        status="failed" if shutdown else "cancelled",
-        restart=shutdown,
-    )
+    try:
+        await interrupt_child(
+            child,
+            config=config,
+            runtime_paths=runtime_paths,
+            reason=RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
+            status="failed" if shutdown else "cancelled",
+            restart=shutdown,
+        )
+    finally:
+        # A settlement that failed left the feed its attempt's exit kept open for it (`_publish_exit`); it ends cancelled.
+        if shutdown and (feed := ActivityFeed.find(child.delegation_id)) is not None:
+            feed.status("cancelled", result=cancel_reason)
     if not shutdown and interrupted_by_restart(child):
         child.status, child.result = "cancelled", cancel_reason
 
