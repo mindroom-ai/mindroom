@@ -62,6 +62,7 @@ __all__ = [
     "InactiveUserService",
     "ServiceSource",
     "UserServiceConflictError",
+    "check_new_user_service",
     "consistent_read",
     "delete_user_service",
     "effective_config",
@@ -70,6 +71,7 @@ __all__ = [
     "save_user_service",
     "service_source",
     "services_for_agent",
+    "user_service_hosts_error",
     "user_service_hosts_not_allowed",
 ]
 
@@ -183,13 +185,15 @@ def save_user_service(
     *,
     config_services: Mapping[str, EgressService],
     oauth_providers: Collection[str],
+    only_new: bool = False,
 ) -> None:
     """Add or replace one of the scope's services, stored as authored so a preset stays a preset.
 
     A new name starts without a key: any key stored under it in the scope, for example one left by a removed config
     service, is deleted first. Replacing an existing service keeps its key, unless it becomes `restrict_only` or
     `oauth_separate_account`, which never use one, so unticking the box later brings back no key. `oauth_providers`
-    holds the ids of the registry's providers (`ConfigPlugins.oauth_providers`).
+    holds the ids of the registry's providers (`ConfigPlugins.oauth_providers`). `only_new` refuses a name the scope
+    already stores, an inactive entry's included, instead of replacing it.
 
     Raises UserServiceConflictError when `config_services` has the name, and ValueError for an invalid name, a
     service that sets `oauth_on_shared_workers`, `admin_key`, `agents`, or `github_app`, an OAuth provider (a preset's
@@ -197,25 +201,16 @@ def save_user_service(
     send off its provider's preset hosts, a placeholder user services may not set, a service with more than 50 rules or
     over 16 KiB, a 51st service in the scope, or a scope document over 256 KiB.
     """
-    validate_egress_service_name(name)
-    if name in config_services:
-        raise UserServiceConflictError(name)
-    _check_user_service(service)
-    for variable, value in service.placeholder_env.items():
-        if error := _placeholder_error(variable, value):
-            raise ValueError(error)
-    if error := _oauth_provider_error(service, target, oauth_providers):
-        raise ValueError(error)
     with _write_lock:
-        stored = _stored_services(manager, target)
-        new = name not in stored
-        if new and len(stored) >= MAX_USER_SERVICES:
-            msg = f"a scope can have at most {MAX_USER_SERVICES} services of its own; delete one before adding another"
-            raise ValueError(msg)
-        stored[name] = service.authored_model_dump()
-        if _json_size({"services": stored}) > MAX_DOCUMENT_BYTES:
-            msg = f"a scope's own services can take at most {MAX_DOCUMENT_BYTES // 1024} KiB together"
-            raise ValueError(msg)
+        stored, new = _stored_with(
+            manager,
+            target,
+            name,
+            service,
+            config_services=config_services,
+            oauth_providers=oauth_providers,
+            only_new=only_new,
+        )
         try:
             if new or service.restrict_only or service.oauth_separate_account:
                 delete_secret(manager, target, name)
@@ -256,6 +251,67 @@ def delete_user_service(
         finally:
             _cache.invalidate()
     return True
+
+
+def check_new_user_service(
+    config: EgressBrokerConfig,
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    service: EgressService,
+    *,
+    oauth_providers: Collection[str],
+) -> None:
+    """Raise as the Agent Keys page would refuse adding `service` as the scope's new service `name`, writing nothing.
+
+    That is `save_user_service` with `only_new`, plus the hosts `config` keeps closed (`user_service_hosts_error`).
+    """
+    if error := user_service_hosts_error(config, service):
+        raise ValueError(error)
+    _stored_with(
+        manager,
+        target,
+        name,
+        service,
+        config_services=config.services,
+        oauth_providers=oauth_providers,
+        only_new=True,
+    )
+
+
+def _stored_with(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    service: EgressService,
+    *,
+    config_services: Mapping[str, EgressService],
+    oauth_providers: Collection[str],
+    only_new: bool,
+) -> tuple[dict[str, object], bool]:
+    """Return the scope's stored entries with `service` as `name` and whether the name is new, or raise as a save does."""
+    validate_egress_service_name(name)
+    if name in config_services:
+        raise UserServiceConflictError(name)
+    _check_user_service(service)
+    for variable, value in service.placeholder_env.items():
+        if error := _placeholder_error(variable, value):
+            raise ValueError(error)
+    if error := _oauth_provider_error(service, target, oauth_providers):
+        raise ValueError(error)
+    stored = _stored_services(manager, target)
+    new = name not in stored
+    if only_new and not new:
+        msg = f"service name '{name}' is already used by a service of your own"
+        raise ValueError(msg)
+    if new and len(stored) >= MAX_USER_SERVICES:
+        msg = f"a scope can have at most {MAX_USER_SERVICES} services of its own; delete one before adding another"
+        raise ValueError(msg)
+    stored[name] = service.authored_model_dump()
+    if _json_size({"services": stored}) > MAX_DOCUMENT_BYTES:
+        msg = f"a scope's own services can take at most {MAX_DOCUMENT_BYTES // 1024} KiB together"
+        raise ValueError(msg)
+    return stored, new
 
 
 @contextlib.contextmanager
@@ -322,6 +378,17 @@ def user_service_hosts_not_allowed(config: EgressBrokerConfig, service: EgressSe
         return []
     hosts = [rule.host for rule in service.rules if not config_covers_rule(config, rule)]
     return list(dict.fromkeys(hosts))
+
+
+def user_service_hosts_error(config: EgressBrokerConfig, service: EgressService) -> str | None:
+    """Return why a save refuses `service`'s hosts (`user_service_hosts_not_allowed`), or None when it does not."""
+    hosts = user_service_hosts_not_allowed(config, service)
+    if not hosts:
+        return None
+    return (
+        "Your administrator only allows requests to hosts that one of its own services covers, "
+        f"so these hosts cannot be used: {', '.join(hosts)}"
+    )
 
 
 def _oauth_provider_hosts() -> dict[str, tuple[str, ...]]:

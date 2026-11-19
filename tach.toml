@@ -5863,6 +5863,8 @@ depends_on = ["mindroom.credentials.policy", "mindroom.egress_broker"]
 path = "mindroom.custom_tools.egress_credentials"
 depends_on = [
     "mindroom.approval.tool_approval",
+    "mindroom.config.egress_broker",
+    "mindroom.config.main",
     "mindroom.egress_broker",
     "mindroom.runtime_resolution",
     "mindroom.secret_request_cards",

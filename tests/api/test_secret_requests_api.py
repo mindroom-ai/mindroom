@@ -29,10 +29,12 @@ from mindroom.api.client_sessions import client_session_store
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.egress_broker import EgressService
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
 from mindroom.egress_broker.secrets import load_secret, save_secret
+from mindroom.egress_broker.user_services import load_user_services, save_user_service
 from mindroom.message_target import MessageTarget
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
@@ -133,15 +135,26 @@ def ask() -> Iterator[Callable[..., PendingSecretRequest]]:
     registry = secret_request_registry()
     registered: list[str] = []
 
-    def ask(agent: str = "code", *, room_id: str = ROOM, now: float | None = None) -> PendingSecretRequest:
+    def ask(
+        agent: str = "code",
+        *,
+        room_id: str = ROOM,
+        now: float | None = None,
+        new_service: dict[str, object] | None = None,
+    ) -> PendingSecretRequest:
+        """Ask for the GitHub key, or for the key of the new service `acme` the agent proposes as `new_service`."""
+        proposed = (
+            None if new_service is None else EgressService.model_validate({**new_service, "oauth_provider": None})
+        )
         request = registry.register(
             room_id=room_id,
             requester_id=ALICE,
             agent_name=agent,
             target=KeyTarget(
-                service="github",
+                service="github" if proposed is None else "acme",
                 worker_target=worker_target(ALICE, agent, scope=SCOPES[agent]),
-                hosts=("api.github.com",),
+                hosts=("api.github.com",) if proposed is None else tuple(sorted({r.host for r in proposed.rules})),
+                new_service=proposed,
             ),
             now=time.time() if now is None else now,
         )
@@ -506,6 +519,105 @@ async def test_value_never_logged(
             "user_id": ALICE,
         },
     ]
+
+
+ACME: dict[str, object] = {
+    "display_name": "Acme",
+    "rules": [{"host": "api.acme.test", "path_prefix": "/v1/", "auth": {"type": "bearer"}}],
+}
+
+
+def _own_services(room: _Room, request: PendingSecretRequest) -> dict[str, EgressService]:
+    return load_user_services(get_runtime_credentials_manager(room.paths), request.target.worker_target)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent", ["code", "team"])
+async def test_saving_a_proposed_service_adds_it_with_the_key(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    agent: str,
+) -> None:
+    """Save adds the service the card proposed to the agent's scope, as one of the user's own, and stores its key."""
+    request = ask(agent, new_service=ACME)
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": SECRET})
+
+    assert response.status_code == 204
+    assert request.outcome.result() == "saved"
+    services = _own_services(room, request)
+    assert {name: service.authored_model_dump() for name, service in services.items()} == {
+        "acme": {**ACME, "oauth_provider": None},
+    }
+    manager = get_runtime_credentials_manager(room.paths)
+    assert load_secret(manager, request.target.worker_target, "acme") == SECRET
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["config-took-the-name", "own-service-took-the-name", "hosts-now-denied"])
+async def test_a_proposed_service_the_config_served_now_refuses_expires(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    change: str,
+) -> None:
+    """The proposal is checked again against the config served now; a refusal ends the request and adds nothing."""
+    request = ask(new_service=ACME)
+    manager = get_runtime_credentials_manager(room.paths)
+    mine = EgressService.model_validate({"rules": [{"host": "api.mine.test", "auth": {"type": "bearer"}}]})
+    if change == "config-took-the-name":
+        room.serve(_config(services={"github": GITHUB, "acme": GITHUB}))
+    elif change == "own-service-took-the-name":
+        save_user_service(manager, request.target.worker_target, "acme", mine, config_services={}, oauth_providers=())
+    else:
+        config = _config()
+        broker = config.egress_broker.model_copy(update={"unmatched_hosts": "deny"})
+        room.serve(config.model_copy(update={"egress_broker": broker}))
+
+    response = await _answer(room, ALICE, request.request_id, {"secret": SECRET})
+
+    assert (response.status_code, response.json()) == (404, {"detail": NOT_ACTIVE})
+    assert request.outcome.result() == "expired"
+    own = _own_services(room, request)
+    assert own == ({"acme": mine} if change == "own-service-took-the-name" else {})
+    assert load_secret(manager, request.target.worker_target, "acme") is None
+
+
+@pytest.mark.asyncio
+async def test_a_key_that_fails_to_save_takes_the_proposed_service_back(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No service without its key stays behind, and the request stays pending for another try."""
+    request = ask(new_service=ACME)
+
+    def failing_save(*_args: object, **_kwargs: object) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr(secret_requests, "save_secret", failing_save)
+    with pytest.raises(OSError, match="disk full"):
+        await _answer(room, ALICE, request.request_id, {"secret": SECRET})
+
+    assert _own_services(room, request) == {}
+    assert not request.outcome.done()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{"decline": True}, {"secret": "a\nb"}], ids=["decline", "invalid-key"])
+async def test_a_decline_or_a_refused_key_adds_no_proposed_service(
+    room: _Room,
+    ask: Callable[..., PendingSecretRequest],
+    body: dict[str, object],
+) -> None:
+    """Only a saved key adds the service; a refused value leaves the request pending."""
+    request = ask(new_service=ACME)
+
+    response = await _answer(room, ALICE, request.request_id, body)
+
+    assert response.status_code == (204 if "decline" in body else 422)
+    assert _own_services(room, request) == {}
+    assert load_secret(get_runtime_credentials_manager(room.paths), request.target.worker_target, "acme") is None
 
 
 TEMPORARY = "open-sesame-123"

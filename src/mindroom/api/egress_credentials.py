@@ -70,7 +70,7 @@ from mindroom.egress_broker.user_services import (
     load_user_services,
     save_user_service,
     service_source,
-    user_service_hosts_not_allowed,
+    user_service_hosts_error,
 )
 from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking, resolve_oauth_credential_context
 from mindroom.oauth.registry import snapshot_oauth_providers
@@ -495,13 +495,8 @@ def _parse_user_service(body: object) -> EgressService:
 
 def _require_hosts_within_operator_policy(operator: EgressBrokerConfig, service: EgressService) -> None:
     """Refuse a service whose rules would apply on hosts that `unmatched_hosts: deny` keeps closed."""
-    hosts = user_service_hosts_not_allowed(operator, service)
-    if hosts:
-        msg = (
-            "Your administrator only allows requests to hosts that one of its own services covers, "
-            f"so these hosts cannot be used: {', '.join(hosts)}"
-        )
-        raise _unprocessable(msg)
+    if error := user_service_hosts_error(operator, service):
+        raise _unprocessable(error)
 
 
 @router.get("/agents/{agent_name}/services/{name}")
