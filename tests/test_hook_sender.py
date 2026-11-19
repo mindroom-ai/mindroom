@@ -57,7 +57,11 @@ from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher
-from tests.access_schema_support import refresh_memberships, with_current_room_member_access
+from tests.access_schema_support import (
+    refresh_memberships,
+    with_current_room_member_access,
+    with_responder_access,
+)
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -1856,8 +1860,9 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
     """A responder enforces room authorization against a hook dispatch's preserved requester.
 
     The room's steward takes such a message only to route it, and each candidate applies its own access.
+    The responder's access admits the account that sent the event, so only the preserved requester refuses it.
     """
-    bot = _wired_bot(_config(tmp_path), "code")
+    bot = _wired_bot(with_responder_access(_config(tmp_path), "code", users=["@mindroom_router:localhost"]), "code")
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
@@ -1869,27 +1874,30 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
         room_id=room.room_id,
     )
     await refresh_memberships(bot._runtime_view.agent_reply_memberships, bot.config, bot.runtime_paths, bot.client)
-    event = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$unauthorized-hook-dispatch",
-            "sender": "@mindroom_router:localhost",
-            "origin_server_ts": 1234567890,
-            "content": {
-                "msgtype": "m.text",
-                "body": "restart notification",
-                SOURCE_KIND_KEY: "hook_dispatch",
-                "com.mindroom.hook_source": "hook-plugin:agent:started",
-                ORIGINAL_SENDER_KEY: "@unauthorized:localhost",
-            },
-        },
-    )
 
-    assert (
-        await bot._turn_ingress._precheck_dispatch_event(
-            room,
-            event,
-            bot._ingress_validator.classify(event, room_id=room.room_id),
+    def hook_dispatch(event_id: str, **preserved: str) -> nio.RoomMessageText:
+        return nio.RoomMessageText.from_dict(
+            {
+                "event_id": event_id,
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "restart notification",
+                    SOURCE_KIND_KEY: "hook_dispatch",
+                    "com.mindroom.hook_source": "hook-plugin:agent:started",
+                    **preserved,
+                },
+            },
         )
-        is False
-    )
+
+    async def precheck(event: nio.RoomMessageText) -> bool:
+        facts = bot._ingress_validator.classify(event, room_id=room.room_id)
+        return await bot._turn_ingress._precheck_dispatch_event(room, event, facts)
+
+    # The same dispatch with no preserved requester passes, so the refusal below is the requester's.
+    assert await precheck(hook_dispatch("$own-hook-dispatch")) is True
+    turn_store.record_turn.assert_not_called()
+    event = hook_dispatch("$unauthorized-hook-dispatch", **{ORIGINAL_SENDER_KEY: "@unauthorized:localhost"})
+    assert await precheck(event) is False
     turn_store.record_turn.assert_called_once_with(TurnRecord.create([event.event_id]), room_id=room.room_id)
