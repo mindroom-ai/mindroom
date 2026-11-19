@@ -103,7 +103,7 @@ Host the dashboard on the app's public origin or on [its own host](#dashboard-on
 | `500 Trusted upstream auth is enabled but <variable> is not set` | Set the named variable |
 | `500 Trusted upstream email mapping requires a valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` | Use exactly one `{localpart}` in a valid Matrix ID template and set the email domain |
 | `401 Missing trusted upstream JWT header: <header>` | The gateway did not send its assertion; check its routing and that it signs requests for this application |
-| `401 Invalid trusted upstream JWT` | The JWT is expired, signed by an unknown key, for the wrong issuer or audience, or lacks a configured claim |
+| `401 Invalid trusted upstream JWT` | The JWT is expired, signed by an unknown key, for the wrong issuer or audience, or lacks a configured claim; a `Trusted upstream JWT rejected` warning in the MindRoom log names the error |
 | `401 Invalid trusted upstream email identity` | The email is outside `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` |
 | `401 Invalid trusted upstream Matrix user id` | The Matrix claim is not a valid Matrix user ID |
 | `403 Administrator access required` | With `MINDROOM_CONNECTIONS_AGENT` set, only `administrators` reach ordinary dashboard routes |
