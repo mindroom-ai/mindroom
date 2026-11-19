@@ -10,7 +10,6 @@ from urllib.parse import quote
 from mindroom.constants import (
     COPIED_MENTIONS_KEY,
     ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     TOOL_TRACE_CONTENT_KEY,
     UNFINISHED_REPLY_STATUSES,
@@ -45,7 +44,6 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.entity_resolution import EntityIdentityRegistry
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -73,7 +71,6 @@ _COPIED_CONTENT_KEYS = (
 class _PlannedCopy:
     """One message to re-post in the target thread, without its thread relation."""
 
-    poster: str
     content: dict[str, Any]
 
 
@@ -81,15 +78,15 @@ def _plan_thread_copy(
     messages: Sequence[ResolvedVisibleMessage],
     *,
     entity_name_for_sender: Callable[[str], str | None],
-    target_posters: frozenset[str],
+    mover_id: str,
     display_names: Mapping[str, str],
     mentioned_user_ids: Callable[[dict[str, Any]], list[str]],
 ) -> list[_PlannedCopy]:
     """Return the posts that recreate one thread's conversation in another room.
 
-    An entity that can post in the target room re-posts its own messages as
-    they appeared, so each agent still sees its earlier replies as its own
-    turns. Everyone else is relayed by the router with their name visible.
+    The moving agent, ``mover_id``, re-posts its own messages as they appeared,
+    so it still sees its earlier replies as its own turns. It re-posts
+    everyone else's with their name visible.
     """
     plan: list[_PlannedCopy] = []
     for message in messages:
@@ -102,23 +99,24 @@ def _plan_thread_copy(
         if mentioned := mentioned_user_ids(message.content):
             # The copy keeps counting them as mentioned earlier in the thread, so a team the thread formed carries on.
             content[COPIED_MENTIONS_KEY] = mentioned
-        entity = entity_name_for_sender(message.sender)
+        named = message.sender == mover_id
         speaks_for = message.content.get(ORIGINAL_SENDER_KEY)
-        if entity is not None and isinstance(speaks_for, str) and speaks_for:
+        if entity_name_for_sender(message.sender) is not None and isinstance(speaks_for, str) and speaks_for:
             # MindRoom's own posts on someone's behalf (voice transcripts,
             # handoffs, earlier move copies) keep who they speak for, because
             # prompts label them with that person. A human's own field is never copied,
             # so a person cannot make a copy claim another author.
             content[ORIGINAL_SENDER_KEY] = speaks_for
-        poster = entity if entity is not None and entity in target_posters else ROUTER_AGENT_NAME
-        if poster != entity:
+            # An earlier move's copy, which mentions nobody, already names its author.
+            named = named or message.content.get(SKIP_MENTIONS_KEY) is True
+        if not named:
             _attribute_relay(content, message.sender, display_names.get(message.sender, message.sender))
-        plan.append(_PlannedCopy(poster=poster, content=content))
+        plan.append(_PlannedCopy(content=content))
     return plan
 
 
 def _attribute_relay(content: dict[str, Any], sender: str, name: str) -> None:
-    """Name the original poster on a router-posted copy."""
+    """Name the original poster on a copy of someone else's message."""
     # No source kind: the relay is attributed in prompts but never becomes a human turn.
     content.setdefault(ORIGINAL_SENDER_KEY, sender)
     body = str(content.get("body", ""))
@@ -141,7 +139,6 @@ class _PreparedMove:
     last_event_id: str
     plan: list[_PlannedCopy]
     skipped: int
-    poster_clients: dict[str, nio.AsyncClient]
 
 
 class ThreadMoveTools(Toolkit):
@@ -181,7 +178,7 @@ class ThreadMoveTools(Toolkit):
                 relation = build_thread_relation(new_root_id, latest_thread_event_id=previous_event_id)
                 content = {**content, "m.relates_to": relation}
             delivered = await send_message_result(
-                prepared.poster_clients[planned.poster],
+                context.client,
                 prepared.target_room_id,
                 content,
                 operation="thread_move",
@@ -235,10 +232,9 @@ async def _prepare_move(  # noqa: PLR0911
         return "The thread is already in this room."
     # Membership comes first: an agent missing from the target room cannot
     # read its members, which the access check would report as a denial.
-    registry = entity_identity_registry(context.current_config, context.runtime_paths)
-    poster_clients = await _target_poster_clients(context, registry, target_room_id)
-    if isinstance(poster_clients, str):
-        return poster_clients
+    members = await get_room_members(context.client, target_room_id)
+    if members is None or context.client.user_id not in members:
+        return f"Invite {context.transport_agent_name or context.agent_name} to the target room before moving a thread there."
     if not await room_access_allowed(context, target_room_id):
         return "Not authorized to access the target room."
     history = await complete_thread_history(context.conversation_reader, context.room_id, root_id)
@@ -249,8 +245,11 @@ async def _prepare_move(  # noqa: PLR0911
         return encryption_error
     plan = _plan_thread_copy(
         history,
-        entity_name_for_sender=registry.current_entity_name_for_user_id,
-        target_posters=frozenset(poster_clients),
+        entity_name_for_sender=entity_identity_registry(
+            context.current_config,
+            context.runtime_paths,
+        ).current_entity_name_for_user_id,
+        mover_id=context.client.user_id,
         display_names=room_member_display_names(context.room) if context.room is not None else {},
         mentioned_user_ids=lambda content: history_mentioned_user_ids(
             content,
@@ -266,32 +265,7 @@ async def _prepare_move(  # noqa: PLR0911
         last_event_id=history[-1].event_id,
         plan=plan,
         skipped=len(history) - len(plan),
-        poster_clients=poster_clients,
     )
-
-
-async def _target_poster_clients(
-    context: ToolRuntimeContext,
-    registry: EntityIdentityRegistry,
-    target_room_id: str,
-) -> dict[str, nio.AsyncClient] | str:
-    """Return the clients of running entities joined to the target room, or why the move cannot post there."""
-    router_error = "The router must be in the target room to move a thread."
-    orchestrator = context.orchestrator
-    router_client = orchestrator.running_entity_client(ROUTER_AGENT_NAME) if orchestrator is not None else None
-    if orchestrator is None or router_client is None:
-        return router_error
-    members = await get_room_members(router_client, target_room_id)
-    if members is None or router_client.user_id not in members:
-        return router_error
-    if context.client.user_id not in members:
-        return f"Invite {context.transport_agent_name or context.agent_name} to the target room before moving a thread there."
-    clients: dict[str, nio.AsyncClient] = {}
-    for entity_name, matrix_id in registry.current_ids.items():
-        client = orchestrator.running_entity_client(entity_name)
-        if client is not None and matrix_id.full_id in members:
-            clients[entity_name] = client
-    return clients
 
 
 async def _encryption_error(client: nio.AsyncClient, source_room_id: str, target_room_id: str) -> str | None:

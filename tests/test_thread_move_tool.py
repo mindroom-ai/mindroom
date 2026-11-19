@@ -81,17 +81,16 @@ def _plan(
     return _plan_thread_copy(
         messages,
         entity_name_for_sender=ENTITY_IDS.get,
-        target_posters=frozenset({"code", ROUTER_AGENT_NAME}),
+        mover_id=CODE_ID,
         display_names=display_names if display_names is not None else {HUMAN_ID: "Dominic"},
         mentioned_user_ids=lambda _content: list(mentioned_user_ids or []),
     )
 
 
-def test_plan_posts_entity_messages_as_their_own_account() -> None:
-    """An entity joined to the target room re-posts its own message unchanged."""
+def test_plan_posts_the_movers_messages_as_they_appeared() -> None:
+    """The moving agent re-posts its own message unchanged."""
     [copy] = _plan(_message(CODE_ID, {"msgtype": "m.text", "body": "done"}, "$reply:example.org"))
 
-    assert copy.poster == "code"
     assert copy.content["body"] == "done"
     assert ORIGINAL_SENDER_KEY not in copy.content
 
@@ -100,15 +99,21 @@ def test_plan_posts_entity_messages_as_their_own_account() -> None:
     "body",
     ["🎤 fix the parser", "@code could you help with this?", "Dominic: hi from an earlier move"],
 )
-def test_plan_reposts_the_routers_own_relays_as_they_appeared(body: str) -> None:
+def test_plan_reposts_the_movers_own_relays_as_they_appeared(body: str) -> None:
     """Voice transcripts, handoffs, and earlier move copies keep who they speak for, without a second name."""
-    [copy] = _plan(
-        _message("@mindroom_router:example.org", {"msgtype": "m.text", "body": body, ORIGINAL_SENDER_KEY: HUMAN_ID}),
-    )
+    [copy] = _plan(_message(CODE_ID, {"msgtype": "m.text", "body": body, ORIGINAL_SENDER_KEY: HUMAN_ID}))
 
-    assert copy.poster == ROUTER_AGENT_NAME
     assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
     assert copy.content["body"] == body
+
+
+def test_plan_reposts_another_movers_copy_without_a_second_name() -> None:
+    """A copy an earlier move posted through another account already names its author."""
+    earlier = {"msgtype": "m.text", "body": "Dominic: hi", ORIGINAL_SENDER_KEY: HUMAN_ID, SKIP_MENTIONS_KEY: True}
+    [copy] = _plan(_message(ABSENT_ID, earlier), display_names={ABSENT_ID: "Research"})
+
+    assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert copy.content["body"] == "Dominic: hi"
 
 
 def test_plan_names_the_poster_of_a_relayed_delegation() -> None:
@@ -121,7 +126,6 @@ def test_plan_names_the_poster_of_a_relayed_delegation() -> None:
         display_names={HUMAN_ID: "Dominic", ABSENT_ID: "Research"},
     )
 
-    assert copy.poster == ROUTER_AGENT_NAME
     assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
     assert copy.content["body"] == "Research: @code please check the logs"
 
@@ -134,16 +138,14 @@ def test_plan_ignores_relay_attribution_claimed_by_a_human() -> None:
     assert copy.content["body"] == "Dominic: hi"
 
 
-def test_plan_relays_human_and_absent_entity_messages_through_router() -> None:
-    """Humans and entities missing from the target room are relayed by the router."""
+def test_plan_attributes_human_and_other_entity_messages_to_their_authors() -> None:
+    """Messages of people and of entities other than the mover name their author."""
     human, absent = _plan(
         _message(HUMAN_ID, {"msgtype": "m.text", "body": "hi"}),
         _message(ABSENT_ID, {"msgtype": "m.text", "body": "found it"}),
     )
 
-    assert human.poster == ROUTER_AGENT_NAME
     assert human.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
-    assert absent.poster == ROUTER_AGENT_NAME
     assert absent.content[ORIGINAL_SENDER_KEY] == ABSENT_ID
 
 
@@ -302,16 +304,6 @@ REQUESTER_ID = "@user:localhost"
 MODULE = "mindroom.custom_tools.thread_move"
 
 
-class _Orchestrator:
-    """Lend running entities' clients the way the live orchestrator does."""
-
-    def __init__(self, clients: dict[str, AsyncMock]) -> None:
-        self.clients = clients
-
-    def running_entity_client(self, entity_name: str) -> AsyncMock | None:
-        return self.clients.get(entity_name)
-
-
 @dataclass
 class _Move:
     context: ToolRuntimeContext
@@ -323,13 +315,13 @@ class _Move:
 class _MatrixMocks:
     send: AsyncMock
     set_tag: AsyncMock
+    members: AsyncMock
 
 
 def _move(
     tmp_path: Path,
     *,
     thread_id: str | None = ROOT_ID,
-    running: tuple[str, ...] = ("general", "code", ROUTER_AGENT_NAME),
 ) -> _Move:
     config = bind_runtime_paths(
         Config(agents={name: AgentConfig(display_name=name.title()) for name in ("general", "code", "research")}),
@@ -337,19 +329,18 @@ def _move(
     )
     runtime_paths = runtime_paths_for(config)
     ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, runtime_paths).items()}
-    clients = {name: make_matrix_client_mock(user_id=ids[name]) for name in running}
+    clients = {"general": make_matrix_client_mock(user_id=ids["general"])}
     room = nio.MatrixRoom(SOURCE_ROOM_ID, ids["general"])
     room.add_member(REQUESTER_ID, "Dominic", None)
     context = make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(room_id=SOURCE_ROOM_ID, thread_id=thread_id, reply_to_event_id=None),
         requester_id=REQUESTER_ID,
-        client=clients.get("general", make_matrix_client_mock(user_id=ids["general"])),
+        client=clients["general"],
         config=config,
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        orchestrator=_Orchestrator(clients),
         room=room,
     )
     return _Move(context=context, ids=ids, clients=clients)
@@ -391,8 +382,8 @@ def _matrix(
     full_history: bool = True,
 ) -> Iterator[_MatrixMocks]:
     if members is None:
-        members = {REQUESTER_ID, move.ids["general"], move.ids["code"], move.ids[ROUTER_AGENT_NAME]}
-    mocks = _MatrixMocks(send=send or _delivered_sends(), set_tag=set_tag or AsyncMock())
+        members = {REQUESTER_ID, move.ids["general"], move.ids["code"]}
+    mocks = _MatrixMocks(send or _delivered_sends(), set_tag or AsyncMock(), AsyncMock(return_value=members))
 
     async def room_encryption(_client: object, room_id: str, **_kwargs: object) -> bool | MatrixDeliveryFailure:
         return encryption[0] if room_id == SOURCE_ROOM_ID else encryption[1]
@@ -402,7 +393,7 @@ def _matrix(
             f"{MODULE}.complete_thread_history",
             new=AsyncMock(return_value=thread_history_result(history, is_full_history=full_history)),
         ),
-        patch(f"{MODULE}.get_room_members", new=AsyncMock(return_value=members)),
+        patch(f"{MODULE}.get_room_members", new=mocks.members),
         patch(f"{MODULE}.resolve_room_encryption_outcome", new=AsyncMock(side_effect=room_encryption)),
         patch(f"{MODULE}.send_message_result", new=mocks.send),
         patch(f"{MODULE}.get_thread_tags", new=AsyncMock(return_value=tags)),
@@ -510,33 +501,20 @@ async def test_move_thread_rejects_unauthorized_target(tmp_path: Path) -> None:
     mocks.send.assert_not_awaited()
 
 
-@pytest.mark.parametrize(
-    ("running", "members_without"),
-    [
-        (("general", "code"), None),
-        (("general", "code", ROUTER_AGENT_NAME), ROUTER_AGENT_NAME),
-        (("general", "code", ROUTER_AGENT_NAME), "general"),
-    ],
-)
+@pytest.mark.parametrize("unreadable", [False, True])
 @pytest.mark.asyncio
-async def test_move_thread_requires_router_and_agent_in_target(
-    tmp_path: Path,
-    running: tuple[str, ...],
-    members_without: str | None,
-) -> None:
-    """The router relays copies and the acting agent writes tags, so both must be in the target room."""
-    move = _move(tmp_path, running=running)
-    members = {REQUESTER_ID, *move.ids.values()} - {move.ids[members_without]} if members_without else None
+async def test_move_thread_requires_the_moving_agent_in_target(tmp_path: Path, *, unreadable: bool) -> None:
+    """The moving agent posts the copies and writes the tags, so it must be in the target room."""
+    move = _move(tmp_path)
+    members = {REQUESTER_ID, *move.ids.values()} - {move.ids["general"]}
     with _matrix(move, _thread(move), members=members) as mocks:
+        if unreadable:
+            # An account outside the room cannot read its members.
+            mocks.members.return_value = None
         payload = await _run()
 
     assert payload["status"] == "error"
-    expected = (
-        "Invite general to the target room before moving a thread there."
-        if members_without == "general"
-        else "The router must be in the target room to move a thread."
-    )
-    assert payload["message"] == expected
+    assert payload["message"] == "Invite general to the target room before moving a thread there."
     mocks.send.assert_not_awaited()
 
 
@@ -544,7 +522,7 @@ async def test_move_thread_requires_router_and_agent_in_target(
 async def test_move_thread_names_a_missing_agent_before_checking_access(tmp_path: Path) -> None:
     """An agent missing from the target room cannot read its members, so that cause is reported first."""
     move = _move(tmp_path)
-    members = {REQUESTER_ID, move.ids["code"], move.ids[ROUTER_AGENT_NAME]}
+    members = {REQUESTER_ID, move.ids["code"]}
     with (
         _matrix(move, _thread(move), members=members) as mocks,
         patch(f"{MODULE}.room_access_allowed", new=AsyncMock(return_value=False)),
@@ -603,25 +581,24 @@ async def test_move_thread_rejects_thread_with_only_skipped_messages(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_move_thread_copies_messages_in_order(tmp_path: Path) -> None:
-    """Each copy is posted in order, by its own entity when possible, as one new thread."""
+async def test_mover_reposts_other_authors_with_their_names(tmp_path: Path) -> None:
+    """With no owner account anywhere, the moving agent posts every copy in order, naming each other author."""
     move = _move(tmp_path)
-    with _matrix(move, _thread(move)) as mocks:
+    thread = [*_thread(move)[:3], _message(move.ids["general"], {"msgtype": "m.text", "body": "on it"}, "$own:x")]
+    with _matrix(move, thread) as mocks:
         payload = await _run()
 
-    copies = mocks.send.await_args_list[:3]
-    assert [call.args[0] for call in copies] == [
-        move.clients[ROUTER_AGENT_NAME],
-        move.clients["code"],
-        move.clients[ROUTER_AGENT_NAME],
-    ]
+    copies = mocks.send.await_args_list[:4]
+    assert [call.args[0] for call in copies] == [move.clients["general"]] * 4
     assert {call.args[1] for call in copies} == {TARGET_ROOM_ID}
-    root, code_reply, research_reply = (call.args[2] for call in copies)
+    root, code_reply, research_reply, own = (call.args[2] for call in copies)
     assert "m.relates_to" not in root
     assert root[ORIGINAL_SENDER_KEY] == REQUESTER_ID
     assert root["body"] == "Dominic: can you two look at this"
-    assert code_reply["body"] == "@research found it?"
+    assert code_reply["body"] == f"{move.ids['code']}: @research found it?"
+    assert code_reply[ORIGINAL_SENDER_KEY] == move.ids["code"]
     assert code_reply[SKIP_MENTIONS_KEY] is True
+    assert (own["body"], ORIGINAL_SENDER_KEY in own) == ("on it", False)
     assert code_reply["m.relates_to"] == {
         "rel_type": "m.thread",
         "event_id": "$copy0:localhost",
@@ -634,8 +611,8 @@ async def test_move_thread_copies_messages_in_order(tmp_path: Path) -> None:
     assert payload["room_id"] == TARGET_ROOM_ID
     assert payload["thread_id"] == "$copy0:localhost"
     assert payload["link"] == "https://matrix.to/#/%21target%3Alocalhost/%24copy0%3Alocalhost?via=localhost"
-    assert payload["copied"] == 3
-    assert payload["skipped"] == 2
+    assert payload["copied"] == 4
+    assert payload["skipped"] == 0
 
 
 @pytest.mark.asyncio
@@ -675,7 +652,7 @@ async def test_moved_message_mentions_whom_its_original_did(tmp_path: Path, case
         with _matrix(move, messages) as mocks:
             payload = await _run()
         assert payload["copied"] == 2
-        return [_message(move.ids[ROUTER_AGENT_NAME], call.args[2]) for call in mocks.send.await_args_list[:2]]
+        return [_message(move.ids["general"], call.args[2]) for call in mocks.send.await_args_list[:2]]
 
     assert mentioned(thread) == expected
     moved_once = await moved(thread)
@@ -799,7 +776,7 @@ async def test_move_thread_stops_when_a_long_message_was_shortened(tmp_path: Pat
 
     async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
         delivered = await sends(client, room_id, content, **kwargs)
-        if content.get("body") == "@research found it?":
+        if str(content.get("body")).endswith("@research found it?"):
             return DeliveredMatrixEvent(event_id=delivered.event_id, content_sent={**content, "body": "@research fo…"})
         return delivered
 
@@ -882,7 +859,7 @@ async def test_move_thread_names_the_sending_account_of_a_delegated_agent(tmp_pa
     """A delegated agent posts through another entity's account, so that account is the one to invite."""
     move = _move(tmp_path)
     move.context = replace(move.context, agent_name="child", transport_agent_name="general")
-    members = {REQUESTER_ID, move.ids["code"], move.ids[ROUTER_AGENT_NAME]}
+    members = {REQUESTER_ID, move.ids["code"]}
     with _matrix(move, _thread(move), members=members):
         payload = await _run()
 
