@@ -7,6 +7,7 @@ import ipaddress
 import re
 import smtplib
 import ssl
+from contextlib import suppress
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from typing import TYPE_CHECKING
@@ -15,9 +16,9 @@ from urllib.parse import quote, unquote, urlsplit
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-SMTP_URL_ENV = "MINDROOM_SMTP_URL"
+_SMTP_URL_ENV = "MINDROOM_SMTP_URL"
 SMTP_FROM_ENV = "MINDROOM_SMTP_FROM"
-MAIL_SUBJECT = "You are invited to a MindRoom room"
+_MAIL_SUBJECT = "You are invited to a MindRoom room"
 
 _ADDRESS = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
 _MAX_ADDRESS_LENGTH = 254
@@ -46,7 +47,7 @@ def invite_link(chat_url: str, router_id: str, code: str) -> str:
 
 def smtp_configured(paths: RuntimePaths) -> bool:
     """Return whether both SMTP variables are set."""
-    return bool(paths.env_value(SMTP_URL_ENV)) and bool(paths.env_value(SMTP_FROM_ENV))
+    return bool(paths.env_value(_SMTP_URL_ENV)) and bool(paths.env_value(SMTP_FROM_ENV))
 
 
 def _clean_name(value: str) -> str:
@@ -81,57 +82,43 @@ def build_invite_mail(
     message = EmailMessage()
     message["From"] = sender
     message["To"] = recipient
-    message["Subject"] = MAIL_SUBJECT
+    message["Subject"] = _MAIL_SUBJECT
     message.set_content(body)
     return message
 
 
 def _is_loopback(host: str) -> bool:
-    if host.lower() == "localhost":
-        return True
-    try:
+    with suppress(ValueError):
         return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+    return host.lower() == "localhost"
 
 
 def _send(smtp_url: str, message: EmailMessage) -> None:
     try:
         parsed = urlsplit(smtp_url)
-        host, port = parsed.hostname, parsed.port
+        host, port = parsed.hostname, parsed.port or _DEFAULT_PORTS.get(parsed.scheme)
     except ValueError:
-        host, port = None, None
-        parsed = None
-    if parsed is None or parsed.scheme not in _DEFAULT_PORTS or not host:
-        msg = f"{SMTP_URL_ENV} is malformed"
+        host = port = None
+    if not host or port is None:
+        msg = f"{_SMTP_URL_ENV} is malformed"
         raise EmailInviteMailError(msg)
-    port = port or _DEFAULT_PORTS[parsed.scheme]
-    user = unquote(parsed.username) if parsed.username else None
-    password = unquote(parsed.password or "")
     context = ssl.create_default_context()
     try:
-        client = (
-            smtplib.SMTP_SSL(host, port, timeout=_SMTP_TIMEOUT_SECONDS, context=context)
-            if parsed.scheme == "smtps"
-            else smtplib.SMTP(host, port, timeout=_SMTP_TIMEOUT_SECONDS)
-        )
+        if parsed.scheme == "smtps":
+            client = smtplib.SMTP_SSL(host, port, timeout=_SMTP_TIMEOUT_SECONDS, context=context)
+        else:
+            client = smtplib.SMTP(host, port, timeout=_SMTP_TIMEOUT_SECONDS)
         with client:
             if parsed.scheme == "smtp" and not _is_loopback(host):
                 client.starttls(context=context)
-            if user:
-                client.login(user, password)
+            if parsed.username:
+                client.login(unquote(parsed.username), unquote(parsed.password or ""))
             client.send_message(message)
     except (smtplib.SMTPException, OSError) as exc:
-        reason = type(exc).__name__
-        if isinstance(exc, smtplib.SMTPResponseException):
-            reason = f"{reason} {exc.smtp_code}"
-        raise EmailInviteMailError(reason) from None
+        code = f" {exc.smtp_code}" if isinstance(exc, smtplib.SMTPResponseException) else ""
+        raise EmailInviteMailError(type(exc).__name__ + code) from None
 
 
 async def send_invite_mail(paths: RuntimePaths, message: EmailMessage) -> None:
     """Send one invite mail over the configured SMTP server in a worker thread."""
-    smtp_url = paths.env_value(SMTP_URL_ENV)
-    if not smtp_url:
-        msg = f"{SMTP_URL_ENV} is not set"
-        raise EmailInviteMailError(msg)
-    await asyncio.to_thread(_send, smtp_url, message)
+    await asyncio.to_thread(_send, paths.env_value(_SMTP_URL_ENV, default=""), message)

@@ -4206,6 +4206,7 @@ visibility = [
     "mindroom.contacts.flow",
     "mindroom.custom_tools.matrix_user_writes",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.email_invites.receiver",
 ]
 
 [[modules]]
@@ -4282,6 +4283,7 @@ visibility = [
     "mindroom.matrix.room_accounts",
     "mindroom.room_tree.note",
     "mindroom.email_invites.policy",
+    "mindroom.email_invites.receiver",
 ]
 
 [[modules]]
@@ -4438,6 +4440,17 @@ depends_on = [
     "mindroom.matrix.room_power",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.state",
+]
+
+[[modules]]
+path = "mindroom.email_invites.receiver"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.email_invites.policy",
+    "mindroom.email_invites.store",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
 ]
 
 [[modules]]
@@ -5107,6 +5120,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.email_invites.receiver",
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.approval.continuation_runner",
     "mindroom.orchestration.server_state",

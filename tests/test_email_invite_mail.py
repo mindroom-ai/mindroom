@@ -90,7 +90,7 @@ def test_config_defaults_and_bounds() -> None:
     with pytest.raises(ValidationError):
         EmailInvitesConfig(approvers=["bas"])
     with pytest.raises(ValidationError):
-        EmailInvitesConfig(unknown=1)
+        EmailInvitesConfig.model_validate({"unknown": 1})
     assert EmailInvitesConfig(chat_url="http://localhost:4200").chat_url == "http://localhost:4200"
     assert EmailInvitesConfig(approvers=["@bas:example.org"]).approvers == ["@bas:example.org"]
 
@@ -98,7 +98,7 @@ def test_config_defaults_and_bounds() -> None:
 def test_mail_text() -> None:
     """Fixed subject, one recipient, and the body template verbatim."""
     message = _message()
-    assert message["Subject"] == mail.MAIL_SUBJECT == "You are invited to a MindRoom room"
+    assert message["Subject"] == mail._MAIL_SUBJECT == "You are invited to a MindRoom room"
     assert message.get_all("To") == ["alice@example.com"]
     assert message["From"] == "MindRoom <invites@example.org>"
     assert message.get_content_type() == "text/plain"

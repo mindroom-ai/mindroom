@@ -7,7 +7,7 @@ import secrets
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -15,10 +15,10 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-ASKER_DAILY_LIMIT = 5
-ROOM_OPEN_LIMIT = 20
-ADDRESS_DAILY_LIMIT = 3
-DEPLOYMENT_DAILY_LIMIT = 50
+_ASKER_DAILY_LIMIT = 5
+_ROOM_OPEN_LIMIT = 20
+_ADDRESS_DAILY_LIMIT = 3
+_DEPLOYMENT_DAILY_LIMIT = 50
 
 _DAY = 86400
 _OPEN = "revoked = 0 AND expires_at > ? AND invited_at IS NULL"
@@ -28,15 +28,15 @@ _SCHEMA = """CREATE TABLE IF NOT EXISTS email_invites (
     inviter_id TEXT, code_hash TEXT UNIQUE, sent_at INTEGER, revoked INTEGER NOT NULL DEFAULT 0,
     claimed_by TEXT, claimed_at INTEGER, invited_at INTEGER)"""
 
-LimitName = Literal["asker", "room", "address", "deployment"]
+_LimitName = Literal["asker", "room", "address", "deployment"]
 
 
 class EmailInviteLimitError(ValueError):
     """One of the daily or per-room caps is reached."""
 
-    def __init__(self, limit: LimitName) -> None:
+    def __init__(self, limit: _LimitName) -> None:
         super().__init__(f"email invite limit reached: {limit}")
-        self.limit: LimitName = limit
+        self.limit: _LimitName = limit
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,26 +100,21 @@ def _write(paths: RuntimePaths, now: int) -> Iterator[sqlite3.Connection]:
 
 def _select(connection: sqlite3.Connection, where: str, params: tuple) -> list[EmailInvite]:
     rows = connection.execute(f"SELECT {_COLUMNS} FROM email_invites WHERE {where} ORDER BY id", params)  # noqa: S608
-    return [EmailInvite(*row[:10], bool(row[10]), *row[11:]) for row in rows]
+    return [replace(EmailInvite(*row), revoked=bool(row[10])) for row in rows]
 
 
-def _enforce(connection: sqlite3.Connection, limit: LimitName, maximum: int, where: str, params: tuple) -> None:
+def _enforce(connection: sqlite3.Connection, limit: _LimitName, maximum: int, where: str, params: tuple) -> None:
     if connection.execute(f"SELECT COUNT(*) FROM email_invites WHERE {where}", params).fetchone()[0] >= maximum:  # noqa: S608
         raise EmailInviteLimitError(limit)
 
 
 def _enforce_daily(connection: sqlite3.Connection, now: int, *, requested_by: str | None, email: str | None) -> None:
+    since = now - _DAY
     if requested_by is not None:
-        _enforce(
-            connection,
-            "asker",
-            ASKER_DAILY_LIMIT,
-            "requested_by = ? AND created_at > ?",
-            (requested_by, now - _DAY),
-        )
+        _enforce(connection, "asker", _ASKER_DAILY_LIMIT, "requested_by = ? AND created_at > ?", (requested_by, since))
     if email is not None:
-        _enforce(connection, "address", ADDRESS_DAILY_LIMIT, "email = ? AND sent_at > ?", (email, now - _DAY))
-        _enforce(connection, "deployment", DEPLOYMENT_DAILY_LIMIT, "sent_at > ?", (now - _DAY,))
+        _enforce(connection, "address", _ADDRESS_DAILY_LIMIT, "email = ? AND sent_at > ?", (email, since))
+        _enforce(connection, "deployment", _DEPLOYMENT_DAILY_LIMIT, "sent_at > ?", (since,))
 
 
 def check_caps(paths: RuntimePaths, *, requested_by: str, email: str, now: int | None = None) -> None:
@@ -144,7 +139,7 @@ def create_request(
     current = _now(now)
     with _write(paths, current) as connection:
         _enforce_daily(connection, current, requested_by=requested_by, email=None)
-        _enforce(connection, "room", ROOM_OPEN_LIMIT, f"room_id = ? AND {_OPEN}", (room_id, current))
+        _enforce(connection, "room", _ROOM_OPEN_LIMIT, f"room_id = ? AND {_OPEN}", (room_id, current))
         if _select(connection, f"room_id = ? AND email = ? AND {_OPEN}", (room_id, email, current)):
             msg = "an open invite for this address already exists in this room"
             raise ValueError(msg)
