@@ -440,6 +440,7 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
             expected_revision_event_id=request.revision_event_id,
             expected_refresh_token=request.refresh_token,
             expected_membership_epoch=request.membership_epoch,
+            expected_projection_generation=request.projection_generation,
         )
 
     async def drop_refetched_message(self, request: RefreshRequest) -> bool:
@@ -451,6 +452,7 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
             expected_revision_event_id=request.revision_event_id,
             expected_refresh_token=request.refresh_token,
             expected_membership_epoch=request.membership_epoch,
+            expected_projection_generation=request.projection_generation,
         )
 
 

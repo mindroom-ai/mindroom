@@ -68,7 +68,7 @@ from mindroom.event_journal import (
     turn_rows,
 )
 from mindroom.event_journal.approval_signals import ApprovalSignals, EndedApproval, PausedReply
-from mindroom.event_journal.identity import agent_of_principal
+from mindroom.event_journal.identity import agent_of_principal, journal_principal_id
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE, _ROOM_CURSOR_CLAUSE, _ROOM_UNTIL_CLAUSE
 from mindroom.event_journal.replies import ApprovalEnded
@@ -10166,3 +10166,50 @@ async def test_claim_rows_pruned_after_seven_days(journal_store: EventJournalSto
         )
     assert await journal_store.claim_room_event(_CLAIM_ROOM, "$old", "member_joined", "beta") == "beta"
     assert await journal_store.claim_room_event(_CLAIM_ROOM, "$recent", "member_joined", "beta") == "alpha"
+
+
+@pytest.mark.parametrize("stale_write", ["install", "drop"])
+async def test_a_point_refetch_from_before_the_owner_account_left_leaves_the_rehydrated_row(
+    journal_store: EventJournalStore,
+    stale_write: str,
+) -> None:
+    """A refetch asked for under one membership neither fills nor drops the row the next membership projected.
+
+    The owner account keeps one membership epoch, and a walk after the rejoin projects the same message again, with
+    the same revision and refresh token, so only the projection generation the request carries tells the two apart.
+    """
+    owner = journal_store.principal(journal_principal_id("router", "@mindroom_router:example.org"))
+    long_text = {"io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"}}
+    preview = projection("$long", content=text("preview") | long_text | {"url": "mxc://example.org/body"})
+
+    async def hydrate() -> RefreshRequest:
+        assert await owner.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(preview,),
+            complete=True,
+            expected_membership_epoch=await owner.membership_epoch(ROOM),
+        )
+        (request,) = await refreshes(owner)
+        return request
+
+    await admit_room_membership(owner, ROOM, "join")
+    stale = await hydrate()
+    await admit_room_membership(owner, ROOM, "leave", source=DepartureSource.LOCAL)
+    await admit_room_membership(owner, ROOM, "join")
+    current = await hydrate()
+    assert (current.revision_event_id, current.refresh_token, current.membership_epoch) == (
+        stale.revision_event_id,
+        stale.refresh_token,
+        stale.membership_epoch,
+    )
+
+    refetched = {"revision_event_id": "$long", "revision_ts": 1_000, "revision_sender": ALICE}
+    if stale_write == "install":
+        assert await owner.install_refetched_revision(stale, **refetched, content=text("the membership before")) is None
+    else:
+        assert not await owner.drop_refetched_message(stale)
+
+    assert await refreshes(owner) == (current,)
+    assert await owner.install_refetched_revision(current, **refetched, content=text("this membership"))
+    assert await bodies(owner) == ["this membership"]

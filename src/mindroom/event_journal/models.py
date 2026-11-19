@@ -370,6 +370,8 @@ class RefreshRequest:
     revision_event_id: str
     refresh_token: int
     membership_epoch: int
+    # The room's projection generation when the debt was read; a departure since then refuses the refetch.
+    projection_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
