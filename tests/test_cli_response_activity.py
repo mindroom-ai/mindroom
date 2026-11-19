@@ -205,6 +205,7 @@ def test_cli_rejects_credentials_over_remote_http(
         ["--url", "file:///activity"],
         ["--url", "http://secret@localhost"],
         ["--wait", "inf"],
+        ["--wait", "nan"],
     ],
 )
 def test_cli_invalid_option_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, option: list[str]) -> None:
@@ -218,18 +219,6 @@ def test_cli_invalid_option_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert json.loads(result.stdout)["status"] == "unavailable"
     assert not served
     assert "secret@" not in result.output
-
-
-def test_cli_nan_wait_is_a_usage_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Typer's minimum check rejects a NaN wait, as it does a negative one, before any polling."""
-    served = _serve(monkeypatch, [httpx.Response(200, json=_snapshot())])
-    result = runner.invoke(
-        app,
-        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--wait", "nan", "--json"],
-    )
-    assert result.exit_code == 2
-    assert "--wait" in result.output
-    assert not served
 
 
 @pytest.mark.parametrize("wire_status", ["busy", "unavailable", "future-status", None])

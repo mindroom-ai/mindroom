@@ -11,6 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.error import HTTPError
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import jwt
@@ -259,6 +260,8 @@ def _build_trusted_upstream_jwt_client(settings: _TrustedUpstreamAuthSettings) -
         cache_jwk_set=True,
         lifespan=_TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS,
         timeout=_TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS,
+        # PyJWT 2.14 waits 30 seconds after a fetch before refetching for an unknown `kid`; rotated keys work at once.
+        cooldown_duration=0,
     )
 
 
@@ -388,6 +391,14 @@ async def _verified_trusted_upstream_jwt_claims(
             options={"require": list(required_claims)},
         )
     except PyJWTError as exc:
+        if isinstance(exc, jwt.PyJWKClientConnectionError):
+            # PyJWT refuses JWKS redirects, so a URL that redirects never yields keys.
+            redirected = isinstance(exc.__cause__, HTTPError) and 300 <= exc.__cause__.code < 400
+            logger.warning(
+                "Trusted upstream JWKS fetch failed",
+                jwks_url=jwt_client.uri,
+                reason="redirect refused; configure the direct JWKS URL" if redirected else "unreachable",
+            )
         # PyJWT messages can quote unverified header text such as `kid`, so log only the class and a missing claim.
         logger.warning(
             "Trusted upstream JWT rejected",
