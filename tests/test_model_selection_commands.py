@@ -638,9 +638,18 @@ async def test_thread_override_leaves_entities_the_requester_cannot_address(tmp_
     assert resolved_thread_models(config, paths) == {"helper": "expensive", "restricted": "default"}
 
 
-async def _typed_command_result(tmp_path: Path, body: str, *, thread_model: str | None = None) -> dict | None:
-    """Run a typed command from USER through the handler and return the content recorded beside its reply."""
-    client, config, paths, index, _, _ = picker_setup(tmp_path)
+async def _model_command_reply(
+    tmp_path: Path,
+    body: str,
+    *,
+    thread_model: str | None = None,
+    picker_operation: str | None = None,
+) -> tuple[str, dict | None]:
+    """Run USER's command through the handler and return its reply and the content recorded beside it.
+
+    The command is typed unless `picker_operation` makes it the picker's structured one.
+    """
+    client, config, paths, index, router, _ = picker_setup(tmp_path)
     config.models["leveled"] = ModelConfig(provider="openai", id="other-model", reasoning=_LEVELS)
     if thread_model is not None:
         set_thread_model_override(
@@ -650,7 +659,15 @@ async def _typed_command_result(tmp_path: Path, body: str, *, thread_model: str 
             entity_names=("helper",),
             config=config,
         )
-    event = root_event(event_id="$command", content={"body": body, "msgtype": "m.text"})
+    content: dict[str, object] = {"body": body, "msgtype": "m.text"}
+    if picker_operation is not None:
+        content["io.mindroom.model_selection"] = {
+            "version": 1,
+            "runtime_user_id": router,
+            "runtime_device_id": "DEVICE",
+            "operation": picker_operation,
+        }
+    event = root_event(event_id="$command", content=content)
     results = []
 
     async def record(text: str, *, extra_content: dict | None = None) -> None:
@@ -675,8 +692,9 @@ async def _typed_command_result(tmp_path: Path, body: str, *, thread_model: str 
         command=command_parser.parse(event.body),
         requester_user_id=USER,
     )
-    assert _helper_override(paths, config) == (None if "reset" in body else thread_model or "leveled@high")
-    return results[0][1]
+    resets = body.endswith(("reset", "clear"))
+    assert _helper_override(paths, config) == (None if resets else thread_model or "leveled@high")
+    return results[0]
 
 
 @pytest.mark.parametrize(
@@ -684,8 +702,6 @@ async def _typed_command_result(tmp_path: Path, body: str, *, thread_model: str 
     [
         ("!model leveled@high", None, {"operation": "set", "model": "leveled@high", "override": "leveled@high"}),
         ("/model reset", "leveled", {"operation": "reset", "override": None}),
-        # Nothing to remove still ends on the inherited models, as the picker's reset reports it.
-        ("!model reset", None, {"operation": "reset", "override": None}),
     ],
 )
 @pytest.mark.asyncio
@@ -699,7 +715,9 @@ async def test_typed_model_command_is_acknowledged_like_the_pickers(
     config = picker_setup(tmp_path)[1]
     router = entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id
 
-    assert await _typed_command_result(tmp_path, body, thread_model=thread_model) == {
+    text, result = await _model_command_reply(tmp_path, body, thread_model=thread_model)
+    assert text.startswith("✅")
+    assert result == {
         "io.mindroom.model_selection_result": {
             "version": 1,
             "command_event_id": "$command",
@@ -717,7 +735,41 @@ async def test_typed_model_command_is_acknowledged_like_the_pickers(
 @pytest.mark.asyncio
 async def test_typed_model_command_that_selects_nothing_carries_no_result(tmp_path: Path, body: str) -> None:
     """A listing or a refusal stays an ordinary reply: nothing marks it as a selection."""
-    assert await _typed_command_result(tmp_path, body, thread_model="leveled") is None
+    assert (await _model_command_reply(tmp_path, body, thread_model="leveled"))[1] is None
+
+
+@pytest.mark.parametrize("body", ["!model reset", "/model clear"])
+@pytest.mark.asyncio
+async def test_typed_reset_with_no_override_to_remove_carries_no_result(tmp_path: Path, body: str) -> None:
+    """A typed reset that removed nothing says so in an ordinary reply: an applied result would claim a reset."""
+    assert await _model_command_reply(tmp_path, body) == (
+        "This thread has no model override for the agents and teams you may address.",
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_picker_reset_with_no_override_to_remove_is_still_acknowledged(tmp_path: Path) -> None:
+    """The picker's result acknowledges its operation, so its client stops waiting whether or not anything changed."""
+    config = picker_setup(tmp_path)[1]
+    router = entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id
+
+    text, result = await _model_command_reply(tmp_path, "!model reset", picker_operation="reset")
+
+    assert text == "This thread has no model override for the agents and teams you may address."
+    assert result == {
+        "io.mindroom.model_selection_result": {
+            "version": 1,
+            "command_event_id": "$command",
+            "room_id": ROOM,
+            "thread_id": "$root",
+            "runtime_user_id": router,
+            "runtime_device_id": "DEVICE",
+            "operation": "reset",
+            "status": "applied",
+            "override": None,
+        },
+    }
 
 
 @pytest.mark.parametrize("args_text", ["default", "reset"])
