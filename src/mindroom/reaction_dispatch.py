@@ -259,6 +259,7 @@ class ReactionDispatcher:
                 self._client(),
                 self.deps.runtime_paths,
                 event,
+                room.room_id,
             )
             if semantic_consumer in {None, SemanticConsumer.CONFIG_CONFIRMATION}
             else None

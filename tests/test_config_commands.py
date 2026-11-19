@@ -882,7 +882,12 @@ async def test_config_preview_is_kept_locally_and_writes_no_room_state(
 
     async def resolve(user_id: str) -> object:
         client.user_id = user_id
-        return await config_confirmation.resolve_reaction_pending_change(client, context.runtime_paths, reaction)
+        return await config_confirmation.resolve_reaction_pending_change(
+            client,
+            context.runtime_paths,
+            reaction,
+            "!room:example.org",
+        )
 
     assert await resolve("@other:example.org") is None
     restored = await resolve("@agent:example.org")
@@ -1045,6 +1050,29 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
             extra_content={constants_mod.CONFIG_CONFIRMATION_REACTION_KEY: "$reaction"},
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_reaction_in_another_room_leaves_the_preview_pending(tmp_path: Path) -> None:
+    """A reaction decides a preview only in the room the preview was sent to."""
+    bot = SimpleNamespace(
+        client=SimpleNamespace(user_id="@router:example.org"),
+        config=Config(**_handler_config_fields(config_command_enabled=True, administrators=["@admin:example.org"])),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        _conversation_resolver=SimpleNamespace(build_message_target=MagicMock()),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
+    )
+    other_room = SimpleNamespace(room_id="!other:example.org")
+    event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to="$preview")
+    resolve = config_confirmation.resolve_reaction_pending_change
+
+    with patch.dict(config_confirmation._pending_changes, {"$preview": _pending_config_change()}, clear=True):
+        assert await resolve(bot.client, bot.runtime_paths, event, other_room.room_id) is None
+        await handle_confirmation_reaction(_confirmation_context(bot), other_room, event)
+
+        assert config_confirmation._pending_changes["$preview"].decision_event_id is None
+        assert await resolve(bot.client, bot.runtime_paths, event, "!room:example.org") is not None
+    bot._delivery_gateway.send_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1278,7 +1306,7 @@ async def test_confirmation_send_failure_keeps_replay_state(
         await handle_confirmation_reaction(_confirmation_context(bot), room, event)
 
     apply_change.assert_awaited_once()
-    assert config_confirmation._resolve_pending_change(bot.client, bot.runtime_paths, event_id) is None
+    assert config_confirmation._resolve_pending_change(bot.client, bot.runtime_paths, event_id, room.room_id) is None
     assert not config_confirmation._pending_change_locks
 
 
@@ -1422,7 +1450,7 @@ async def test_confirmation_recovery_adopts_untracked_visible_response(
 
     apply_change.assert_not_awaited()
     bot._delivery_gateway.send_text.assert_not_awaited()
-    assert config_confirmation._resolve_pending_change(bot.client, bot.runtime_paths, event_id) is None
+    assert config_confirmation._resolve_pending_change(bot.client, bot.runtime_paths, event_id, room.room_id) is None
     response_filter = find_response.await_args.kwargs["response_source_filter"]
     assert response_filter(
         {"content": {constants_mod.CONFIG_CONFIRMATION_REACTION_KEY: "$reaction"}},
@@ -1868,7 +1896,7 @@ async def test_expired_config_change_is_discarded(tmp_path: Path) -> None:
     with patch.object(config_confirmation, "_pending_changes", {}):
         config_confirmation._save_pending_change(runtime_paths, "$preview", stale)
         assert "$preview" in _stored_pending_changes(runtime_paths)
-        resolved = config_confirmation._resolve_pending_change(client, runtime_paths, "$preview")
+        resolved = config_confirmation._resolve_pending_change(client, runtime_paths, "$preview", stale.room_id)
         assert config_confirmation._pending_changes.get("$preview") is None
 
     assert resolved is None

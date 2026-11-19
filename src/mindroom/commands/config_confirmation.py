@@ -198,15 +198,16 @@ def _resolve_pending_change(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
     event_id: str,
+    room_id: str,
 ) -> _PendingConfigChange | None:
-    """Return the unexpired pending change of a preview this bot sent, from memory or the local store."""
+    """Return the unexpired pending change of a preview this bot sent to this room, from memory or the local store."""
     pending_change = _pending_changes.get(event_id)
     if pending_change is None:
         record = load_cached_override_records(_store_path(runtime_paths), _is_stored_change).get(event_id)
         if record is None:
             return None
         pending_change = _PendingConfigChange.from_dict(record)
-    if pending_change.sender != client.user_id:
+    if pending_change.sender != client.user_id or pending_change.room_id != room_id:
         return None
     if pending_change.is_expired():
         logger.info("Discarding expired pending config change", event_id=event_id)
@@ -220,11 +221,12 @@ async def resolve_reaction_pending_change(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
     event: nio.ReactionEvent,
+    room_id: str,
 ) -> _PendingConfigChange | None:
-    """Resolve the local pending change only for confirmation-shaped reactions to a preview this bot sent."""
+    """Resolve the local pending change only for confirmation-shaped reactions to a preview this bot sent there."""
     if event.key not in {"✅", "❌"}:
         return None
-    return _resolve_pending_change(client, runtime_paths, event.reacts_to)
+    return _resolve_pending_change(client, runtime_paths, event.reacts_to, room_id)
 
 
 async def _add_confirmation_reactions(
@@ -315,7 +317,7 @@ async def recover_confirmation_setup(
 ) -> bool:
     """Recover a preview whose pending change or completed decision already exists."""
     async with _pending_change_lock(preview_event_id):
-        pending_change = _resolve_pending_change(client, runtime_paths, preview_event_id)
+        pending_change = _resolve_pending_change(client, runtime_paths, preview_event_id, room_id)
         if pending_change is not None:
             if pending_change.decision_event_id is None:
                 await _add_confirmation_reactions(client, room_id, preview_event_id)
@@ -337,7 +339,7 @@ async def ensure_pending_change(
 ) -> None:
     """Persist one preview exactly once before exposing its reaction buttons."""
     async with _pending_change_lock(event_id):
-        pending_change = _resolve_pending_change(client, runtime_paths, event_id)
+        pending_change = _resolve_pending_change(client, runtime_paths, event_id, room_id)
         if pending_change is not None:
             if pending_change.decision_event_id is None:
                 await _add_confirmation_reactions(client, room_id, event_id)
@@ -461,7 +463,7 @@ async def handle_confirmation_reaction(
     assert context.client.user_id is not None
     preview_event_id = event.reacts_to
     async with _pending_change_lock(preview_event_id):
-        pending_change = _resolve_pending_change(context.client, context.runtime_paths, preview_event_id)
+        pending_change = _resolve_pending_change(context.client, context.runtime_paths, preview_event_id, room.room_id)
         if pending_change is None:
             return
         if pending_change.decision_event_id is not None and pending_change.decision_event_id != event.event_id:

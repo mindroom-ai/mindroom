@@ -659,7 +659,7 @@ class TestAgentBot(AgentBotTestBase):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == []
-        resolve_pending.assert_awaited_once_with(bot.client, bot.runtime_paths, event)
+        resolve_pending.assert_awaited_once_with(bot.client, bot.runtime_paths, event, room.room_id)
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
