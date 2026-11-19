@@ -726,6 +726,24 @@ def test_chat_reasoning_streamed_as_written_starts_when_it_arrives() -> None:
     assert event == ReasoningDelta("Plan.")
 
 
+def test_chat_typed_content_parts_split_into_text_and_reasoning() -> None:
+    """Mistral's GLM models stream ``content`` as typed parts; ``thinking`` parts are reasoning, ``text`` parts reply."""
+    stream = ChatStream(ChatWire(route="openai", system_role="system"))
+    content = [
+        {"type": "thinking", "thinking": [{"type": "text", "text": "Plan."}], "closed": True},
+        {"type": "text", "text": "pong"},
+    ]
+    # The SDK builds stream chunks without validation, so the list reaches ``delta.content`` as sent.
+    chunk = openai._models.construct_type(type_=ChatCompletionChunk, value=_chunk({"content": content})["data"])
+
+    events = stream.add(chunk)
+    stream.finish()
+
+    assert events == [ReasoningDelta("Plan."), TextDelta("pong")]
+    assert stream.parts.content == "pong"
+    assert stream.parts.reasoning == "Plan."
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_config",
