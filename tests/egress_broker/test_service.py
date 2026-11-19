@@ -1008,26 +1008,32 @@ async def test_unused_all_proxy_does_not_stop_startup(
 
 @pytest.mark.usefixtures("no_proxy_env")
 @pytest.mark.parametrize(
-    ("env", "api", "on"),
+    ("env", "dotenv", "api", "on"),
     [
-        pytest.param({}, True, True, id="default"),
-        pytest.param({"HTTPS_PROXY": "http://user:hunter2@proxy:3128"}, True, False, id="default-unusable-proxy"),
-        pytest.param({"ALL_PROXY": "socks5://x:1080"}, True, False, id="default-socks"),
+        pytest.param({}, "", True, True, id="default"),
+        # Any proxy a primary shell would inherit keeps the default broker off, so proxied networks work as before.
+        pytest.param({"HTTPS_PROXY": "http://user:hunter2@proxy:3128"}, "", True, False, id="default-https-proxy"),
+        pytest.param({"http_proxy": "http://proxy:3128"}, "", True, False, id="default-http-proxy-only"),
+        pytest.param({"ALL_PROXY": "socks5://x:1080"}, "", True, False, id="default-socks"),
+        pytest.param({}, "HTTPS_PROXY=http://user:hunter2@proxy:3128\n", True, False, id="default-dotenv-proxy"),
         # Without the API nobody can answer a key card, so the default broker and its tool stay off.
-        pytest.param({}, False, False, id="default-no-api"),
+        pytest.param({}, "", False, False, id="default-no-api"),
         # An explicit port keeps its loud refusal at startup and its warning without the API.
-        pytest.param({**_broker_env(8768), "HTTPS_PROXY": "http://user:hunter2@proxy:3128"}, True, True, id="set"),
-        pytest.param(_broker_env(8768), False, True, id="set-no-api"),
+        pytest.param({**_broker_env(8768), "HTTPS_PROXY": "http://user:hunter2@proxy:3128"}, "", True, True, id="set"),
+        pytest.param(_broker_env(8768), "", False, True, id="set-no-api"),
     ],
 )
 def test_the_default_broker_turns_off_where_it_cannot_run(
     tmp_runtime_paths: Callable[..., RuntimePaths],
+    tmp_path: Path,
     env: dict[str, str],
+    dotenv: str,
     *,
     api: bool,
     on: bool,
 ) -> None:
     """The implicit broker never stops MindRoom: where it cannot run, Agent Keys is off and a warning says why."""
+    (tmp_path / ".env").write_text(dotenv, encoding="utf-8")
     with capture_logs() as logs:
         runtime_paths = service.turn_off_unusable_default_broker(tmp_runtime_paths(**env), api=api)
 
@@ -1036,7 +1042,6 @@ def test_the_default_broker_turns_off_where_it_cannot_run(
     assert any(log["event"] == "egress_broker_default_off" for log in logs) is (not on and api)
 
 
-@pytest.mark.usefixtures("no_proxy_env")
 class _RefusedBrokerThread(threading.Thread):
     """A thread the OS refuses to start, only for the broker's own thread."""
 
@@ -1047,6 +1052,7 @@ class _RefusedBrokerThread(threading.Thread):
         super().start()
 
 
+@pytest.mark.usefixtures("no_proxy_env")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["bind", "ttl", "audit", "ca-bundle", "thread"])
 async def test_a_default_broker_that_cannot_start_leaves_mindroom_running(

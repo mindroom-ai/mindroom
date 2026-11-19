@@ -88,6 +88,7 @@ _DEFAULT_HOST = "0.0.0.0"  # noqa: S104 - workers reach the broker over the cont
 # only IPv6 here, so it is reached on `::1`, never `127.0.0.1`.
 _WILDCARD_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}  # noqa: S104
 _DEFAULT_TOKEN_TTL_SECONDS = 604800
+_PROXY_NAMES = ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 _STOP_TIMEOUT_SECONDS = 5.0
 # OAuth lookups can wait up to a token endpoint's deadline, so they get a small pool of their own: a stalled
 # provider holds at most these threads, never the loop's default executor that key lookups, audit writes, and
@@ -572,18 +573,17 @@ def _default_port(runtime_paths: RuntimePaths) -> bool:
 def turn_off_unusable_default_broker(runtime_paths: RuntimePaths, *, api: bool) -> RuntimePaths:
     """Return `runtime_paths` with the default broker off where it cannot serve; a set port is left as it is.
 
-    Without the API nobody can answer the tool's key cards, and an operator proxy the broker cannot follow must never
-    be dialed around. The warning names the variable, never its value.
+    Without the API nobody can answer the tool's key cards. Any proxy a primary shell would inherit, from the exported
+    environment or the `.env`, also keeps it off, so shells on a proxied network route as they did without the broker.
+    The warning names the variable, never its value.
     """
     if not egress_broker_enabled(runtime_paths) or not _default_port(runtime_paths):
         return runtime_paths
     if api:
-        try:
-            _operator_egress(runtime_paths)
-        except ValueError as exc:
-            logger.warning("egress_broker_default_off", reason=str(exc))
-        else:
+        proxy = next((name for name in _PROXY_NAMES if runtime_paths.env_value(name) or os.getenv(name)), None)
+        if proxy is None:
             return runtime_paths
+        logger.warning("egress_broker_default_off", reason=f"{proxy} is set; set a broker port to use one")
     return replace(runtime_paths, process_env={**runtime_paths.process_env, EGRESS_BROKER_ENV_BY_KEY["port"]: "off"})
 
 

@@ -148,6 +148,20 @@ def test_primary_shell_claim_is_signed_and_absent_means_a_worker_token(signer: T
     assert primary.primary_shell is True
 
 
+def test_a_worker_token_keeps_the_wire_format_of_tokens_before_the_primary_claim(
+    signer: TokenSigner,
+    claims: WorkerClaims,
+) -> None:
+    """A worker token carries no `primary_shell` key, so a release without the claim still accepts it."""
+
+    def signed_claims(token: str) -> dict[str, object]:
+        payload = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["claims"]
+
+    assert "primary_shell" not in signed_claims(signer.mint(claims))
+    assert signed_claims(signer.mint(replace(claims, primary_shell=True)))["primary_shell"] is True
+
+
 @pytest.mark.parametrize(
     "payload",
     [

@@ -18294,6 +18294,7 @@ Do not report or "fix" these; they are deliberate.
   A folder swapped for a link between that walk and its watch moves its own watch, and those of the folders the walk found below it, to the link's target and the matching folders below that target; each watch stays not recursive and within the folder cap, and lasts until the watcher next rebuilds its watches, such as when a folder appears in the base.
   A change there can start a refresh of the base, which still reads only files reached inside the base without links, as code that writes inside the base can already do by writing a file there.
 - `egress_broker.private_networks` lets the broker, which runs in the primary, dial the listed private ranges for workers, including primary-host addresses in them (such as the `docker0` gateway) and destinations a Kubernetes worker's NetworkPolicy blocks; loopback and metadata addresses stay refused, and [Private networks](https://docs.mindroom.chat/deployment/egress-broker/#private-networks) describes the exposure.
+  For `shell` calls in the primary, whose broker tokens say so, the broker dials every private range without a list, because such a call can reach those addresses directly anyway; loopback, link-local, and metadata addresses stay refused for them too.
 - The egress broker streams request bodies, so a valid request head can reach the right upstream before a bad or oversized body gets 400 or 413 and the upstream connection is aborted; the head carries the secret only to the host the request was routed to, and [Egress Broker Design Decisions](https://docs.mindroom.chat/architecture/egress-broker-design/#where-a-secret-may-go) gives the reason.
 - The egress broker's check for stray bytes on a reused tunnel upstream cannot see bytes that reach the socket just after the check polls it.
   Such bytes can only come from that tunnel's own upstream, and no other tunnel, host, or requester is affected.
@@ -18309,7 +18310,6 @@ Do not report or "fix" these; they are deliberate.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 - The Connections portal signs users in either through trusted upstream auth or through a Matrix OpenID token that MindRoom Chat hands to the portal window, from the origins `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists or, unset, from MindRoom's hosted Chat and, for a portal on a local address, any Chat on a local address.
   Under the default list, MindRoom accepts that sign-in only while the homeserver binds tokens, because otherwise any backend a user opens from Chat could replay their token to it, and request headers cannot show that a portal is out of such a backend's reach; an explicit list is the operator's choice.
-  For `shell` calls in the primary, whose broker tokens say so, the broker dials every private range without a list, because such a call can reach those addresses directly anyway; loopback, link-local, and metadata addresses stay refused for them too.
   The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, its user's own conversation connect and reset links for requester-owned connections, the OAuth callback for flows it started, the OAuth success page, and `GET` requests for published reports.
   The portal opens a connect or reset link given as `?next=` after its sign-in attempt, which grants nothing beyond opening that link directly: the link still checks that the signed-in user is its requester, and the user still approves at the provider or on the reset confirmation page.
   Outside hosted platform mode, it also opens the dashboard, but only for a user in `administrators` whose token the homeserver bound to this deployment at sign-in; everyone else, and every session on a homeserver that does not bind tokens, needs the API key for the dashboard.
@@ -23680,6 +23680,7 @@ The TTL applies to new requests: an expired token gets 407 on every new request,
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
 That includes LAN and Tailscale addresses and names that resolve to them, unless [`private_networks`](#private-networks) lists them.
 Without that, a command that needs one can bypass the broker, for example with `curl --noproxy '*'`, where the worker's network allows direct connections.
+A `shell` call that runs in the primary process can always bypass the broker that way, so the broker does not refuse private addresses for it; see [Private networks](#private-networks).
 
 ## Configuration
 
@@ -23698,7 +23699,6 @@ Set the port and URL to serve workers too:
 | `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` | No | `604800` (7 days) | How long each minted worker token remains valid |
 
 A `shell` command that runs in the primary process does not use `MINDROOM_EGRESS_BROKER_URL`, which may not resolve on the primary's host: it reaches the broker at `http://127.0.0.1:<port>` when `MINDROOM_EGRESS_BROKER_HOST` is `0.0.0.0`, at `http://[::1]:<port>` when it is `::`, and at the bound address otherwise.
-A `shell` call that runs in the primary process can always bypass the broker that way, so the broker does not refuse private addresses for it; see [Private networks](#private-networks).
 Its CA variables (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` and `NODE_EXTRA_CA_CERTS`) point at files under `<storage>/egress_broker/primary_ca/` that add the broker CA to the system roots and to the certificates of the CA files the primary's own values of those variables name, exported or set in the `.env` beside `config.yaml`, read when the broker starts.
 Every tool gets the same files, and their system roots are the file the primary's exported `SSL_CERT_FILE` names when one is set, otherwise OpenSSL's default file or certifi, so a tool that used roots of its own before, such as Python Requests with certifi, trusts these instead.
 On macOS, Go programs such as `gh` verify certificates with the system keychain and ignore these variables, so from a primary shell there they do not trust the broker CA.
@@ -23708,7 +23708,7 @@ Keys and accounts can only be entered while the broker is on.
 While it is on, the request log and CA download routes return 409 when the broker is not running.
 
 Running MindRoom with `--no-api` disables the broker along with the API, since nobody could answer a key request; with a set port, MindRoom logs a warning and keeps running.
-Without a port, the broker is also off when the primary's `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` names a proxy the broker cannot follow, which it never dials around, or when it fails to start, for example on an invalid token TTL, unreadable broker state, or a loopback port it cannot bind. MindRoom stops whatever the broker started, logs a warning, and keeps running without it. With a set port, a failure to start stops startup instead.
+Without a port, the broker is also off when the primary's `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is set in any case, exported or in the `.env` beside `config.yaml`, so shell calls on a proxied network keep using that proxy as before; set a port to use the broker there. It is off as well when it fails to start, for example on an invalid token TTL, unreadable broker state, or a loopback port it cannot bind. MindRoom stops whatever the broker started, logs a warning, and keeps running without it. With a set port, a failure to start stops startup instead.
 
 ### Service rules
 

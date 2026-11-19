@@ -153,7 +153,9 @@ class TokenSigner:
         exp = int(now + self._ttl_seconds)
 
         # Build payload with sorted keys and compact separators
-        payload_dict = {"claims": asdict(claims), "exp": exp}
+        # A worker token leaves out `primary_shell`, keeping the format releases without the claim accept.
+        signed_claims = {key: value for key, value in asdict(claims).items() if key != "primary_shell" or value}
+        payload_dict = {"claims": signed_claims, "exp": exp}
         payload_bytes = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
         mac = self._mac(payload_bytes)
