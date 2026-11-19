@@ -1146,7 +1146,9 @@ def test_stderr_stays_off_the_logging_thread_after_another_logging_config(
     finally:
         unstall.cancel()
         stderr.writable.set()
-    logging.shutdown()
+    # The `dictConfig` also took the handler off the list `logging.shutdown` closes.
+    for handler in logging.getLogger().handlers:
+        handler.close()
 
     events = [json.loads(line)["event"] for line in stderr.getvalue().splitlines()]
     assert events == ["Logging initialized", "logged_after_another_config"]
