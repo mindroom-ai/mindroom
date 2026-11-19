@@ -68,8 +68,8 @@ Never commit build outputs such as `*.aux`, `*.log`, or a `.pdf`.
   the token is missing, expired, or revoked, or the account has no premium plan.
   Check `list_egress_credentials`; if the service shows `configured: false`, ask with `request_secret` as above.
   If it shows `configured: true`, the token is wrong or expired: ask the user to create a new one and call `request_secret` again.
-- A refusal from Agent Keys (a JSON body with an `error` such as `credential_not_configured` or
-  `service_not_matched`) is not a project problem: follow its `message`, check `list_egress_credentials`, and use
+- A refusal from Agent Keys (git prints `fatal: remote error:` and a message naming Agent Keys, a key, or a
+  service, such as `credential_not_configured` or `service_not_matched`) is not a project problem: follow it, check `list_egress_credentials`, and use
   `request_secret` for a missing key.
 - Otherwise `403` or `404` / `repository not found`: the project id is wrong, or the token's account cannot open
   the project. Ask the user for the project link and to check they are a collaborator.
