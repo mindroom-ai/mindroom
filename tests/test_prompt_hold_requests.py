@@ -1136,8 +1136,8 @@ async def test_usage_reported_for_a_request_sent_as_built_sizes_only_requests_se
     assert 7000 < size.tokens < 8500
 
 
-async def _summaries(root: Path, monkeypatch: pytest.MonkeyPatch, question: str) -> tuple[int, int]:
-    """Edit the prompt at length before each of twelve turns; return the folds made and the most updates sent."""
+async def _summaries(root: Path, monkeypatch: pytest.MonkeyPatch, question: str) -> tuple[int, list[int]]:
+    """Edit the prompt at length before each of twelve turns; return the folds made and the updates each turn sent."""
     conversation = _Conversation.start(root, monkeypatch)
     conversation.config.defaults.compaction.threshold_tokens = 26_000
     folds: list[None] = []
@@ -1148,12 +1148,12 @@ async def _summaries(root: Path, monkeypatch: pytest.MonkeyPatch, question: str)
 
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", summarize)
     await conversation.turn("First question")
-    most = 0
+    told: list[int] = []
     for revision in range(12):
         conversation.write_rules(f"- Revision {revision}." + " Remain accurate and concise." * 190)
         [body] = await conversation.turn(f"Question {revision}.{question}")
-        most = max(most, len(_updates(body)))
-    return len(folds), most
+        told.append(len(_updates(body)))
+    return len(folds), told
 
 
 @pytest.mark.asyncio
@@ -1164,10 +1164,44 @@ async def test_a_prompt_edited_every_turn_folds_no_history_a_conversation_withou
     """Updates are sent again by every request; once they alone would fold the history, the hold starts over."""
     with monkeypatch.context() as unheld:
         unheld.setattr("mindroom.ai._with_prompt_hold", lambda _ctx, build, _scope: build)
-        assert await _summaries(tmp_path / "unheld", monkeypatch, "") == (0, 0)
-    folds, most = await _summaries(tmp_path / "held", monkeypatch, "")
-    # More updates than main kept, and no fold.
-    assert (folds, most > 8) == (0, True)
+        assert await _summaries(tmp_path / "unheld", monkeypatch, "") == (0, [0] * 12)
+    folds, told = await _summaries(tmp_path / "held", monkeypatch, "")
+    # More updates than main kept, no fold, and a turn that sent the current prompt in its place.
+    assert (folds, max(told) > 8, 0 in told) == (0, True, True)
+
+
+@pytest.mark.asyncio
+async def test_updates_alone_never_trim_history_the_current_prompt_replays_whole_without_compaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With compaction off the replay window still trims; updates must not push the oldest turns out of it."""
+    conversation = _Conversation.start(tmp_path, monkeypatch)
+    compaction = conversation.config.defaults.compaction
+    compaction.enabled, compaction.replay_window_tokens, compaction.reserve_tokens = False, 16_000, 0
+
+    def reported(request: httpx.Request) -> httpx.Response:
+        """Answer reporting about the tokens the request's texts hold, as a provider counts what it was sent."""
+        texts = json.dumps([message["content"] for message in json.loads(request.content)["messages"]])
+        prompt = len(texts) // 4
+        usage = {"prompt_tokens": prompt, "completion_tokens": 5, "total_tokens": prompt + 5}
+        return sse_response([_chunk({"role": "assistant", "content": "ok"}), {**_chunk({}, "stop"), "usage": usage}])
+
+    conversation.wire.replies = [reported]
+    conversation.respond = conversation.wire.respond  # ty: ignore[invalid-assignment]
+    await conversation.turn("First question")
+    bodies = []
+    for revision in range(12):
+        conversation.write_rules(f"- Revision {revision}." + " Remain accurate and concise." * 190)
+        bodies += await conversation.turn(f"Question {revision}.")
+    [follow_up] = await conversation.turn("Unedited question")
+    for body in (*bodies, follow_up):
+        assert "First question" in json.dumps(body)
+    # Updates were told until the request they made outgrew the window, and then the current prompt was sent.
+    told = [len(_updates(body)) for body in bodies]
+    dropped = told.index(0)
+    assert told[:dropped] == list(range(1, dropped + 1))
+    assert f"Revision {dropped}." in _system_texts(bodies[dropped])[0]
 
 
 @pytest.mark.asyncio
@@ -1176,5 +1210,5 @@ async def test_a_held_conversation_whose_history_outgrows_the_window_still_folds
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A history too long even under the current prompt alone is compacted, as without a hold."""
-    folds, _most = await _summaries(tmp_path, monkeypatch, " Explain it in depth." * 800)
+    folds, _told = await _summaries(tmp_path, monkeypatch, " Explain it in depth." * 800)
     assert folds >= 1
