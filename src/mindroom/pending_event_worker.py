@@ -156,6 +156,8 @@ class PendingEventWorker:
         if event.event_id not in self._deferred:
             self._rooms.setdefault(event.room_id, _RoomProgress()).deferred_count += 1
         self._deferred[event.event_id] = event
+        # The sweep bounds how long silently runnable work waits, so it runs from the first deferral.
+        self._schedule_deferral_scan()
 
     def _owned_tasks(self) -> tuple[asyncio.Task[object], ...]:
         return tuple(
@@ -254,6 +256,7 @@ class PendingEventWorker:
         # Receipt order is commit order, so no row commits behind that point: one runtime
         # holds a journal (`hold_exclusively`), and its one writer task takes receipts for a
         # batch and commits it before the next batch takes any (`WriteQueue._drain_writes`).
+        # On Postgres that hold is a separate session, so this is as strong as that fence.
         full_scans_due = self._full_scans_due
         tail_only = (
             not (whole_backlog or full_scans_due)

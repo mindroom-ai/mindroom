@@ -56,6 +56,7 @@ from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, request_envelope
 from tests.journal_helpers import admit_dispatch_event
+from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import corrupt
@@ -4438,6 +4439,91 @@ class TestInFlightTurnsAreNotReread:
             assert await alice.unsettled_event_ids() == frozenset({"$busy"})
         finally:
             await dispatcher.stop()
+
+    async def test_a_source_a_departing_router_frees_still_runs_before_later_work_in_its_room(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A room's callbacks run in receipt order, also when an older one becomes runnable silently.
+
+        A router that leaves fails the paused replies its cards held, in its
+        own transaction: the responder's source becomes runnable with no
+        admission and no owner to hand it back. The room's lane is already past
+        it, behind a turn still in flight, so the next message in the room ran
+        first unless that write also sends the lane back.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id == "$new"
+
+        await _ApprovalContinuations.admit_sources(alice)
+        await self._admit(alice, text_event("$busy", ts=2_000))
+        await paused_for_approval(
+            alice,
+            replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="live"),
+        )
+        await _ApprovalContinuations.remember_card(journal_store.principal("router@shared"))
+        worker = PendingEventWorker(store=alice, handle=handle, runtime_generation="live")
+        stop_following = journal_store.approval_signals.follow_paused_replies(
+            "agent@alice",
+            paused=lambda _reply: None,
+            ended=lambda _approval_id: None,
+            freed=lambda room_id: worker.wake(room_id=room_id),
+        )
+        try:
+            await _dispatch_worker_pass(worker)
+            assert handled == ["$busy"]
+
+            await admit_room_membership(journal_store.principal("router@shared"), ROOM, "leave")
+            await self._admit(alice, text_event("$new", ts=3_000))
+            await _dispatch_worker_pass(worker)
+            # The room already admitted a later receipt, so the revisit is paced once.
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: not worker._room_is_backing_off(ROOM))
+            await _dispatch_worker_pass(worker)
+
+            assert handled == ["$busy", "$source-1", "$new"]
+        finally:
+            stop_following()
+            await worker.stop()
+
+    async def test_the_first_turn_in_flight_starts_the_sweep_while_its_lane_still_runs(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The sweep is what bounds how long silently runnable work waits, so it starts with the first deferral.
+
+        Started only once a pass or a lane finished, it was not running while
+        the lane that recorded the deferral sat in its next callback, and the
+        wait became that callback's length plus a whole sweep interval.
+        """
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> bool:
+            if event.event_id == "$blocked":
+                entered.set()
+                await release.wait()
+            return False
+
+        for event_id in ("$busy", "$blocked"):
+            await self._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await worker._dispatch_ready_rooms()
+            await asyncio.wait_for(entered.wait(), timeout=5)
+
+            assert list(worker._deferred) == ["$busy"]
+            assert worker._deferral_scan is not None
+            assert not worker._deferral_scan.done()
+        finally:
+            release.set()
+            await worker.stop()
 
 
 class TestStoreFailuresBelongToTheLane:

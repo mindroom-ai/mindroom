@@ -484,9 +484,9 @@ class ResponseRunner:
         """Count a continued reply's source as news again once its sender edits it."""
         self.lifecycle_coordinator.continued_sources -= {source_event_id}
 
-    def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str) -> None:
+    def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str, freed: Callable[[str], None]) -> None:
         """Hold the conversation of each pending approval of this principal, from the ones pending now on."""
-        self.lifecycle_coordinator.follow_approval_holds(signals, principal_id)
+        self.lifecycle_coordinator.follow_approval_holds(signals, principal_id, freed)
 
     def stop_following_approval_holds(self) -> None:
         """Stop holding conversations for approvals that pause or end from now on."""
