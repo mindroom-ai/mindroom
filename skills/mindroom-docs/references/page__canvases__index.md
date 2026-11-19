@@ -160,9 +160,15 @@ The room header's **Canvas** button lists the conversation's canvases, newest up
 ### Pages in the thread
 
 With `inline=True`, `show_canvas` shows the page in the conversation itself, at the width of a reply, instead of in the panel; its height follows the content.
-Agents use it for mockups, diagrams, charts, and previews the user should see in the flow.
-An inline page is display-only: it cannot send answers or save state, and Chat never opens the panel for it, though **Open canvas** still shows it there.
+Agents prefer it for anything the user should see or answer in the flow: charts, diagrams, mockups, pickers, short forms, and multi-step questions.
+They use the panel for what stays open beside the conversation: dashboards, slides, long documents, and pages the user returns to.
+An inline page sends answers and keeps inputs and saved state like a panel canvas.
+Chat never opens the panel for it; **Open canvas** shows it there, and the thread then shows "Shown in the panel" in its place.
 Updates keep a canvas inline.
+
+Chat rebuilds an inline page each time it scrolls back into view, so agents give form fields an `id` or `name`, or call `saveState`, to keep what the user entered.
+Forms use the themed mode, not `raw` or `width`, because a scaled-down preview shrinks fields and buttons.
+For the next step of a flow, the agent shows a new inline canvas with its reply or updates the same one.
 
 For an accurate preview of a website or app, the agent adds `raw=True`: Chat adds no styles or theme variables of its own, so browser defaults apply as in a normal tab.
 `width` (320 to 2560 pixels) renders the page at the viewport the design targets, such as 1440 for desktop or 390 for a phone, and scales it down to fit the conversation; it never scales up.
@@ -180,7 +186,7 @@ When the panel cannot open, the **Open canvas** button is disabled and a message
 | Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
-Other people in the room who use MindRoom Chat on the agent's homeserver see the title without the button; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
+Other people in the room who use MindRoom Chat on the agent's homeserver see the title and **Open canvas**, not the inline page, and can answer in the panel; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
 
 ### Find a canvas again
 

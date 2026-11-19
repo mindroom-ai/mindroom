@@ -100,11 +100,11 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
     "show_canvas": (
-        "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
+        "show_canvas(...) shows a canvas: a web page you write yourself, which cannot load any "
         "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
         "something in; their answer comes back as their next message. For a quick choice between a few "
-        "options, just ask in your reply. With inline=True the page appears in the conversation itself, "
-        "for mockups, diagrams and charts."
+        "options, just ask in your reply. Prefer inline=True, which shows the page in the conversation, "
+        "for anything the user should see or answer in the flow; use the panel for what stays open beside it."
     ),
     "read_canvas_state": (
         "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
@@ -468,34 +468,35 @@ class ChatUITools(Toolkit):
         width: int | None = None,
         libraries: list[_CanvasLibrary] | None = None,
     ) -> str:
-        """Show the user the Canvas panel: an interactive web page you wrote, beside this conversation.
+        """Show the user a canvas: an interactive web page you wrote, in this conversation or beside it.
 
-        Use a canvas when seeing or clicking beats reading or typing: dashboards,
-        reports, charts, slides, menus, forms, pickers, and multi-step flows. The page
-        cannot load any website, so it cannot show the user a real website. Pass the
-        page as ``html``, or as a workspace-relative ``path`` (e.g. ``slides/deck.html``)
-        to an HTML file, which suits pages you build and refine such as slides. Pages up
-        to 4 MB are supported. Only show pages you wrote: a canvas appears as yours and
-        whatever the user types into it could leave the panel.
+        Use a canvas when seeing or clicking beats reading or typing. The page cannot
+        load any website, so it cannot show the user a real website. Pass the page as
+        ``html``, or as a workspace-relative ``path`` to an HTML file (e.g.
+        ``slides/deck.html``) for pages you build and refine. Pages up to 4 MB are
+        supported. Only show pages you wrote: a canvas appears as yours and whatever
+        the user types into it could leave the page.
 
-        With ``inline=True`` the page appears in the conversation at the width of a
-        reply (about 700px on desktop, about 360px on phones) instead of the panel:
-        use it for mockups, diagrams, charts and previews the user should see in the
-        flow. Leave ``html`` and ``body`` without a background, outer card, title
-        banner or side padding; give charts fixed pixel heights; let content set the
-        height and do not use ``vh`` units or ``height:100%`` on ``html`` or ``body``.
-        An inline page cannot send answers or save state; for that, show a panel canvas.
+        Prefer ``inline=True``, which shows the page in the conversation at reply
+        width (about 700px on desktop, 360px on phones), for anything the user should
+        see or answer in the flow: charts, diagrams, mockups, pickers, short forms,
+        multi-step questions. Use the panel for what stays open beside the
+        conversation: dashboards, slides, long documents, pages the user returns to.
+        Inline, leave ``html`` and ``body`` without a background, card, title banner
+        or side padding; give charts fixed pixel heights; do not use ``vh`` units or
+        ``height:100%`` on ``html`` or ``body``. The page restarts when it scrolls out
+        of view, so give fields an ``id`` or ``name`` or call ``saveState``. For forms
+        use the themed mode, not ``raw`` or ``width``. Show the next step as a new
+        inline canvas or an update.
 
         To preview a website or app as it will really look, use ``inline=True`` with
-        ``raw=True``: Chat then adds no styles of its own, so browser defaults apply
-        until your CSS sets them, and the theme variables are not defined. Set
-        ``width`` to the viewport the design targets, such as 1440 for desktop or 390
-        for a phone: the page renders at that width and is scaled down to fit the
-        conversation. The layout rules above do not apply to such a preview: a page
-        with ``raw`` or ``width`` shows in a browser window at most 16:10 of its width
-        tall (568 to 1080px), ``vh`` units resolve against that window as in a
-        browser, and taller content scrolls inside it. The panel shows raw pages too,
-        at the panel's own width.
+        ``raw=True``: Chat adds no styles or theme variables, so browser defaults
+        apply until your CSS sets them. Set ``width`` to the viewport the design
+        targets, such as 1440 for desktop or 390 for a phone; the page renders at that
+        width, scaled down to fit. A page with ``raw`` or ``width`` ignores the inline
+        layout rules: it shows in a browser window at most 16:10 of its width tall
+        (568 to 1080px), where ``vh`` units work as in a browser and taller content
+        scrolls. The panel shows raw pages too, at the panel's own width.
 
         Design it like a polished web app. Fetch, XHR, and WebSockets are always
         blocked. External images, scripts, styles, and fonts are blocked too
