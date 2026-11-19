@@ -839,15 +839,23 @@ async def test_restore_keeps_the_stored_owner_when_the_room_would_now_pick_anoth
 
 
 @pytest.mark.asyncio
-async def test_task_saved_without_an_owner_keeps_its_writer_as_owner_through_a_rewrite(tmp_path: Path) -> None:
-    """A task saved before owners were stored runs under the agent that last wrote it, also after the steward rewrites it."""
+@pytest.mark.parametrize(
+    "stored_owner",
+    [{}, {"owner": None}, {"owner": ""}, {"owner": 5}],
+    ids=["absent", "null", "empty", "not a string"],
+)
+async def test_task_saved_without_an_owner_keeps_its_writer_as_owner_through_a_rewrite(
+    tmp_path: Path,
+    stored_owner: dict[str, object],
+) -> None:
+    """A task stored without an owner runs under the agent that last wrote it, also after the steward rewrites it."""
     config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
     room = _SharedRoom({ids["router"]: 100, ids["general"]: 50, ids["helper"]: 100})
     workflow = _workflow(due=False)
     room._put(
         "com.mindroom.scheduled.task",
         TASK_ID,
-        {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"},
+        {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending", **stored_owner},
         ids["general"],
     )
 

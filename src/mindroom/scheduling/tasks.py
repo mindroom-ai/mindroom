@@ -108,14 +108,15 @@ def _runtime_authored_task_content(
         return None
     if sender in runtime_account_ids:
         # LEGACY_COMPAT: Scheduled tasks without a stored owner.
-        # Legacy format: Scheduled-task state content without an "owner" field; every task saved before owners
-        #   were stored.
+        # Legacy format: Scheduled-task state content whose "owner" is absent, empty or not a string; every task
+        #   saved before owners were stored.
         # Last legacy release: v2026.10.675 wrote scheduled-task state without an owner; replacement: the next
         #   release stores the owner's Matrix ID in the task's state content when the task is saved.
         # Handling: The account that last wrote the task reads as its owner, and every rewrite stores that owner,
         #   so a write by the room's steward never moves the task; the router's ID marks a task the router owned.
         # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_keeps_its_writer_as_owner_through_a_rewrite.
-        return {"owner": sender, **content}
+        owner = content.get("owner")
+        return {**content, "owner": owner if isinstance(owner, str) and owner else sender}
     logger.warning(
         "scheduled_task_state_ignored_unmanaged_author",
         room_id=room_id,
