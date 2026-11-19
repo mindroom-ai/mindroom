@@ -1,6 +1,6 @@
 # Agent graphs: workflows as Python scripts
 
-Date: 2026-11-19. Status: decided by Bas (approach B), revised after review rounds 1 and 2, ready to build.
+Date: 2026-11-19. Status: decided by Bas (approach B), revised after review rounds 1 to 3, locked, ready to build.
 
 ## Intent
 
@@ -24,6 +24,7 @@ The user always sees what runs, what waits for them, and what it costs.
 For the user: a workflow is a small program your agent writes that puts many agents to work at once.
 It runs in the background while you keep chatting, shows every agent as a box in a live graph, stops to ask you when it needs an answer or an approval, and ends with one report.
 You can cancel it at any time, and a stopped run continues where it left off.
+Everything workflow agents say or send each other is visible to the room, like sub-agent output today; run workflows in a private room for private work.
 
 For the agent: a workflow is a Python file with `def main(args)`.
 `agent(prompt)` runs one agent turn and returns its answer.
@@ -492,8 +493,8 @@ Delivery semantics:
 - A message or a state value is at most 1 MiB, the request limit; larger data goes in a workspace file whose path is sent.
 - Messages and shared state survive restarts and resume with the run.
 
-In the graph a message is an edge from sender to recipient with a count and nothing else.
-Message texts and shared state never enter a frame, a card or room state, because every room member can read those; only `get_workflow(run_id, messages=True)`, which checks the run's owner, returns them.
+In the graph a message is an edge from sender to recipient with a count.
+The texts and shared state are as visible as the agents' own output (see Visibility): each agent's Sub-agents view shows its sends and reads, and `get_workflow(run_id, messages=True)` returns the full history to the run's owner.
 Not in v1: pushing a message into a busy agent's next tool result (it reads its inbox when it chooses), and messages between different runs.
 
 ### 3. With people and with the room
@@ -553,12 +554,17 @@ The store is SQLite at `<control_root>/workflow_runs/workflow_runs.sqlite3` with
 Tables: `workflow_runs`, `workflow_nodes`, `workflow_usage`, `workflow_messages`, `workflow_cursors`, `workflow_peer_calls`, `workflow_state`, `workflow_sources` and `workflow_log`.
 A node row holds its full request, not only a digest, so a restart can restore it and a person can inspect it.
 Node results are stored in full; a result over 8 MiB is written to a file beside the database and the node holds a reference and the first 64 KiB.
-The control store is the only authoritative copy and it is private to the run's owner.
+The control store is the only authoritative copy, and its full records are read only by the run's owner.
 Nothing is exported to the workspace on its own, because a workspace can be shared by several requesters; `get_workflow(run_id, nodes="all")` with the standard `mindroom_output_path` writes a run's nodes to a file when the agent asks.
 Finished runs, with their messages, usage and files, are pruned after the script retention window (30 days, `MINDROOM_SCRIPT_RETENTION_SECONDS`) by the scheduled prune that already removes script runs.
 
 **Ownership.** Every lookup by run ID goes through one function that checks the calling agent and requester against the run's owner, as scripts do; a foreign ID answers exactly like an unknown one.
 That covers the six tool functions, the peer tools, shared state and `save_workflow`.
+
+**Visibility.** One rule: peer message text and shared state have the same visibility as the agents' own output.
+The Sub-agents feed already shows room members every agent's text and tool calls, redacted and capped by `delegation/activity.py`, and that includes `send_peer_message`, `read_peer_messages` and the shared-state calls of a workflow agent; a `get_workflow` result can show in the owner agent's reply previews in the same way.
+Nothing here is private from the room, and no extra hiding is built.
+The owner check guards the full, uncapped record (results, message history, state), and unencrypted room state still carries IDs only.
 
 **The run's job.** The run is one background job of kind `workflow` in the existing `ToolJobRuntime`.
 That gives it a jobs-bar entry, every existing cancel path, the `job` tool, and delivery of the report to the calling agent.
@@ -758,7 +764,7 @@ Existing budgets apply unchanged: each child turn passes through the requester's
 
 - A saved workflow is `workflows/<name>.py` in the owner's workspace; `<name>` matches `[a-z0-9][a-z0-9_-]{0,63}`.
   It is the agent's code, like a skill: whoever can make that agent write files can change it, and a shared workspace shares it.
-  A run's results are not in the workspace and stay private to the run's owner.
+  A run's stored results are not in the workspace; the full record is read through the owner check.
 - Its description is the first line of the module docstring, and an optional literal `ARGS = {"base": "Branch to compare against"}` documents its arguments.
   `list_workflow_runs` reads both with `ast`, never by running the file.
 - `save_workflow(run_id, name, description)` writes that run's source there with the confined, descriptor-relative, no-clobber write the delegation exports use; it adds the docstring when the file has none, and refuses to replace a different file.
@@ -843,7 +849,7 @@ Its structure is what the engine does know: phase, lane (which `foreach` or `par
 |---|---|
 | Operator `tool_approval` default and rules apply to `start_workflow`, to script `tool()` calls and inside every agent | The operator's policy, unchanged in both directions. |
 | Requester authorization is rechecked on every node | A run must stop acting for someone who lost access (existing check). |
-| Only the requester answers questions, approves and resumes; only the owner reads a run, its messages and its shared state | The existing rule for approval cards and scripts; the room sees the graph and message counts only. |
+| Only the requester answers questions, approves and resumes; only the owner reads a run's full stored record | The existing rule for approval cards and scripts; the room sees the graph and what the Sub-agents feed shows of every agent, as today. |
 | A target agent must be the caller, in `delegate_to`, or joined to the room and addressable by the requester | A run must not reach an agent the requester could not reach from this room. |
 | An indeterminate call is never issued again without `rerun` | A write must not happen twice. |
 | Local runs need `allow_shell_without_worker` or local sandbox mode, and Linux | The script runs as the primary's OS user; that is the operator's existing switch for it, and only Linux kills an orphaned script. |
@@ -893,7 +899,7 @@ The removal gives back about 3,000 source lines.
 ## v1 and later
 
 In v1: everything above.
-Cut from v1 in review round 2: paging of rows a frame left out and message texts in the panel (both need delivery to one person, not to the room); a workflow run as a report-publishing source and `mindroom.workflow` as a plugin import; local runs on macOS (a `kqueue` parent watch); the prompt-cache stagger for agents that share a prompt prefix.
+Cut from v1 in review round 2: paging of rows a frame left out and a list of an edge's messages in the panel (each agent's Sub-agents view shows its sends and reads); a workflow run as a report-publishing source and `mindroom.workflow` as a plugin import; local runs on macOS (a `kqueue` parent watch); the prompt-cache stagger for agents that share a prompt prefix.
 Later, in rough order of value: pushing peer messages into a busy agent's next tool result; early exit from a fan-out (the first good answer wins and the rest are cancelled); `agent(..., thread=True)` to show one agent's turn as a Matrix thread; stopping the script process while a run waits for hours and relaunching it on the answer (replay makes that possible); bundled and shared workflows; a `!workflow run` command with no model turn; stall detection with automatic agent restart.
 
 ## Testing
@@ -952,7 +958,7 @@ Each line is a claim from reading code; the named test is its proof, and its PR 
 - **A sender lane that has not started** (Task 23, `test_sender_lane_not_yet_started_is_not_a_deadlock`, with the real SDK).
 - **Large typed results** (Tasks 3, 5 and 10, `test_result_over_the_inline_limit_is_fetched_in_full_and_keeps_its_type` and its two engine tests, after a restart too, and on a Docker worker in B3b's live gate).
 - A provider that repeats a tool call ID with the same arguments inside one model run is treated as a retry of that call; nothing can tell the two apart.
-- Rows a frame left out, and message texts, are readable only through the owner's agent in v1.
+- Rows a frame left out, and the full uncapped message history, are read through the owner's agent in v1; the room sees the capped previews of the Sub-agents feed.
 
 ## Decisions on the open questions
 

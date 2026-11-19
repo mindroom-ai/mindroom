@@ -13,7 +13,7 @@ MindRoom Chat adds the frame type to its sync filter, a frame store, two message
 
 **Tech Stack:** Python 3.13, FastAPI, SQLite, `jsonschema`, pytest; TypeScript, React, vanilla-extract, vitest, Playwright.
 
-**Spec:** `docs/baspowers/specs/2026-11-19-agent-graphs-design.md` (revised after review rounds 1 and 2).
+**Spec:** `docs/baspowers/specs/2026-11-19-agent-graphs-design.md` (revised after review rounds 1 to 3, locked).
 
 ## Global Constraints
 
@@ -23,7 +23,8 @@ MindRoom Chat adds the frame type to its sync filter, a frame store, two message
 - Run lookups by ID go through `owned_run` (Task 6), which checks agent and requester; nothing else reads a run for a caller.
 - Defaults: `max_concurrent` 16, `max_concurrent_runs` 8 (top-level runs), `max_runtime_hours` 72 of working time, `max_tool_calls_per_minute` 600, `large_run_notice_usd` 10 and 25 agents, schema turns 5, automatic resumes without progress 5, node poll 25 s with a 40 s client timeout, `shell` timeout 3600 s and tail 2000.
 - Sizes: request 1 MiB, result 8 MiB then spill to a file with a 64 KiB preview, source 128 KiB, label 80 characters, frame error text 200 characters; frames and cards are fitted with the transport's own size check, never with `len(json.dumps(...))`.
-- Room state carries IDs only (`workflow`, `job_id`) and only the run's own job; node jobs are not listed there; titles, labels, prompts and results never enter unencrypted state, and peer message texts and shared state never enter a frame, a card or room state.
+- Room state carries IDs only (`workflow`, `job_id`) and only the run's own job; node jobs are not listed there; titles, labels, prompts and results never enter unencrypted state.
+- Visibility: peer message text and shared state are as visible to the room as the agents' own output (the Sub-agents feed, redacted and capped by `delegation/activity.py`); no code hides them further, graph frames and the card carry message counts only, and `owned_run` guards the full uncapped record.
 - The script never runs inside the primary process, and never on the host when a worker backend is configured; `mindroom.workflow` imports only the standard library and `mindroom.script_runs.launch_contract`.
 - No change to `dynamic_workflow` code; no new third-party dependency in either repository; no graph library in Chat.
 - Backend: `ruff format` only changed files, new internal imports get a `tach.toml` entry (`uv run tach check --dependencies --interfaces` in every task that adds an import; do not export engine internals to make it pass), tests use `@pytest_asyncio.fixture`.
@@ -53,7 +54,7 @@ Every test file states its level in its module docstring, and a task says which 
 4. Controls from the wrong person or place: another requester's run ID, an answer from another user, the right user in the wrong room, an answer to a card of an old generation, a target agent that is addressable but not in the room (Tasks 6, 9, 16, 18).
 5. A `foreach` over 1,000 items: at most 256 script threads, at most `max_concurrent` running nodes, every frame passes the transport check with 1,000 unfinished nodes and long Unicode labels, and the counts stay true (Tasks 12, 13, 15, 16, 28).
 6. A restart with an open approval or an open question: the earlier writes of that agent are not made again, and the question is not posted twice (Tasks 11, 11b, 18, 24).
-7. Nothing a room member can read carries more than the owner chose to show: no peer message text or shared-state value in a frame, card or state event, and no run found through a provider call ID alone (Tasks 6, 14, 15, 23).
+7. Identity and visibility: no run is found through a provider call ID alone, another requester never reads a run's full record, and nothing but IDs enters unencrypted room state; peer texts showing in the Sub-agents feed is intended (Tasks 6, 14, 23).
 
 ## Pull requests and branches
 
@@ -1024,7 +1025,7 @@ async def test_workflow_agent_message_lands_in_the_originating_thread(stack): ..
   - `fit_snapshot(graph, *, fits: Callable[[dict], bool]) -> dict`: adds rows in the order waiting for a person, failed and indeterminate, running, queued, completed newest first, then edges by count, keeping the largest set for which `fits(candidate)` holds (binary search over the ordered rows, not one call per row); what is left out is counted in `omitted` per status and for edges; when the groups alone do not fit, the innermost groups fold into their parent's counts until they do.
     Every field is bounded in the projection, never in the run: the title and each phase name are cut to 80 characters, the log to its last 20 lines of 200 characters. When a candidate with no node row still does not fit, the log, then the group rows, then the phase names are dropped (their counts stay in `meta` and `omitted`); the last form, `meta` plus `omitted`, has a fixed size and always fits.
   - `graph_delta(before: dict, after: dict) -> dict | None`: changed and new rows and `log_append`; returns the marker `REPLACE` when a row disappeared, the phases changed or `omitted` changed, and the publisher then sends a snapshot.
-  - `edges` rows are `{"from", "to", "kind": "message", "count"}` and nothing else; no function in this module takes a message text or a shared-state value.
+  - `edges` rows are `{"from", "to", "kind": "message", "count"}` and nothing else; the texts show in each agent's Sub-agents view, not in the graph.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1346,7 +1347,7 @@ def test_sdk_turn_numbers_count_per_session(gateway, sdk, in_main): ...
   - Messages queued for a session between turns are put in front of its next message as `Messages received since your last turn:` and one `<sender>: <text>` line each.
   - SDK `send(to, text)`, `inbox(wait_seconds=0)`, `state.get(key, default=None)`, `state.set(key, value)`; the script's name is `script`.
   - A message or value over the 1 MiB request limit is refused with `Too large (<n> bytes, limit 1 MiB). Write it to a workspace file and send the path.`
-  - Graph `edges`: `{"from", "to", "kind": "message", "count"}` only. Message texts and state values leave the store through one function, `get_workflow(run_id, messages=True)` behind `owned_run`; the frame publisher, the card and room state have no code path to them.
+  - Graph `edges`: `{"from", "to", "kind": "message", "count"}` only. The full uncapped message history and state values are returned by `get_workflow(run_id, messages=True)` behind `owned_run`. The peer tools' calls and results show in the room's Sub-agents feed like any tool call, redacted and capped by `delegation/activity.py`; nothing marks them names-only. The docs page carries the spec's sentence: everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1377,7 +1378,9 @@ async def test_message_to_a_finished_agent_is_refused_with_the_hint(stack): ...
 async def test_session_gets_queued_messages_in_front_of_its_next_turn(stack): ...
 async def test_peer_tools_reach_only_the_childs_own_run(stack): ...   # a child of another run cannot read this run's state
 async def test_workflow_children_get_the_peer_tools_and_other_children_do_not(stack): ...
-async def test_message_edges_carry_counts_and_no_frame_card_or_state_event_carries_a_text(stack): ...   # the marker text is in no sent event; get_workflow(messages=True) of the owner has it, of another requester reads as unknown
+async def test_message_edges_carry_counts_and_the_full_history_is_owner_checked(stack): ...
+    # graph frames, the card and room state hold no text; the Sub-agents feed shows the send like any tool call, capped
+    # get_workflow(messages=True) returns the full text to the owner and reads as unknown to another requester
 async def test_reused_call_id_in_a_continued_turn_or_with_other_arguments_is_a_new_operation(stack): ...
 async def test_sender_lane_not_yet_started_is_not_a_deadlock(local_stack): ...
     # real SDK: foreach([reader, sender], fn, max_concurrent=1); the reader waits in read_peer_messages(600); the sender lane has not submitted
@@ -1673,7 +1676,7 @@ it('previews the result, else the last line the agent wrote', () => { /* ... */ 
     Header: title, status pill, the counts and cost lines, elapsed time, Stop for a live run (the job is the room's `kind: 'workflow'` job whose `workflow` is this run) and Resume or Run again under the card's rule.
     Body: one `section` per band with the phase name as its heading; a group box with its kind ("For each", "Parallel", "Saved workflow"), "{{done}} of {{total}}", a progress bar and "Failed: {{count}}"; chips folded by `foldGroupItems` behind "Show {{count}} more"; then one line per non-zero `omitted` status ("and {{count}} more queued", "... running", "... waiting", "... failed", "... done") and, under them, "Ask {{agent}} for the rest." (the rows a frame left out are not paged in v1); then the log.
     Chip: a button with a status dot, the label, the agent's name, the model (the compact label of the joined sub-agent run, else the node's `model` name), tokens, cost and elapsed time; "Reused from the last run" for `cached`, "Queued", "May have run" for `indeterminate`, or the reason it waits.
-    Details of the selected chip: label, status, error, `nodeResultPreview`, its message counts as text ("Messages to {{name}}: {{count}}"; message texts never reach the client), Open (`openSubagentsPanel(store, roomId, threadId, node.run)`, when `node.run` is set) and Stop agent (`cancelBackgroundJob` with `node.job`, while the node is live).
+    Details of the selected chip: label, status, error, `nodeResultPreview`, its message counts as text ("Messages to {{name}}: {{count}}"; the texts are in each agent's Sub-agents view), Open (`openSubagentsPanel(store, roomId, threadId, node.run)`, when `node.run` is set) and Stop agent (`cancelBackgroundJob` with `node.job`, while the node is live).
     Edges: one `aria-hidden` SVG over the body with a path per `shownEdges` entry; chip boxes are measured in a layout effect and by one `ResizeObserver`, and redrawn at most once per animation frame.
     With no entry for the run it shows "Waiting for the run's next update…"; with a `stale` entry it shows "Not updating. Last update {{time}}." above the last graph.
     Chips are memoized on their node row, which `applyWorkflowRunDelta` keeps for untouched rows, so a delta re-renders only the chips it names.
