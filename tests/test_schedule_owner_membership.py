@@ -118,7 +118,7 @@ def _owner_schedule(
     client = make_matrix_client_mock(user_id="@router:server")
     client.user_id = "@router:server"
     client.device_id = "TEST"
-    client.rooms = {}
+    client.rooms = {"!test:server": nio.MatrixRoom("!test:server", client.user_id)}
     client.room_send.return_value = nio.RoomSendResponse("$message", "!test:server")
     client.room_get_state_event.side_effect = read_state
     client.room_put_state.side_effect = write_state

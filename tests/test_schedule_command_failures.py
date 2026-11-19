@@ -108,7 +108,8 @@ async def _reply(
     config = _config(runtime_paths)
     ids = entity_ids(config, runtime_paths)
     scheduled_tasks = MagicMock(spec=ScheduledTaskRuntime)
-    scheduled_tasks.room_steward.return_value = None if steward is None else SimpleNamespace(client=steward)
+    # The answering agent is the only bot of its room, and so its steward, unless a test names another.
+    scheduled_tasks.room_steward.return_value = SimpleNamespace(client=steward or client)
     context = make_test_command_handler_context(
         client=client,
         config=config,

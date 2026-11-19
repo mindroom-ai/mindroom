@@ -722,11 +722,17 @@ async def _put_scheduled_task_state_content(
 ) -> None:
     """Write scheduled-task state as the room's steward, whose power there no other running bot exceeds.
 
-    ``client`` writes where no runtime names a steward.
-    The steward's refusal for lack of power is the moderator-rights answer; any other failure may succeed on a retry.
+    ``client`` writes only where there is no runtime to name a steward.
+    A room without a steward, or whose steward lacks the power, gets the moderator-rights answer; any other failure
+    may succeed on a retry.
     """
-    steward = None if writers is None else writers.room_steward(room_id)
-    writer = client if steward is None or steward.client is None else steward.client
+    writer = client
+    if writers is not None:
+        steward = writers.room_steward(room_id)
+        if steward is None or steward.client is None:
+            logger.warning("scheduled_task_state_refused", room_id=room_id, task_id=task_id, error="no steward")
+            raise ScheduledTaskStateRefusedError(moderator_rights_message("save schedules"))
+        writer = steward.client
     try:
         outcome: object = await writer.room_put_state(
             room_id=room_id,

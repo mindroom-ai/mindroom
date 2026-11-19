@@ -18,7 +18,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE, resolve_runtime_paths
 from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling import tasks as scheduling
-from mindroom.scheduling.errors import ScheduledTaskStateReadError, SchedulingError
+from mindroom.scheduling.errors import ScheduledTaskStateReadError, ScheduledTaskStateRefusedError, SchedulingError
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
 from mindroom.scheduling.runtime import ScheduledTaskRuntime, _TaskRunner
@@ -2535,6 +2535,26 @@ async def test_schedule_task_with_a_failed_state_write_and_no_fallback_writer_fa
 
 
 @pytest.mark.asyncio
+async def test_schedule_state_is_refused_before_any_write_where_the_runtime_names_no_steward() -> None:
+    """With no running bot joined to the room, the asking client does not write, though the room would let it."""
+    client = make_matrix_client_mock(user_id="@mindroom_general:server")
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
+    writers = scheduled_task_runtime(_runtime_paths(), config=Config())
+
+    with pytest.raises(ScheduledTaskStateRefusedError) as exc_info:
+        await scheduling._put_scheduled_task_state_content(
+            client=client,
+            room_id="!test:server",
+            task_id="taskfail",
+            content={},
+            writers=writers,
+        )
+
+    assert str(exc_info.value) == "I need moderator rights in this room to save schedules."
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_steward_write_failure_that_is_not_about_power_gives_no_moderator_advice() -> None:
     """A raised write by the room's steward is a failure to retry, not a lack of power."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
@@ -2594,7 +2614,7 @@ async def test_schedule_task_fails_when_active_write_returns_unexpected_response
                 config=config,
                 runtime_paths=runtime_paths,
                 room=room,
-                task_runtime=scheduled_task_runtime(runtime_paths, config=config),
+                task_runtime=scheduled_task_runtime(runtime_paths, scheduling_bot(client), config=config),
             ),
             room_id="!test:server",
             thread_id="$thread",

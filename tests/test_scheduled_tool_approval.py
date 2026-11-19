@@ -95,7 +95,13 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
-from tests.scheduling_helpers import joined_member_state, run_once_task, scheduled_task_runtime, serve_full_room_state
+from tests.scheduling_helpers import (
+    joined_member_state,
+    run_once_task,
+    scheduled_task_runtime,
+    scheduling_bot,
+    serve_full_room_state,
+)
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
@@ -1229,7 +1235,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     config = _gated_config()
     context = _tool_context(config)
     request = AsyncMock(return_value=True)
-    task_runtime = scheduled_task_runtime(runtime_paths_for(config), config=config)
+    task_runtime = scheduled_task_runtime(runtime_paths_for(config), scheduling_bot(context.client), config=config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request),
@@ -1525,7 +1531,7 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
         else AsyncMock(return_value=request_outcome)
     )
     withdraw = AsyncMock()
-    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
@@ -1570,7 +1576,7 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
     context.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     request = AsyncMock(return_value=True)
     withdraw = AsyncMock()
-    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
@@ -1591,7 +1597,7 @@ async def test_a_published_call_keeps_its_approval_when_its_runner_cannot_start(
     context = _tool_context(_gated_config())
     request = AsyncMock(return_value=True)
     withdraw = AsyncMock()
-    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
