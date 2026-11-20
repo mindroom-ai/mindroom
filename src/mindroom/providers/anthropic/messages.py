@@ -731,7 +731,9 @@ def _without_sampling(params: dict[str, Any]) -> dict[str, Any]:
     """Drop the sampling controls the raw request overrides set, in ``extra_body`` too (``_SAMPLING_CONTROL_NAMES``)."""
     for name in _SAMPLING_CONTROL_NAMES:
         params.pop(name, None)
-    extra_body = {key: value for key, value in (params.get("extra_body") or {}).items() if key not in _SAMPLING_CONTROL_NAMES}
+    extra_body = {
+        key: value for key, value in (params.get("extra_body") or {}).items() if key not in _SAMPLING_CONTROL_NAMES
+    }
     if extra_body:
         params["extra_body"] = extra_body
     else:

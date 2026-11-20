@@ -2611,7 +2611,7 @@ A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its max
 
 Some models reject sampling controls:
 
-- Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
+- Claude API version `2026-10-21`, which MindRoom sends on Anthropic, Bedrock, and Vertex requests, rejects `temperature`, `top_p`, and `top_k` on every model, so MindRoom omits them there, from `request_params` too; a Claude model's `extra_kwargs` still accepts them, and they have no effect.
 - MindRoom also omits those controls for direct Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
 - [GPT-6.2 Astra and GPT-6.2 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 
@@ -22325,7 +22325,7 @@ MINDROOM_MCP_SCIM_TOKEN=<at least 32 random characters>
 | `MINDROOM_MCP_EXTERNAL_AUTHORIZATION_SERVER` | required | Issuer advertised in protected-resource metadata; its discovery document supplies the client's OAuth endpoints |
 | `MINDROOM_MCP_EXTERNAL_ISSUER` | required | Required `iss` value; may differ from the authorization server, and significant trailing slashes matter |
 | `MINDROOM_MCP_EXTERNAL_AUDIENCE` | required | Required `aud`; use an audience dedicated to this MCP resource, not a client ID or browser application audience |
-| `MINDROOM_MCP_EXTERNAL_JWKS_URL` | required | Signing keys |
+| `MINDROOM_MCP_EXTERNAL_JWKS_URL` | required | Signing keys, at a URL that answers directly, since MindRoom refuses JWKS redirects |
 | `MINDROOM_MCP_EXTERNAL_TOKEN_HEADER` | `Authorization` | Header carrying the token; `Authorization` expects `Bearer <JWT>`, other headers carry the raw JWT |
 | `MINDROOM_MCP_EXTERNAL_EMAIL_CLAIM` | `email` | Claim holding the user's email |
 | `MINDROOM_MCP_EXTERNAL_MATRIX_USER_ID_CLAIM` | unset | Claim holding the Matrix user ID |
@@ -23711,6 +23711,7 @@ When a worker makes an HTTP(S) request through the broker, the broker matches th
 If the request matches a service rule, the broker terminates TLS with its own certificate, injects the configured secret into the request as a header or query parameter, forwards the request to the upstream server, and returns the response to the worker.
 Unmatched hosts are either tunneled through (passthrough mode) or blocked (deny mode), controlled by `egress_broker.unmatched_hosts` in `config.yaml`.
 The broker replaces any value the client sent in the header or query parameter it injects into, and returns redirects to the client without following them, so a redirect to another host gets a credential only where a rule matches that host.
+It also drops any other header that sends one of the service's placeholder values, alone or after a scheme such as `Bearer`, so a client that sends its key in another header, such as the Anthropic SDK's `Authorization` since version 2, still sends one credential.
 
 Workers authenticate to the broker with a signed token in `HTTP_PROXY` and `HTTPS_PROXY`: the user name in `http://<token>:mindroom@<broker host>:<port>`, whose fixed password `mindroom` is not a secret, so curl, Python `urllib`, and Node `fetch` (with `NODE_USE_ENV_PROXY`) work as is.
 The broker checks the token, resolves the worker's scope, and loads that scope's API key or connected-account token (see [Secret sources](#secret-sources)), which never reaches the worker process, its environment, or the filesystem it can read.
@@ -24852,7 +24853,7 @@ MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM=matrix_user_id
 | --- | --- |
 | `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED` | Turns the mode on; default `false` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER` | Required; header carrying the JWT |
-| `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL` | Required; the gateway's signing keys |
+| `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL` | Required; the gateway's signing keys, at a URL that answers directly, since MindRoom refuses JWKS redirects |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE` | Required; expected `aud` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER` | Required; expected `iss` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM` | Claim holding the verified email; default `email` |
