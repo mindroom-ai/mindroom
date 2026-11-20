@@ -400,7 +400,7 @@ class File:
 
 
 # The MIME type family of each media kind that a file name or a declared type can name.
-MEDIA_MIME_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
+MEDIA_MIME_FAMILIES: dict[type, str] = {Image: "image/", Audio: "audio/", Video: "video/"}
 
 
 # Types Python's MIME table lacks or names differently, so the host's MIME table must not decide them; OpenAI's

@@ -21,7 +21,7 @@ _MAX_SLEEP_SECONDS = 300
 class SleepTools(AgnoSleepTools):
     """Agno sleep toolkit whose pauses are capped and awaited, because it runs in the process shared by every agent."""
 
-    async def sleep(self, seconds: int) -> str:  # ty: ignore[invalid-method-override]  # Agno awaits async tools
+    async def sleep(self, seconds: int) -> str:  # ty: ignore[incompatible-method-override]  # Agno awaits async tools
         """Use this function to sleep for a given number of seconds, at most 300."""
         if not 0 <= seconds <= _MAX_SLEEP_SECONDS:
             return f"Sleep duration must be between 0 and {_MAX_SLEEP_SECONDS} seconds."

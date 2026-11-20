@@ -311,7 +311,8 @@ class FileIndexer:
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
 
         strategy = reader.chunking_strategy
-        if (legacy := _LEGACY_WHITESPACE_CHUNKING.get(type(strategy))) is not None:
+        legacy = _LEGACY_WHITESPACE_CHUNKING.get(type(strategy))
+        if legacy is not None and isinstance(strategy, FixedSizeChunking | DocumentChunking):
             # JSON, PDF, DOCX, and PPTX readers keep Agno's split algorithm and its size, with the legacy whitespace.
             reader.chunking_strategy = legacy(chunk_size=strategy.chunk_size, overlap=strategy.overlap)
 
@@ -489,7 +490,7 @@ class FileIndexer:
                 try:
                     vectors.update(
                         await run_with_embedding_retry(
-                            partial(asyncio.to_thread, self.embedder.embed_texts, planned_batch, stop=stop),
+                            partial(asyncio.to_thread, partial(self.embedder.embed_texts, planned_batch, stop=stop)),
                             policy=_EMBEDDING_RETRY_POLICY,
                             sleep=_EMBEDDING_RETRY_SLEEP,
                             on_retry=self._record_embedding_retry,

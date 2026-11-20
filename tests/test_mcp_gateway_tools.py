@@ -1036,10 +1036,10 @@ async def test_close_failure_does_not_swallow_cancellation(
             super().__init__(name="calculator", tools=[self.wait])
             self._requires_connect = True
 
-        async def connect(self) -> None:  # ty: ignore[invalid-method-override]
+        async def connect(self) -> None:  # ty: ignore[incompatible-method-override]
             pass
 
-        async def close(self) -> None:  # ty: ignore[invalid-method-override]
+        async def close(self) -> None:  # ty: ignore[incompatible-method-override]
             message = "backend cleanup failed"
             raise RuntimeError(message)
 

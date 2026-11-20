@@ -24,11 +24,30 @@ logger = get_logger(__name__)
 class HookRegistryPlugin(Protocol):
     """Structural plugin shape consumed by hook-registry compilation."""
 
-    name: str
-    entry_config: PluginEntryConfig
-    plugin_order: int
-    discovered_hooks: tuple[HookCallback, ...]
-    discovered_automations: tuple[CheckFn, ...]
+    @property
+    def name(self) -> str:
+        """The plugin name."""
+        ...
+
+    @property
+    def entry_config(self) -> PluginEntryConfig:
+        """The plugin's config entry."""
+        ...
+
+    @property
+    def plugin_order(self) -> int:
+        """The position of the plugin in the configured order."""
+        ...
+
+    @property
+    def discovered_hooks(self) -> tuple[HookCallback, ...]:
+        """The hook callbacks the plugin registers."""
+        ...
+
+    @property
+    def discovered_automations(self) -> tuple[CheckFn, ...]:
+        """The automation checks the plugin registers."""
+        ...
 
 
 def _callback_source_lineno(callback: HookCallback) -> int:

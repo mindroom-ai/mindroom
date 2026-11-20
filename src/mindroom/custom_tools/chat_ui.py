@@ -198,7 +198,7 @@ class ChatUITools(Toolkit):
         super().__init__(name="chat_ui", tools=tools)
 
     @property
-    def instructions(self) -> str:
+    def instructions(self) -> str:  # ty: ignore[incompatible-property-override]  # Toolkit writes it only when passed one
         """Map the built functions; ``with_offered_instructions`` narrows them to the ones an agent is offered."""
         return self.instructions_for(self.functions)
 

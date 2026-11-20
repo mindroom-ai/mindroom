@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class DesktopIdentityError(RuntimeError):
@@ -30,7 +33,7 @@ class _AgentUserIdentity(Protocol):
 
 class _OlmAccountIdentity(Protocol):
     @property
-    def identity_keys(self) -> dict[str, str]: ...
+    def identity_keys(self) -> Mapping[str, object]: ...
 
 
 class _OlmIdentity(Protocol):

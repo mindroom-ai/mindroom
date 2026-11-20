@@ -130,7 +130,7 @@ def lumalabs_tools() -> type[LumaLabTools]:
             # retain MindRoom's configured default, polling, media, and error behavior.
             # Coverage: tests/test_lumalabs_tool.py::test_lumalabs_generation_sends_model_and_returns_video;
             # tests/test_lumalabs_tool.py preserves completion controls, HTTP errors, and registration flags.
-            # Intentional instance-local SDK method binding; its declared method type cannot express this repair.
-            self.client.generations.create = partial(self.client.generations.create, model=model)  # ty: ignore[invalid-assignment]
+            # Intentional instance-local SDK method binding.
+            self.client.generations.create = partial(self.client.generations.create, model=model)
 
     return MindRoomLumaLabTools

@@ -122,7 +122,11 @@ def _query_agentql_server(
         request_id = error.response.headers.get("X_REQUEST_ID") if error.response is not None else None
         if isinstance(error, requests.exceptions.ReadTimeout):
             raise AgentQLServerTimeoutError from error
-        if isinstance(error, requests.exceptions.HTTPError) and error.response.status_code == 401:
+        if (
+            isinstance(error, requests.exceptions.HTTPError)
+            and error.response is not None
+            and error.response.status_code == 401
+        ):
             raise_401_error(error, request_id)
         error_code = error.response.status_code if error.response is not None else None
         server_error = error.response.content.decode("utf-8") if error.response is not None else None

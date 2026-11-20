@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request
 
@@ -110,7 +110,7 @@ def resolve_dashboard_execution_scope_override(
     if raw_execution_scope == "unscoped":
         return True, None
     if raw_execution_scope in {"shared", "user", "user_agent"}:
-        return True, cast("WorkerScope", raw_execution_scope)
+        return True, raw_execution_scope
     raise HTTPException(
         status_code=400,
         detail=("Query parameter 'execution_scope' must be one of 'shared', 'user', 'user_agent', or 'unscoped'."),

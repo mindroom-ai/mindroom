@@ -7,7 +7,7 @@ import json
 import threading
 from typing import TYPE_CHECKING
 
-import httpx
+import httpx2
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
@@ -25,6 +25,7 @@ from mindroom.oauth.providers import (
     OAuthRefreshRejectedError,
     OAuthRuntimeEndpoints,
     OAuthTokenEndpointChangedError,
+    OAuthTokenResponseBodyError,
     token_endpoint_origin,
 )
 from tests.oauth_test_utils import (
@@ -213,8 +214,8 @@ def _refreshable_provider(tmp_path: Path) -> tuple[OAuthProvider, RuntimePaths, 
     return provider, runtime_paths, token_data
 
 
-def _lost(request: httpx.Request) -> Exception:
-    return httpx.ReadTimeout("timed out", request=request)
+def _lost(request: httpx2.Request) -> Exception:
+    return httpx2.ReadTimeout("timed out", request=request)
 
 
 @pytest.mark.asyncio
@@ -222,9 +223,9 @@ def _lost(request: httpx.Request) -> Exception:
     "lost_response",
     [
         pytest.param(_lost, id="read-timeout"),
-        pytest.param(lambda request: httpx.ReadError("connection reset", request=request), id="read-error"),
+        pytest.param(lambda request: httpx2.ReadError("connection reset", request=request), id="read-error"),
         pytest.param(
-            lambda request: httpx.RemoteProtocolError("Server disconnected", request=request),
+            lambda request: httpx2.RemoteProtocolError("Server disconnected", request=request),
             id="disconnected",
         ),
     ],
@@ -232,7 +233,7 @@ def _lost(request: httpx.Request) -> Exception:
 async def test_refresh_repeats_grant_once_when_its_response_is_lost(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    lost_response: Callable[[httpx.Request], Exception],
+    lost_response: Callable[[httpx2.Request], Exception],
 ) -> None:
     """A grant whose response never arrived is repeated with the same refresh token, and its answer is used."""
     provider, runtime_paths, token_data = _refreshable_provider(tmp_path)
@@ -251,22 +252,22 @@ async def test_refresh_repeats_grant_once_when_its_response_is_lost(
     ("outcomes", "expected_requests"),
     [
         pytest.param(
-            [_lost, lambda request: httpx.ReadTimeout("timed out again", request=request)],
+            [_lost, lambda request: httpx2.ReadTimeout("timed out again", request=request)],
             2,
             id="repeat-also-lost",
         ),
         pytest.param(
-            [lambda request: httpx.ConnectError("unreachable", request=request), rotated_token_response()],
+            [lambda request: httpx2.ConnectError("unreachable", request=request), rotated_token_response()],
             1,
             id="connect-error-never-reached-provider",
         ),
         pytest.param(
-            [httpx.Response(429, text="Rate exceeded."), rotated_token_response()],
+            [httpx2.Response(429, text="Rate exceeded."), rotated_token_response()],
             1,
             id="non-json-error-response",
         ),
         pytest.param(
-            [httpx.Response(429, content=b"\x80\x81 not text"), rotated_token_response()],
+            [httpx2.Response(429, content=b"\x80\x81 not text"), rotated_token_response()],
             1,
             id="non-utf8-error-response",
         ),
@@ -296,7 +297,7 @@ async def test_refresh_rejected_on_the_repeat_is_terminal(
 ) -> None:
     """A provider without a reuse grace period rejects the repeat, which the caller treats as a terminal rejection."""
     provider, runtime_paths, token_data = _refreshable_provider(tmp_path)
-    presented = serve_token_endpoint(monkeypatch, [_lost, httpx.Response(400, json={"error": "invalid_grant"})])
+    presented = serve_token_endpoint(monkeypatch, [_lost, httpx2.Response(400, json={"error": "invalid_grant"})])
 
     with pytest.raises(OAuthRefreshRejectedError) as exc_info:
         await provider.refresh_token_data(token_data, runtime_paths)
@@ -322,7 +323,7 @@ def test_refresh_deadline_fits_a_repeat_and_ends_before_lock_waiters_give_up() -
         pytest.param(
             [DelayedTokenEndpointOutcome(0.35, _lost), rotated_token_response()],
             1,
-            httpx.ReadTimeout,
+            httpx2.ReadTimeout,
             id="no-budget-left-for-repeat",
         ),
         pytest.param(
@@ -364,23 +365,70 @@ async def test_refresh_grant_attempts_share_one_deadline(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("body", "decode_error"),
-    [
-        pytest.param(b"Rate exceeded.", json.JSONDecodeError, id="non-json"),
-        pytest.param(b"\x80\x81 not text", UnicodeDecodeError, id="non-utf8"),
-    ],
+    "body",
+    [pytest.param(b"Rate exceeded.", id="non-json"), pytest.param(b"\x80\x81 not text", id="non-utf8")],
 )
 async def test_code_exchange_reports_undecodable_error_response_as_provider_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     body: bytes,
-    decode_error: type[ValueError],
 ) -> None:
-    """A token endpoint answering with an undecodable error body fails the exchange instead of escaping."""
+    """A token endpoint answering with an undecodable error body fails the exchange with its HTTP error."""
     provider, runtime_paths, _token_data = _refreshable_provider(tmp_path)
-    serve_token_endpoint(monkeypatch, [httpx.Response(429, content=body)])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(429, content=body)])
 
     with pytest.raises(OAuthProviderError) as exc_info:
         await provider.exchange_code("authorization-code", runtime_paths, token_url=provider.token_url)
 
+    assert str(exc_info.value) == "OAuth token exchange failed"
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, httpx2.HTTPStatusError)
+    assert cause.response.status_code == 429
+
+
+_NON_OBJECT_SUCCESS_BODIES = [
+    pytest.param(b"Rate exceeded.", json.JSONDecodeError, id="non-json"),
+    pytest.param(b"\x80\x81 not text", UnicodeDecodeError, id="non-utf8"),
+    pytest.param(b'["access_token"]', OAuthTokenResponseBodyError, id="json-array"),
+    pytest.param(b'"access_token"', OAuthTokenResponseBodyError, id="json-string"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("body", "decode_error"), _NON_OBJECT_SUCCESS_BODIES)
+async def test_code_exchange_reports_non_object_success_response_as_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    body: bytes,
+    decode_error: type[ValueError],
+) -> None:
+    """A success status whose body is not a JSON object fails the exchange with the decode error that says why."""
+    provider, runtime_paths, _token_data = _refreshable_provider(tmp_path)
+    serve_token_endpoint(monkeypatch, [httpx2.Response(200, content=body)])
+
+    with pytest.raises(OAuthProviderError) as exc_info:
+        await provider.exchange_code("authorization-code", runtime_paths, token_url=provider.token_url)
+
+    assert str(exc_info.value) == "OAuth token exchange failed"
     assert type(exc_info.value.__cause__) is decode_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("body", "decode_error"), _NON_OBJECT_SUCCESS_BODIES)
+async def test_refresh_reports_non_object_success_response_as_non_terminal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    body: bytes,
+    decode_error: type[ValueError],
+) -> None:
+    """A success status whose body is not a JSON object fails the refresh without repeating the answered grant."""
+    provider, runtime_paths, token_data = _refreshable_provider(tmp_path)
+    presented = serve_token_endpoint(monkeypatch, [httpx2.Response(200, content=body), rotated_token_response()])
+
+    with pytest.raises(OAuthProviderError) as exc_info:
+        await provider.refresh_token_data(token_data, runtime_paths)
+
+    assert type(exc_info.value) is OAuthProviderError
+    assert str(exc_info.value) == "OAuth token refresh failed"
+    assert type(exc_info.value.__cause__) is decode_error
+    assert presented == ["stored-refresh-token"]

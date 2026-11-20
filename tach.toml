@@ -9135,6 +9135,19 @@ from = ["mindroom.tools.agno_compat_mem0"]
 expose = ["UserFilterMem0Tools"]
 
 [[modules]]
+path = "mindroom.tools.confluence"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_confluence"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_confluence"
+depends_on = []
+visibility = ["mindroom.tools.confluence"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_confluence"]
+expose = ["V1ConfluenceTools"]
+
+[[modules]]
 path = "mindroom.tools.newspaper4k"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_newspaper4k"]
 

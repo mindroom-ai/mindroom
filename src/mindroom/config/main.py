@@ -1243,7 +1243,7 @@ class Config(BaseModel):
 
     def runtime_model_dump(self) -> dict[str, Any]:
         """Serialize authored config plus the agents generated from personal_agents templates."""
-        payload = cast("dict[str, Any]", self.model_dump(exclude_unset=True))
+        payload = self.model_dump(exclude_unset=True)
         knowledge_bases = payload.get("knowledge_bases")
         if isinstance(knowledge_bases, dict):
             for base_id in self._runtime_knowledge_base_overlays:

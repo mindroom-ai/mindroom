@@ -615,7 +615,7 @@ def test_agentql_redirect_does_not_forward_scoped_request(
             response._content = (
                 b'{"request_id":"redirect-destination","response":{"text_content":["forwarded"],"title":"forwarded"}}'
             )
-        response.url = cast("str", request.url)
+        response.url = request.url
         return response
 
     monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
