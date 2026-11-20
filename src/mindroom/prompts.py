@@ -326,7 +326,7 @@ FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (
     "[Memory entrypoint truncated - showing {included_lines} of {total_lines} lines "
     "(capped by memory.file.max_entrypoint_lines={max_entrypoint_lines} "
     "and memory.file.max_entrypoint_tokens={max_entrypoint_tokens}). "
-    "Lines past the cap, the newest included, never reach this prompt: read `{memory_path}` directly for them, "
+    "Lines past the cap, new ones included, are left out of this prompt: read `{memory_path}` directly for them, "
     "and condense it (move detail into searchable `memory/` files) so they fit again.]"
 )
 PROMPT_CURATION_PROMPT_TEMPLATE = """🧹 Prompt maintenance: the files loaded into every one of your prompts total {measured_tokens} tokens (limit {trigger_tokens}), and MEMORY.md has {memory_lines} lines and {entrypoint_tokens} tokens (preload limits {max_entrypoint_lines} lines and {max_entrypoint_tokens} tokens; over either, some of its lines never reach your prompt).
