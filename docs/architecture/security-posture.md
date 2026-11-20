@@ -335,7 +335,6 @@ A worker's sshd never starts at boot: the primary asks the runner to start it on
 Before it starts sshd, the primary writes `sshd_config`, `authorized_keys` with every line `restrict,pty`, and the link's own Ed25519 host private key into `<worker root>/.runtime/ssh/`, which the worker mounts read-only, so worker code can read the host key, as sshd's own uid, but cannot change what sshd admits.
 The links, each person's SSH public keys, and every link's host private key live in `tracking/tailnet_ssh.json`, which only the primary reads and no worker mounts.
 A removed key, portal or operator, and a disconnected or removed link move the link's `closed_before`, which tells the gateway to close the sessions opened before it.
-A disconnected link's sshd and files stay in its worker until the worker stops, so port 2222 stays reachable directly on the worker network, such as Docker's bridge, with a key `authorized_keys` still lists.
 
 ## Known gaps
 
@@ -357,6 +356,7 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   The one-time merge of the team memory copies earlier releases kept there refuses a member store holding a link when it starts, but not a link swapped in while Chroma opens it.
   Chroma also bundles its own SQLite 3.46, so a journal planted beside that store makes the primary delete the file the journal names when Chroma next opens it.
   Only code in the Kubernetes `static_runner` sidecar can write below `agents/`, and team memory itself lives in `team_memory/`, which no worker mounts.
+- A disconnected tailnet SSH link's sshd and files stay in its worker until the worker stops, so port 2222 stays reachable directly on the worker network, such as Docker's bridge, with a key `authorized_keys` still lists.
 
 ## Intentional behaviors
 
