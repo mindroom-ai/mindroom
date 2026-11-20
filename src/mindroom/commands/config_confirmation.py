@@ -307,6 +307,19 @@ async def _has_visible_confirmation_response(
     )
 
 
+async def _already_set_up(client: nio.AsyncClient, runtime_paths: RuntimePaths, room_id: str, event_id: str) -> bool:
+    """Whether the preview has a pending change, whose buttons are added again, or a visible decision.
+
+    Call it while holding the preview's lock.
+    """
+    pending_change = _resolve_pending_change(client, runtime_paths, event_id, room_id)
+    if pending_change is not None:
+        if pending_change.decision_event_id is None:
+            await _add_confirmation_reactions(client, room_id, event_id)
+        return True
+    return bool(await _confirmation_response_ids(client, room_id, event_id))
+
+
 async def recover_confirmation_setup(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
@@ -315,12 +328,7 @@ async def recover_confirmation_setup(
 ) -> bool:
     """Recover a preview whose pending change or completed decision already exists."""
     async with _pending_change_lock(preview_event_id):
-        pending_change = _resolve_pending_change(client, runtime_paths, preview_event_id, room_id)
-        if pending_change is not None:
-            if pending_change.decision_event_id is None:
-                await _add_confirmation_reactions(client, room_id, preview_event_id)
-            return True
-        return bool(await _confirmation_response_ids(client, room_id, preview_event_id))
+        return await _already_set_up(client, runtime_paths, room_id, preview_event_id)
 
 
 async def ensure_pending_change(
@@ -337,12 +345,7 @@ async def ensure_pending_change(
 ) -> None:
     """Persist one preview exactly once before exposing its reaction buttons."""
     async with _pending_change_lock(event_id):
-        pending_change = _resolve_pending_change(client, runtime_paths, event_id, room_id)
-        if pending_change is not None:
-            if pending_change.decision_event_id is None:
-                await _add_confirmation_reactions(client, room_id, event_id)
-            return
-        if await _confirmation_response_ids(client, room_id, event_id):
+        if await _already_set_up(client, runtime_paths, room_id, event_id):
             return
 
         pending_change = _PendingConfigChange(
