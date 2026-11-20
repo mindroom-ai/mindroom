@@ -718,6 +718,33 @@ async def test_failed_membership_queries_log_why_they_failed(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_refused_membership_queries_log_the_servers_answer(tmp_path: Path) -> None:
+    """A joined-rooms or joined-members query the homeserver refuses logs the refusal it answered."""
+    config, runtime_paths = _current_room_runtime_config(tmp_path)
+    room_id = "!current:example.com"
+    rooms_refused = nio.JoinedRoomsError("rooms refused")
+    members_refused = nio.JoinedMembersError("members refused", room_id=room_id)
+    client = AsyncMock()
+    client.joined_rooms.side_effect = [rooms_refused, nio.JoinedRoomsResponse(rooms=[room_id])]
+    client.joined_members.return_value = members_refused
+    index = AgentReplyMembershipIndex()
+
+    with capture_logs() as logs:
+        await refresh_memberships(index, config, runtime_paths, client)
+        await refresh_memberships(index, config, runtime_paths, client)
+
+    assert [
+        (log["event"], log["error"])
+        for log in logs
+        if log["event"] in {"agent_reply_observer_joined_rooms_failed", "agent_reply_grant_room_snapshot_failed"}
+    ] == [
+        ("agent_reply_observer_joined_rooms_failed", str(rooms_refused)),
+        ("agent_reply_grant_room_snapshot_failed", str(members_refused)),
+    ]
+    assert not index.is_current_room_member("@alice:example.com", room_id, config, runtime_paths)
+
+
+@pytest.mark.asyncio
 async def test_a_member_list_raced_by_a_membership_change_is_read_again(tmp_path: Path) -> None:
     """A room whose member list the client refused for a membership change during the read is read again and ready."""
     config, runtime_paths = _current_room_runtime_config(tmp_path)
