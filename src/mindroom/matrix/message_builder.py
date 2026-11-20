@@ -324,12 +324,13 @@ def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
     """Return the text replacing an ``<img>`` whose first ``src`` no client can load, or None to keep it."""
     src = unescape(next((value or "" for name, value in attrs if name == "src"), "")).strip()  # the src as emitted
     server, _, media_id = src.removeprefix("mxc://").partition("/")
+    web_src = f"https:{src}" if src.startswith("//") else src  # a scheme-relative src loads like https
     try:
-        parts = urlsplit(src)
+        parts = urlsplit(web_src)
         web = parts.scheme.lower() in {"http", "https"} and bool(parts.hostname) and parts.port != -1  # port may raise
     except ValueError:
         web = False
-    authority = re.split(r"[/?#]", src.partition("://")[2])[0]  # raw, since urlsplit drops tabs and newlines
+    authority = re.split(r"[/?#]", web_src.partition("://")[2])[0]  # raw, since urlsplit drops tabs and newlines
     mxc = src.startswith("mxc://") and valid_matrix_server_name(server) and re.fullmatch(r"[A-Za-z0-9_-]+", media_id)
     if (web and not any(char.isspace() for char in authority)) or mxc:
         return None

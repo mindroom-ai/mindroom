@@ -173,6 +173,12 @@ def test_loadable_image_is_kept(markdown: str) -> None:
         ("![logo](https://%65xample.org/logo.png)", '<p><img src="https://%65xample.org/logo.png" alt="logo"></p>\n'),
         ("![l](https://example.org/a%20b.png)", '<p><img src="https://example.org/a%20b.png" alt="l"></p>\n'),
         ('<a href="" href="https://example.org">Docs</a>', '<p><a href="https://example.org">Docs</a></p>\n'),
+        ("![x](//example.org/x.png)", '<p><img src="//example.org/x.png" alt="x"></p>\n'),
+        ('<img src="//example.org:8443/x.png" alt="x">', '<img src="//example.org:8443/x.png" alt="x">'),
+        ('<img src="//" alt="x">', "⚠️ Image not sent: x (no uploaded file)"),
+        ('<img src="///x" alt="x">', "⚠️ Image not sent: x (no uploaded file)"),
+        ('<img src="//a b/x" alt="x">', "⚠️ Image not sent: x (no uploaded file)"),
+        ('<img src="//example.org:99999/x" alt="x">', "⚠️ Image not sent: x (no uploaded file)"),
     ],
 )
 def test_the_checked_src_is_the_emitted_src(markdown: str, expected: str) -> None:
