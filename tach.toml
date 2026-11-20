@@ -3938,6 +3938,7 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
     "mindroom.memory._mem0_usage",
+    "mindroom.providers.anthropic.messages",
     "mindroom.providers.ollama.errors",
     "mindroom.tool_system.dependencies",
 ]

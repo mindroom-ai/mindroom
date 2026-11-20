@@ -2847,7 +2847,8 @@ class TestGenerateSummary:
                     "claude-mythos-5-1",
                 )
             ),
-            pytest.param({"provider": "anthropic", "id": "claude-haiku-4-5"}, True, id="anthropic-claude-haiku-4-5"),
+            # API version 2026-10-21 rejects sampling on every Claude model, so older ones get none either.
+            pytest.param({"provider": "anthropic", "id": "claude-haiku-4-5"}, False, id="anthropic-claude-haiku-4-5"),
             *(
                 pytest.param({"provider": "bedrock_claude", "id": model_id}, False, id=f"bedrock-{model_id}")
                 for model_id in (

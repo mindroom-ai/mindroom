@@ -17,8 +17,7 @@ dynamic = [ "version" ]
 dependencies = [
   "agno==3.2.1",
   "aiohttp>=3.13.3",
-  # Claude SDK 2 moves requests to API version 2026-10-21, a migration of its own.
-  "anthropic>=1.17,<2",
+  "anthropic>=2.11,<3",
   "anyio>=4.10",
   # Authlib 1.8 moves its HTTPX client to httpx2, which our token transports and error handling do not use yet.
   "authlib>=1.6,<1.8",

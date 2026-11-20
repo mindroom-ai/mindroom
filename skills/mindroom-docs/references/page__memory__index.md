@@ -167,6 +167,7 @@ With `provider: ollama`, `config.host` names the Ollama server only when no `OLL
 With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
 With `provider: openai`, `config.openai_base_url` sets the server; without it, extraction uses [`OPENAI_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else OpenAI's API.
 With `provider: anthropic`, `config.anthropic_base_url` sets the server; without it, extraction uses [`ANTHROPIC_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else Anthropic's API.
+With `provider: anthropic`, Mem0 sends no `temperature`, `top_p`, or `top_k`, which Claude API version `2026-10-21` rejects on every model, so `config` sampling values have no effect.
 For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
 ```yaml

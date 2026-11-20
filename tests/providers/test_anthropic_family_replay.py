@@ -665,6 +665,39 @@ async def test_a_tool_result_stored_as_a_list_keeps_its_blocks(tmp_path: Path) -
     ]
 
 
+_CITATION = [{"type": "char_location", "cited_text": "Paris", "document_index": 0, "start_char_index": 0}]
+
+
+@pytest.mark.asyncio
+async def test_user_text_blocks_and_stored_tool_results_go_without_citations(tmp_path: Path) -> None:
+    """API version 2026-10-21 rejects cited user text, in a search result too; a citation setting stays."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
+    call = {"id": "call_cited", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+    cited = {"type": "text", "text": "Paris", "citations": _CITATION}
+    search = {
+        "type": "search_result",
+        "source": "https://example.test",
+        "title": "Capitals",
+        "content": [cited],
+        "citations": {"enabled": True},
+    }
+    user_content = [cited, search]
+    messages = [
+        Message(role="user", content=user_content),
+        Message(role="assistant", tool_calls=[call]),
+        Message(role="tool", tool_call_id="call_cited", tool_name="lookup", content=[cited, search]),
+    ]
+
+    body = await _sent(route_provider("anthropic", tmp_path, wire), wire, messages)
+
+    plain = {"type": "text", "text": "Paris"}
+    shaped_search = {**search, "content": [plain]}
+    assert _user_blocks(body, 0) == [plain, shaped_search]
+    assert _user_blocks(body, 1)[0]["content"] == [plain, shaped_search]
+    assert user_content == [cited, search]
+    assert search["content"] == [cited]
+
+
 # --- Tool definitions and foreign history --------------------------------------------------------------------
 
 
