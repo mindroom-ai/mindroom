@@ -84,7 +84,7 @@ from mindroom.turn_origin import classify_turn_origin
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-    from anyio.abc import BlockingPortal
+    from anyio.from_thread import BlockingPortal
     from starlette.testclient import WebSocketTestSession
 
     from mindroom.api.app_state import EmbeddedRuntime

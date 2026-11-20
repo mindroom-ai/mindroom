@@ -58,7 +58,7 @@
             {
               "inlineData": {
                 "data": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA-AAACABAAZGF0YQAAAAA=",
-                "mimeType": "audio/wav"
+                "mime_type": "audio/wav"
               }
             }
           ],

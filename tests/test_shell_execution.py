@@ -39,7 +39,7 @@ class _RecordingCapture(ShellOutputCapture):
     """Keep the spool readable after the engine reports completion."""
 
     def __init__(self, directory: Path) -> None:
-        super().__init__(ShellOutputDestination(workspace_root=str(directory), path="", max_bytes=1024), None)
+        super().__init__(ShellOutputDestination(workspace_root=str(directory), path="", max_bytes=1024))
         self.return_codes: list[int | None] = []
 
     def publish(self, return_code: int | None) -> str:
@@ -152,9 +152,9 @@ async def test_default_streams_stay_separate_and_merge_seam_interleaves(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,
 ) -> None:
-    """Merged stderr keeps terminal order in one stream; the default reply still omits stderr on success."""
+    """Merged stderr keeps terminal order in one stream; by default a success's stderr follows its stdout."""
     argv = ["/bin/sh", "-c", "echo first; echo second >&2; echo third"]
-    assert await _run(registry, argv, tmp_path) == "first\nthird"
+    assert await _run(registry, argv, tmp_path) == "first\nthird\nStderr:\nsecond"
     assert await _run(registry, argv, tmp_path, stderr=asyncio.subprocess.STDOUT) == "first\nsecond\nthird"
 
 
@@ -274,6 +274,56 @@ async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
         assert await _wait_until_gone(record.pid)
     finally:
         capture.release()
+
+
+@pytest.mark.asyncio
+async def test_checking_a_finished_success_shows_its_stderr_after_its_output(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """A finished background success shows its stderr, tailed like its stdout, after the status and output."""
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "echo out; echo warn >&2; echo again >&2"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=1,
+        timeout=10,
+        register_finished=True,
+    )
+    assert result.handle is not None
+
+    status, rest = check_command(registry, namespace="test", handle=result.handle).split("\n", 1)
+    assert status.startswith("Status: FINISHED (exit code 0, ")
+    assert rest == (
+        "Output:\nout\nStderr:\n[Showing the last 1 of 2 lines. Pass a larger tail, or narrow the command.]\nagain"
+    )
+
+
+@pytest.mark.asyncio
+async def test_checking_a_running_command_counts_its_blank_lines_as_its_notice_does(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """The buffered line count of a running command and the notice above its tail count blank lines alike."""
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "echo text; yes '' | head -n 60; sleep 30"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=1,
+    )
+    assert result.handle is not None
+
+    status, rest = check_command(registry, namespace="test", handle=result.handle).split("\n", 1)
+    assert status.startswith("Status: RUNNING (PID ")
+    assert rest == (
+        "Partial output (61 lines buffered):\n"
+        "[Showing the last 50 of 61 lines. Pass a larger tail, or narrow the command.]\n" + "\n" * 49
+    )
 
 
 @pytest.mark.asyncio
@@ -519,7 +569,7 @@ async def test_a_running_command_reports_its_latest_output_as_progress(
         on_progress=reports.append,
     )
 
-    assert result.message == "one\ntwo"
+    assert result.message == "one\ntwo\nStderr:\nwarn"
     assert reports[0] == "one"
     assert reports[-1] == "one\ntwo\nStderr:\nwarn"
     assert all(earlier != later for earlier, later in itertools.pairwise(reports))

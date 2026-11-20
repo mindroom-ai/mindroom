@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 from urllib.parse import unquote, urlsplit
 
+import aiohttp
+import aioresponses.core as aioresponses_core
 import httpcore
 import httpcore2
 import httpx
@@ -244,6 +246,26 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from tests.team_turn_helpers import ProbeToolkit
 
+
+# aioresponses 0.7.9 predates aiohttp 3.14: its fake responses lack the `stream_writer` aiohttp 3.14.4 requires, and
+# their body stream has no parser for the flow control a body over 128 KiB starts. This mirrors the fix proposed
+# upstream; remove it once a release includes https://github.com/pnuckowski/aioresponses/pull/292.
+class _AioresponsesClientResponse(aiohttp.ClientResponse):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("stream_writer", SimpleNamespace(output_size=0))
+        super().__init__(*args, **kwargs)
+
+
+def _aioresponses_stream_reader(loop: asyncio.AbstractEventLoop | None = None) -> aiohttp.StreamReader:
+    reader = _AIORESPONSES_STREAM_READER(loop)
+    reader._protocol._parser = MagicMock()
+    reader._protocol._parser.feed_data.return_value = ([], False, b"")
+    return reader
+
+
+_AIORESPONSES_STREAM_READER = aioresponses_core.stream_reader_factory
+aioresponses_core.ClientResponse = _AioresponsesClientResponse
+aioresponses_core.stream_reader_factory = _aioresponses_stream_reader
 
 _STRUCTLOG_CONFIGURE = structlog.configure
 _REAL_BUILD_MODEL_PROVIDER = provider_registry.build_model_provider

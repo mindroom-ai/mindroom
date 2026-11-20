@@ -64,7 +64,11 @@ class _OutputBuffer:
     max_bytes: int = _MAX_OUTPUT_BYTES
     chunks: deque[str] = field(default_factory=deque)
     byte_count: int = 0
-    truncated: bool = False
+    # Which caps dropped output, and every line the command printed, so a notice can say what was left out.
+    bytes_capped: bool = False
+    lines_capped: bool = False
+    newlines: int = 0
+    open_line: bool = False
     # The number of this buffer's latest append, so a reader can tell new output from a full buffer that rotated to
     # the same size, and which stream printed last.
     last_append: int = 0
@@ -73,12 +77,14 @@ class _OutputBuffer:
         if not text:
             return
         self.last_append = next(_APPEND_SEQUENCE)
+        self.newlines += text.count("\n")
+        self.open_line = not text.endswith("\n")
 
         encoded = text.encode("utf-8", errors="replace")
         if len(encoded) > self.max_bytes:
             text = encoded[-self.max_bytes :].decode("utf-8", errors="ignore")
             encoded = text.encode("utf-8", errors="replace")
-            self.truncated = True
+            self.bytes_capped = True
 
         self.chunks.append(text)
         self.byte_count += len(encoded)
@@ -86,47 +92,58 @@ class _OutputBuffer:
         while self.chunks and self.byte_count > self.max_bytes:
             removed = self.chunks.popleft()
             self.byte_count -= len(removed.encode("utf-8", errors="replace"))
-            self.truncated = True
+            self.bytes_capped = True
 
         self._trim_to_max_lines()
 
-    def render(self, *, tail: int | None = None) -> str:
-        output = self._rendered_text()
-        output_lines = output.split("\n") if output else []
-        if tail is not None:
-            output_lines = output_lines[-tail:]
-        output = "\n".join(output_lines)
-        if not self.truncated:
-            return output
+    def lines(self) -> list[str]:
+        """Return every retained line; a final newline ends the last line rather than starting another."""
+        text = "".join(self.chunks)
+        return text.removesuffix("\n").split("\n") if text else []
 
-        notice = (
-            f"[Output truncated to the last {self.max_bytes} bytes. "
-            "Redirect command output to a file for complete results.]"
+    def render(self, *, tail: int | None = None) -> str:
+        """Return the last ``tail`` retained lines, after one notice of what was left out."""
+        return "\n".join(part for part in self.render_parts(tail=tail) if part)
+
+    def render_parts(self, *, tail: int | None = None, stream: str = "") -> tuple[str, str]:
+        """Return the notice of what was left out, empty when nothing was, and the last ``tail`` retained lines."""
+        lines = self.lines()
+        shown = lines if tail is None else lines[-tail:]
+        caps = [f"{self.max_bytes} bytes"] if self.bytes_capped else []
+        if self.lines_capped:
+            caps.append(f"{self.max_lines} lines")
+        printed = self.newlines + self.open_line
+        if len(shown) == printed and not caps:
+            # Whole output ends where its last non-blank line does, as it always has.
+            return "", "\n".join(shown).rstrip("\n")
+        cuts = []
+        if len(shown) < printed:
+            cuts.append(f"Showing the last {len(shown)} of {printed} {stream + ' ' if stream else ''}lines")
+        if caps:
+            noun = stream or "output"
+            cuts.append(f"{noun if cuts else noun.capitalize()} truncated to the last {' and '.join(caps)}")
+        advice = (
+            "Redirect command output to a file for complete results."
+            if caps
+            else "Pass a larger tail, or narrow the command."
         )
-        return f"{notice}\n{output}" if output else notice
+        return f"[{'; '.join(cuts)}. {advice}]", "\n".join(shown)
 
     def __len__(self) -> int:
-        output = self._rendered_text()
-        return len(output.split("\n")) if output else 0
-
-    def last_lines(self, count: int) -> str:
-        """Return the last ``count`` lines retained so far, without the truncation notice."""
-        output = self._rendered_text()
-        return "\n".join(output.split("\n")[-count:]) if output else ""
-
-    def _rendered_text(self) -> str:
-        return "".join(self.chunks).rstrip("\n")
+        return len(self.lines())
 
     def _trim_to_max_lines(self) -> None:
-        output = self._rendered_text()
-        lines = output.split("\n")
-        if len(lines) <= self.max_lines:
+        text = "".join(self.chunks)
+        lines = text.split("\n")
+        # A final newline ends the last line rather than starting another, and stays for the next append.
+        keep = self.max_lines + text.endswith("\n")
+        if len(lines) <= keep:
             return
 
-        output = "\n".join(lines[-self.max_lines :])
-        self.chunks = deque([output])
-        self.byte_count = len(output.encode("utf-8", errors="replace"))
-        self.truncated = True
+        text = "\n".join(lines[-keep:])
+        self.chunks = deque([text])
+        self.byte_count = len(text.encode("utf-8", errors="replace"))
+        self.lines_capped = True
 
 
 @dataclass
@@ -155,7 +172,7 @@ def _progress_lines(buffer: _OutputBuffer) -> str:
 
     It is reported whole, so whoever shows its tail can mask a credential whose label sits above the tail.
     """
-    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in buffer.last_lines(buffer.max_lines).split("\n"))
+    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in "".join(buffer.chunks).rstrip("\n").split("\n"))
 
 
 class _OutputProgress:
@@ -263,8 +280,8 @@ async def run_command(
     """Run one shell command; return output, an error message, or a background handle.
 
     When the command completes within ``timeout`` seconds the last ``tail``
-    lines of stdout are returned; ``None`` waits however long it runs. On
-    non-zero exit, useful stdout is preserved together with stderr. When the
+    lines of stdout, then of any stderr, are returned; ``None`` waits however
+    long it runs. On non-zero exit, stdout is preserved with all of stderr. When the
     timeout is exceeded, ``on_timeout="kill"`` stops the command's whole
     process group and returns its output so far; otherwise the process keeps
     running under *registry* and a handle string is returned for
@@ -337,7 +354,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     capture = output_capture
     try:
         if capture is None and output_destination is not None:
-            capture = ShellOutputCapture(output_destination, cwd)
+            capture = ShellOutputCapture(output_destination)
         started_at = time.monotonic()
         spawn_argv = _idle_launch_argv(argv, env, cwd)
         process = await asyncio.create_subprocess_exec(
@@ -451,16 +468,21 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
             )
         finally:
             capture.close()
-    if return_code != 0:
-        return ShellRunResult(
-            message=format_shell_completion(
-                stdout_buf.render(tail=tail),
-                stderr_buf.render(),
-                return_code=return_code,
-            ),
-            handle=finished_handle,
-        )
-    return ShellRunResult(message=stdout_buf.render(tail=tail), handle=finished_handle)
+    if return_code:
+        # A failure keeps its whole stderr, which explains it.
+        errors = stderr_buf.render() if stderr_buf else None
+        message = format_shell_completion(stdout_buf.render(tail=tail), errors, return_code=return_code)
+    else:
+        message = _success_message(stdout_buf, stderr_buf, tail)
+    return ShellRunResult(message=message, handle=finished_handle)
+
+
+def _success_message(stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer, tail: int) -> str:
+    """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
+    output_notice, output = stdout_buf.render_parts(tail=tail)
+    errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr")
+    completion = format_shell_completion(output, errors if stderr_buf else None, return_code=0)
+    return "\n".join(part for part in (output_notice, errors_notice, completion) if part)
 
 
 async def _stop_timed_out_process(
@@ -480,8 +502,8 @@ async def _stop_timed_out_process(
     lines = [f"Stopped after {timeout:g}s." + (" No output file was saved." if output_capture is not None else "")]
     if output := stdout_buf.render(tail=tail):
         lines += ["Output:", output]
-    if errors := stderr_buf.render():
-        lines += ["Stderr:", errors]
+    if stderr_buf:
+        lines += ["Stderr:", stderr_buf.render()]
     message = "\n".join(lines)
     if output_capture is None:
         return ShellRunResult(message=message)
@@ -589,12 +611,15 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     if record.finished:
         if record.output_receipt is not None:
             return record.output_receipt
+        failed = record.return_code != 0
         output = record.stdout_buf.render(tail=record.tail)
-        errors = record.stderr_buf.render()
+        errors = record.stderr_buf.render(tail=None if failed else record.tail)
         result = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)\n"
-        if record.return_code != 0 and errors:
+        if failed and record.stderr_buf:
             result += f"Stderr:\n{errors}\n"
         result += f"Output:\n{output}"
+        if record.stderr_buf and not failed:
+            result += f"\nStderr:\n{errors}"
         return result
 
     partial = record.stdout_buf.render(tail=50)
