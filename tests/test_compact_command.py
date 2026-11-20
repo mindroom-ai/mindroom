@@ -258,6 +258,26 @@ async def test_bare_compact_flags_only_addressable_entities_with_a_session_here(
 
 
 @pytest.mark.asyncio
+async def test_bare_compact_reports_pending_membership_once_without_naming_entities(tmp_path: Path) -> None:
+    config, paths = _config(tmp_path)
+    pending_names = ("code", "docs")
+    for name in pending_names:
+        config.agents[name].access = ResponderAccessConfig(current_room_members=True)
+        _seed(config, paths, name)
+
+    notice = "Some agents' room membership is still loading; run `/compact` again in a moment."
+    assert await _compact(config, paths, "") == notice
+
+    _seed(config, paths, "squad")
+    assert (await _compact(config, paths, "")).splitlines() == [
+        "✅ `squad` compacts its context before its next reply in this thread.",
+        notice,
+    ]
+    assert _queued(config, paths, "squad")
+    assert not any(_queued(config, paths, name) for name in pending_names)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("args_text", ["", "docs"], ids=["bare", "named"])
 async def test_compact_reports_an_unreadable_store(tmp_path: Path, args_text: str) -> None:
     config, paths = _config(tmp_path)
