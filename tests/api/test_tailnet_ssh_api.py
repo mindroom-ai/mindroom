@@ -22,7 +22,7 @@ from mindroom.api.connection_agents import resolve_connection_agent, resolve_con
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tailnet_ssh import links
 from mindroom.tailnet_ssh.links import GatewayReport, GatewayStatus, LinkReport, LinkStatus, StatusReport
-from mindroom.tailnet_ssh.store import Link, read_links, update_links
+from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerSshEndpoint
 from tests.api.conftest import api_snapshot, publish_api_payload, trusted_upstream_env
 from tests.api.test_egress_credentials_api import _signed_headers, _trust_signed_users
@@ -735,6 +735,49 @@ def test_workers_are_not_listed_without_an_enrolled_link(portal: _Portal) -> Non
 
     assert portal.agent("mind")["link"]["worker"] is None
     assert portal.manager.listed == listed
+
+
+def test_a_link_stays_on_the_card_when_its_agent_drops_tailnet_ssh(portal: _Portal) -> None:
+    """The gateway keeps the node of a suspended link in the person's tailnet, so the card keeps it, to disconnect."""
+    link = _connected(portal, "researcher", "researcher")
+    payload = _payload(portal.tmp_path)
+    payload["agents"]["researcher"].pop("tailnet_ssh")
+    publish_api_payload(main.app, payload)
+
+    shown = portal.agent("researcher")
+
+    assert (shown["eligible"], shown["reason"], shown["link"]["state"]) == (False, "not_enabled", "suspended")
+    assert shown["link"]["host_public_key"] == link.host_public_key
+    assert portal.client.delete(f"{BASE}/agents/researcher", headers=portal.headers["alice"]).status_code == 204
+    assert portal.agent("researcher")["link"]["state"] == "removing"
+    portal.change_link(ALICE, "researcher", desired="off")
+    assert "researcher" not in [agent["name"] for agent in portal.get()["agents"]]
+
+
+def test_a_room_granted_link_waits_suspended_while_membership_is_pending(portal: _Portal) -> None:
+    """Before the primary knows a room's members, the person's link to an agent that room grants is shown suspended."""
+    payload = _payload(portal.tmp_path)
+    payload["agents"]["research"] = {
+        "display_name": "Research",
+        "role": "Private per person and agent, for the lobby's members",
+        "private": {"per": "user_agent"},
+        "tailnet_ssh": True,
+        "rooms": ["lobby"],
+    }
+    publish_api_payload(main.app, payload)
+    config = api_snapshot(main.app).runtime_config
+    assert config is not None
+    now = time.time()
+    worker_key = links.resolve_target(config, portal.paths, ALICE, "research").worker_key
+    link = new_link(ALICE, "research", worker_key, "research", now=now - 60).model_copy(
+        update={"enrolled_login": "alice@github", "enrolled_at": now - 30},
+    )
+    update_links(portal.paths, lambda book: book.links.append(link))
+
+    shown = portal.agent("research")
+
+    assert (shown["eligible"], shown["reason"], shown["link"]["state"]) == (False, "not_authorized", "suspended")
+    assert portal.link(ALICE, "research") == link
 
 
 def test_suspended_link_shows_no_login_url(portal: _Portal) -> None:

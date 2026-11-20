@@ -166,7 +166,10 @@ def _link_row(link: Link, node: LinkStatus | None, *, suspended: bool) -> dict[s
 def _overview(person: _Person, nodes: Mapping[str, LinkStatus]) -> dict[str, object]:
     """Return the gateway's enrolment mode, the person's keys, and their agents that opt in to SSH, with links. Blocking.
 
-    The backend is asked for its workers only when one of the links is enrolled, the only state that shows its worker.
+    An agent with a link of theirs that is not ``off`` is listed too, also when it no longer opts in or they may not
+    use it now, because the gateway still holds that link's node in their tailnet; it shows why, and can be
+    disconnected. The backend is asked for its workers only when one of the links is enrolled, the only state that
+    shows its worker.
     """
     config, runtime_paths, requester_id = person.user.config, person.user.runtime_paths, person.requester_id
     book = read_links(runtime_paths)
@@ -174,15 +177,21 @@ def _overview(person: _Person, nodes: Mapping[str, LinkStatus]) -> dict[str, obj
     is_shareable = partial(is_shareable_agent, config)
     agents: list[dict[str, object]] = []
     enrolled: list[tuple[dict[str, object], str]] = []
-    for name in person.user.agent_names:
-        agent = config.agents[name]
-        if not agent.tailnet_ssh:
-            continue
-        worker_key = resolve_connection_agent(person.user, name).worker_target.worker_key
-        ineligible = link_ineligibility(config, runtime_paths, requester_id, name, worker_key, person.memberships)
+    for name, agent in config.agents.items():
         link = book.link(requester_id, name)
+        if link is not None and link.desired == "off":
+            link = None
+        usable = name in person.user.agent_names
+        if not (usable and agent.tailnet_ssh) and link is None:
+            continue
+        if usable:
+            worker_key = resolve_connection_agent(person.user, name).worker_target.worker_key
+        else:
+            # The agent's target is built only for a person who may use it; their link names its worker.
+            worker_key = None if link is None else link.worker_key
+        ineligible = link_ineligibility(config, runtime_paths, requester_id, name, worker_key, person.memberships)
         row = None
-        if link is not None and link.desired != "off":
+        if link is not None:
             row = _link_row(link, nodes.get(link.id), suspended=ineligible is not None)
             if row["state"] == "enrolled":
                 enrolled.append((row, link.worker_key))
