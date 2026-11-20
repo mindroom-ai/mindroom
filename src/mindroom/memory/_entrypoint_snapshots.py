@@ -37,11 +37,13 @@ class ConversationRef:
 
     ``compaction`` holds the conversation's text summary and newest native checkpoint; a change means a compaction
     rewrote the replayed history. ``snapshot`` is the file that keeps the conversation's copy
-    (``entrypoint_snapshot_path``).
+    (``entrypoint_snapshot_path``). ``model`` names the model the turn runs on, whose tokenizer sizes the copy against
+    the token cap, so a switch, which starts a fresh provider cache anyway, loads the file again.
     """
 
     compaction: tuple[str | None, str | None]
     snapshot: Path
+    model: str = ""
 
 
 def entrypoint_snapshot_path(database: Path, session_id: str) -> Path:

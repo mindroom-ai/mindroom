@@ -137,7 +137,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.provider import ModelProvider, ModelRequest, TokenCounter
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, ModelRequest, TokenCounter
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
     from mindroom.response_turn import TurnRunState
@@ -674,6 +674,7 @@ def _memory_conversation(
     ctx: ResponseTurnContext,
     config: Config,
     scope_context: ScopeSessionContext | None,
+    model: ModelIdentity,
 ) -> ConversationRef | None:
     """Name the conversation whose cached system prompt the turn's inlined MEMORY.md should keep unchanged.
 
@@ -701,6 +702,7 @@ def _memory_conversation(
     return ConversationRef(
         compaction,
         entrypoint_snapshot_path(scope_context.storage.path, scope_context.session_id),
+        f"{model.provider}:{model.id}",
     )
 
 
@@ -762,7 +764,7 @@ async def _system_messages_after_compaction(
     That compaction already changes the request after the system prompt, so reloading here costs nothing, while
     waiting for the next turn would make it miss the cache on the whole compacted history.
     """
-    compacted = _memory_conversation(ctx, config, scope_context)
+    compacted = _memory_conversation(ctx, config, scope_context, build.spec.model.identity)
     if compacted is None or compacted == conversation:
         return system_messages
     fresh = await conversation_entrypoint_preamble(
@@ -858,7 +860,7 @@ async def _prepare_agent_and_prompt(
         return runtime_model, _with_prompt_hold(ctx, build, scope_context)
 
     memory_backend = agent_memory_backend(config, agent_name)
-    memory_conversation = _memory_conversation(ctx, config, scope_context)
+    memory_conversation = _memory_conversation(ctx, config, scope_context, provider.identity)
     parallel_branches = memory_backend == "mem0"
     serial_reason: str | None = None
     if memory_backend == "file":

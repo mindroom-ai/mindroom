@@ -240,7 +240,7 @@ async def _entrypoint_preamble(
         conversation,
         entrypoint.source_path,
         preamble,
-        frame=[*(config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{name}") for name in framing), *caps],
+        frame=[*(config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{name}") for name in framing), *caps, conversation.model],
         shown=entrypoint.included,
         file_lines=entrypoint.lines,
         now=time.time(),

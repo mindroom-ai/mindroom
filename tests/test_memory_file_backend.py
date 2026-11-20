@@ -1992,6 +1992,21 @@ async def test_file_backend_conversation_reloads_its_entrypoint_when_a_cap_chang
 
 
 @pytest.mark.asyncio
+async def test_file_backend_conversation_reloads_its_entrypoint_when_its_model_changes(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Another model's tokenizer sizes the token cap differently, and its turn starts a fresh provider cache anyway."""
+    _capped_memory_file(storage_path, config)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json", "openai:gpt-4.1")
+    first = await _conversation_preamble(config, thread)
+    await add_agent_memory("Fact four.", "general", config)
+
+    assert await _conversation_preamble(config, thread) == first
+    assert "Fact four." in await _conversation_preamble(config, replace(thread, model="openai:gpt-4-turbo"))
+
+
+@pytest.mark.asyncio
 async def test_file_backend_cold_token_encoder_does_not_cut_a_warm_copy(
     storage_path: Path,
     config: Config,

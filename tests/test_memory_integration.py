@@ -20,6 +20,7 @@ from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.hooks import render_transient_context
+from mindroom.llm.provider import ModelIdentity
 from mindroom.memory import ConversationRef, MemoryPromptParts, entrypoint_snapshot_path
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
@@ -100,7 +101,9 @@ class TestMemoryIntegration:
 
         # Verify memory enhancement was applied
         database = create_session_storage("general", config, runtime_paths, execution_identity=None).path
-        conversation = ConversationRef((None, None), entrypoint_snapshot_path(database, "test_session"))
+        # The copy is keyed on the model the turn runs on, here the scripted provider's.
+        snapshot = entrypoint_snapshot_path(database, "test_session")
+        conversation = ConversationRef((None, None), snapshot, "Synthetic:scripted-model")
         mock_build.assert_called_once_with(
             "What is 2+2?",
             "general",
@@ -261,17 +264,19 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         memory={"backend": "file"},
     )
 
-    assert _memory_conversation(ctx, config, scope_context) == ConversationRef(
+    model = ModelIdentity(id="test-model", provider="openai")
+    assert _memory_conversation(ctx, config, scope_context, model) == ConversationRef(
         ("Earlier work.", None),
         entrypoint_snapshot_path(database, "thread"),
+        "openai:test-model",
     )
-    assert _memory_conversation(ctx, mem0, scope_context) is None
-    assert _memory_conversation(replace(ctx, agent_mode="minimal"), config, scope_context) is None
-    assert _memory_conversation(ctx, limited, scope_context) is None
+    assert _memory_conversation(ctx, mem0, scope_context, model) is None
+    assert _memory_conversation(replace(ctx, agent_mode="minimal"), config, scope_context, model) is None
+    assert _memory_conversation(ctx, limited, scope_context, model) is None
     scheduled = replace(ctx, scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"))
-    assert _memory_conversation(scheduled, config, scope_context) is None
+    assert _memory_conversation(scheduled, config, scope_context, model) is None
     persona = replace(ctx, persona=inline_persona("You are a reviewer.", None, None, None))
-    assert _memory_conversation(persona, config, scope_context) is None
+    assert _memory_conversation(persona, config, scope_context, model) is None
     # Compaction nobody configured never runs on its own, so a long conversation drops its oldest runs instead.
     unauthored = Config(
         agents={"general": AgentConfig(display_name="General")},
@@ -279,4 +284,4 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         models={"default": ModelConfig(provider="openai", id="test-model")},
         memory={"backend": "file"},
     )
-    assert _memory_conversation(ctx, unauthored, scope_context) is None
+    assert _memory_conversation(ctx, unauthored, scope_context, model) is None
