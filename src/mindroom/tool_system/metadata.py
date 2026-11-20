@@ -9,7 +9,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.config.legacy_fields import retired_tool_override
+from mindroom.config.legacy_fields import retired_file_setting, retired_tool_override
+from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
@@ -720,17 +721,39 @@ def resolve_tool_settings(
         tool_metadata=tools.entries,
     )
     resolved_credentials_manager = _resolve_tool_credentials_manager(metadata, runtime_paths, credentials_manager)
-    stored_credentials = (
-        load_scoped_credentials(
-            tool_name,
+
+    def stored(service: str) -> dict[str, Any] | None:
+        if resolved_credentials_manager is None:
+            return None
+        return load_scoped_credentials(
+            service,
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
             allowed_shared_services=allowed_shared_services,
             primary_built_tool=primary_owns_tool_settings(tool_name, tools, runtime_paths=runtime_paths),
         )
-        if resolved_credentials_manager is not None
-        else None
-    )
+
+    stored_credentials = stored(tool_name)
+    # LEGACY_COMPAT: Dashboard settings stored for the file and coding tools.
+    # Legacy format: a stored settings document under service file or coding, saved from the Tools dashboard, holding
+    #   Agno FileTools switches or an include_tools or exclude_tools filter.
+    # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit reads service filesystem.
+    # Handling: Refuse to resolve the toolkit's settings while such a document holds any setting, so the toolkit is
+    #   not built and grants no workspace write until the operator deletes it; the dashboard reads and deletes it
+    #   in the store read here.
+    # Coverage:
+    #   tests/api/test_plugin_room_agents.py::test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant;
+    #   tests/test_credentials.py::test_dashboard_deletes_old_name_settings_from_the_store_the_toolkit_build_reads.
+    for alias, name in TOOL_ALIASES.items():
+        if name == tool_name and any(not key.startswith("_") for key in stored(alias) or ()):
+            msg = (
+                f"{tool_name}: settings stored under '{alias}' no longer apply; "
+                f"delete them, and save any you still want under '{tool_name}'."
+            )
+            raise ToolConfigOverrideError(msg)
+    if tool_name == "filesystem" and (retired := retired_file_setting(stored_credentials or {})) is not None:
+        msg = f"{tool_name}: stored setting {retired[0]} was removed; {retired[1]}."
+        raise ToolConfigOverrideError(msg)
     credentials = {**(stored_credentials or {}), **(credential_overrides or {})}
     safe_tool_init_overrides = sanitize_tool_init_overrides(
         tool_name,
@@ -785,6 +808,7 @@ def get_tool_by_name(
     None follows the sandbox settings for those tools.
     ``in_sandbox_request`` is set only by the sandbox runner building a toolkit for the request it executes.
     """
+    tool_name = canonical_tool_name(tool_name)
     factory = tools.factory(tool_name)
     metadata = tools.entries[tool_name]
     routed = (
@@ -1112,6 +1136,8 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
         tool_dict.pop("factory", None)
         tool_dict.pop("mcp_server_id", None)
         tool_dict.pop("dependency_extra", None)
+        if aliases := sorted(alias for alias, name in TOOL_ALIASES.items() if name == metadata.name):
+            tool_dict["aliases"] = aliases
         tools.append(tool_dict)
 
     tools.sort(key=lambda tool: (tool["category"], tool["name"]))

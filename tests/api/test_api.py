@@ -1356,7 +1356,7 @@ def test_get_tools(test_client: TestClient) -> None:
     # Check that some expected tools are present
     tool_names = {tool["name"] for tool in data["tools"]}
     assert "calculator" in tool_names
-    assert "file" in tool_names
+    assert "filesystem" in tool_names
     assert "shell" in tool_names
 
     # Check that tools have the expected structure

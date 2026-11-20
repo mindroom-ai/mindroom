@@ -8,10 +8,11 @@ of them added.
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 # 2: workers mount only agent workspaces and never write private-instance identity records.
@@ -81,7 +82,7 @@ class CallEnvironment(_WireModel):
 class ExecuteRequest(WorkerRoute):
     """One tool call, with credentials by lease and the environment execution tools receive."""
 
-    tool_name: str
+    tool_name: Annotated[str, AfterValidator(canonical_tool_name)]
     function_name: str
     args: list[Any] = Field(default_factory=list)
     kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -117,7 +118,7 @@ class LeaseRequest(_WireModel):
     """Credentials for one upcoming tool call, held by the worker until the call consumes them."""
 
     protocol: int
-    tool_name: str
+    tool_name: Annotated[str, AfterValidator(canonical_tool_name)]
     function_name: str
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     ttl_seconds: int

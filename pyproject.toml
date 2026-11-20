@@ -193,6 +193,7 @@ eleven_labs = [
   "elevenlabs",
 ]
 email = []
+email_invite = []
 exa = [
   "exa-py",
 ]
@@ -205,6 +206,7 @@ file_generation = [
   "python-docx>=1.2",
   "reportlab",
 ]
+filesystem = []
 financial_datasets_api = [
   "requests",
 ]

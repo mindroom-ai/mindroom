@@ -309,8 +309,8 @@ async def test_a_paused_call_is_judged_by_the_alias_its_toolkit_declares(
 @pytest.mark.asyncio
 async def test_a_preset_naming_the_toolkit_brings_its_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A call names the preset its agent authored; the alias of the tool the preset brings in still judges it."""
-    assert "coding" in Config.expand_tool_names(["openclaw_compat"])
-    register_test_tool(monkeypatch, _lines_tool("coding"))
+    assert "filesystem" in Config.expand_tool_names(["openclaw_compat"])
+    register_test_tool(monkeypatch, _lines_tool("filesystem"))
     config, runtime_paths = _config(tmp_path, _shell_review())
 
     assert await _planned_asks(config, runtime_paths, "openclaw_compat", _paused_line("rm -rf build")) == [True]

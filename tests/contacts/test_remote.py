@@ -7,7 +7,7 @@ import re
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import nio
@@ -65,8 +65,8 @@ def flow_context(config: Config, paths: RuntimePaths, runtime: _Runtime) -> Tool
     return _context(config, paths, "mind_alice", OWNER, runtime)
 
 
-def _remote_setup(tmp_path: Path) -> tuple[Config, RuntimePaths]:
-    return _setup(tmp_path, remote_agents=(REMOTE_PATTERN,))
+def _remote_setup(tmp_path: Path, **data_options: Any) -> tuple[Config, RuntimePaths]:  # noqa: ANN401
+    return _setup(tmp_path, remote_agents=(REMOTE_PATTERN,), **data_options)
 
 
 def _store(paths: RuntimePaths, record: ContactRecord) -> None:
@@ -180,6 +180,18 @@ async def test_asking_again_returns_the_pending_request_without_another_room(tmp
     assert again == first
     matrix["create"].assert_not_awaited()
     matrix["invite"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_asking_again_under_a_toolkits_other_name_returns_the_pending_request(tmp_path: Path) -> None:
+    """A request naming coding stores filesystem, and the same call again is that request, not a change to it."""
+    config, paths = _remote_setup(tmp_path, tools=["coding", "matrix_message"])
+    runtime = _runtime()
+    with _matrix():
+        first = await _request(config, paths, runtime, target=REMOTE, tools=["coding"])
+        again = await _request(config, paths, runtime, target=REMOTE, tools=["coding"])
+    assert first.requester_side.tools == ["filesystem"]
+    assert again == first
 
 
 @pytest.mark.asyncio

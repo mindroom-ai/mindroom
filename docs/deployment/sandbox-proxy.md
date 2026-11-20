@@ -49,7 +49,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
     networks:
       - mindroom-network
 
@@ -124,7 +124,7 @@ docker run -d \
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
-export MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
+export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
 mindroom run
 ```
 
@@ -171,15 +171,15 @@ Then route tools into workers and choose a [worker scope](#worker-scopes):
 
 ```yaml
 defaults:
-  worker_tools: [shell, file, python]
+  worker_tools: [shell, filesystem, python]
   worker_scope: shared
 
 agents:
   code:
-    tools: [shell, file, python]
+    tools: [shell, filesystem, python]
 
   research:
-    tools: [shell, file, python]
+    tools: [shell, filesystem, python]
 ```
 
 To verify, ask two agents to run `hostname`, then list the worker containers:
@@ -258,11 +258,11 @@ When both are omitted, the [execution mode](#execution-modes) environment settin
 
 ```yaml
 defaults:
-  worker_tools: [shell, file]        # route shell and file through workers for all agents
+  worker_tools: [shell, filesystem]        # route shell and filesystem through workers for all agents
 
 agents:
   code:
-    tools: [file, shell, calculator]
+    tools: [filesystem, shell, calculator]
     # inherits worker_tools from defaults
 
   research:
@@ -270,13 +270,13 @@ agents:
     worker_tools: []                 # run everything in the primary runtime
 
   untrusted:
-    tools: [shell, file, python]
-    worker_tools: [shell, file, python]
+    tools: [shell, filesystem, python]
+    worker_tools: [shell, filesystem, python]
 ```
 
 <a id="worker-routed-execution"></a>
 
-The tools that default to workers when no list is set are `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
+The tools that default to workers when no list is set are `browser_mcp`, `docker`, `filesystem`, `python`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
 These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, and `oauth_connections`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
 The built-in `memory`, `delegate`, `self_config`, `agent_manager`, and `contacts` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
@@ -334,7 +334,7 @@ What a worker can see depends on the backend:
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
-`shell`, `file`, `python`, and `coding` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
+`shell`, `filesystem`, and `python` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
 Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
@@ -373,7 +373,7 @@ A plugin's [`tool:environment` hook](../hooks.md#shell-command-environment-toole
 For worker-routed `shell` and `python` calls with a resolved workspace, MindRoom sets `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` to the workspace or directories under it.
 `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` point at the worker cache directory when a worker root exists, and `VIRTUAL_ENV` stays on the worker's environment.
 Neither passthrough nor `.mindroom/worker-env.sh` can redirect these variables.
-As a result `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and relative paths in the `file` and `coding` tools all refer to the same workspace.
+As a result `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and relative paths in the `filesystem` tool all refer to the same workspace.
 For example, after `get_attachment("att_...", mindroom_output_path="incoming/file.txt")`, worker-routed shell can read both `incoming/file.txt` and `~/incoming/file.txt`.
 
 ### Workspace env hook (`.mindroom/worker-env.sh`)

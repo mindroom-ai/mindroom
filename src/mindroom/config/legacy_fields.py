@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Collection, Iterable, Mapping, Sequence
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -196,8 +197,76 @@ _REJECTED_TOOL_OVERRIDES_BY_TOOL = {
 }
 
 
+# LEGACY_COMPAT: Agno FileTools settings of the file tool.
+# Legacy format: file tool entries took Agno FileTools settings: enable_<function> switches, max_file_length,
+#   max_file_lines, line_separator, exclude_patterns, all, and expose_base_directory, and include_tools or
+#   exclude_tools naming save_file, read_file_chunk, replace_file_chunk, list_files, search_files, or search_content.
+# Last legacy release: v2026.11.447; replacement: unreleased; file and coding both name the filesystem toolkit.
+# Handling: Reject each one, whatever its value, on a filesystem entry authored under any of its names in defaults or
+#   on an agent, and in settings stored for filesystem, naming the filesystem setting to write instead. None is
+#   translated, so a function that was switched off never comes back on.
+# Coverage:
+#   tests/test_filesystem_tool_config.py::test_an_old_agno_setting_on_a_file_entry_fails_config_load_naming_its_replacement,
+#   tests/api/test_plugin_room_agents.py::test_old_settings_copied_under_filesystem_stop_the_toolkit_and_its_workspace_grant.
+RETIRED_FILE_FUNCTIONS = {
+    "save_file": "write_file",
+    "replace_file_chunk": "edit_file",
+    "read_file_chunk": "read_file",
+    "list_files": "ls",
+    "search_files": "find_files",
+    "search_content": "grep",
+}
+_RETIRED_FILE_SETTINGS = {
+    **{
+        f"enable_{old}": f"use `filesystem: {{exclude_tools: [{new}]}}` to switch {new} off"
+        for old, new in {"read_file": "read_file", **RETIRED_FILE_FUNCTIONS}.items()
+    },
+    "all": "remove it; set `filesystem: {enable_delete_file: true}` only if it enabled deletion and you still want that",
+    **dict.fromkeys(
+        ("max_file_length", "max_file_lines", "line_separator", "exclude_patterns", "expose_base_directory"),
+        "filesystem has no such setting, so remove it",
+    ),
+}
+
+
+# LEGACY_COMPAT: Approval rules written for the file tool's retired function names.
+# Legacy format: a tool_approval.rules[].match glob matching save_file, replace_file_chunk, read_file_chunk,
+#   list_files, search_files, or search_content, the functions of Agno's FileTools.
+# Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit names them write_file,
+#   edit_file, read_file, ls, find_files, and grep.
+# Handling: Reject the rules when the first one matching a retired name is not the first one matching its
+#   replacement, unless another registered toolkit still offers the retired name, naming that rule and the
+#   replacement, so the rule that decided a call still decides it.
+# Coverage:
+#   tests/test_filesystem_tool_config.py::test_an_approval_rule_that_stops_deciding_a_renamed_function_fails,
+#   tests/test_filesystem_tool_config.py::test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails,
+#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load.
+def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere: Collection[str]) -> str | None:
+    """Return the rule that decided a retired file function but not its replacement, as text, or None."""
+    for old, new in RETIRED_FILE_FUNCTIONS.items():
+        first_old, first_new = (
+            next((index for index, glob in enumerate(globs) if fnmatchcase(name, glob)), None) for name in (old, new)
+        )
+        if old not in offered_elsewhere and first_old is not None and first_old != first_new:
+            return f"tool_approval.rules[{first_old}].match {globs[first_old]!r} decided {old}; {old} is now {new}"
+    return None
+
+
+def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first Agno FileTools setting or retired function filter in ``settings``, and what replaces it."""
+    for key in ("include_tools", "exclude_tools"):
+        value = settings.get(key)
+        names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
+        for name in names if isinstance(names, list) else ():
+            if isinstance(name, str) and (new := RETIRED_FILE_FUNCTIONS.get(name.strip())):
+                return f"{key}: {name.strip()}", f"use `filesystem: {{{key}: [{new}]}}`"
+    return next(((field, guidance) for field, guidance in _RETIRED_FILE_SETTINGS.items() if field in settings), None)
+
+
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
+    if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
+        return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)
 

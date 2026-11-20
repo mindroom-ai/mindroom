@@ -155,6 +155,22 @@ async def test_a_tool_the_agent_lacks_or_one_that_needs_approval_is_refused(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("asked", ["file", "coding", "filesystem"])
+async def test_a_tool_is_called_by_any_name_its_toolkit_goes_by(tmp_path: Path, asked: str) -> None:
+    """A plugin's test written before `file` and `coding` became `filesystem` still calls the agent's toolkit."""
+    helper = {**CONFIG["agents"]["helper"], "tools": ["greeter", "coding"]}
+    with load_plugin(EXAMPLE, tmp_path, config={"agents": {"helper": helper}}, settings=SETTINGS) as plugin:
+        plugin.add_room(ROOM, members={ALICE: "Alice"})
+        arguments = {"path": "note.txt", "content": "kept\n"}
+
+        written = await plugin.call_tool(asked, "write_file", arguments, agent="helper", sender=ALICE, room=ROOM)
+        read = await plugin.call_tool(asked, "read_file", {"path": "note.txt"}, agent="helper", sender=ALICE, room=ROOM)
+
+    assert written.status == "ok"
+    assert (read.status, read.value) == ("ok", "1| kept")
+
+
+@pytest.mark.asyncio
 async def test_a_member_of_a_room_the_agent_serves_is_admitted_by_its_room_key(tmp_path: Path) -> None:
     """An agent admits the members of the rooms its config names, found by the key the test gives a room."""
     with load_plugin(EXAMPLE, tmp_path, config=HOST_CONFIG, settings=SETTINGS) as plugin:

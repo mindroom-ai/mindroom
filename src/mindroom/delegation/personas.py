@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge.utils import semantic_agent_knowledge_base_ids
@@ -462,6 +463,9 @@ def resolve_persona_request(  # noqa: PLR0911
     try:
         if profile is None:
             persona = inline_persona(system_prompt, tools, skills, knowledge)
+            if persona.tools is not None:
+                # Only tools this call names may say file or coding; a saved profile or snapshot is read as written.
+                persona = replace(persona, tools=canonical_tool_names(persona.tools))
         elif not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
         else:
