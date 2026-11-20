@@ -10,6 +10,7 @@ from dataclasses import asdict, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.background_tasks import run_blocking_or_compensate
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.delegation.lifecycle import running_child_id
 from mindroom.script_runs.manager import workflow_placement
@@ -287,8 +288,16 @@ class WorkflowTools(Toolkit):
             runtime_seconds_left=hours * 3600 if hours else None,
             origin_job_id=origin,
         )
-        # On a thread, where it waits for the store's writer.
-        return await asyncio.to_thread(engine.store.reserve_run, intent, max_active=self.limits.max_concurrent_runs)
+        store = engine.store
+
+        def take_back(reserved: tuple[WorkflowRun, bool]) -> None:
+            if reserved[1]:
+                store.delete_intent(reserved[0].run_id)
+
+        # On a thread, where it waits for the store's writer. A call cancelled meanwhile takes back the intent it
+        # wrote; the engine keeps an inline caller's cancellation away from here and ends the run itself.
+        reserve = partial(store.reserve_run, intent, max_active=self.limits.max_concurrent_runs)
+        return await run_blocking_or_compensate(reserve, take_back)
 
 
 def _workflow_job_outcome(run: WorkflowRun) -> BackgroundOutcome:

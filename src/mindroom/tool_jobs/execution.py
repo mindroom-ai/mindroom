@@ -19,7 +19,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
 from mindroom.failure_text import failure_text
 from mindroom.llm.runs import denial_note_for
@@ -446,17 +446,12 @@ async def _run_managed_call(
     detached = _detached(job_call)
     # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
     record_return = await record_call(function.name, dict(detached.arguments))
-    claim, retained = None, False
+    claim = None
+    retained = False
     job: JobSpec | None = None
     reference: ExecutionResourceReference | None = None
-
-    async def admit() -> None:
-        """Prepare the job, have the runtime start it, and take back what a refused start prepared.
-
-        Deliveries of one call take turns here, and the call's cancellation waits for this to end, so a start is
-        admitted or taken back whole and its claim reaches the call that must release it.
-        """
-        nonlocal job, reference, claim
+    try:
+        # Deliveries of one call take turns from preparing the job to the runtime's answer.
         async with runtime.admission(job_id):
             job = await _call_job(
                 inner,
@@ -491,15 +486,12 @@ async def _run_managed_call(
                     reply_stop_order=None if reply is None else reply.reply.stop_receipt_order,
                     span_stopped=None if span is None else span.stopped,
                 )
-            except Exception:
+            except BaseException:
                 if job.refused is not None and all(known.job_id != job_id for known in runtime.retained_jobs()):
-                    # No job has this ID, so nothing owns what preparing it wrote.
-                    await job.refused()
+                    # No job has this ID, so nothing owns what preparing it wrote: a refused or cancelled start
+                    # takes it back, and holds the lock until it is gone.
+                    await wait_for_future_until_complete(asyncio.ensure_future(job.refused()))
                 raise
-
-    try:
-        await run_coroutine_until_complete(admit())
-        assert job is not None
         waited = await runtime.wait(
             job_id,
             owner=owner,

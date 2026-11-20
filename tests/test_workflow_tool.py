@@ -170,26 +170,10 @@ async def test_refused_admission_starts_no_process_and_reserves_no_run(stack: Wo
 
 
 @pytest.mark.asyncio
-async def test_a_call_cancelled_while_its_start_is_admitted_only_stops_waiting(stack: WorkflowStack) -> None:
-    """The start of a cancelled call still ends whole: its job is admitted and launches once, and the same call finds it."""
-    async with stack.jobs._lock:
-        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
-        await _waits_for_admission(stack)
-        first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    [run] = stack.store.list_runs()
-
-    again = await _started(stack, call_id="call-1")
-    assert again["run_id"] == run.run_id
-    assert stack.jobs.awaited_job_ids() == frozenset()
-    assert len(stack.scripts.launched) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_call_whose_start_is_refused_frees_its_run_slot(stack: WorkflowStack) -> None:
-    """Once the runtime refused the start of a cancelled call, no job can own its intent, so the intent goes at once."""
-    stack.refuse_admission()
+async def test_a_call_cancelled_before_its_job_is_admitted_starts_nothing_and_frees_its_run_slot(
+    stack: WorkflowStack,
+) -> None:
+    """A call cancelled while its job waits for the runtime has no job, so its intent goes at once; a retry starts anew."""
     async with stack.jobs._lock:
         first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
         await _waits_for_admission(stack)
@@ -198,7 +182,56 @@ async def test_a_cancelled_call_whose_start_is_refused_frees_its_run_slot(stack:
         await first
 
     assert stack.store.list_runs() == []
+    assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0) == []
+    await _started(stack, call_id="call-1")
+    assert len(stack.store.list_runs()) == 1
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_while_it_reserves_its_run_takes_the_intent_back(stack: WorkflowStack) -> None:
+    """The write of a cancelled call still ends, and the call then deletes the intent no job will ever own."""
+    writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        call = asyncio.create_task(stack.call("start_workflow", source=SCRIPT))
+        await asyncio.sleep(0.1)
+        call.cancel()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    # Long enough for a write that the call did not wait for to land.
+    await asyncio.sleep(0.3)
+
+    assert stack.store.list_runs() == []
     assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_a_redelivery_cancelled_while_it_finds_its_run_takes_nothing_from_the_admitted_job(
+    stack: WorkflowStack,
+) -> None:
+    """A cancelled call takes back only an intent it wrote itself, never the run an earlier delivery was admitted with."""
+    stack.scripts.hold_launch = asyncio.Event()
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    await stack.until(lambda: stack.scripts.launched)
+    writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        again = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await asyncio.sleep(0.1)
+        again.cancel()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    with pytest.raises(asyncio.CancelledError):
+        await again
+
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.STARTING
+    stack.scripts.hold_launch.set()
+    await stack.until(lambda: stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING)
 
 
 @pytest.mark.asyncio
