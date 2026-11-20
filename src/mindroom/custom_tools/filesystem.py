@@ -58,6 +58,7 @@ _MAX_BYTES = 50 * 1024  # 50KB
 _MAX_LINE_CHARS = 500  # Per-line truncation for grep output
 _DEFAULT_GREP_LIMIT = 100
 _GREP_TIMEOUT_SECONDS = 30.0
+_CONFINED_COPY = "confined"
 _DEFAULT_FIND_LIMIT = 1000
 _DEFAULT_LS_LIMIT = 500
 _MAX_HINT_CHARS = 200
@@ -1107,19 +1108,21 @@ def _confined_rg_events(
 ) -> Generator[_RgEvent]:
     """Yield what the ``match`` ripgrep finds in each file the ``nominate`` one names, until the deadline sets ``expired``.
 
-    Ripgrep opens files by path, so what it finds in one only nominates it: the events come from a ripgrep fed the
-    bytes the capped no-follow reader returns, one file at a time, and a file that reader refuses is skipped.
+    Ripgrep opens files by path, so what it finds in one only nominates it: the events come from a ripgrep run in a
+    private directory on ``_CONFINED_COPY``, the bytes the capped no-follow reader returns, one file at a time, and
+    a file that reader refuses is skipped.
     """
     deadline = time.monotonic() + _GREP_TIMEOUT_SECONDS
-    with closing(_rg_candidates(nominate, expired)) as candidates:
+    with tempfile.TemporaryDirectory() as private, closing(_rg_candidates(nominate, expired)) as candidates:
         for candidate in candidates:
             try:
                 payload = read_resolved_file(base_dir, resolve_base_dir_path(base_dir, str(candidate)))
             except (OSError, ValueError):
                 continue
+            Path(private, _CONFINED_COPY).write_bytes(payload)
             remaining = deadline - time.monotonic()
             try:
-                found = subprocess.run(match, check=False, input=payload, capture_output=True, timeout=remaining)
+                found = subprocess.run(match, check=False, cwd=private, capture_output=True, timeout=remaining)
             except subprocess.TimeoutExpired:
                 expired.set()
                 return
@@ -1162,8 +1165,10 @@ def _run_ripgrep(
     target = [*(["--glob", glob_filter] if glob_filter else []), "--", pattern, str(search_path)]
     if restrict_to_base_dir:
         nominate = [rg_binary, "--files-with-matches", "--null", *options, *target]
-        # Nominated files are text, numbered by their own lines; none's events are held past the limit's last match.
-        match = [*report, "--text", "--max-count", str(limit + 1), "--", pattern, "-"]
+        # Searched as the path is, in a directory or by name, so binary data is treated as it is in the file itself;
+        # no file's events are held past the match that shows the limit was reached.
+        copy = "." if search_path.is_dir() else _CONFINED_COPY
+        match = [*report, "--no-ignore", "--threads=1", "--max-count", str(limit + 1), "--", pattern, copy]
         return _run_confined_ripgrep(nominate, match, base_dir, limit, context)
 
     args = [*report, *target]

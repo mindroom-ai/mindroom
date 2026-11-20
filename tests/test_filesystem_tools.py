@@ -1530,6 +1530,27 @@ class TestGrep:
             assert tools.grep(pattern, path="crlf.txt") == expected
             assert unrestricted.grep(pattern, path="crlf.txt") == expected
 
+    def test_workspace_grep_treats_binary_data_as_ripgrep_does_on_the_file(
+        self,
+        tools: FilesystemTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A directory search stops at a file's first NUL, and a search of the file by name goes past it, in both modes."""
+        _use_ripgrep(monkeypatch, ripgrep=True)
+        (tmp_base / "sub" / "notes.dat").write_bytes(
+            b"needle before\n" + b"filler line\n" * 20000 + b"\x00\n" + b"needle after\n",
+        )
+        unrestricted = FilesystemTools(base_dir=str(tmp_base), file_access="unrestricted")
+
+        by_directory = tools.grep("needle", path="sub")
+        by_name = tools.grep("needle", path="sub/notes.dat")
+
+        assert by_directory == "sub/notes.dat:1:needle before"
+        assert by_name == "sub/notes.dat:1:needle before\nsub/notes.dat:20003:needle after"
+        assert unrestricted.grep("needle", path="sub") == by_directory
+        assert unrestricted.grep("needle", path="sub/notes.dat") == by_name
+
     @pytest.mark.parametrize("slow", ["nominating", "matching"])
     def test_workspace_grep_stops_a_slow_ripgrep_at_the_deadline(
         self,
@@ -1544,7 +1565,7 @@ class TestGrep:
         (workspace / "slow.txt").write_text("slow needle\n")
         pid_file = tmp_path / "pid"
         hang = f"echo $$ > '{pid_file}'; exec sleep 60"
-        match = {"path": {"text": "<stdin>"}, "lines": {"text": "fast needle\n"}, "line_number": 1}
+        match = {"path": {"text": "./confined"}, "lines": {"text": "fast needle\n"}, "line_number": 1}
         fake_ripgrep = tmp_path / "rg"
         fake_ripgrep.write_text(
             "#!/bin/sh\n"
@@ -1553,7 +1574,7 @@ class TestGrep:
             f"  {hang if slow == 'nominating' else ''}\n"
             f"  printf '%s\\0' '{workspace}/slow.txt'; exit 0;;\n"
             "esac\n"
-            f'case "$(cat)" in slow*) {hang};; esac\n'
+            f'case "$(cat confined)" in slow*) {hang};; esac\n'
             f"printf '%s\\n' '{json.dumps({'type': 'match', 'data': match})}'\n",
         )
         fake_ripgrep.chmod(0o755)
