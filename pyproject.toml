@@ -71,7 +71,8 @@ dependencies = [
   "starlette>=1.3.1",
   "structlog>=24.1",
   "tiktoken>=0.12",
-  # 0.26+ vendors Click and rerenders `--help` (`<bool>` beside every flag, `{arg}` usage), which changes our CLI docs.
+  # 0.26 vendors Click, which breaks retrying an invalid `click.Choice` prompt; later releases also rerender `--help`
+  # (`{arg}` usage from 0.27, `<bool>` beside every flag by 0.29), which changes our CLI docs.
   "typer>=0.24,<0.26",
   "uvicorn>=0.35",
   "watchfiles>=1",
