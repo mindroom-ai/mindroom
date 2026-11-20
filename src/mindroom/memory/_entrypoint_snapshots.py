@@ -2,7 +2,7 @@
 
 The preamble is part of the system prompt, so a changed preamble makes the provider re-read the whole
 conversation after it. A conversation therefore keeps the preamble it last sent while its inlined copy only gains
-lines, anywhere in a file within its preload caps and at the end of a capped one (whose preload keeps its first
+lines, anywhere in a file within its preload limit and at the end of a cut one (whose preload keeps its first
 lines, so an appended line leaves it as it was), until it idles past the cache lifetime or its history is compacted; the
 conversation already shows the agent its own memory writes as tool calls. Each conversation's copy is a file in its
 agent's state root, so a restart keeps it and one requester's private memory stays out of another's; the file's
@@ -113,12 +113,12 @@ def stable_entrypoint_preamble(
 ) -> str:
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
 
-    ``fresh_body`` is this turn's preamble without the truncation marker, whose counts change as lines are added
-    past a cap; its header is compared too, so an edited prompt override loads again. A kept copy keeps its own
-    marker, so it can show old counts, or no marker after the file grows past a cap, until it loads again.
-    ``lines`` holds the file's lines when the caps withhold none, else None. A copy that withheld none is also kept
+    ``fresh_body`` is this turn's preamble without the cut marker; its header is compared too, so an edited prompt
+    override loads again. A kept copy keeps its own marker, so it shows none after the file grows past the limit
+    until it loads again.
+    ``lines`` holds the file's lines when the preload cuts none, else None. A copy that cut none is also kept
     while ``lines`` holds its every line in order and each prompt in ``frame`` (its header) is unchanged, so lines
-    inserted anywhere keep it; ``lines`` fit the caps this turn, so the copy's, which they hold, still fit them.
+    inserted anywhere keep it; ``lines`` fit the limit this turn, so the copy's, which they hold, still fit it.
     A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
     anyway, and the turn after one costs only its compacted history.
     An edited or deleted line loads at once. A route that holds the system prompt tells that as a system prompt

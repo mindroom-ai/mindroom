@@ -23,7 +23,6 @@ from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timed
-from mindroom.token_counting.counts import count
 
 from ._policy import MemoryScope, team_scope, team_scopes, team_user_id
 from ._prompting import redact_memory_text
@@ -51,7 +50,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.rerank import Reranker
-    from mindroom.llm.provider import TokenCounter
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -649,55 +647,9 @@ def _replace_scope_path_memory_entry(scope: MemoryScope, memory_id: str, content
     return True
 
 
-def _entrypoint_text(lines: Sequence[str]) -> str:
-    """Return the text of ``lines`` as the preamble inlines it."""
-    return "\n".join(lines).strip()
-
-
-def _line_tokens(counter: TokenCounter, line: str) -> int:
-    """Count one line with its newline as an upper bound: before the encoder loads, its UTF-8 bytes."""
-    return count(counter, line + "\n", upper_bound=True)
-
-
-def _lines_within_caps(lines: Sequence[str], config: Config, counter: TokenCounter) -> list[str]:
-    """Keep the file's first whole lines within both caps, as ``counter`` counts each with its newline.
-
-    A line past a cap, and every line after it, is withheld whole, so lines appended to a capped file never change
-    the preload, it never shows a partial fact, and the truncation marker accounts for every withheld line.
-    """
-    file_config = config.memory.file
-    kept = 0
-    for index, line in enumerate(lines[: file_config.max_entrypoint_lines]):
-        kept += _line_tokens(counter, line)
-        if kept > file_config.max_entrypoint_tokens:
-            return list(lines[:index])
-    return list(lines[: file_config.max_entrypoint_lines])
-
-
-def cap_entrypoint(
-    entrypoint: MemoryEntrypointContext,
-    config: Config,
-    counter: TokenCounter,
-) -> MemoryEntrypointContext:
-    """Cut the preload to both caps, as the model the preload goes to counts it."""
-    kept = _lines_within_caps(entrypoint.lines, config, counter)
-    return replace(entrypoint, text=_entrypoint_text(kept), included_lines=len(kept))
-
-
-def entrypoint_tokens(text: str, counter: TokenCounter) -> int:
-    """Return the tokens of the MEMORY.md ``text`` as the preload's token cap counts them."""
-    return sum(_line_tokens(counter, line) for line in text.splitlines())
-
-
-def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter) -> bool:
-    """Return whether the MEMORY.md preload would leave out any line of ``text``, its size counted with ``counter``."""
-    lines = text.splitlines()
-    return len(_lines_within_caps(lines, config, counter)) < len(lines)
-
-
 @timed("system_prompt_assembly.memory_file_entrypoint_read")
 def _load_scope_entrypoint_context(scope: MemoryScope) -> MemoryEntrypointContext:
-    """Load the scoped `MEMORY.md` entrypoint whole; ``cap_entrypoint`` cuts its preload."""
+    """Load the scoped `MEMORY.md` entrypoint whole; the preamble cuts what it inlines."""
     payload = _read_scope_entrypoint_payload(scope.root)
     if payload is None:
         return MemoryEntrypointContext()
@@ -709,13 +661,7 @@ def _load_scope_entrypoint_context(scope: MemoryScope) -> MemoryEntrypointContex
             path=str(entrypoint_path),
             max_bytes=_MAX_MEMORY_FILE_BYTES,
         )
-    return MemoryEntrypointContext(
-        source_path=entrypoint_path,
-        # An oversized entrypoint still reports at least one withheld line, so the
-        # preamble tells the model to read the file instead of claiming completeness.
-        total_lines=len(lines) + 1 if payload.truncated else len(lines),
-        lines=tuple(lines),
-    )
+    return MemoryEntrypointContext(source_path=entrypoint_path, lines=tuple(lines), read_cut=payload.truncated)
 
 
 def _read_scope_entrypoint_payload(scope_path: Path) -> _CappedPayload | None:
@@ -1071,5 +1017,5 @@ class FileMemoryBackend:
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryEntrypointContext:
-        """Load the stable scoped `MEMORY.md` entrypoint of one agent whole, before ``cap_entrypoint`` cuts it."""
+        """Load the stable scoped `MEMORY.md` entrypoint of one agent whole, before the preamble cuts it."""
         return _load_scope_entrypoint_context(_agent_scope(agent_name, config, self.runtime_paths, execution_identity))

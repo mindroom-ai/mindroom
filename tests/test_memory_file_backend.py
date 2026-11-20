@@ -916,7 +916,7 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
             "general",
             config,
             runtime_paths_for(config),
-            )
+        )
 
     assert "Semantic memory search is unavailable this turn" in prompt_parts.transient_turn_context
     assert "semantic memory search failed (RuntimeError)" in prompt_parts.transient_turn_context

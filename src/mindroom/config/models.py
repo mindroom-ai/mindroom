@@ -13,7 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
-from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.legacy_fields import (
+    RETIRED_DEFAULTS_FIELDS,
+    drop_retired_fields,
+    reject_legacy_defaults_fields,
+)
 from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.tool_aliases import ToolNames, canonical_tool_name
@@ -608,10 +612,13 @@ class DefaultsConfig(BaseModel):
         default=False,
         description="Default setting for allowing agents to modify their own configuration",
     )
-    max_preload_chars: int = Field(
-        default=50000,
+    max_preload_file_chars: int = Field(
+        default=30000,
         ge=1,
-        description="Hard cap for extra role preload context loaded from context_files",
+        description=(
+            "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; "
+            "a longer file keeps its first whole lines within this limit"
+        ),
     )
     automations: AutomationList = Field(
         default_factory=list,
@@ -658,8 +665,8 @@ class DefaultsConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
-        """Reject removed legacy fields to prevent silent misconfiguration."""
-        return reject_legacy_defaults_fields(data)
+        """Drop retired fields that changed nothing, and reject removed legacy fields to prevent silent misconfiguration."""
+        return reject_legacy_defaults_fields(drop_retired_fields(data, RETIRED_DEFAULTS_FIELDS))
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:

@@ -3359,8 +3359,9 @@ def _context_files_role(tmp_path: Path, files: dict[str, str], max_chars: int) -
     for name, text in files.items():
         (workspace / name).write_text(text, encoding="utf-8")
     config.agents["general"].context_files = list(files)
-    config.defaults.max_preload_file_chars = max_chars
-    return _role(_create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path))))
+    bound = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    bound.defaults.max_preload_file_chars = max_chars
+    return _role(_create_agent_for_test("general", config=bound))
 
 
 def _cut_marker(path: Path, max_chars: int) -> str:
@@ -3438,8 +3439,8 @@ async def test_memory_entrypoint_and_a_context_file_get_the_same_cut(tmp_path: P
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text(_LONG_FILE, encoding="utf-8")
     role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, 70)
-    config.defaults.max_preload_file_chars = 70
     bound = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    bound.defaults.max_preload_file_chars = 70
 
     parts = await build_memory_prompt_parts("x", "general", bound, runtime_paths_for(bound))
 

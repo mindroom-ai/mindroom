@@ -145,18 +145,28 @@ RETIRED_AUTO_FLUSH_FIELDS = frozenset({"max_dirty_age_seconds", "max_cross_sessi
 # Handling: Drop it before validation, so a config that still sets it loads unchanged and the next dashboard save
 #   removes it.
 # Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_team_memory_fields_still_load.
-RETIRED_MEMORY_FIELDS = frozenset({"team_reads_member_memory"})
+#
+# LEGACY_COMPAT: Retired memory.file section.
+# Legacy format: memory.file held path, a fallback root that changed nothing (team and agent file memory always lived
+#   in their canonical roots), and max_entrypoint_lines and max_entrypoint_tokens, the MEMORY.md preload caps, all
+#   written by the dashboard on every save.
+# Last legacy release: v2026.11.480; replacement: unreleased; every file inlined into the system prompt, MEMORY.md
+#   included, is cut by defaults.max_preload_file_chars, so the section is removed.
+# Handling: Drop the whole section before validation, so a config that still sets it loads and the next dashboard
+#   save removes it; the old caps are not mapped to the new limit.
+# Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_team_memory_fields_still_load,
+#   tests/test_agents.py::test_config_ignores_the_retired_shared_preload_budget.
+RETIRED_MEMORY_FIELDS = frozenset({"team_reads_member_memory", "file"})
 
 
-# LEGACY_COMPAT: Retired memory.file.path fallback root.
-# Legacy format: memory.file.path, which the dashboard wrote on every save, was documented as the root of team file
-#   memory, but team and agent file memory always lived in their canonical roots, so it changed nothing.
-# Last legacy release: v2026.10.732; replacement: unreleased; team file memory lives in its team's own directory, and
-#   the field is removed.
-# Handling: Drop it before validation, so a config that still sets it loads unchanged and the next dashboard save
-#   removes it.
-# Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_team_memory_fields_still_load.
-RETIRED_MEMORY_FILE_FIELDS = frozenset({"path"})
+# LEGACY_COMPAT: Retired defaults.max_preload_chars shared budget.
+# Legacy format: defaults.max_preload_chars capped all context files together, so one growing file shortened or
+#   dropped the others.
+# Last legacy release: v2026.11.480; replacement: unreleased; defaults.max_preload_file_chars cuts each file on its own.
+# Handling: Drop it before validation, so a config that still sets it loads with the per-file default; a total budget
+#   is not mapped to a per-file limit.
+# Coverage: tests/test_agents.py::test_config_ignores_the_retired_shared_preload_budget.
+RETIRED_DEFAULTS_FIELDS = frozenset({"max_preload_chars"})
 
 
 def drop_retired_fields(value: object, fields: frozenset[str]) -> object:
