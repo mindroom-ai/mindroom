@@ -38,7 +38,7 @@ _SCRIPT_RUN_COLUMN_MIGRATIONS = (
 _SCRIPT_CALL_COLUMN_MIGRATIONS = (
     # LEGACY_COMPAT: Script-call rows without the effect stamp and result metadata columns.
     # Legacy format: Script-call rows lacked effect_started_at and metadata_json.
-    # Last legacy release: v2026.11.470; replacement: the next release adds both columns for workflow tool nodes.
+    # Last legacy release: v2026.11.474; replacement: the next release adds both columns for workflow tool nodes.
     # Handling: Add the absent columns in place; old rows read both as null, so an old unfinished call stays unproven.
     # Coverage: tests/test_script_run_store.py::test_run_store_migrates_existing_call_table_without_effect_columns.
     ("effect_started_at", "ALTER TABLE script_calls ADD COLUMN effect_started_at TEXT"),
