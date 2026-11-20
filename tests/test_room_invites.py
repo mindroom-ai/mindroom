@@ -47,7 +47,9 @@ from mindroom.matrix.invited_rooms_store import (
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from mindroom.thread_summary import notices
+from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.access_schema_support import joined_members_response
 from tests.bot_helpers import make_test_agent_bot
@@ -1957,7 +1959,7 @@ async def test_owner_does_not_join_a_room_its_saved_invite_record_names(
     tmp_path: Path,
     joined: list[str],
 ) -> None:
-    """A room the router once saved as invited is kept on record and never a reason for a membership command."""
+    """A room the router once saved as invited is restored when joined, without a membership command either way."""
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     invited_path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
     invited_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1965,14 +1967,39 @@ async def test_owner_does_not_join_a_room_its_saved_invite_record_names(
     bot = make_test_agent_bot(agent_user=_router_user(), config=config, runtime_paths=runtime_paths_for(config))
     install_runtime_journal_support(bot)
     bot.client = AsyncMock(invited_rooms={"!saved-invite:localhost": MagicMock()})
+    snooze = {
+        "type": THREAD_TAGS_EVENT_TYPE,
+        "state_key": '["$root","snoozed"]',
+        "sender": "@bas:localhost",
+        "event_id": "$tag",
+        "origin_server_ts": 1,
+        "content": {
+            "set_by": "@bas:localhost",
+            "set_at": "2026-11-13T08:00:00+00:00",
+            "data": {"until": "2099-01-01T08:00:00+00:00"},
+        },
+    }
+    bot.client.rooms = {room_id: nio.MatrixRoom(room_id, bot.agent_user.user_id) for room_id in joined}
+    bot.client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse([snooze], "!saved-invite:localhost"))
+    snoozes = ThreadSnoozeRuntimeCoordinator(
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+        bots=lambda: {ROUTER_AGENT_NAME: bot},
+    )
     lifecycle = bot._room_lifecycle
-    lifecycle.deps = replace(lifecycle.deps, change_membership=AsyncMock(return_value=True))
+    lifecycle.deps = replace(
+        lifecycle.deps,
+        change_membership=AsyncMock(return_value=True),
+        on_room_joined=lambda room_id: snoozes.restore_room(bot, room_id),
+    )
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=joined))
 
     await lifecycle.join_configured_rooms()
 
     lifecycle.deps.change_membership.assert_not_awaited()
     assert lifecycle.invited_room_ids() == {"!saved-invite:localhost"}
+    # A cold start reads the joined room's state once, so a snooze older than the synced timeline still wakes.
+    assert list(snoozes._runtime._snoozes) == [(room_id, "$root") for room_id in joined]
 
 
 @pytest.mark.asyncio

@@ -422,8 +422,11 @@ class BotRoomLifecycle:
         desired_rooms = set(self.deps.get_configured_rooms())
         desired_rooms.update(self.deps.get_retained_room_ids())
         if self._should_accept_invite():
-            # A room saved for an account that accepts no invite stays on record and is never a reason to join.
             desired_rooms.update(invited_rooms)
+        # A room saved for an account that accepts no invite is never joined; one it is in is restored as joined.
+        for room_id in sorted(invited_rooms & current_rooms - desired_rooms):
+            await self._room_joined(room_id)
+            await self.deps.on_configured_room_joined(room_id)
 
         for room_id in desired_rooms:
             if room_id in current_rooms:
