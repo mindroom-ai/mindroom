@@ -29,13 +29,21 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths
+from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.message_target import MessageTarget
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
 from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TOKEN_PATH_ENV
+from mindroom.script_runs.manager import ScriptRunManager
 from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunRecord, ScriptRunState
 from mindroom.script_runs.reasons import PROCESS_EXIT_OBSERVED
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
+from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.results import read_result_payload
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workflow_runs.engine import WorkflowEngine
 from mindroom.workflow_runs.models import (
@@ -54,6 +62,7 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.scripted_agent_helpers import registered_toolkit
+from tests.tool_job_helpers import call_job_tool, job_actor, tool_job_runtime, toolkit_job_tools
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -64,7 +73,9 @@ if TYPE_CHECKING:
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.script_runs.manager import ScriptRunLimits
     from mindroom.script_runs.models import ScriptToolGrant
+    from mindroom.tool_jobs.runtime import BackgroundJob, JobGrant
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from tests.tool_job_helpers import ProcessRuntime
 
 SCRIPT_RUN_ID = "script-" + "a" * 32
 TOKEN = "invented-capability"  # noqa: S105 - an invented placeholder, not a credential.
@@ -206,6 +217,10 @@ class NodeFailed(Exception):  # noqa: N818 - named as the plan's tests name it.
         self.receipt = receipt
 
 
+class CallFailed(Exception):  # noqa: N818 - named after what happened to the call.
+    """A tool call that failed, with the text the model reads."""
+
+
 class CountingTool:
     """State of the stack's `counter` toolkit, whose effect is one line appended to a file."""
 
@@ -310,6 +325,12 @@ class FakeScripts:
         self.launched: list[ScriptRunRecord] = []
         self.limits: list[ScriptRunLimits | None] = []
         self.tokens: dict[str, str] = {}
+        self.hold_launch: asyncio.Event | None = None
+        """While set and not released, `run` has written its attempt's record and waits, as a starting process does."""
+        self.refuse_launch: Exception | None = None
+
+    # The real confined read of a script's source, which needs nothing of the manager itself.
+    resolve_source = ScriptRunManager.resolve_source
 
     async def run(
         self,
@@ -321,6 +342,8 @@ class FakeScripts:
         limits: ScriptRunLimits | None = None,
     ) -> ScriptRunRecord:
         """Record one running attempt of *workflow_run_id* and keep its capability token."""
+        if self.refuse_launch is not None:
+            raise self.refuse_launch
         token, token_hash = mint_script_capability()
         attempt = self.store.create_run(
             ScriptRunRecord(
@@ -343,6 +366,8 @@ class FakeScripts:
         self.tokens[attempt.run_id] = token
         self.limits.append(limits)
         self.launched.append(self.store.transition_run(attempt.run_id, state=ScriptRunState.RUNNING))
+        if self.hold_launch is not None:
+            await self.hold_launch.wait()
         return self.launched[-1]
 
     async def revoke(self, run_id: str, *, reason: str) -> ScriptRunRecord:
@@ -384,10 +409,11 @@ def owner_context(
     *,
     extra_tools: tuple[str, ...] = (),
     process_env: Mapping[str, str] = MappingProxyType({}),
+    require_approval: tuple[str, ...] = ("append",),
 ) -> ToolRuntimeContext:
     """Return the tool context of the stack's owner: the agent `watcher` with `counter` and `shell`, for Alice.
 
-    The operator allows shell on this machine and approves by default; only `append` asks first.
+    The operator allows shell on this machine and approves by default; only the functions in *require_approval* ask.
     *process_env* is the primary's environment, which says for example where its sandbox runner listens.
     """
     defaults = DefaultsConfig(tools=[], allow_shell_without_worker=True)
@@ -404,7 +430,10 @@ def owner_context(
             agents={"watcher": AgentConfig(display_name="Watcher", tools=["counter", "shell", *extra_tools])},
             defaults=defaults,
             models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={"default": "auto_approve", "rules": [{"match": "append", "action": "require_approval"}]},
+            tool_approval={
+                "default": "auto_approve",
+                "rules": [{"match": name, "action": "require_approval"} for name in require_approval],
+            },
         ),
         runtime_paths,
     )
@@ -434,6 +463,7 @@ class WorkflowStack:
         self.owner_options = owner_options
         self.run_id = ""
         self.tokens: dict[str, str] = {}
+        self.admission: JobGrant = "allowed"
         self._open()
 
     def _open(self) -> None:
@@ -447,6 +477,8 @@ class WorkflowStack:
         self.scripts = FakeScripts(self.script_store, self.broker)
         self.scripts.tokens = self.tokens
         self.engine = WorkflowEngine(self.store, self.scripts, self.broker)  # type: ignore[arg-type]
+        # What a turn of the owner sees: the context with the orchestrator that holds the engine.
+        self.context = replace(self.context, orchestrator=SimpleNamespace(workflow_engine=self.engine, running=True))  # type: ignore[arg-type]
 
     @property
     def attempt(self) -> ScriptRunRecord:
@@ -514,6 +546,63 @@ class WorkflowStack:
         """End the attempt's process in *state* and let the engine see it."""
         await self.scripts.end(self.attempt.run_id, state, reason=reason or PROCESS_EXIT_OBSERVED, output=output)
         await self.engine.reconcile()
+
+    async def open_jobs(self) -> ProcessRuntime:
+        """Start the real job runtime on the stack's journal as the instance of the owner's storage root."""
+        paths = self.context.runtime_paths
+        self.jobs = await tool_job_runtime(paths.storage_root, grant=lambda _job: self.admission)
+        self._instance = pin_background_tool_jobs(self.context.config, paths)
+        register_background_runtime(paths, self.jobs)
+        return self.jobs
+
+    async def close(self) -> None:
+        """Stop the job runtime and the engine, and withdraw the instance."""
+        await self.jobs.shutdown()
+        release_background_tool_jobs(self.context.runtime_paths, self._instance)
+        await self.engine.close()
+
+    def refuse_admission(self) -> None:
+        """Make the job runtime's grant check refuse every job from now on."""
+        self.admission = "denied"
+
+    async def call(
+        self,
+        name: str,
+        *,
+        context: ToolRuntimeContext | None = None,
+        depth: int = 0,
+        call_id: str | None = None,
+        **arguments: object,
+    ) -> str:
+        """Make one model call of the `workflow` toolkit through job admission, as a turn in *context* does.
+
+        A call that fails raises `CallFailed` with the text the model would read.
+        """
+        context = context or self.context
+        toolkit = WorkflowTools(context.config)
+        bind_toolkit_construction(toolkit, ToolConstruction("workflow", None))
+        tools = toolkit_job_tools(toolkit, authored_name="workflow").values()
+        async with execution_resources():
+            with tool_runtime_context(context):
+                outcome = await call_job_tool(
+                    job_actor(*tools, name=context.agent_name, depth=depth),
+                    name,
+                    arguments,
+                    call_id=call_id or uuid4().hex,
+                    session_id=context.execution_identity.session_id or "session",
+                )
+        if outcome.is_error:
+            raise CallFailed(outcome.content)
+        return outcome.content
+
+    async def finish_attempt(self, result: object = None, error: str | None = None) -> None:
+        """Let the attempt's script report and exit, as `main` returning or raising does."""
+        await self.engine.finish(self.attempt, result=result, error=error)
+        await self.end_attempt(ScriptRunState.EXITED if error is None else ScriptRunState.FAILED)
+
+    async def collect(self, job: BackgroundJob) -> object:
+        """Return the whole result an ended job delivers to the conversation that started it."""
+        return (await read_result_payload(self.jobs, job)).value
 
     async def restart(self) -> WorkflowStack:
         """Close the runtimes and reopen them on the same databases, as a primary restart does."""

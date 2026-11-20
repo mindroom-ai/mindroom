@@ -95,37 +95,50 @@ class WorkflowEngine:
         context: ToolRuntimeContext,
         limits: WorkflowLimits | None = None,
     ) -> WorkflowRun:
-        """Start the next attempt of a reserved run."""
-        limits = limits or WorkflowLimits()
+        """Start the next attempt of a reserved run; a script that cannot start ends the run failed with the reason.
+
+        The engine owns a launch once it began, so a caller that goes away leaves no process its run does not name.
+        """
+        launch = self._launch(run_id, context, limits or WorkflowLimits())
+        return await asyncio.shield(self._spawn(_ADMISSIONS, launch))
+
+    async def _launch(self, run_id: str, context: ToolRuntimeContext, limits: WorkflowLimits) -> WorkflowRun:
         # Held until the run names the attempt, so the new process's first request waits instead of being refused.
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
             if run.state is not WorkflowRunState.STARTING:
                 # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none.
                 return run
-            attempt = await self.scripts.run(
-                context,
-                source=run.source,
-                workflow_run_id=run_id,
-                resource_profile=cast("ScriptResourceProfileName | None", run.resource_profile),
-                limits=ScriptRunLimits(
-                    max_concurrent_runs=limits.max_concurrent_runs,
-                    max_tool_calls_per_minute=limits.max_tool_calls_per_minute,
-                ),
-            )
-            launched = await asyncio.to_thread(
-                self.store.update_run,
-                run_id,
-                when={WorkflowRunState.STARTING},
-                state=WorkflowRunState.RUNNING,
-                attempt=run.attempt + 1,
-                script_run_id=attempt.run_id,
-            )
-            if launched.script_run_id != attempt.run_id:
-                # The run ended while its process started, so nothing names this attempt: stop it.
-                await self.scripts.revoke(attempt.run_id, reason=launched.error or launched.state.value)
-                await self.scripts.reconcile_durable(run_id=attempt.run_id)
-            return launched
+            try:
+                attempt = await self.scripts.run(
+                    context,
+                    source=run.source,
+                    workflow_run_id=run_id,
+                    resource_profile=cast("ScriptResourceProfileName | None", run.resource_profile),
+                    limits=ScriptRunLimits(
+                        max_concurrent_runs=limits.max_concurrent_runs,
+                        max_tool_calls_per_minute=limits.max_tool_calls_per_minute,
+                    ),
+                )
+            except Exception as exc:
+                logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
+                attempt, refusal = None, str(exc)
+            if attempt is not None:
+                launched = await asyncio.to_thread(
+                    self.store.update_run,
+                    run_id,
+                    when={WorkflowRunState.STARTING},
+                    state=WorkflowRunState.RUNNING,
+                    attempt=run.attempt + 1,
+                    script_run_id=attempt.run_id,
+                )
+                if launched.script_run_id != attempt.run_id:
+                    # The run ended while its process started, so nothing names this attempt: stop it.
+                    await self.scripts.revoke(attempt.run_id, reason=launched.error or launched.state.value)
+                    await self.scripts.reconcile_durable(run_id=attempt.run_id)
+                return launched
+        # The gate is free again, which ending a run takes.
+        return await self._end_run(run, WorkflowRunState.FAILED, refusal)
 
     async def cancel(self, run_id: str, *, reason: str) -> WorkflowRun:
         """Revoke the run's attempt, end its process and end the run cancelled; completed nodes stay saved."""

@@ -2489,6 +2489,7 @@ expose = [
     "WorkflowRunNotFoundError",
     "WorkflowRunStore",
     "WorkflowRunStoreError",
+    "owned_run",
 ]
 
 [[modules]]
@@ -2523,6 +2524,24 @@ expose = ["SupersededAttemptError", "WorkflowEngine", "WorkflowLimits"]
 path = "mindroom.orchestration.workflow_runtime"
 depends_on = ["mindroom.workflow_runs.engine", "mindroom.workflow_runs.store"]
 visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.custom_tools.workflow"
+depends_on = [
+    "mindroom.delegation.lifecycle",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_jobs.results",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.tool_jobs.settings",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.store",
+]
+visibility = ["mindroom.tools.workflow"]
 
 [[modules]]
 path = "mindroom.api.schedules"
@@ -8589,6 +8608,7 @@ depends_on = [
     "mindroom.tool_jobs.control",
 ]
 visibility = [
+    "mindroom.custom_tools.workflow",
     "mindroom.ai",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.dynamic_workflow",
@@ -9238,6 +9258,7 @@ depends_on = [
     "mindroom.tool_system.progress",
 ]
 visibility = [
+    "mindroom.custom_tools.workflow",
     "mindroom.tool_jobs.publication",
     "mindroom.commands.handler",
     "mindroom.tool_jobs.client_cancel",
@@ -9271,6 +9292,7 @@ visibility = [
 path = "mindroom.tool_jobs.control"
 depends_on = []
 visibility = [
+    "mindroom.custom_tools.workflow",
     "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
@@ -9350,7 +9372,6 @@ depends_on = [
 path = "mindroom.tool_jobs.execution"
 depends_on = [
     "mindroom.agent_loop",
-    "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.job",
     "mindroom.failure_text",
     "mindroom.llm",
@@ -9450,6 +9471,7 @@ visibility = [
 path = "mindroom.tool_jobs.results"
 depends_on = ["mindroom.llm", "mindroom.tool_jobs.legacy_results", "mindroom.tool_system.tool_function"]
 visibility = [
+    "mindroom.custom_tools.workflow",
     "mindroom.delegation.background",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.consumption",
@@ -10165,6 +10187,7 @@ visibility = ["mindroom.cli.config"]
 path = "mindroom.tool_jobs.settings"
 depends_on = ["mindroom.tool_jobs.instances"]
 visibility = [
+    "mindroom.custom_tools.workflow",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.api.config_lifecycle",

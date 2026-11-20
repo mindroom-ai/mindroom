@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
 
 from mindroom.ai_runtime import queued_message_signal_context
@@ -101,7 +101,8 @@ class JobSpec:
     ``tool_name`` and ``kind`` are what people and models see: a tool's job is named by its function, a subagent's
     (``kind="delegation"``) by the agent it runs. ``adapter`` is the exact mapping the runtime admits, saves, and hands
     to cleanup. ``cancel`` settles the job's own work after a cancellation or shutdown in this process, before the
-    runtime's cleanup for its kind.
+    runtime's cleanup for its kind. ``refused`` undoes what preparing the job wrote when the runtime does not admit
+    it, and ``handle`` words what a call that stops waiting for the job returns, the job's summary when None.
     """
 
     tool_name: str
@@ -110,6 +111,24 @@ class JobSpec:
     adapter: dict[str, Any]
     operation: _Operation
     cancel: _Cleanup | None = None
+    refused: Callable[[], object] | None = None
+    handle: Callable[[BackgroundJob], str] | None = None
+
+
+@runtime_checkable
+class ManagedJobToolkit(Protocol):
+    """A toolkit that prepares the job a managed call of one of its functions runs as."""
+
+    async def managed_job(
+        self,
+        function_name: str,
+        arguments: dict[str, Any],
+        *,
+        job_id: str,
+        runtime: ToolJobRuntime,
+    ) -> JobSpec | str | None:
+        """Return the job, the sentence that refuses the call, or None for a function that runs as any tool does."""
+        ...
 
 
 @dataclass(frozen=True)

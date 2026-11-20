@@ -497,6 +497,17 @@ def _select_run(connection: sqlite3.Connection, run_id: str) -> WorkflowRun:
     return _run_from_row(row)
 
 
+def owned_run(store: WorkflowRunStore, run_id: str, *, agent_name: str, requester_id: str) -> WorkflowRun:
+    """Return the run *run_id* for its owner; another owner's ID raises exactly as an unknown one does.
+
+    Every lookup of a run for a caller goes through here.
+    """
+    run = store.get_run(run_id)
+    if run.agent_name != agent_name or run.owner_user_id != requester_id:
+        raise WorkflowRunNotFoundError(run_id)
+    return run
+
+
 def _reservation_digest(run: WorkflowRun) -> str:
     """Return the digest of what a redelivered start must share with the run it hits.
 

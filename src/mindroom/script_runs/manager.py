@@ -365,7 +365,7 @@ class ScriptRunManager:
         """
         workflow = workflow_run_id is not None
         effective_limits = limits or ScriptRunLimits()
-        source_bytes = await self._resolve_source(context, source=source, path=path)
+        source_bytes = await self.resolve_source(context, source=source, path=path)
         source_digest = hashlib.sha256(source_bytes).hexdigest()
         execution_identity = context.execution_identity
         worker_target = build_agent_toolkit_worker_target(
@@ -865,7 +865,8 @@ class ScriptRunManager:
             raise ScriptRunManagerError(not_found)
         return run
 
-    async def _resolve_source(self, context: ToolRuntimeContext, *, source: str | None, path: str | None) -> bytes:
+    async def resolve_source(self, context: ToolRuntimeContext, *, source: str | None, path: str | None) -> bytes:
+        """Return the bytes of one inline source, or of one file read inside the agent's workspace."""
         if (source is None) == (path is None):
             msg = "Provide exactly one of source or path."
             raise ScriptRunManagerError(msg)

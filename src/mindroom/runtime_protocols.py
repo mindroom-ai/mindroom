@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.skill_learning.runner import SkillReviewRunner
     from mindroom.tool_system.plugins import PluginReloadResult
+    from mindroom.workflow_runs.engine import WorkflowEngine
 
 __all__ = [
     "OrchestratorRuntime",
@@ -85,6 +86,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def script_runtime(self) -> ScriptRuntimeLifecycle: ...  # noqa: D102
+
+    @property
+    def workflow_engine(self) -> WorkflowEngine: ...  # noqa: D102
 
     @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102

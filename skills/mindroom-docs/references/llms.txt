@@ -49,6 +49,7 @@
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/)
 - [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/)
 - [Background Python Scripts](https://docs.mindroom.chat/tools/background-scripts/)
+- [Workflows](https://docs.mindroom.chat/tools/workflows/)
 - [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/)
 - [Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/)
