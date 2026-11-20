@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -690,6 +691,38 @@ async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
     assert node is not None
     assert node.state is WorkflowNodeState.INDETERMINATE
     assert left == [broken.run_id]
+
+
+@pytest.mark.asyncio
+async def test_store_writes_wait_for_the_database_lock_off_the_event_loop(stack: WorkflowStack) -> None:
+    """Another writer holding the database delays a log line and a node, and never the loop that serves every run."""
+    other_writer = sqlite3.connect(stack.store.database_path, isolation_level=None, check_same_thread=False)
+    other_writer.execute("BEGIN IMMEDIATE")
+    release = threading.Timer(0.5, other_writer.execute, ("COMMIT",))
+    release.start()
+    ticks = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    ticker = asyncio.create_task(tick())
+    try:
+        await asyncio.gather(
+            stack.engine.append_log(stack.attempt, "The tide is in."),
+            *(stack.submit("@0", "tool", _APPEND) for _ in range(2)),
+        )
+        ticks_while_waiting = ticks
+        assert await stack.result("@0", "tool", _APPEND) == "appended"
+    finally:
+        ticker.cancel()
+        release.join()
+        other_writer.close()
+
+    assert ticks_while_waiting >= 10
+    assert (stack.store.log(stack.run_id), stack.counting_tool.lines) == (["The tide is in."], ["a"])
 
 
 @pytest.mark.asyncio

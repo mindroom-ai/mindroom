@@ -109,7 +109,8 @@ class WorkflowEngine:
                     max_tool_calls_per_minute=limits.max_tool_calls_per_minute,
                 ),
             )
-            launched = self.store.update_run(
+            launched = await asyncio.to_thread(
+                self.store.update_run,
                 run_id,
                 when={WorkflowRunState.STARTING},
                 state=WorkflowRunState.RUNNING,
@@ -180,6 +181,11 @@ class WorkflowEngine:
     async def submit_node(self, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
         """Save and dispatch one call of the attempt's script, or return the receipt of the node its key has."""
         run = await self._current_run(attempt)
+        # Held from the lookup to the dispatch, so two requests with one key cannot both find it free.
+        async with self._condition(run.run_id):
+            return await self._submit_node(run, attempt, request)
+
+    async def _submit_node(self, run: WorkflowRun, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
         saved = self.store.get_node(run.run_id, request.key)
         if saved is not None:
             # A request the script sent twice never repeats work, not even failed work.
@@ -197,7 +203,8 @@ class WorkflowEngine:
         lane, index = split_key(request.key)
         call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{request.key}:1").hex
         meta = request.meta
-        node = self.store.put_node(
+        node = await asyncio.to_thread(
+            self.store.put_node,
             WorkflowNode(
                 run_id=run.run_id,
                 key=request.key,
@@ -242,12 +249,13 @@ class WorkflowEngine:
 
     async def append_log(self, attempt: ScriptRunRecord, text: str) -> None:
         """Add one progress line to the attempt's run."""
-        self.store.append_log((await self._current_run(attempt)).run_id, text)
+        await asyncio.to_thread(self.store.append_log, (await self._current_run(attempt)).run_id, text)
 
     async def finish(self, attempt: ScriptRunRecord, *, result: object, error: str | None) -> None:
         """Store what the script's `main` returned or raised; the run ends when the attempt's process has."""
         run = await self._current_run(attempt)
-        self.store.update_run(
+        await asyncio.to_thread(
+            self.store.update_run,
             run.run_id,
             when={WorkflowRunState.RUNNING},
             result=result,
@@ -352,7 +360,8 @@ class WorkflowEngine:
         for node in self.store.nodes(run.run_id, include_stale=True):
             if node.state in _UNSETTLED_NODE_STATES and node.handle is not None:
                 await asyncio.to_thread(self.settle_from_handle, node)
-        ended = self.store.update_run(
+        ended = await asyncio.to_thread(
+            self.store.update_run,
             run.run_id,
             when=_LIVE_RUN_STATES,
             state=state,
