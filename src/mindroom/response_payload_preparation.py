@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments.ids import merge_attachment_ids
-from mindroom.constants import INCOMPLETE_TEXT_KEY, UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
+from mindroom.constants import UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayloadWithAttachmentsRequest,
@@ -119,9 +119,8 @@ class ResponsePayloadPreparer:
         lone = request.prompt_source_event_ids if len(request.prompt_source_event_ids) == 1 else ()
         read = preparation.routed_revision
         read = tuple(read) if isinstance(read, list) and [type(part) for part in read] == [int, str] else (0, "")
-        held = [m for m in request.thread_history if m.event_id in lone and INCOMPLETE_TEXT_KEY not in m.content]
-        text = [m for m in held if m.content.get("msgtype") == "m.text"]
-        # A row stored before that mark existed is incomplete by the notice its body ends in.
+        text = [m for m in request.thread_history if m.event_id in lone and m.content.get("msgtype") == "m.text"]
+        # An edit whose long-text file, or own later edit, could not be read ends in the notice its read appended.
         whole = [m for m in text if not m.body.endswith((UNREADABLE_SIDECAR_NOTICE, UNREADABLE_EDIT_NOTICE))]
         newer = [m.body for m in whole if m.edited_timestamp and (m.edited_timestamp, m.latest_event_id) > read]
         preparation = replace(preparation, prompt=newer[0]) if newer else preparation

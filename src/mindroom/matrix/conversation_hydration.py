@@ -58,7 +58,7 @@ from typing import TYPE_CHECKING
 import nio
 from nio.api import RelationshipType
 
-from mindroom.constants import INCOMPLETE_TEXT_KEY, UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
+from mindroom.constants import UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
 from mindroom.event_journal import (
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
@@ -341,8 +341,8 @@ def _advanced_room_cursor(*, room_id: str, start: str | None, end: str) -> str:
 
 
 def _with_notice(content: Mapping[str, object], notice: str) -> dict[str, object]:
-    """Return one revision's content with a notice appended to its body, marked as not its whole text."""
-    return {**content, "body": f"{content.get('body', '')}\n\n{notice}", INCOMPLETE_TEXT_KEY: True}
+    """Return one revision's content with a notice appended to its body."""
+    return {**content, "body": f"{content.get('body', '')}\n\n{notice}"}
 
 
 @dataclass

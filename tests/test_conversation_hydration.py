@@ -17,7 +17,6 @@ from structlog.testing import capture_logs
 
 from mindroom.attachments.storage import register_thread_history_media_attachments
 from mindroom.constants import (
-    INCOMPLETE_TEXT_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -46,7 +45,6 @@ from mindroom.matrix.conversation_reads import (
     complete_thread_history,
     latest_agent_message_snapshot,
     projected_thread_history,
-    projected_visible_messages,
     refetched_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
@@ -2614,8 +2612,6 @@ class TestSidecarResolution:
                 {
                     "msgtype": "m.text",
                     "body": "The edit beg [continues]\n\n[The rest of this message could not be loaded.]",
-                    # The notice is for readers; what must not take a preview for the message reads this mark.
-                    INCOMPLETE_TEXT_KEY: True,
                 },
             ]
             assert page.refresh_pending == ()
@@ -3193,9 +3189,6 @@ class TestEncryptedRelations:
             (await refreshes(alice))[0],
         )
         assert await bodies(alice) == [f"first\n\n{UNREADABLE_EDIT_NOTICE}"]
-        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
-        # The mark reaches a responder's thread history, where the notice alone would pass for the sender's words.
-        assert projected_visible_messages(page)[0].content[INCOMPLETE_TEXT_KEY] is True
         assert await refreshes(alice) == ()
 
     async def test_an_unreadable_edit_older_than_the_winning_one_adds_no_notice(

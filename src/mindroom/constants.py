@@ -1076,9 +1076,7 @@ ROUTE_TOO_LARGE_KEY = "io.mindroom.route_too_large"
 ROUTE_TOO_LARGE_NOTICE = "Your message is too long for me to read."
 # In a waiting message's content and its route's: the sender's edit its text is, as [origin_server_ts, event ID].
 ROUTE_REVISION_KEY = "io.mindroom.route_revision"
-# In a projected message's content: its body ends in a notice of text, a file's or a later edit's, that was not read.
-INCOMPLETE_TEXT_KEY = "io.mindroom.incomplete_text"
-# Those notices. A row stored before the mark existed is known as incomplete only by the one its body ends in.
+# What a read appends to the body of a message whose long-text file, or later edit, it could not read.
 UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
 UNREADABLE_EDIT_NOTICE = "[A later edit of this message could not be read.]"
 # In a route's content: the steward's transcript of each voice message it routes, by event ID.

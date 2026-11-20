@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.ai import _compose_current_turn_prompt
-from mindroom.constants import INCOMPLETE_TEXT_KEY, UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
+from mindroom.constants import UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
 from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.hooks import EVENT_MESSAGE_ENRICH, HookRegistry, MessageEnrichContext, hook
@@ -146,14 +146,10 @@ def _held(
     *,
     revision: str | None = None,
     edited_at: int = 2_000,
-    whole: bool = True,
     msgtype: str = "m.text",
 ) -> ResolvedVisibleMessage:
-    """Return one message as this responder's thread holds it, at ``revision`` when its own sender edited it.
-
-    One that is not ``whole`` is marked as the thread's read marks a text it could not read all of.
-    """
-    content = {"msgtype": msgtype, "body": body} | ({} if whole else {INCOMPLETE_TEXT_KEY: True})
+    """Return one message as this responder's thread holds it, at ``revision`` when its own sender edited it."""
+    content = {"msgtype": msgtype, "body": body}
     message = ResolvedVisibleMessage.from_message_data(
         {"sender": "@user:localhost", "body": body, "timestamp": 1, "event_id": event_id, "content": content},
         thread_id="$thread",
@@ -177,9 +173,8 @@ def _held(
             ("$first", "$second"),
             "raw prompt",
         ),
-        # An edit whose file, or whose own later edit, could not be read leaves the route's whole prompt standing.
-        pytest.param([_held("$first", "the preview", revision="$edit", whole=False)], ("$first",), "raw prompt"),
-        # A row stored before the mark existed says so only in its text, which ends in the notice its read appended.
+        # An edit whose file, or whose own later edit, could not be read leaves the route's whole prompt standing:
+        # its text ends in the notice its read appended.
         pytest.param(
             [_held("$first", f"the preview\n\n{UNREADABLE_SIDECAR_NOTICE}", revision="$edit")],
             ("$first",),
@@ -201,9 +196,8 @@ def _held(
         "edited",
         "unedited-or-replaced-by-another",
         "batch",
-        "edit-not-whole",
-        "edit-file-unread-before-the-mark",
-        "later-edit-unread-before-the-mark",
+        "edit-file-unread",
+        "later-edit-unread",
         "edit-not-text",
         "neighbour-edited",
         "unrouted",
