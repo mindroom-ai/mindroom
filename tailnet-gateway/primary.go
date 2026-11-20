@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -117,6 +118,10 @@ func (p *httpPrimary) Links(ctx context.Context) ([]DesiredLink, error) {
 	if err := json.Unmarshal(answer, &links); err != nil {
 		return nil, fmt.Errorf("GET /links: %w", err)
 	}
+	if links == nil {
+		// JSON null decodes without an error; taken as an empty list it would stop every node.
+		return nil, errors.New("GET /links: the primary answered null, not a list")
+	}
 	return links, nil
 }
 
@@ -163,6 +168,9 @@ func (p *httpPrimary) Connect(ctx context.Context, id, peerLogin, peerNode strin
 	}
 	if err := json.Unmarshal(answer, &target); err != nil {
 		return "", 0, fmt.Errorf("POST /links/%s/connect: %w", id, err)
+	}
+	if target.Host == "" || target.Port < 1 || target.Port > 65535 {
+		return "", 0, fmt.Errorf("POST /links/%s/connect: the primary's 200 names no host and port", id)
 	}
 	return target.Host, target.Port, nil
 }

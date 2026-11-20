@@ -161,6 +161,8 @@ func TestLinksAnswerThatIsNotAListIsAnError(t *testing.T) {
 		{http.StatusBadGateway, "[]"},
 		{http.StatusOK, `{"detail": "x"}`},
 		{http.StatusOK, "not json"},
+		// JSON null decodes into a list without an error, and is none.
+		{http.StatusOK, "null"},
 	} {
 		primary := newFakePrimary(t)
 		primary.answer("GET /links", answer.code, answer.body)
@@ -269,6 +271,31 @@ func TestConnectRefusalCarriesDetail(t *testing.T) {
 		var refused *RefusedError
 		if !errors.As(err, &refused) || refused.Detail != refusal.detail {
 			t.Errorf("answer %+v: err = %v, want a RefusedError with detail %q", refusal.answer, err, refusal.detail)
+		}
+	}
+}
+
+func TestConnectAnswerWithoutATargetIsAnError(t *testing.T) {
+	for _, body := range []string{
+		"{}",
+		"null",
+		"not json",
+		`{"host": "10.0.0.5"}`,
+		`{"port": 2222}`,
+		`{"host": "", "port": 2222}`,
+		`{"host": "10.0.0.5", "port": 0}`,
+		`{"host": "10.0.0.5", "port": 65536}`,
+		`{"host": "10.0.0.5", "port": "2222"}`,
+	} {
+		primary := newFakePrimary(t)
+		primary.answer("POST /links/"+idA+"/connect", http.StatusOK, body)
+
+		host, port, err := NewPrimary(primary.URL, "tok").Connect(context.Background(), idA, "bas@github", "laptop")
+
+		// The primary did not refuse, so its words are no link's last error.
+		var refused *RefusedError
+		if err == nil || errors.As(err, &refused) {
+			t.Errorf("answer %s: target = %q:%d, err = %v, want an error that is no RefusedError", body, host, port, err)
 		}
 	}
 }
