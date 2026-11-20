@@ -301,12 +301,12 @@ async def test_onboarding_join_observed_by_room_steward(coordination: Coordinati
     lifecycle = coordination.lifecycle
     lifecycle.agent_name = "helper"
     lifecycle.is_steward = lambda room_id: room_id == "!other:localhost"
-    assert not lifecycle._observes_onboarding_joins
+    assert not lifecycle._stewarded_onboarding_rooms()
     # Every bot in a configured onboarding room enters its joins into their claim, whoever stewards it.
     assert lifecycle.onboards_from("!lobby:localhost")
     assert not lifecycle.onboards_from("!other:localhost")
     lifecycle.is_steward = lambda room_id: room_id == "!lobby:localhost"
-    assert lifecycle._observes_onboarding_joins
+    assert lifecycle._stewarded_onboarding_rooms()
     join = RoomMemberJoin("!lobby:localhost", "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
     await lifecycle.baseline_join(join)
     coordination.owner.ensure.assert_awaited_once()
@@ -399,6 +399,32 @@ async def test_retry_pass_without_stewardship_leaves_the_lobbys_backfill_owed(co
 
 
 @pytest.mark.asyncio
+async def test_taking_over_another_onboarding_room_backfills_it(coordination: Coordination) -> None:
+    """A bot that settled its own lobby and then becomes the steward of a second onboarding room backfills that one too."""
+    lifecycle = coordination.lifecycle
+    settings = lifecycle.runtime.config.personal_rooms
+    settings.backfill = True
+    settings.onboarding_rooms = ["lobby", "!second:localhost"]
+    members = {"!lobby:localhost": "@alice:localhost", "!second:localhost": "@bob:localhost"}
+    lifecycle.runtime.client.joined_members.side_effect = lambda room_id: joined_members_response(
+        room_id,
+        members[room_id],
+    )
+    stewarded = {"!lobby:localhost"}
+    lifecycle.is_steward = lambda room_id: room_id in stewarded
+    await lifecycle._reconcile()
+    assert lifecycle._reconciled
+    stewarded.add("!second:localhost")
+
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+
+    onboarded = [attempt.args[:2] for attempt in coordination.owner.ensure.await_args_list]
+    assert onboarded == [("@alice:localhost", "!lobby:localhost"), ("@bob:localhost", "!second:localhost")]
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
 async def test_disabling_personal_rooms_drops_a_queued_retry(coordination: Coordination) -> None:
     """A reload that turns the feature off ends a failed trigger's retry, so the next sync frame schedules nothing."""
     lifecycle = coordination.lifecycle
@@ -438,7 +464,7 @@ async def test_non_steward_never_routes_onboarding(coordination: Coordination) -
     lifecycle = coordination.lifecycle
     lifecycle.is_steward = lambda _room_id: False
     lifecycle.runtime.config.personal_rooms.backfill = True
-    assert not lifecycle._observes_onboarding_joins
+    assert not lifecycle._stewarded_onboarding_rooms()
     # It still takes the lobby's command as handled, so it never answers it as an unknown command.
     assert await lifecycle.handle_command(
         nio.MatrixRoom("!lobby:localhost", "@helper:localhost"),
@@ -1703,7 +1729,7 @@ async def test_target_ready_allows_immediate_reconciliation(template_coordinatio
     """A user's agent finishing its first sync onboards its owner at once instead of after the retry delay."""
     lifecycle = template_coordination.lifecycle
     add_alices_agent(lifecycle)
-    lifecycle._reconciled = True
+    lifecycle._reconciled, lifecycle._reconciled_rooms = True, frozenset({"!lobby:localhost"})
     lifecycle._next_reconciliation_at = float("inf")
     lifecycle.schedule_reconciliation()
     assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
