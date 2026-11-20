@@ -470,10 +470,10 @@ class TurnDispatcher:
             if body is None:
                 response = await self._client().room_get_event(turn.room.room_id, event_id)
                 event = response.event if isinstance(response, nio.RoomGetEventResponse) else None
-                if not isinstance(event, nio.RoomMessageFormatted):
+                body = await self.deps.normalizer.fetched_message_text(event)
+                if body is None:
                     self.deps.logger.warning("Cannot read a routed message; its turn stays pending", event_id=event_id)
                     return None
-                body = event.body
             bodies.append(body)
         return replace(turn, event=replace(turn.event, body="\n\n".join(bodies)))
 

@@ -7,6 +7,8 @@ from collections.abc import Sequence  # noqa: TC003
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import nio
+
 from mindroom.attachments.ids import merge_attachment_ids
 from mindroom.attachments.media import attachment_records_to_media, resolve_scoped_attachments
 from mindroom.attachments.storage import (
@@ -21,12 +23,13 @@ from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.logging_config import bound_log_context
-from mindroom.matrix.client_visible_messages import resolve_visible_event_source
+from mindroom.matrix.client_visible_messages import bundled_replacement_body, resolve_visible_event_source
 from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.media import (
     AudioMessageEvent,
     FileMessageEvent,
     FileOrVideoMessageEvent,
+    is_file_message_event,
     is_file_or_video_message_event,
     is_image_message_event,
     is_matrix_media_dispatch_event,
@@ -41,7 +44,6 @@ from mindroom.voice.handler import prepare_raw_voice_fallback_message, prepare_v
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import nio
     import structlog
 
     from mindroom.constants import RuntimePaths
@@ -53,7 +55,7 @@ if TYPE_CHECKING:
 class TextNormalizationRequest:
     """One inbound text-like event to normalize."""
 
-    event: nio.RoomMessageFormatted | PreparedIngress
+    event: nio.RoomMessageFormatted | FileMessageEvent | PreparedIngress
 
 
 @dataclass(frozen=True)
@@ -227,28 +229,32 @@ class InboundTurnNormalizer:
                 ),
             )
 
-    async def prepare_file_sidecar_text_event(
-        self,
-        event: FileMessageEvent,
-    ) -> PreparedIngress | None:
+    async def prepare_file_sidecar_text_event(self, event: FileMessageEvent) -> PreparedIngress | None:
         """Return a prepared text event when a file event is really a long-text preview."""
         if not is_v2_sidecar_text_preview(event.source):
             return None
+        return await self.resolve_text_event(TextNormalizationRequest(event=event))
 
-        resolved_source, body = await resolve_visible_event_source(
+    async def fetched_message_text(self, event: nio.Event | None) -> str | None:
+        """Return the text of a message read by its ID, as ingress reads one and in its sender's latest revision.
+
+        None is an event with no text to read: one missing, undecrypted, or neither a text nor a long-text file.
+        """
+        if is_file_message_event(event):
+            prepared = await self.prepare_file_sidecar_text_event(event)
+        elif isinstance(event, nio.RoomMessageFormatted):
+            prepared = await self.resolve_text_event(TextNormalizationRequest(event=event))
+        else:
+            return None
+        if prepared is None:
+            return None
+        edited = await bundled_replacement_body(
             event.source,
-            self._client(),
-            fallback_body=event.body,
+            client=self._client(),
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
         )
-        return PreparedIngress(
-            sender=event.sender,
-            event_id=event.event_id,
-            body=body,
-            source=resolved_source,
-            server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-        )
+        return edited or prepared.body
 
     async def register_routed_attachment(
         self,

@@ -8500,6 +8500,81 @@ async def test_a_route_is_answered_with_the_text_it_carries_whatever_the_person_
     harness.runtime.client.room_get_event.assert_not_awaited()
 
 
+def _read_by_id(content: dict[str, Any], **source: Any) -> AsyncMock:  # noqa: ANN401
+    """Return a homeserver that answers an exact read of the person's question with one event of this content."""
+    response = nio.RoomGetEventResponse()
+    response.event = nio.Event.parse_event(
+        {
+            "content": content,
+            "event_id": "$question:localhost",
+            "sender": _SENDER,
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+            **source,
+        },
+    )
+    return AsyncMock(return_value=response)
+
+
+@pytest.mark.asyncio
+async def test_a_route_without_a_prompt_reads_a_long_message_in_full(tmp_path: Path) -> None:
+    """A message too long for one event is a file with its text beside it, which its routed responder reads whole."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    uploads: list[bytes] = []
+
+    async def upload(**kwargs: Any) -> tuple[nio.UploadResponse, None]:  # noqa: ANN401
+        uploads.append(kwargs["data_provider"](None, None).read())
+        return nio.UploadResponse("mxc://localhost/long-question"), None
+
+    upload_client = make_matrix_client_mock()
+    upload_client.upload = AsyncMock(side_effect=upload)
+    body = "Which release is next? " + "Details. " * 8_000
+    text = {"body": body, "msgtype": "m.text"}
+    client = harness.runtime.client
+    client.room_get_event = _read_by_id(
+        await prepare_large_message(upload_client, _ROOM_ID, text, room_encrypted=False),
+    )
+    client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadResponse, body=uploads[0]))
+
+    await harness.deliver(room, _route_message(config, steward="research", thread_id="$question:localhost", body=None))
+
+    [request] = harness.runner.requests
+    assert request.prompt == body
+
+
+@pytest.mark.asyncio
+async def test_a_route_without_a_prompt_reads_a_message_as_its_sender_last_edited_it(tmp_path: Path) -> None:
+    """The steward routed the person's correction, so its responder answers that, not the text it replaced."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    correction = {
+        "content": {
+            "body": "* July, not June.",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "July, not June.", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$question:localhost"},
+        },
+        "event_id": "$correction:localhost",
+        "sender": _SENDER,
+        "origin_server_ts": 1_000_001,
+        "room_id": _ROOM_ID,
+        "type": "m.room.message",
+    }
+    harness.runtime.client.room_get_event = _read_by_id(
+        {"body": "June.", "msgtype": "m.text"},
+        unsigned={"m.relations": {"m.replace": correction}},
+    )
+
+    await harness.deliver(room, _route_message(config, steward="research", thread_id="$question:localhost", body=None))
+
+    [request] = harness.runner.requests
+    assert request.prompt == "July, not June."
+
+
 @pytest.mark.asyncio
 async def test_a_route_without_a_prompt_whose_message_cannot_be_read_starts_no_turn(tmp_path: Path) -> None:
     """A responder that can read neither a prompt on its route nor the message it names answers nothing yet."""
