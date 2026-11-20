@@ -397,6 +397,35 @@ async def test_recovery_without_the_senders_client_leaves_a_fresh_card_unattempt
         await manager.shutdown()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sender_running", [True, False])
+async def test_a_notice_about_a_click_comes_from_the_cards_sender_while_it_runs(
+    tmp_path: Path,
+    journal: EventJournalStore,
+    sending_clients: list[nio.AsyncClient],
+    sender_running: bool,
+) -> None:
+    """The notice answering a click on a card is posted by the card's sender, or by the room's poster without it."""
+    cards = journal.principal(_BOOKS)
+    bots = {"other": _bot("other"), "code": _bot("code")}
+    manager = _manager(tmp_path, bots, cards)
+    try:
+        await _reserve_card(cards)
+        assert (await manager.recover_cards_on_startup()).complete
+        bots["code"].running = sender_running
+
+        assert await manager.transport.send_notice(
+            room_id=_ROOM,
+            approval_event_id="$event-1",
+            thread_id=None,
+            reason="This approval was already handled.",
+        )
+
+        assert sending_clients == [bots["code"].client, bots["code" if sender_running else "other"].client]
+    finally:
+        await manager.shutdown()
+
+
 async def _pause_with_card(owner: PrincipalStore, manager: ApprovalManager) -> None:
     """Pause code's reply on one gated call and publish the call's card."""
     await owner.admit(
