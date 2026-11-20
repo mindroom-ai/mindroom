@@ -113,9 +113,9 @@ async def test_an_anthropic_route_gets_the_claude_ladder(tmp_path: Path) -> None
     ]
     assert messages[-1]["content"] == [{"type": "text", "text": "Summarize it.", "cache_control": _ONE_HOUR}]
     assert messages[-2]["content"] == [{"type": "text", "text": "Found it.", "cache_control": _ONE_HOUR}]
-    # Unmarked messages keep their original shape.
-    assert messages[1]["content"] == "Look something up."
-    assert messages[3]["content"] == "Lookup result."
+    # Unmarked messages use the same text-part form as marked ones.
+    assert messages[1]["content"] == [{"type": "text", "text": "Look something up."}]
+    assert messages[3]["content"] == [{"type": "text", "text": "Lookup result."}]
     assert "cache_control" not in payload["tools"][0]
     assert payload["tools"][1]["cache_control"] == _ONE_HOUR
     assert _markers(payload) == [_ONE_HOUR] * 4
@@ -129,7 +129,7 @@ async def test_an_agent_without_instructions_still_caches_its_conversation_and_t
     payload, _ = await _send(tmp_path, conversation, tools=_TOOLS)
 
     messages = payload["messages"]
-    assert messages[0] == {"role": "user", "content": "Look something up."}
+    assert messages[0] == {"role": "user", "content": [{"type": "text", "text": "Look something up."}]}
     assert messages[-2]["content"] == [{"type": "text", "text": "Found it.", "cache_control": _ONE_HOUR}]
     assert messages[-1]["content"] == [{"type": "text", "text": "Summarize it.", "cache_control": _ONE_HOUR}]
     assert payload["tools"][1]["cache_control"] == _ONE_HOUR
@@ -217,8 +217,33 @@ async def test_transient_context_after_the_prompt_takes_no_marker(tmp_path: Path
 
     assert payload["messages"][1:] == [
         {"role": "user", "content": [{"type": "text", "text": "Durable prompt.", "cache_control": _ONE_HOUR}]},
-        {"role": "user", "content": transient},
+        {"role": "user", "content": [{"type": "text", "text": transient}]},
     ]
+
+
+@pytest.mark.asyncio
+async def test_moving_markers_preserves_the_prefix_with_consecutive_user_messages(tmp_path: Path) -> None:
+    """Claude routes merge the user message and transient context, so both must retain their wire shape."""
+    messages = [
+        Message(role="system", content=_SHARED),
+        Message(role="user", content="Current message."),
+        Message(role="user", content=render_transient_context(["Current memory."])),
+    ]
+    first, _ = await _send(tmp_path / "first", messages)
+    second, _ = await _send(
+        tmp_path / "second",
+        [*messages, Message(role="assistant", content="Reply."), Message(role="user", content="Next message.")],
+    )
+
+    before = first["messages"]
+    after = second["messages"][: len(before)]
+    assert _markers(before[1]) == [_ONE_HOUR]
+    assert _markers(after[1]) == []
+    for message in before + after:
+        if isinstance(message["content"], list):
+            for part in message["content"]:
+                part.pop("cache_control", None)
+    assert json.dumps(after) == json.dumps(before)
 
 
 @pytest.mark.asyncio

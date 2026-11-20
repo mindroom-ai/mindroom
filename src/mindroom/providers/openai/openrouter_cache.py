@@ -29,7 +29,7 @@ __all__ = [
 
 _ANTHROPIC_MODEL_PREFIXES = ("anthropic/", "~anthropic/")
 _SYSTEM_ROLES = frozenset({"system", "developer"})
-# Roles whose plain-string content becomes a markable text part when it takes a rung.
+# Roles whose non-empty string content is sent as a text part on the automatic cache path.
 _RUNG_ROLES = frozenset({"user", "assistant", "tool"})
 
 
@@ -110,14 +110,9 @@ def request_kwargs_with_prompt_cache(
     if system_count:
         prepared[0] = _with_marked_system_prompt(prepared[0], system, cache_control)
 
-    conversation = prepared[system_count:]
-    # Only messages that receive a marker keep the text-part form; others stay unchanged.
-    candidates = [_with_text_part_content(message) for message in conversation]
-    marked = mark_message_cache_rungs(candidates, cache_control, MESSAGE_RUNG_COUNT)
-    prepared[system_count:] = [
-        original if marked_message is candidate else marked_message
-        for original, candidate, marked_message in zip(conversation, candidates, marked, strict=True)
-    ]
+    # Keep the text-part form even after a marker moves so the cached prefix stays byte-identical.
+    candidates = [_with_text_part_content(message) for message in prepared[system_count:]]
+    prepared[system_count:] = mark_message_cache_rungs(candidates, cache_control, MESSAGE_RUNG_COUNT)
     prepared_kwargs = {**request_kwargs, "messages": prepared}
 
     marked_tools, tools_marked = mark_last_tool(request_kwargs.get("tools"), cache_control)
