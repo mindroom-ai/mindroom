@@ -1,0 +1,18 @@
+[
+  {
+    "id": "0123456789abcdef",
+    "hostname": "mind-bas",
+    "desired": "on",
+    "allowed_login": "bas@github",
+    "closed_before": 1795000000.5,
+    "login_after": 1795000100.25
+  },
+  {
+    "id": "fedcba9876543210",
+    "hostname": "code",
+    "desired": "removing",
+    "allowed_login": null,
+    "closed_before": 1795000200.5,
+    "login_after": 1795000200.5
+  }
+]

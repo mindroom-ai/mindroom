@@ -1,0 +1,15 @@
+{
+  "enrollment": "auth_key",
+  "links": {
+    "0123456789abcdef": {
+      "state": "running",
+      "login_url": "https://login.tailscale.com/a/1c0ffee",
+      "tailnet": "tail1234.ts.net",
+      "dns_name": "mind-bas.tail1234.ts.net",
+      "login_name": "bas@github",
+      "key_expiry": "2027-05-19T12:00:00Z",
+      "open_connections": 2,
+      "last_error": "scope"
+    }
+  }
+}
