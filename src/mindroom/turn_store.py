@@ -22,7 +22,6 @@ from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionSnapshotChangedError,
     SourceEventRevision,
-    SourceVisibleEcho,
     TurnRecord,
     canonicalize_turn_record,
 )
@@ -286,8 +285,8 @@ class TurnStore:
         """Return an exact physical source's voice checkpoint."""
         return await self.deps.turn_records.read(turn_rows.prepared_voice, source_event_id)
 
-    async def visible_echo(self, source_event_id: str) -> SourceVisibleEcho | None:
-        """Return the visible echo tracked for one source event, and how its replacement ended."""
+    async def visible_echo(self, source_event_id: str) -> str | None:
+        """Return the event ID of the visible echo tracked for one source event."""
         return await self.deps.turn_records.read(turn_rows.visible_echo, source_event_id)
 
     async def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:

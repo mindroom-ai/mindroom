@@ -30,7 +30,6 @@ from mindroom.model_selection import freeze_command_result_content
 from mindroom.turn_record import (
     RevisionReplay,
     SourceEventMetadata,
-    SourceVisibleEcho,
     TurnRecord,
     canonical_optional_string,
     canonical_source_event_ids,
@@ -639,7 +638,7 @@ def _converted_turn(
 ) -> TurnRecord | None:
     record = decoded.record
     echo = decoded.echo
-    echoes = {source: SourceVisibleEcho(echo) for source in physical} if echo else None
+    echoes = dict.fromkeys(physical, echo) if echo else None
     if room_id is None:
         if not record.completed:
             return None

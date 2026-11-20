@@ -663,7 +663,7 @@ async def test_answering_agent_posts_the_transcript_and_dispatches_canonical_voi
 
     generate_response_mock.assert_called_once()
     assert generate_response_mock.call_args.kwargs["prompt"].startswith("canonical voice transcript")
-    assert (await bot._turn_store.visible_echo(voice_event.event_id)).event_id == "$transcript"
+    assert await bot._turn_store.visible_echo(voice_event.event_id) == "$transcript"
     transcript = bot._delivery_gateway.send_text.await_args.args[0]
     assert transcript.response_text == "canonical voice transcript"
     assert transcript.target.resolved_thread_id == "$thread_root"
@@ -698,7 +698,7 @@ async def test_transcript_retry_sends_the_same_matrix_transaction(mock_home_bot:
     assert failed is not None
     assert failed == retried
     assert other not in (None, failed)
-    assert (await bot._turn_store.visible_echo("$voice")).event_id == "$transcript"
+    assert await bot._turn_store.visible_echo("$voice") == "$transcript"
 
 
 @pytest.mark.asyncio

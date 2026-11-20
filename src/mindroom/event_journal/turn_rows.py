@@ -39,7 +39,6 @@ from mindroom.turn_record import (
     RevisionReplay,
     SourceEventMetadata,
     SourceEventRevision,
-    SourceVisibleEcho,
     TurnRecord,
 )
 
@@ -389,7 +388,7 @@ def _assemble(rows: _Rows) -> TurnRecord:
         ),
         turn_key=turn.turn_key,
         visible_echoes={
-            source.event_id: SourceVisibleEcho(source.visible_echo_event_id)
+            source.event_id: source.visible_echo_event_id
             for source in sources
             if source.visible_echo_event_id is not None
         },
@@ -617,12 +616,10 @@ def prepared_voice(transaction: Transaction, agent_name: str, source_event_id: s
     return PreparedVoiceSource._from_raw(json.loads(found[0].prepared_voice_json))
 
 
-def visible_echo(transaction: Transaction, agent_name: str, source_event_id: str) -> SourceVisibleEcho | None:
+def visible_echo(transaction: Transaction, agent_name: str, source_event_id: str) -> str | None:
     """Return the echo published for one physical source."""
     found = _source_row(transaction, agent_name, source_event_id)
-    if found is None or found[0].visible_echo_event_id is None:
-        return None
-    return SourceVisibleEcho(found[0].visible_echo_event_id)
+    return None if found is None else found[0].visible_echo_event_id
 
 
 # Row writes.
@@ -1265,7 +1262,7 @@ def _apply_payload(
     for source in sources:
         echo = (candidate.visible_echoes or {}).get(source.event_id)
         if echo is not None and source.visible_echo_event_id is None:
-            source.visible_echo_event_id = echo.event_id
+            source.visible_echo_event_id = echo
         if source.event_id in deleted:
             source.prompt = None
             source.prepared_voice_json = None

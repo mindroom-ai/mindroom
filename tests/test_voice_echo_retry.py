@@ -283,7 +283,7 @@ async def test_failed_transcript_send_retries_from_the_checkpoint_and_posts_once
         await harness.gate.drain_all()
         await harness.runner.settle_inbox_responses()
         assert [request.response_text for request in harness.gateway.sent] == ["Please review the new PR"]
-        assert (await harness.turn_store.visible_echo(event.event_id)).event_id == "$sent-1:localhost"
+        assert await harness.turn_store.visible_echo(event.event_id) == "$sent-1:localhost"
         assert [request.prompt for request in harness.runner.requests] == ["Please review the new PR"]
         normalize.assert_awaited_once()
     finally:

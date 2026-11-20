@@ -18,7 +18,6 @@ from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionReplay,
     SourceEventMetadata,
-    SourceVisibleEcho,
     TurnRecord,
 )
 from tests.test_event_journal_store import admit
@@ -53,7 +52,7 @@ def turn(
     response: str | None = None,
     requester: str | None = ALICE,
     voice: Mapping[str, PreparedVoiceSource] | None = None,
-    echoes: Mapping[str, SourceVisibleEcho] | None = None,
+    echoes: Mapping[str, str] | None = None,
 ) -> TurnRecord:
     """Return one candidate turn; every source gets an original-body prompt unless ``prompts`` says otherwise."""
     return TurnRecord.create(
@@ -261,7 +260,7 @@ class TestReshape:
         assert voice_turn.conversation_target is None
         echo_turn = await lookup(store, "$echoed")
         assert echo_turn is not None
-        assert echo_turn.visible_echoes == {"$echoed": SourceVisibleEcho("$e")}
+        assert echo_turn.visible_echoes == {"$echoed": "$e"}
 
     async def test_a_reformed_batch_keeps_an_echo_on_one_source_and_a_checkpoint_on_another(
         self,
@@ -273,27 +272,27 @@ class TestReshape:
 
         batch = await accepted(store, turn(["$m1", "$m2"]))
 
-        assert batch.visible_echoes == {"$m1": SourceVisibleEcho("$echo")}
+        assert batch.visible_echoes == {"$m1": "$echo"}
         assert batch.prepared_voice_sources == {"$m2": VOICE}
-        assert await read(store, turn_rows.visible_echo, "$m1") == SourceVisibleEcho("$echo")
+        assert await read(store, turn_rows.visible_echo, "$m1") == "$echo"
 
     async def test_a_pending_write_stores_the_checkpoint_and_echo_it_carries_and_keeps_stored_ones(
         self,
         store: EventJournalStore,
     ) -> None:
         """A pending write stores a candidate's voice checkpoint and echo, and a later one keeps those it finds."""
-        first = await accepted(store, turn(["$v"], voice={"$v": VOICE}, echoes={"$v": SourceVisibleEcho("$echo")}))
+        first = await accepted(store, turn(["$v"], voice={"$v": VOICE}, echoes={"$v": "$echo"}))
         other = PreparedVoiceSource.from_content("other", {"msgtype": "m.text", "body": "other"})
 
         again = await accepted(
             store,
-            turn(["$v"], voice={"$v": other}, echoes={"$v": SourceVisibleEcho("$other-echo")}),
+            turn(["$v"], voice={"$v": other}, echoes={"$v": "$other-echo"}),
         )
 
         assert first.prepared_voice_sources == {"$v": VOICE}
-        assert first.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
+        assert first.visible_echoes == {"$v": "$echo"}
         assert again.prepared_voice_sources == {"$v": VOICE}
-        assert again.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
+        assert again.visible_echoes == {"$v": "$echo"}
 
     async def test_completed_or_bound_owners_refuse_and_the_same_completed_tuple_is_answered(
         self,
@@ -540,12 +539,12 @@ class TestRedactionGuard:
         """A deleted voice source's pending write stores no checkpoint, while its echo stays for publication readers."""
         await redact(store, "$v")
 
-        result = await pending(store, turn(["$v"], voice={"$v": VOICE}, echoes={"$v": SourceVisibleEcho("$echo")}))
+        result = await pending(store, turn(["$v"], voice={"$v": VOICE}, echoes={"$v": "$echo"}))
 
         assert isinstance(result, PendingTurn)
         assert result.deleted_sources == {"$v"}
         assert result.record.prepared_voice_sources is None
-        assert result.record.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
+        assert result.record.visible_echoes == {"$v": "$echo"}
 
     async def test_a_pending_write_clears_the_stored_checkpoint_of_a_source_it_finds_deleted(
         self,
@@ -922,7 +921,7 @@ class TestRetention:
 
         assert result.cleared_voice_turn_count == 1
         assert await read(store, turn_rows.prepared_voice, "$v") is None
-        assert await read(store, turn_rows.visible_echo, "$v") == SourceVisibleEcho("$echo")
+        assert await read(store, turn_rows.visible_echo, "$v") == "$echo"
         assert await read(store, turn_rows.prepared_voice, "$busy") == VOICE
         assert await read(store, turn_rows.prepared_voice, "$intent") == VOICE
         assert intent.turn_key is not None
@@ -948,7 +947,7 @@ class TestRetention:
         assert detached is not None
         assert detached.source_event_ids == ("$v",)
         assert detached.prepared_voice_sources is None
-        assert detached.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
+        assert detached.visible_echoes == {"$v": "$echo"}
         assert await column(reopened, "SELECT prepared_voice_json FROM turn_sources WHERE event_id = '$v'") == [
             (None,),
         ]

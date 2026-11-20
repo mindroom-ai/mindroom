@@ -53,7 +53,6 @@ from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionReplay,
     SourceEventMetadata,
-    SourceVisibleEcho,
     TurnRecord,
     canonicalize_turn_record,
 )
@@ -612,7 +611,7 @@ async def test_pending_delivery_intent_does_not_require_model_history_scope(jour
     assert record.conversation_target == target
     assert record.history_scope is None
     assert record.response_event_id is None
-    assert record.visible_echoes["$source"].event_id == "$echo"
+    assert record.visible_echoes["$source"] == "$echo"
 
 
 @pytest.mark.asyncio
@@ -1960,7 +1959,7 @@ async def test_terminal_turn_can_absorb_a_source_that_only_carries_an_echo(journ
     assert first_record is not None
     assert first_record == second_record
     assert first_record.source_event_ids == ("$first", "$second")
-    assert await store.visible_echo("$second") == SourceVisibleEcho("$echo")
+    assert await store.visible_echo("$second") == "$echo"
 
 
 @pytest.mark.asyncio
@@ -2015,7 +2014,7 @@ async def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(journal
         assert record is not None
         assert record.completed
         assert record.response_event_id == "$response"
-        assert await current.visible_echo("$event") == SourceVisibleEcho("$echo")
+        assert await current.visible_echo("$event") == "$echo"
 
 
 @pytest.mark.asyncio
@@ -2914,8 +2913,8 @@ async def test_every_echo_of_a_coalesced_turn_is_known_after_a_restart(
 
     reopened = await _store(journal_store)
 
-    assert await reopened.visible_echo("$voice-1") == SourceVisibleEcho("$echo-1")
-    assert await reopened.visible_echo("$voice-2") == SourceVisibleEcho("$echo-2")
+    assert await reopened.visible_echo("$voice-1") == "$echo-1"
+    assert await reopened.visible_echo("$voice-2") == "$echo-2"
     record = await reopened.get_turn_record("$voice-1")
     assert record is not None
     assert record.response_event_id is None, "an echo never becomes the turn's answer"
