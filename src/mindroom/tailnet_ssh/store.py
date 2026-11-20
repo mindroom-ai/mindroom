@@ -98,7 +98,7 @@ def new_link(requester_id: str, agent_name: str, worker_key: str, hostname: str,
     )
 
 
-def _key_identity(line: str) -> str:
+def key_identity(line: str) -> str:
     """Return a normalized key line without its comment, so renaming a key neither duplicates nor removes it."""
     return " ".join(line.split()[:2])
 
@@ -113,11 +113,11 @@ def set_keys(book: LinkBook, requester_id: str, lines: Sequence[str], *, now: fl
         for line in entry.splitlines():
             if line.strip():
                 key = normalize_public_key(line)
-                keys.setdefault(_key_identity(key), key)
+                keys.setdefault(key_identity(key), key)
     if len(keys) > MAX_KEYS:
         msg = f"At most {MAX_KEYS} SSH keys are allowed per person; {len(keys)} were given."
         raise ValueError(msg)
-    if any(_key_identity(line) not in keys for line in book.keys.get(requester_id, [])):
+    if any(key_identity(line) not in keys for line in book.keys.get(requester_id, [])):
         for link in book.links:
             if link.requester_id == requester_id:
                 link.closed_before = now

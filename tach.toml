@@ -3818,6 +3818,10 @@ depends_on = [
 path = "mindroom.tailnet_ssh.store"
 depends_on = ["mindroom.config.tailnet_ssh", "mindroom.constants"]
 
+[[modules]]
+path = "mindroom.tailnet_ssh.projection"
+depends_on = ["mindroom.atomic_file", "mindroom.tailnet_ssh.store"]
+
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
 [[modules]]
 path = "mindroom.memory"
