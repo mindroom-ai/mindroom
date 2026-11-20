@@ -104,6 +104,22 @@ egressBroker:
   # Lifetime of the per-call worker tokens; empty keeps the MindRoom default.
   tokenTtlSeconds: ""
 
+# Optional tailnet SSH gateway: a person runs `ssh <hostname>` from their own tailnet and lands in their own Kubernetes worker.
+# Requires workers.backend=kubernetes; port must differ from runtime.apiPort, scriptGateway.port, and egressBroker.port.
+# See "Tailnet SSH" in the README.
+tailnetSsh:
+  enabled: false
+  port: 8769                   # the primary's internal listener
+  image: {repository: ghcr.io/mindroom-ai/mindroom-tailnet-gateway, tag: ""}
+  persistence: {size: 1Gi, storageClassName: ""}
+  authKeySecret: ""            # Secret with key `auth-key`; empty means login links
+  loginServer: ""              # Headscale
+  tags: []                     # with an operator key
+  httpsProxy: ""               # an HTTP CONNECT proxy for the gateway's only internet egress
+  resources: {}                # about 25 MB plus 7 MB per link
+  # Raw Kubernetes NetworkPolicyEgressRule entries appended to the gateway's egress; with httpsProxy set they must admit the proxy.
+  extraEgress: null
+
 config:
   # configMap keeps the existing chart-managed or externally managed ConfigMap behavior.
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.

@@ -203,6 +203,11 @@ spec:
               containerPort: {{ .Values.egressBroker.port }}
               protocol: TCP
             {{- end }}
+            {{- if .Values.tailnetSsh.enabled }}
+            - name: tailnet-ssh
+              containerPort: {{ .Values.tailnetSsh.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: MINDROOM_STORAGE_PATH
               value: {{ .Values.storage.mountPath | quote }}
@@ -369,6 +374,16 @@ spec:
             - name: MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS
               value: {{ .Values.egressBroker.tokenTtlSeconds | quote }}
             {{- end }}
+            {{- end }}
+            {{- if .Values.tailnetSsh.enabled }}
+            # The listener the tailnet SSH gateway alone calls; see templates/tailnet-ssh.yaml.
+            - name: MINDROOM_TAILNET_SSH_PORT
+              value: {{ .Values.tailnetSsh.port | quote }}
+            - name: MINDROOM_TAILNET_SSH_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-tailnet-ssh" (include "mindroom-runtime.fullname" . | trunc 43 | trimSuffix "-") }}
+                  key: token
             {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME

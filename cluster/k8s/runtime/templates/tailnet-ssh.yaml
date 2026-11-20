@@ -1,0 +1,252 @@
+{{- if .Values.tailnetSsh.enabled }}
+{{- /* 43 characters leave room for the -workers and -primary policy names within 63. */ -}}
+{{- $name := printf "%s-tailnet-ssh" (include "mindroom-runtime.fullname" . | trunc 43 | trimSuffix "-") -}}
+{{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name -}}
+{{- $gatewayLabels := dict "app.kubernetes.io/name" (include "mindroom-runtime.name" .) "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/component" "tailnet-ssh" -}}
+{{- $sshWorkerLabels := merge (dict "mindroom.ai/tailnet-ssh" "true") (include "mindroom-runtime.workerPodLabels" . | fromYaml) -}}
+{{- $image := .Values.tailnetSsh.image -}}
+# Held by the primary's listener and the gateway only; never by a worker.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+type: Opaque
+data:
+  token: {{ get ($existing.data | default dict) "token" | default (randAlphaNum 48 | b64enc) | quote }}
+---
+# The gateway's node keys, one tsnet state directory per link.
+{{ include "mindroom-runtime.persistentVolumeClaim" (list . $name (merge (dict "accessModes" (list "ReadWriteOnce")) .Values.tailnetSsh.persistence)) }}
+---
+# The primary's internal listener, for the gateway only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.tailnetSsh.port }}
+      targetPort: tailnet-ssh
+      protocol: TCP
+      name: tailnet-ssh
+  selector:
+    {{- include "mindroom-runtime.selectorLabels" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tailnet-ssh
+spec:
+  # Two processes must never hold one node key, so the old pod stops before the new one starts.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- toYaml $gatewayLabels | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- toYaml $gatewayLabels | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tailnet-gateway
+          image: {{ printf "%s:%s" $image.repository ($image.tag | default .Chart.AppVersion) | quote }}
+          env:
+            - name: TAILNET_SSH_PRIMARY_URL
+              value: {{ printf "http://%s.%s.svc.cluster.local:%v" $name .Release.Namespace .Values.tailnetSsh.port | quote }}
+            - name: TAILNET_SSH_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $name }}
+                  key: token
+            - name: TAILNET_SSH_STATE_DIR
+              value: /state
+            # Without it tsnet uploads node logs to log.tailscale.com.
+            - name: TS_NO_LOGS_NO_SUPPORT
+              value: "true"
+            {{- with .Values.tailnetSsh.authKeySecret }}
+            - name: TAILNET_SSH_AUTH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: auth-key
+            {{- end }}
+            {{- with .Values.tailnetSsh.loginServer }}
+            - name: TAILNET_SSH_LOGIN_SERVER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.tailnetSsh.tags }}
+            - name: TAILNET_SSH_TAGS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.tailnetSsh.httpsProxy }}
+            - name: HTTPS_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+          {{- with .Values.tailnetSsh.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ $name }}
+        - name: tmp
+          emptyDir: {}
+{{- if .Values.workers.kubernetes.networkPolicy.create }}
+---
+# Additive to the worker policy: marked workers admit the gateway on their sshd port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-workers
+  namespace: {{ $workerNamespace }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sshWorkerLabels | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $gatewayLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 2222
+{{- end }}
+{{- if .Values.networkPolicy.create }}
+---
+# Additive to the control-plane ingress policy: admit the gateway to the listener port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-primary
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mindroom-runtime.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $gatewayLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.tailnetSsh.port }}
+{{- end }}
+---
+# The gateway admits nothing. No UDP besides DNS, so tailnet traffic is relayed by DERP over TCP 443.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $gatewayLabels | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        {{- include "mindroom-runtime.egressProxyDnsPeers" . | nindent 8 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.tailnetSsh.port }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $workerNamespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $sshWorkerLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 2222
+    {{- with include "mindroom-runtime.keyedList" (dict "value" .Values.tailnetSsh.extraEgress "path" "tailnetSsh.extraEgress") | fromJsonArray }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if not .Values.tailnetSsh.httpsProxy }}
+    # Tailscale control and DERP, or Headscale and its DERP, on public addresses only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+{{- end }}

@@ -442,3 +442,14 @@
 {{- fail "egressBroker.port must differ from runtime.apiPort and scriptGateway.port" -}}
 {{- end -}}
 {{- end -}}
+{{- if .Values.tailnetSsh.enabled -}}
+{{- if ne .Values.workers.backend "kubernetes" -}}
+{{- fail "tailnetSsh.enabled requires workers.backend=kubernetes" -}}
+{{- end -}}
+{{- if has (int .Values.tailnetSsh.port) (list (int .Values.runtime.apiPort) (int .Values.scriptGateway.port) (int .Values.egressBroker.port)) -}}
+{{- fail "tailnetSsh.port must differ from runtime.apiPort, scriptGateway.port, and egressBroker.port" -}}
+{{- end -}}
+{{- if and .Values.tailnetSsh.httpsProxy (not (include "mindroom-runtime.keyedList" (dict "value" .Values.tailnetSsh.extraEgress "path" "tailnetSsh.extraEgress") | fromJsonArray)) -}}
+{{- fail "tailnetSsh.httpsProxy requires tailnetSsh.extraEgress to admit the proxy" -}}
+{{- end -}}
+{{- end -}}
