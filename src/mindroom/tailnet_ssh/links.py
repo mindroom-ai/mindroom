@@ -169,7 +169,7 @@ def _desired(
     return "on" if ineligible is None else "suspended"
 
 
-def _listed_workers(runtime_paths: RuntimePaths) -> list[WorkerHandle]:
+def listed_workers(runtime_paths: RuntimePaths) -> list[WorkerHandle]:
     """Return the backend's workers, or none while it has no dedicated backend or the backend fails. Blocking."""
     try:
         lease = lease_configured_primary_worker_manager(runtime_paths)
@@ -201,7 +201,7 @@ def desired_links(
     enrollment = status.report.enrollment
     if enrollment == "auth_key" and now - status.operator_sync_at >= _OPERATOR_SYNC_SECONDS:
         status.operator_sync_at = now
-        workers = _listed_workers(runtime_paths)
+        workers = listed_workers(runtime_paths)
     agent_names: dict[str, str | None] = {}
     for name in config.agents:
         part = normalize_worker_key_part(name)
@@ -466,7 +466,7 @@ def refresh_projections(config: Config, runtime_paths: RuntimePaths, requester_i
     A worker that is not listed with an SSH port gets them at its next connect, before its sshd starts.
     Call it after the keys are stored: the workers are listed first, so one a connect made ready before is among them.
     """
-    endpoints = {handle.worker_key: handle.ssh_endpoint for handle in _listed_workers(runtime_paths)}
+    endpoints = {handle.worker_key: handle.ssh_endpoint for handle in listed_workers(runtime_paths)}
 
     def project(book: LinkBook) -> None:
         key_lines = authorized_key_lines(config, book, requester_id)

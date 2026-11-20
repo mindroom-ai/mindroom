@@ -1616,6 +1616,7 @@ visibility = [
     "mindroom.api.egress_credentials",
     "mindroom.api.github_requests",
     "mindroom.api.oauth",
+    "mindroom.api.tailnet_ssh",
     "mindroom.api.tools",
     "mindroom.custom_tools.slack",
     "mindroom.egress_broker",
@@ -2134,6 +2135,7 @@ depends_on = [
     "mindroom.api.script_gateway",
     "mindroom.api.secret_requests",
     "mindroom.api.skills",
+    "mindroom.api.tailnet_ssh",
     "mindroom.api.tailnet_ssh_gateway",
     "mindroom.api.tools",
     "mindroom.api.budgets",
@@ -8871,7 +8873,23 @@ depends_on = [
     "mindroom.api.script_gateway",
     "mindroom.tailnet_ssh.links",
 ]
-visibility = ["mindroom.api.main", "mindroom.api.workers", "mindroom.orchestrator"]
+visibility = ["mindroom.api.main", "mindroom.api.tailnet_ssh", "mindroom.api.workers", "mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.api.tailnet_ssh"
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
+    "mindroom.api.tailnet_ssh_gateway",
+    "mindroom.config.tailnet_ssh",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.tailnet_ssh.eligibility",
+    "mindroom.tailnet_ssh.links",
+    "mindroom.tailnet_ssh.projection",
+    "mindroom.tailnet_ssh.store",
+    "mindroom.tool_system.worker_routing",
+]
 
 # Public: plugin routes and tools import it, and its `__all__` lists what they may use.
 [[modules]]
