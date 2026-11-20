@@ -27,9 +27,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _FRAME_INTERVAL_SECONDS = 0.1
-# A snapshot this often lets a client that missed frames, or opened the room mid-reply, catch up, and tells clients
-# the reply is still live while nothing changes.
+# A snapshot this often while the reply changes, or after a delta, lets a client that missed frames, or opened the room
+# mid-reply, catch up.
 _SNAPSHOT_INTERVAL_SECONDS = 5.0
+# A reply unchanged since its last snapshot, as during a long tool call, repeats it only this often, to tell clients it
+# is still live: Chat drops a reply's live state 12 s after its last frame (LIVE_REPLY_FRESHNESS_MS).
+_IDLE_SNAPSHOT_INTERVAL_SECONDS = 10.0
 
 
 @dataclass
@@ -43,6 +46,8 @@ class LivePublisher:
     # What the last frame that landed showed; None makes the next frame a snapshot.
     last_sent: LiveDocs | None = None
     last_snapshot_at: float = 0.0
+    # Whether the last frame that landed was a snapshot, so a reply unchanged since needs one only to stay live.
+    last_was_snapshot: bool = False
     # False once frames stopped for this reply; durable edits then keep their ordinary cadence.
     running: bool = True
     # How many of the oldest tool entries frames show without previews, so snapshots fit the size limit. Only a
@@ -58,9 +63,13 @@ class LivePublisher:
     async def _send_next(self, reply_event_id: str, docs: LiveDocs) -> LiveSendOutcome | None:
         """Send one frame when the documents changed or a snapshot is due; return the outcome, None when none was due."""
         now = time.monotonic()
-        snapshot_due = self.last_sent is None or now - self.last_snapshot_at >= _SNAPSHOT_INTERVAL_SECONDS
         shown = replace(docs, tools=fitted_tools(docs.tools, bare=self.bare))
-        if not snapshot_due and shown == self.last_sent:
+        unchanged = shown == self.last_sent
+        interval = (
+            _IDLE_SNAPSHOT_INTERVAL_SECONDS if unchanged and self.last_was_snapshot else _SNAPSHOT_INTERVAL_SECONDS
+        )
+        snapshot_due = self.last_sent is None or now - self.last_snapshot_at >= interval
+        if not snapshot_due and unchanged:
             return None
         self.seq += 1
         frame = None
@@ -87,6 +96,7 @@ class LivePublisher:
         )
         if outcome is LiveSendOutcome.SENT:
             self.last_sent = shown
+            self.last_was_snapshot = snapshot_due
             if snapshot_due:
                 self.last_snapshot_at = now
         elif outcome is LiveSendOutcome.RETRY:
