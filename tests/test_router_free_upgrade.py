@@ -12,7 +12,7 @@ import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
@@ -26,7 +26,6 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.event_journal import ApprovalCardView, DeliveryStage
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, MessageReceivedContext, hook
 from mindroom.hooks.execution import emit
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.orchestration.config_warnings import warn_about_config_risks
 from mindroom.prompt_message_tags import render_msg_tag
@@ -122,17 +121,20 @@ async def _the_routers_schedule_fires_through_an_agent(config: Config) -> None:
     workflow = _workflow().model_copy(update={"message": "@helper water the plants"})
     task = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending", "owner": ids["router"]}
     room._put("com.mindroom.scheduled.task", TASK_ID, task, ids["router"])
-    general = scheduling_bot(room.client(ids["general"]), agent_name="general")
-    helper = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
+    reader = AsyncMock(latest_thread_event_id=AsyncMock(return_value="$latest"))
+    general = scheduling_bot(room.client(ids["general"]), agent_name="general", conversation_reader=reader)
+    helper = scheduling_bot(room.client(ids["helper"]), agent_name="helper", conversation_reader=reader)
     schedules = _runtime(runtime_paths, config, {"general": general, "helper": helper})
-    delivered = DeliveredMatrixEvent(event_id="$fired", content_sent={"body": "sent"})
-    # The workflow runs for real; only the Matrix send is recorded, at the delivery seam.
-    with patch("mindroom.matrix.client_delivery.send_message_outcome", new=AsyncMock(return_value=delivered)) as send:
-        assert [await schedules.restore_room(bot, ROOM_ID) for bot in (general, helper)] == [0, 1]
-        await asyncio.wait_for(schedules._runners[TASK_ID][1], timeout=2)
-    send.assert_awaited_once()
-    client, room_id, content = send.await_args.args[:3]
-    assert (client, room_id) == (helper.client, ROOM_ID)
+    # The workflow and the send path run for real; the fake homeserver clients record what reaches Matrix.
+    for bot in (general, helper):
+        bot.client.room_send = AsyncMock(return_value=nio.RoomSendResponse("$fired", ROOM_ID))
+    assert [await schedules.restore_room(bot, ROOM_ID) for bot in (general, helper)] == [0, 1]
+    await asyncio.wait_for(schedules._runners[TASK_ID][1], timeout=2)
+    general.client.room_send.assert_not_awaited()
+    helper.client.room_send.assert_awaited_once()
+    sent = helper.client.room_send.await_args.kwargs
+    assert (sent["room_id"], sent["message_type"]) == (ROOM_ID, "m.room.message")
+    content = sent["content"]
     assert ids["helper"] in content["m.mentions"]["user_ids"]
     assert "water the plants" in content["body"]
     assert content[constants.ORIGINAL_SENDER_KEY] == workflow.created_by
