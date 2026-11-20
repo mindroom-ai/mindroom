@@ -60,7 +60,7 @@ POWER_LEVELS = {"users": {ALICE: 100, CAROL: 10}, "events_default": 10}
 READ_ONLY_FILE = {"file": {"exclude_tools": ["write_file", "edit_file"]}}
 # The functions of each built-in toolkit that change the workspace's files, by writing them or by running code there.
 WRITING_FUNCTIONS = {
-    "filesystem": ("write_file", "edit_file", "delete_file"),
+    "filesystem": ("write_file", "edit_file"),
     "python": (
         "run_python_code",
         "save_to_file_and_run",
@@ -305,7 +305,8 @@ async def test_agent_refuses_a_user_that_is_no_current_agent(tmp_path: Path) -> 
     ("tools", "files"),
     [
         ([{"file": {"exclude_tools": ["write_file"]}}], "write"),
-        ([{"file": {"enable_delete_file": True, **READ_ONLY_FILE["file"]}}], "write"),
+        ([{"file": {"enable_delete_file": True, **READ_ONLY_FILE["file"]}}], "read"),
+        ([{"filesystem": {"enable_delete_file": True, "include_tools": ["delete_file"]}}], "read"),
         ([{"file": READ_ONLY_FILE["file"]}], "read"),
         ([{"file": {"include_tools": ["delete_file"]}}], "none"),
         ([{"coding": {"include_tools": ["read_file", "grep"]}}], "read"),
@@ -507,9 +508,6 @@ def test_the_built_in_toolkits_declare_their_writing_functions_among_their_own()
         assert functions <= set(tools[name].function_names), name
 
 
-_SWITCHED_ON = {"delete_file": {"enable_delete_file": True}}
-
-
 def _writing_toolkit_cases() -> list[tuple[object, str]]:
     """Each writing toolkit as it is, with each of its writing functions alone, and with none of them."""
     cases: list[tuple[object, str]] = []
@@ -517,10 +515,7 @@ def _writing_toolkit_cases() -> list[tuple[object, str]]:
         cases.append((name, "write"))
         if name == "script":  # It takes no function filters.
             continue
-        # delete_file is offered only once switched on.
-        cases.extend(
-            ({name: {"include_tools": [function], **_SWITCHED_ON.get(function, {})}}, "write") for function in functions
-        )
+        cases.extend(({name: {"include_tools": [function]}}, "write") for function in functions)
         cases.append(({name: {"exclude_tools": list(functions)}}, "read"))
     return cases
 

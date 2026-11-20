@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     ],
     dependencies=[],
     function_names=("delete_file", "edit_file", "find_files", "grep", "ls", "read_file", "write_file"),
-    workspace_writers=("delete_file", "edit_file", "write_file"),
+    workspace_writers=("edit_file", "write_file"),
 )
 def filesystem_tools() -> type[FilesystemTools]:
     """Return the filesystem tools for LLM agents."""
