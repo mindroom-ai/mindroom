@@ -2396,6 +2396,7 @@ depends_on = [
     "mindroom.api.validation_errors",
     "mindroom.api.worker_preview",
     "mindroom.api.worker_services",
+    "mindroom.api.worker_ssh",
     "mindroom.api.worker_terminal",
 ]
 
@@ -3821,6 +3822,10 @@ depends_on = ["mindroom.config.tailnet_ssh", "mindroom.constants"]
 [[modules]]
 path = "mindroom.tailnet_ssh.projection"
 depends_on = ["mindroom.atomic_file", "mindroom.tailnet_ssh.store"]
+
+[[modules]]
+path = "mindroom.tailnet_ssh.session"
+depends_on = []
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
 [[modules]]
@@ -8741,6 +8746,17 @@ depends_on = [
 path = "mindroom.api.worker_terminal"
 depends_on = [
     "mindroom.api.sandbox_runner",
+    "mindroom.terminal.session",
+]
+
+[[modules]]
+path = "mindroom.api.worker_ssh"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.api.sandbox_runner",
+    "mindroom.atomic_file",
+    "mindroom.constants",
+    "mindroom.tailnet_ssh.session",
     "mindroom.terminal.session",
 ]
 
