@@ -3463,25 +3463,22 @@ wheels = [
 
 [[package]]
 name = "kubernetes"
-version = "37.0.1"
+version = "35.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
-    { name = "aiohttp-retry" },
     { name = "certifi" },
     { name = "durationpy" },
-    { name = "pydantic" },
     { name = "python-dateutil" },
     { name = "pyyaml" },
     { name = "requests" },
     { name = "requests-oauthlib" },
-    { name = "typing-extensions" },
+    { name = "six" },
     { name = "urllib3" },
     { name = "websocket-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b9/c3/efd33fa9ae254ecdc35ebc128f99e8034d5a5a8c625f92e5d2173f929b53/kubernetes-37.0.1.tar.gz", hash = "sha256:e41db0a95615c2388680a2d556df33fd0f27a5717c9b5df5857e475c196c2f10", size = 3358265, upload-time = "2026-10-09T17:13:41.072Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/8f/85bf51ad4150f64e8c665daf0d9dfe9787ae92005efb9a4d1cba592bd79d/kubernetes-35.0.0.tar.gz", hash = "sha256:3d00d344944239821458b9efd484d6df9f011da367ecb155dadf9513f05f09ee", size = 1094642, upload-time = "2026-01-16T01:05:27.76Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8a/de/ac1904ac7fb651426e5698f56a268669a1ca3d63378629bacbf057b25e75/kubernetes-37.0.1-py2.py3-none-any.whl", hash = "sha256:a313a482361506340b5972cabaf20a7ee16ec8713e73325bf699b783a40464a9", size = 7511310, upload-time = "2026-10-09T17:13:38.933Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/70/05b685ea2dffcb2adbf3cdcea5d8865b7bc66f67249084cf845012a0ff13/kubernetes-35.0.0-py2.py3-none-any.whl", hash = "sha256:39e2b33b46e5834ef6c3985ebfe2047ab39135d41de51ce7641a7ca5b372a13d", size = 2017602, upload-time = "2026-01-16T01:05:25.991Z" },
 ]
 
 [[package]]
@@ -4555,7 +4552,7 @@ requires-dist = [
     { name = "jira", marker = "extra == 'jira'", specifier = ">=3.10.5" },
     { name = "json5", specifier = ">=0.13" },
     { name = "jsonschema", specifier = ">=4.26" },
-    { name = "kubernetes", marker = "extra == 'kubernetes'", specifier = ">=28.1" },
+    { name = "kubernetes", marker = "extra == 'kubernetes'", specifier = ">=28.1,<36" },
     { name = "linkup-sdk", marker = "extra == 'linkup'", specifier = ">=0.2.8" },
     { name = "livekit-agents", extras = ["openai"], marker = "extra == 'matrix-calls'", specifier = ">=1.8.9,<1.8.12" },
     { name = "lumaai", marker = "extra == 'lumalabs'" },
