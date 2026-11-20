@@ -1026,8 +1026,7 @@ def test_saves_and_loads_read_messages_and_tools_in_order_without_a_sort(
     _save(store, _run("r1"))
     _loaded(store)
 
-    # A save reads back only its message rows' fold flags, and no tool rows.
-    assert len(reads) == (2 if table.endswith("messages") else 1)
+    assert len(reads) == 2
     for read in reads:
         plan = [step for *_, step in _query(store, f"EXPLAIN QUERY PLAN {read}")]
         assert [step for step in plan if "TEMP B-TREE" in step] == [], plan
