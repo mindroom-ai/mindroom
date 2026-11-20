@@ -9,11 +9,13 @@ import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
 import jwt
 from fastapi import HTTPException
 
+from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
     try_parse_historical_matrix_user_id,
@@ -28,6 +30,7 @@ if TYPE_CHECKING:
 _ALGORITHMS = ("RS256", "ES256")
 _MAX_TOKEN_BYTES = 16384
 _KEY_CACHE_SECONDS = 60
+_logger = get_logger(__name__)
 
 
 def _text(value: object, *, limit: int = 1024) -> str:
@@ -156,7 +159,17 @@ class ExternalAuth:
             if time.monotonic() >= self._refresh_after:
                 self._refresh_after = time.monotonic() + _KEY_CACHE_SECONDS
                 self._keys = []
-                self._keys = await asyncio.to_thread(self._client.get_signing_keys, refresh=True)
+                try:
+                    self._keys = await asyncio.to_thread(self._client.get_signing_keys, refresh=True)
+                except jwt.PyJWKClientConnectionError as error:
+                    # PyJWT refuses JWKS redirects, so a URL that redirects never yields keys.
+                    redirected = isinstance(error.__cause__, HTTPError) and 300 <= error.__cause__.code < 400
+                    _logger.warning(
+                        "External MCP JWKS fetch failed",
+                        jwks_url=self.settings.jwks_url,
+                        reason="redirect refused; configure the direct JWKS URL" if redirected else "unreachable",
+                    )
+                    raise
             matches = [key for key in self._keys if key.key_id == key_id and key.algorithm_name == algorithm]
             if len(matches) != 1:
                 raise jwt.InvalidTokenError

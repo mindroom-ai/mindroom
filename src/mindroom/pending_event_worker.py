@@ -3,6 +3,14 @@
 The journal owns durable work and replay eligibility. Discovery only finds
 rooms: its rotating cursor never decides which event in a room runs next.
 Each room keeps its own page position across bounded passes and cooldowns.
+
+A running turn is a pending row that stays pending until its owner hands it
+back, so discovery does not go over those rows again on every wake: while
+turns are in flight it reads only what was admitted after its last finished
+scan, and the whole scan the deferral sweep asks for covers the rest. A room's
+lane still starts each pass at the front of its room, because a commit is
+visible before anything announces it and an older source it made runnable has
+to run before the room's newer ones.
 """
 
 from __future__ import annotations
@@ -94,6 +102,10 @@ class PendingEventWorker:
     _deferral_scan: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
     _scan_cursor: int | None = field(default=None, init=False, repr=False)
+    # Where the last finished scan ended; None sends the next one over the whole backlog.
+    _scanned_through: int | None = field(default=None, init=False, repr=False)
+    # Whole-backlog scans the deferral sweep asked for; a scan answers the ones made before it started.
+    _full_scans_due: int = field(default=0, init=False, repr=False)
     _stopped: bool = field(default=False, init=False, repr=False)
     _process_shutdown: bool = field(default=False, init=False, repr=False)
     _stop_generation: int = field(default=0, init=False, repr=False)
@@ -131,10 +143,20 @@ class PendingEventWorker:
                 self._queue_room(event.room_id)
                 self._wake.set()
 
+    def retry(self, event_ids: Iterable[str]) -> None:
+        """Take back deferred sources whose owner failed; each room's lane goes back for them."""
+        for event_id in event_ids:
+            event = self._deferred.get(event_id)
+            if event is not None:
+                self.release((event_id,))
+                self.wake(room_id=event.room_id)
+
     def _defer(self, event: JournalEvent) -> None:
         if event.event_id not in self._deferred:
             self._rooms.setdefault(event.room_id, _RoomProgress()).deferred_count += 1
         self._deferred[event.event_id] = event
+        # The sweep bounds how long silently runnable work waits, so it runs from the first deferral.
+        self._schedule_deferral_scan()
 
     def _owned_tasks(self) -> tuple[asyncio.Task[object], ...]:
         return tuple(
@@ -192,7 +214,7 @@ class PendingEventWorker:
         }
         self._ready_rooms.clear()
         self._room_retries.clear()
-        self._scan_cursor = None
+        self._scan_cursor = self._scanned_through = None
         return True
 
     async def stop(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
@@ -219,8 +241,23 @@ class PendingEventWorker:
         """Find rooms without passing global scan slices to their lanes."""
         rooms: set[str] = set()
         origin = None if whole_backlog else self._scan_cursor
-        cursor = origin
+        # New work is admitted behind everything a finished scan saw. While turns are in
+        # flight, the rows before that point are those turns, whose owners announce what
+        # changes, so only the tail is read; without any, the whole backlog is the work.
+        # Receipt order is commit order, so no row commits behind that point: one runtime
+        # holds a journal (`hold_exclusively`), and its one writer task takes receipts for a
+        # batch and commits it before the next batch takes any (`WriteQueue._drain_writes`).
+        # On Postgres that hold is a separate session, so this is as strong as that fence.
+        full_scans_due = self._full_scans_due
+        tail_only = (
+            not (whole_backlog or full_scans_due)
+            and origin is None
+            and self._scanned_through is not None
+            and bool(self._deferred)
+        )
+        cursor = self._scanned_through if tail_only else origin
         wrapped = origin is None
+        tail = cursor
         pages = 0
         while whole_backlog or pages < _MAX_SCAN_PAGES:
             page = await self.store.pending(
@@ -236,15 +273,22 @@ class PendingEventWorker:
                     break
                 if event.event_id not in self._deferred:
                     rooms.add(event.room_id)
+            if page.reached_end and not reached_origin:
+                tail = page.resume_after
             if reached_origin or (page.reached_end and wrapped):
                 if not whole_backlog:
-                    self._scan_cursor = None
+                    self._scan_cursor, self._scanned_through = None, tail
+                    # A request made while this scan was reading is the next scan's.
+                    self._full_scans_due -= full_scans_due
                 return rooms, False
             if page.reached_end:
                 cursor, wrapped = None, True
             else:
                 cursor = page.resume_after
-        self._scan_cursor = cursor
+        if tail_only:
+            self._scanned_through = cursor
+        else:
+            self._scan_cursor = cursor
         return rooms, True
 
     async def drain_once(self) -> int:
@@ -512,6 +556,8 @@ class PendingEventWorker:
             for _ in range(0, len(self._deferred), _BATCH_SIZE):
                 self._queue_lost_owners()
                 await asyncio.sleep(0)
+            # A source can also become runnable with nobody to announce it, so a scan reads everything again.
+            self._full_scans_due += 1
             self._wake.set()
 
     def _schedule_retry(self) -> None:

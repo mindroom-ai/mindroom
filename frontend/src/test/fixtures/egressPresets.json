@@ -51,6 +51,7 @@
         "GH_TOKEN": "mindroom-brokered",
         "GITHUB_TOKEN": "mindroom-brokered"
       },
+      "read_only_supported": false,
       "rules": [
         {
           "host": "api.github.com",
@@ -75,6 +76,7 @@
       "id": "google_drive",
       "oauth_provider": "google_drive",
       "placeholder_env": {},
+      "read_only_supported": true,
       "rules": [
         {
           "host": "www.googleapis.com",
@@ -94,6 +96,7 @@
       "id": "google_gmail",
       "oauth_provider": "google_gmail",
       "placeholder_env": {},
+      "read_only_supported": true,
       "rules": [
         {
           "host": "gmail.googleapis.com",
@@ -113,6 +116,7 @@
       "id": "google_calendar",
       "oauth_provider": "google_calendar",
       "placeholder_env": {},
+      "read_only_supported": true,
       "rules": [
         {
           "host": "www.googleapis.com",
@@ -127,6 +131,7 @@
       "id": "google_sheets",
       "oauth_provider": "google_sheets",
       "placeholder_env": {},
+      "read_only_supported": true,
       "rules": [
         {
           "host": "sheets.googleapis.com",
@@ -141,6 +146,7 @@
       "id": "google_docs",
       "oauth_provider": "google_docs",
       "placeholder_env": {},
+      "read_only_supported": true,
       "rules": [
         {
           "host": "docs.googleapis.com",
@@ -155,6 +161,7 @@
       "id": "google_tasks",
       "oauth_provider": "google_tasks",
       "placeholder_env": {},
+      "read_only_supported": true,
       "rules": [
         {
           "host": "tasks.googleapis.com",
@@ -174,6 +181,7 @@
       "id": "atlassian",
       "oauth_provider": "atlassian",
       "placeholder_env": {},
+      "read_only_supported": true,
       "rules": [
         {
           "host": "api.atlassian.com",
@@ -188,6 +196,7 @@
       "id": "overleaf",
       "oauth_provider": null,
       "placeholder_env": {},
+      "read_only_supported": false,
       "rules": [
         {
           "host": "git.overleaf.com",
@@ -204,6 +213,7 @@
       "placeholder_env": {
         "OPENAI_API_KEY": "mindroom-brokered"
       },
+      "read_only_supported": false,
       "rules": [
         {
           "host": "api.openai.com",
@@ -220,6 +230,7 @@
       "placeholder_env": {
         "ANTHROPIC_API_KEY": "mindroom-brokered"
       },
+      "read_only_supported": false,
       "rules": [
         {
           "host": "api.anthropic.com",
