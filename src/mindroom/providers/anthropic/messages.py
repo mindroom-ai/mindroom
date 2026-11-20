@@ -10,6 +10,7 @@ discovers once.
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -755,22 +756,37 @@ def _sends_thinking_binding(params: dict[str, Any]) -> bool:
 
 
 def _with_key_header(kwargs: dict[str, Any]) -> AsyncAnthropic:
-    """Build a direct client that sends its key in ``X-Api-Key`` (``send_key_as_x_api_key``).
+    """Build a direct client that sends its key in ``X-Api-Key`` (``send_key_as_x_api_key``), else as SDK 1 would.
 
-    The SDK takes one credential, so the key leaves the arguments; without another one, an empty key keeps the SDK
-    from reading a credential from the process env.
+    The SDK takes one credential. A resolved key alone becomes an empty one, which keeps the SDK off the process env; an
+    ``auth_token`` beside a ``credentials``, ``config``, or ``profile`` provider goes on the client after it, so the
+    token wins at the request, as in SDK 1. Without either, the SDK discovers a credential itself.
     """
     key = kwargs.pop("api_key", None)
-    if not any(kwargs.get(name) is not None for name in ("auth_token", "credentials", "config", "profile")):
+    token = kwargs.get("auth_token")
+    if provider := any(kwargs.get(name) is not None for name in ("credentials", "config", "profile")):
+        kwargs.pop("auth_token", None)
+    elif key is not None and token is None:
         kwargs["api_key"] = ""
-    return send_key_as_x_api_key(AsyncAnthropic(**kwargs), key)
+    client = AsyncAnthropic(**kwargs)
+    if provider and token is not None:
+        _warn_token_shadows_provider()
+        client.auth_token = token
+    return send_key_as_x_api_key(client, client.api_key if key is None else key)
+
+
+@functools.cache
+def _warn_token_shadows_provider() -> None:
+    """Warn once, as SDK 1 did, that an ``auth_token`` disables the client's credentials provider."""
+    logger.warning("claude_auth_token_shadows_credentials_provider")
 
 
 def send_key_as_x_api_key[ClientT: anthropic.Anthropic | AsyncAnthropic](client: ClientT, key: str | None) -> ClientT:
     """Make a direct client send ``key`` in ``X-Api-Key``, as SDK 1 did, where SDK 2 sends its ``api_key`` as a bearer.
 
     An ``X-Api-Key`` from the config, ``ANTHROPIC_CUSTOM_HEADERS``, or the request then replaces the key, and an
-    ``auth_token`` still goes out as ``Authorization`` beside it. Without either header, the request fails unsent.
+    ``auth_token`` still goes out as ``Authorization`` beside it. Never copy the result with ``with_options()``: the
+    copy would keep the key header and rediscover the SDK's own credential.
     """
     client.api_key = None
     if key:

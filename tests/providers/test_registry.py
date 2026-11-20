@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, get_args
 
+import anthropic
 import httpx
 import pytest
+from anthropic.lib.credentials import StaticToken
 from google.oauth2.credentials import Credentials
 from pydantic import ValidationError
 from structlog.testing import capture_logs
@@ -24,7 +27,7 @@ from mindroom.config.main import Config, iter_config_validation_messages
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.llm.errors import MALFORMED_TOOL_CALL, ModelSafeguardRefusal, ProviderError
+from mindroom.llm.errors import MALFORMED_TOOL_CALL, MISSING_API_KEY, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
@@ -694,6 +697,7 @@ async def test_a_claude_key_goes_out_as_x_api_key_which_a_gateway_key_replaces(
     get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-process")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-process")
+    _forbid_client_copies(monkeypatch, anthropic.AsyncAnthropic)
     if custom_headers is not None:
         monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", custom_headers)
     model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
@@ -705,6 +709,60 @@ async def test_a_claude_key_goes_out_as_x_api_key_which_a_gateway_key_replaces(
             ModelRequest(messages=[_user()]),
         )
 
+    headers = wire.requests[0].headers
+    assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
+
+
+def _forbid_client_copies(monkeypatch: pytest.MonkeyPatch, client_class: type) -> None:
+    """Fail a copy of the client, which would rediscover the SDK's own credential beside the moved key."""
+
+    def copy(*_args: object, **_kwargs: object) -> None:
+        msg = "an adapted Claude client must not be copied"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(client_class, "copy", copy)
+    monkeypatch.setattr(client_class, "with_options", copy)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("environment", "client_params", "sent"),
+    [
+        ({"ANTHROPIC_AUTH_TOKEN": "tok-env"}, {}, {"authorization": "Bearer tok-env"}),
+        ({"ANTHROPIC_API_KEY": "sk-env"}, {}, {"x-api-key": "sk-env"}),
+        ({}, {}, None),
+        ({}, {"auth_token": "tok", "credentials": StaticToken("tok-provider")}, {"authorization": "Bearer tok"}),
+    ],
+    ids=["env-token", "env-key", "no-credential", "token-beside-provider"],
+)
+async def test_a_claude_model_without_a_resolved_key_authenticates_as_its_sdk_would(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    environment: dict[str, str],
+    client_params: dict[str, Any],
+    sent: dict[str, str] | None,
+) -> None:
+    """The SDK finds an ambient credential itself, an env key goes out as ``X-Api-Key``, and a token beats a provider."""
+    for name in [name for name in os.environ if name.startswith("ANTHROPIC_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no SDK profile to discover
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    extra_kwargs = {"client_params": client_params}
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    if sent is None:
+        assert (raised.value.code, wire.requests) == (MISSING_API_KEY, [])
+        return
     headers = wire.requests[0].headers
     assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
 

@@ -398,6 +398,8 @@ class TestMemoryConfig:
             return httpx2.Response(400, json={"type": "error", "error": {"type": "invalid_request_error"}})
 
         mem0_llm.client._client = httpx2.Client(transport=httpx2.MockTransport(reply))
+        for name in ("copy", "with_options"):
+            monkeypatch.setattr(anthropic.Anthropic, name, MagicMock(side_effect=AssertionError("copied the client")))
         stored = SimpleNamespace(llm=mem0_llm, embedding_model=MagicMock(), vector_store=MagicMock())
         with patch.object(AsyncMemory, "from_config", return_value=stored):
             await create_memory_instance(tmp_path / "memory", config, runtime_paths)
