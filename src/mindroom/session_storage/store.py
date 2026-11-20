@@ -17,7 +17,7 @@ import copy
 import hashlib
 import json
 import sqlite3
-import weakref
+import threading
 from collections import defaultdict
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
@@ -67,8 +67,9 @@ _RECORD_COLUMNS = tuple(field.name for field in fields(RunColumns))
 
 # What a full save did: wrote the run, wrote nothing because a cut removed it, or wrote nothing because it is final.
 type SaveOutcome = Literal["written", "removed", "final"]
-# What the latest save in this process of each unfinished run left in its rows, by database and run id (``_Rows``).
-_WRITTEN: dict[Path, dict[str, _Rows]] = {}
+# What the latest save in this process of each unfinished run left in its rows, by database and run id (``_Rows``),
+# with the lock each save of the database holds from reading its entry until it commits or rolls back.
+_WRITTEN: dict[Path, tuple[threading.Lock, dict[str, _Rows]]] = {}
 _WRITTEN_PER_DATABASE = 64
 
 
@@ -283,29 +284,30 @@ class ConversationStore:
 
         The run is then mirrored in ``session``.
         """
-        written = _WRITTEN.setdefault(self.path.resolve(), {})
-        try:
-            with self.transaction(write=True) as connection:
-                created = ensure_session_row(connection, self.names, session)
-                saved = _write_run(connection, self.names, session.session_id, data, kind, interrupted, written)
-                if usage is not None and saved.outcome != "final":
-                    _record_usage(
-                        connection,
-                        self.names,
-                        session.session_id,
-                        data["run_id"],
-                        usage,
-                        created_at=saved.created_at,
-                        updated_at=saved.updated_at,
-                    )
-                elif saved.moved and data["status"] not in _NON_VISIBLE:
-                    # A finished run new to the log, or finished after the turns it waited for, is news to readers too.
-                    _move_update_time(connection, self.names, session.session_id, saved.updated_at)
-                stored = self._write_state(connection, session, created, state)
-        except BaseException:
-            # The rows may not hold what this write recorded, so the run's next save writes every row.
-            written.pop(data["run_id"], None)
-            raise
+        lock, written = _WRITTEN.setdefault(self.path.resolve(), (threading.Lock(), {}))
+        with lock:
+            try:
+                with self.transaction(write=True) as connection:
+                    created = ensure_session_row(connection, self.names, session)
+                    saved = _write_run(connection, self.names, session.session_id, data, kind, interrupted, written)
+                    if usage is not None and saved.outcome != "final":
+                        _record_usage(
+                            connection,
+                            self.names,
+                            session.session_id,
+                            data["run_id"],
+                            usage,
+                            created_at=saved.created_at,
+                            updated_at=saved.updated_at,
+                        )
+                    elif saved.moved and data["status"] not in _NON_VISIBLE:
+                        # A finished run new to the log, or finished after the turns it waited for, is news to readers too.
+                        _move_update_time(connection, self.names, session.session_id, saved.updated_at)
+                    stored = self._write_state(connection, session, created, state)
+            except BaseException:
+                # The rows may not hold what this write recorded, so the run's next save writes every row.
+                written.pop(data["run_id"], None)
+                raise
         _record_stored_state(session, stored)
         _mirror(session, saved)
         if created is not None:
@@ -538,16 +540,15 @@ class _Saved:
 class _Rows:
     """What a save of an unfinished run left in its rows, so the run's next save in this process sends only changes.
 
-    It holds the run's ``seq``, each message row's ``ord`` and data digest by id, each tool row's data digest, and the
-    copy the save mirrored. Each save of the run takes it out under the write lock before writing, so it exists only
-    while the save that recorded it is the run's latest; a deleted run has no row, and a fold that recreates one moves
-    its ``seq``. Other processes do not write a running run's rows.
+    It holds the run's ``seq``, each message row's ``ord`` and data digest by id, and each tool row's data digest. Each
+    save of the run takes it out before writing and records its own only once it commits, under the database's lock
+    in ``_WRITTEN``, so it exists only while the save that recorded it is the run's latest; a deleted run has no row,
+    and a fold that recreates one moves its ``seq``. Other processes do not write a running run's rows.
     """
 
     seq: int
     messages: dict[str, tuple[int, bytes]]
     tools: list[bytes]
-    copy: weakref.ref[AnyRunRecord]
 
 
 def _digest(text: str) -> bytes:
@@ -892,16 +893,17 @@ def _write_run(
     )
     messages = set_visible_messages(connection, names, run_id, data["messages"], data["status"], known=known)
     _adopt_requester(connection, names, session_id, data.get("user_id"))
-    if kind == "team" and data["status"] == RunStatus.paused.value:
-        # A paused team run's copy holds its paused member runs, which only a read of the log finds.
+    if stored is None or (kind == "team" and data["status"] == RunStatus.paused.value):
+        # A new row can be another session's that holds the id, and a paused team run's copy holds its paused member
+        # runs, which only a read of the log finds.
         [copied] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
     else:
-        copied = _written_copy(connection, names, session_id, data, columns, messages, tools, known)
+        copied = _written_copy(connection, names, session_id, data, columns, messages, tools)
     if data["status"] in _NON_VISIBLE:
         if len(written) >= _WRITTEN_PER_DATABASE:
             written.pop(next(iter(written)))
         digests = {message_id: (place, digest) for message_id, (place, _, digest) in messages.items()}
-        written[run_id] = _Rows(seq, digests, [digest for _, digest in tools], weakref.ref(copied))
+        written[run_id] = _Rows(seq, digests, [digest for _, digest in tools])
     return _Saved(run_id, "written", created_at, now, moved, copied)
 
 
@@ -913,35 +915,19 @@ def _written_copy(
     columns: RunColumns,
     messages: dict[str, tuple[int, str, bytes]],
     tools: list[tuple[str, bytes]],
-    known: _Rows | None,
 ) -> AnyRunRecord:
-    """Return the run just written as a read of its rows returns it, without reading back what the save wrote.
+    """Return the run just written to its stored row as a read of it returns it, decoded from the JSON the save wrote.
 
-    Its rows are ``messages`` less the ones a fold flagged, and ``tools``. A row the previous save of the run left as
-    it is keeps that save's decoded copy, which no reader changes in place; any other decodes from its JSON.
+    Its message rows are ``messages`` less the ones a fold flagged, and its tool rows are ``tools``.
     """
     run_id, table = data["run_id"], quote_identifier(names.log_messages)
     folded_sql = f"SELECT message_id FROM {table} WHERE run_id = ? AND folded_by IS NOT NULL"  # noqa: S608
     folded = {message_id for (message_id,) in connection.execute(folded_sql, (run_id,))}
-    previous = known.copy() if known is not None else None
-    reused = {message.id: message for message in previous.messages} if previous is not None else {}
-    reused_tools = (previous.tools or []) if previous is not None else []
-    stored, stored_tools = (known.messages, known.tools) if known is not None else ({}, [])
     record = run_record(run_id, session_id, data.get("parent_run_id"), columns, [], [])
     record.messages = [
-        reused[message_id]
-        if message_id in reused and stored.get(message_id) == (place, digest)
-        else Message.from_dict(json.loads(text))
-        for message_id, (place, text, digest) in messages.items()
-        if message_id not in folded
+        Message.from_dict(json.loads(text)) for message_id, (_, text, _) in messages.items() if message_id not in folded
     ]
-    copied_tools = [
-        reused_tools[place]
-        if place < len(reused_tools) and stored_tools[place] == digest
-        else ToolExecution.from_dict(json.loads(text))
-        for place, (text, digest) in enumerate(tools)
-    ]
-    record.tools = copied_tools if columns.has_tools else None
+    record.tools = [ToolExecution.from_dict(json.loads(text)) for text, _ in tools] if columns.has_tools else None
     return record
 
 
