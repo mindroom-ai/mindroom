@@ -26,6 +26,7 @@ from mindroom.matrix.large_messages import (
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_thread_relation
 from mindroom.timing import emit_timing_event
+from mindroom.tool_system.events import tool_markers_out_of_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -318,8 +319,11 @@ async def _prepare_matrix_message(
 
     content_sent = content
     if not content_is_prepared:
-        # Reasoning must not push an ordinary-size message or edit into a sidecar.
-        fitted = fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=room_encrypted)
+        # Reasoning must not push an ordinary-size message or edit into a sidecar. Sent without its tool markers, the
+        # content only changes in preparation when it moves to a sidecar.
+        fitted = tool_markers_out_of_text(
+            fit_reasoning_to_ordinary_event(client, room_id, content, room_encrypted=room_encrypted),
+        )
         try:
             content_sent = await prepare_large_message(
                 client,

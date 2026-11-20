@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from mindroom.constants import STREAM_VISIBLE_BODY_KEY
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import ToolExecution
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
-# Version 3 is what Matrix gets: text without marker lines, each call's place as ``at`` on its entry.
+# Version 3 is what Matrix gets: text without marker lines, each call's place as ``body_line`` and ``at`` on its entry.
 _TOOL_TRACE_VERSION = 3
 # Version 2 has its markers in the text, as the pipeline builds a reply before sending it.
 _MARKED_TEXT_VERSION = 2
@@ -34,12 +35,10 @@ _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳
 # Bounded so an index in untrusted text never reaches int()'s digit limit.
 _VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d{1,9}(?=\](?: ⏳)?\s*$)")
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
-_HTML_TOOL_MARKER_PATTERN = re.compile(r"<p>🔧 <code>[^<]+</code> \[(\d{1,9})\](?: ⏳)?</p>")
 # Top-level HTML blocks as MindRoom Chat counts them (``matrix/protocol/toolPositions.ts`` there).
 _HTML_TAG_PATTERN = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9-]*)\b[^>]*?(/?)>")
 _HTML_VOID_TAG_PATTERN = re.compile(r"area|base|br|col|embed|hr|img|input|link|meta|source|track|wbr", re.IGNORECASE)
 _NON_BLANK_PATTERN = re.compile(r"[^ \t\n\r\f]")
-_FENCE_PATTERN = re.compile(r" {0,3}(`{3,}|~{3,})")
 _StructuredResultDict = dict[str, object]
 _StructuredResultList = list[object]
 _MALFORMED_TRACE = "Durable tool trace contains a malformed event"
@@ -655,128 +654,163 @@ def html_block_spans(html: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _body_block_starts(body: str) -> list[int]:
-    """Return where each block of a Markdown body starts: a run of lines not blank, a fenced code block whole."""
-    starts: list[int] = []
-    fence: str | None = None
-    in_block = False
-    offset = 0
-    for line in body.split("\n"):
-        opener = match.group(1)[0] if (match := _FENCE_PATTERN.match(line)) else None
-        if fence is not None:
-            fence = None if opener == fence else fence
-        elif _NON_BLANK_PATTERN.search(line) is None:
-            in_block = False
-        else:
-            if not in_block:
-                starts.append(offset)
-            in_block = True
-            fence = opener
-        offset += len(line) + 1
-    return starts
+def _trace_calls(payload: object, version: int) -> list[tuple[int, dict[str, Any]]] | None:
+    """Return the named calls of a trace of ``version`` with their marker indexes, or None for any other value."""
+    events = cast("dict[str, Any]", payload).get("events") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or payload.get("version") != version or not isinstance(events, list):
+        return None
+    return [
+        (index, event)
+        for index, event in enumerate(events, start=1)
+        if isinstance(event, dict) and isinstance(event.get("tool_name"), str) and event["tool_name"]
+    ]
+
+
+def _marker_texts(index: int, event: Mapping[str, Any]) -> tuple[str, str]:
+    """Return one call's marker as a body line and as HTML, as MindRoom Chat writes them back."""
+    name, pending = event["tool_name"], event.get("type") == "tool_call_started"
+    suffix = f" [{index}]{_TOOL_PENDING_MARKER if pending else ''}"
+    code = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return f"{_TOOL_REF_ICON} `{name}`{suffix}", f"<p>{_TOOL_REF_ICON} <code>{code}</code>{suffix}</p>\n"
+
+
+def _placed(calls: list[tuple[int, dict[str, Any]]], key: str, end: int) -> list[tuple[int, int, dict[str, Any]]]:
+    """Return the calls with a ``key`` position, in order of it.
+
+    A position that is no integer from the one before it up to ``end`` is ``end``.
+    """
+    placed: list[tuple[int, int, dict[str, Any]]] = []
+    previous = 0
+    for index, event in calls:
+        if key in event:
+            valid = type(event[key]) is int and previous <= event[key] <= end
+            previous = event[key] if valid else previous
+            placed.append((event[key] if valid else end, index, event))
+    return sorted(placed, key=lambda call: call[0])
+
+
+def _layer_with_markers(content: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return a layer with a version-3 trace as version 2, its markers back in its text; None for any other layer.
+
+    A call goes before body line ``body_line`` with a blank line after it, or at the end after a blank line, and
+    before top-level HTML block ``at`` (``html_block_spans``) or at the end. A call without the key has no marker.
+    """
+    payload = content.get(_TOOL_TRACE_KEY)
+    if (calls := _trace_calls(payload, _TOOL_TRACE_VERSION)) is None:
+        return None
+    restored = dict(content)
+    if isinstance(body := content.get("body"), str):
+        lines = body.split("\n") if body else []
+        kept: list[str] = []
+        cursor = 0
+        for position, index, event in _placed(calls, "body_line", len(lines)):
+            kept += lines[cursor:position]
+            cursor, line = position, _marker_texts(index, event)[0]
+            kept += [line, ""] if position < len(lines) else [*([""] if kept else []), line]
+        restored["body"] = "\n".join(kept + lines[cursor:])
+    if isinstance(html := content.get("formatted_body"), str):
+        starts = [start for start, _end in html_block_spans(html)]
+        text, cursor = "", 0
+        for position, index, event in _placed(calls, "at", len(starts)):
+            offset = starts[position] if position < len(starts) else len(html)
+            text, cursor = text + html[cursor:offset] + _marker_texts(index, event)[1], offset
+        restored["formatted_body"] = text + html[cursor:]
+    events = [
+        {key: value for key, value in event.items() if key not in ("at", "body_line")}
+        if isinstance(event, dict)
+        else event
+        for event in payload["events"]
+    ]
+    restored[_TOOL_TRACE_KEY] = {**payload, "version": _MARKED_TEXT_VERSION, "events": events}
+    return restored
 
 
 def _layer_without_markers(content: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return one content layer with a version-2 trace as version 3, or None when it has none to convert."""
+    """Return a layer with a version-2 trace as version 3, without its calls' markers in its text.
+
+    None when it has no trace and HTML to convert, or when its text would not read back exactly.
+    """
     payload = content.get(_TOOL_TRACE_KEY)
-    body = content.get("body")
-    html = content.get("formatted_body")
-    if not isinstance(payload, dict) or not isinstance(body, str) or not isinstance(html, str):
+    body, html = content.get("body"), content.get("formatted_body")
+    calls = _trace_calls(payload, _MARKED_TEXT_VERSION)
+    # A warm-up frame's canonical body keeps its markers, so the frame does too.
+    if calls is None or not isinstance(body, str) or not isinstance(html, str) or STREAM_VISIBLE_BODY_KEY in content:
         return None
-    events = cast("dict[str, Any]", payload).get("events")
-    if payload.get("version") != _MARKED_TEXT_VERSION or not isinstance(events, list):
-        return None
-    positions: dict[int, int] = {}
+    lines_of = {_marker_texts(index, event)[0]: index for index, event in calls}
+    html_of = {_marker_texts(index, event)[1].removesuffix("\n"): index for index, event in calls}
+    positions: dict[int, dict[str, int]] = {}
+    lines = body.split("\n")
+    # Markers after the last other text are at the end, after their blank line; others go with the one after them.
+    end = max((number for number, line in enumerate(lines, 1) if line.strip() and line not in lines_of), default=0)
     kept: list[str] = []
-    cursor = 0
-    blocks = 0
-
-    def drop(marker: re.Match[str], at: int) -> None:
-        nonlocal cursor
-        kept.append(html[cursor : marker.start()])
-        cursor = marker.end() + html.startswith("\n", marker.end())
-        positions.setdefault(int(marker.group(1)), at)
-
-    for start, end in html_block_spans(html):
-        if (marker := _HTML_TOOL_MARKER_PATTERN.fullmatch(html, start, end)) is not None:
-            drop(marker, blocks)
+    skip = False
+    for number, line in enumerate(lines):
+        if (index := lines_of.get(line)) is not None:
+            if number >= end and kept and not kept[-1]:
+                kept.pop()
+            positions.setdefault(index, {}).setdefault("body_line", len(kept))
+            skip = number < end
+        elif not (skip and not line):
+            kept.append(line)
+        skip = skip and index is not None
+    pieces: list[str] = []
+    cursor = blocks = 0
+    for start, stop in html_block_spans(html):
+        if (index := html_of.get(html[start:stop])) is None:
+            blocks += 1
             continue
-        # A marker inside a list or quote goes after it.
-        for marker in _HTML_TOOL_MARKER_PATTERN.finditer(html, start, end):
-            drop(marker, blocks + 1)
-        blocks += 1
-    kept.append(html[cursor:])
-    placed = [
-        {**event, "at": positions[index]} if isinstance(event, dict) and index in positions else event
-        for index, event in enumerate(events, start=1)
-    ]
-    return {
+        pieces.append(html[cursor:start])
+        cursor = stop + html.startswith("\n", stop)
+        positions.setdefault(index, {}).setdefault("at", blocks)
+    events = [{**event, **positions.get(index, {})} for index, event in enumerate(payload["events"], start=1)]
+    sent = {
         **content,
-        "body": strip_visible_tool_markers(body),
-        "formatted_body": "".join(kept),
-        _TOOL_TRACE_KEY: {**payload, "version": _TOOL_TRACE_VERSION, "events": placed},
+        "body": "\n".join(kept),
+        "formatted_body": "".join(pieces) + html[cursor:],
+        _TOOL_TRACE_KEY: {**payload, "version": _TOOL_TRACE_VERSION, "events": events},
     }
+    restored = _layer_with_markers(sent) or {}
+    # Text that would read back otherwise (a call inside a list, raw HTML) keeps its markers, as version 2.
+    return sent if (restored.get("body"), restored.get("formatted_body")) == (body, html) else None
+
+
+def _each_layer(
+    content: dict[str, Any],
+    convert: Callable[[Mapping[str, Any]], dict[str, Any] | None],
+) -> dict[str, Any]:
+    """Return ``content`` with ``convert`` applied to its layer, an edit's fallback following its replacement."""
+    new_content = content.get("m.new_content")
+    if not isinstance(new_content, dict):
+        return convert(content) or content
+    if (replacement := convert(new_content)) is None:
+        return content
+    converted = {**content, "m.new_content": replacement}
+    # The fallback repeats the replacement's text after "* ", where a leading marker is no line of its own.
+    fallback = (content.get("body"), content.get("formatted_body"))
+    if fallback == (f"* {new_content.get('body')}", new_content.get("formatted_body")):
+        converted["body"] = f"* {replacement['body']}"
+        converted.update({key: replacement[key] for key in ("formatted_body", _TOOL_TRACE_KEY) if key in content})
+    return converted
 
 
 def tool_markers_out_of_text(content: dict[str, Any]) -> dict[str, Any]:
-    """Return content as Matrix gets it: no marker lines in its text, and ``at`` on each call's trace entry.
+    """Return content as Matrix gets it: a version-3 trace, whose calls' marker lines are out of the text.
 
-    ``at`` counts the top-level blocks of the sent ``formatted_body`` before the call. Content without a version-2
-    trace and HTML comes back as the same object.
+    Each call keeps its place as ``body_line``, the number of ``body`` lines before it, and ``at``, the number of
+    top-level ``formatted_body`` blocks before it. Content that ``tool_markers_in_text`` would not give back exactly,
+    and content without a version-2 trace and HTML, comes back as the same object.
     """
-    new_content = content.get("m.new_content")
-    if not isinstance(new_content, dict) or (replacement := _layer_without_markers(new_content)) is None:
-        return _layer_without_markers(content) or content
-    # An edit's fallback shows the replacement's text, whether or not it carries the trace too.
-    fallback = _layer_without_markers({**content, _TOOL_TRACE_KEY: new_content[_TOOL_TRACE_KEY]}) or content
-    kept = {key: value for key, value in fallback.items() if key != _TOOL_TRACE_KEY or _TOOL_TRACE_KEY in content}
-    return {**kept, "m.new_content": replacement}
+    return _each_layer(content, _layer_without_markers)
+
+
+def tool_markers_in_text(content: dict[str, Any]) -> dict[str, Any]:
+    """Return version-3 content as it was before ``tool_markers_out_of_text``; other content as the same object."""
+    return _each_layer(content, _layer_with_markers)
 
 
 def body_with_tool_markers(body: str, content: Mapping[str, object]) -> str:
-    """Return a version-3 message's body with its marker lines back as Chat puts them back; other bodies unchanged.
-
-    A call goes before the body block ``at`` names, or at the end when ``at`` is no HTML block or before an earlier one;
-    a call without ``at`` never had a line.
-    """
-    payload = content.get(_TOOL_TRACE_KEY)
-    trace = cast("dict[str, Any]", payload) if isinstance(payload, dict) else {}
-    if trace.get("version") != _TOOL_TRACE_VERSION:
-        return body
-    html = content.get("formatted_body")
-    starts = _body_block_starts(body)
-    blocks = len(html_block_spans(html)) if isinstance(html, str) else len(starts)
-    calls: list[tuple[int, str]] = []
-    previous = 0
-    for index, event in enumerate(trace.get("events") or [], start=1):
-        name = event.get("tool_name") if isinstance(event, dict) else None
-        # A call without a position had no line in the text, as a version-2 trace's call without a marker.
-        if not isinstance(name, str) or not name or "at" not in event:
-            continue
-        at = event.get("at")
-        if type(at) is int and previous <= at <= blocks:
-            previous = at
-        else:
-            at = blocks
-        calls.append((at, _tool_marker_line(name, index, pending=event.get("type") == "tool_call_started")))
-    text, cursor = "", 0
-    for at, line in sorted(calls, key=lambda call: call[0]):
-        offset = starts[at] if at < len(starts) else len(body)
-        text += f"{body[cursor:offset]}{line}\n\n" if at < len(starts) else f"{body[cursor:offset]}\n\n{line}"
-        cursor = offset
-    return f"{text}{body[cursor:]}" if body else text.removeprefix("\n\n")
-
-
-def moved_tool_positions(payload: object, by: int) -> object:
-    """Return a version-3 trace whose calls sit ``by`` top-level HTML blocks later; any other value unchanged."""
-    trace = cast("dict[str, Any]", payload) if isinstance(payload, dict) else {}
-    if trace.get("version") != _TOOL_TRACE_VERSION:
-        return payload
-    moved = [
-        {**event, "at": event["at"] + by} if isinstance(event, dict) and type(event.get("at")) is int else event
-        for event in trace.get("events") or []
-    ]
-    return {**trace, "events": moved}
+    """Return a version-3 message's ``body`` with its marker lines back, as MindRoom Chat reads it; others unchanged."""
+    return (_layer_with_markers({**content, "body": body}) or {"body": body})["body"]
 
 
 def has_tool_trace(content: Mapping[str, object]) -> bool:

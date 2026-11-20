@@ -384,7 +384,7 @@ def segment_matrix_content(
 
     is_edit = is_edit_message(content)
     first_target = _segment_target_bytes(room_encrypted=room_encrypted, is_edit=is_edit)
-    if calculate_event_size(content) <= first_target:
+    if calculate_event_size(tool_markers_out_of_text(content)) <= first_target:
         return None
     continuation_target = _segment_target_bytes(room_encrypted=room_encrypted, is_edit=False)
 

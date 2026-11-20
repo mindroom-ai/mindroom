@@ -50,7 +50,7 @@ from mindroom.matrix.large_messages import (
 from mindroom.matrix.media import parse_matrix_media_event_source
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message
-from mindroom.tool_system.events import _TOOL_TRACE_KEY, tool_markers_out_of_text
+from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
 
 _SIDECAR_UPLOAD_FALLBACK_TEXT = _SIDECAR_UPLOAD_FALLBACK_INDICATOR.strip()
@@ -1181,13 +1181,11 @@ async def test_prepare_terminal_edit_preview_keeps_the_rendered_answer_when_only
     result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     inner = result["m.new_content"]
-    sent = tool_markers_out_of_text(edit_content)["m.new_content"]
     assert inner["msgtype"] == "m.file"
-    assert inner["body"] == sent["body"]
-    assert "🔧" not in inner["body"]
+    assert inner["body"] == text
     assert inner["format"] == "org.matrix.custom.html"
     # The reply's own HTML, pill included, not a re-render of its body.
-    assert inner["formatted_body"] == sent["formatted_body"]
+    assert inner["formatted_body"] == formatted_body
     assert pill in inner["formatted_body"]
     assert "<table>" in inner["formatted_body"]
     assert _TOOL_TRACE_KEY not in inner
@@ -1513,9 +1511,8 @@ async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> 
     assert result["formatted_body"] == result["m.new_content"]["formatted_body"]
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
-    # The sidecar holds what Matrix gets: the text without its markers.
-    assert uploaded_payload == tool_markers_out_of_text(edit_content)
-    assert uploaded_payload["m.new_content"][_TOOL_TRACE_KEY]["version"] == 3
+    assert uploaded_payload == edit_content
+    assert uploaded_payload["m.new_content"][_TOOL_TRACE_KEY] == tool_trace
     assert calculate_event_size(result) <= 64000
 
 
@@ -1562,7 +1559,7 @@ async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_
     assert result["m.new_content"]["url"] == "mxc://server/huge-trace"
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
-    assert uploaded_payload["m.new_content"][_TOOL_TRACE_KEY] == {**huge_tool_trace, "version": 3}
+    assert uploaded_payload["m.new_content"][_TOOL_TRACE_KEY] == huge_tool_trace
     assert calculate_event_size(result) <= 64000
 
 

@@ -29,14 +29,12 @@ def message_judgment_text(message: ResolvedVisibleMessage) -> str | None:
     msgtype = message.content.get("msgtype", "m.text")
     # A tuple compares without hashing, so a malformed list or dict msgtype cannot raise.
     if msgtype in ("m.text", "m.notice"):
-        if not message.body.strip():
+        # A reply of tool calls alone has its markers back before judges see whether it says anything.
+        body = body_with_tool_markers(message.body, message.content)
+        if not body.strip():
             return None
         trace = message_tool_trace(message.content)
-        body = (
-            message.body
-            if trace is None
-            else body_with_tool_tags(body_with_tool_markers(message.body, message.content), trace)
-        )
+        body = body if trace is None else body_with_tool_tags(body, trace)
         return f"{body}\n[with attachments]" if message.content.get(ATTACHMENT_IDS_KEY) else body
     kind = (msgtype.removeprefix("m.") if isinstance(msgtype, str) else "") or "media"
     filename = message.content.get("filename")

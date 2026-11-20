@@ -310,7 +310,7 @@ def test_a_split_reply_tells_receivers_how_many_segments_it_has(*, edit: bool) -
 
 
 # Replies whose first segment's tool trace fills it to within the count's bytes, as a plain message and as an edit.
-@pytest.mark.parametrize(("seed", "edit"), [(343, False), (61, True)])
+@pytest.mark.parametrize(("seed", "edit"), [(255, False), (61, True)])
 def test_a_first_segment_filled_to_its_budget_is_still_sent_as_segments(seed: int, *, edit: bool) -> None:
     """A first segment with no room left for the segment count goes without it instead of falling back to the sidecar."""
     rng = random.Random(seed)  # noqa: S311 - a fixed test fixture, not a secret
@@ -568,3 +568,27 @@ def test_segment_without_room_for_its_trace_drops_its_markers() -> None:
     assert "io.mindroom.tool_trace" not in segment
     assert "🔧" not in segment["body"]
     assert segment["body"].startswith("Done.")
+
+
+def test_a_segmented_edit_that_opens_with_a_call_sends_no_marker_in_its_fallback() -> None:
+    """The fallback's "* " prefix keeps an opening marker from being a line of its own; it goes all the same."""
+    body = "🔧 `alpha` [1]\n\n" + _body()
+    events = [{"type": "tool_call_completed", "tool_name": "alpha"}]
+    content = build_matrix_edit_content(
+        event_id="$placeholder",
+        new_content=build_message_content(
+            body,
+            extra_content={"io.mindroom.tool_trace": {"version": 2, "events": events}},
+        ),
+    )
+
+    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    first = segmented.first
+    assert first["body"].startswith("* ## Section 0")
+    assert first["body"] == f"* {first['m.new_content']['body']}"
+    assert "🔧" not in first["formatted_body"]
+    assert body_with_tool_markers(first["m.new_content"]["body"], first["m.new_content"]).startswith(
+        "🔧 `alpha` [1]\n\n",
+    )

@@ -578,13 +578,12 @@ async def test_message_with_formatted_body_no_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_large_message_with_plain_tool_markers_uploads_full_content_json() -> None:
-    """Large-message sidecar stores the content as sent, tool trace included and markers out of its text."""
+    """Large-message sidecar stores full source content including tool trace metadata."""
     client = MockClient()
 
-    result_line = "Here is the result: " + "x" * 200
-    body = f"{result_line}\n\n🔧 `web_search` [1]\n"
+    body = "Here is the result:\n\n🔧 `web_search` [1]\n"
     body = body * 500  # Make it large enough to trigger long text
-    formatted_body = f"<p>{result_line}</p>\n<p>🔧 <code>web_search</code> [1]</p>\n"
+    formatted_body = "<p>Here is the result:</p>\n<p>🔧 <code>web_search</code> [1]</p>\n"
     formatted_body = formatted_body * 500
 
     content = {
@@ -600,19 +599,14 @@ async def test_large_message_with_plain_tool_markers_uploads_full_content_json()
     assert result["msgtype"] == "m.file"
     assert result["info"]["mimetype"] == "application/json"
     assert result["formatted_body"] == markdown_to_html(result["body"])
-    assert "🔧" not in result["body"]
+    assert "🔧 <code>web_search</code> [1]" in result["formatted_body"]
     assert _TOOL_TRACE_KEY not in result
 
-    # The uploaded sidecar holds the whole content as sent.
+    # Uploaded sidecar should preserve full original content.
     uploaded_data = client.uploads[0]
     uploaded_payload = json.loads(uploaded_data.read().decode("utf-8"))
-    assert uploaded_payload["formatted_body"] == f"<p>{result_line}</p>\n" * 500
-    assert uploaded_payload[_TOOL_TRACE_KEY]["version"] == 3
-    assert uploaded_payload[_TOOL_TRACE_KEY]["events"][0] == {
-        "type": "tool_call_started",
-        "tool_name": "web_search",
-        "at": 1,
-    }
+    assert uploaded_payload["formatted_body"] == formatted_body
+    assert uploaded_payload[_TOOL_TRACE_KEY]["events"][0]["tool_name"] == "web_search"
 
 
 @pytest.mark.asyncio

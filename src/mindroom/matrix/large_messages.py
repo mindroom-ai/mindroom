@@ -41,7 +41,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
-from mindroom.tool_system.events import tool_markers_out_of_text
+from mindroom.tool_system.events import tool_markers_in_text, tool_markers_out_of_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -305,6 +305,7 @@ def should_send_oversized_nonterminal_streaming_edit(
     """Return whether one oversized non-terminal streaming edit may be sent now, at a size-proportional cadence."""
     if not original_event_id or not is_edit_message(edit_content):
         return True
+    edit_content = tool_markers_out_of_text(edit_content)
 
     source_content = edit_content.get("m.new_content")
     if not isinstance(source_content, dict) or not _is_nonterminal_stream_content(source_content):
@@ -673,7 +674,8 @@ def fit_reasoning_to_ordinary_event(
     delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
 
     def fits(candidate: dict[str, Any]) -> bool:
-        return calculate_event_size(candidate) <= limit and delivery_size(candidate) <= _MATRIX_EVENT_HARD_LIMIT
+        sent = tool_markers_out_of_text(candidate)
+        return calculate_event_size(sent) <= limit and delivery_size(sent) <= _MATRIX_EVENT_HARD_LIMIT
 
     base = {key: value for key, value in content.items() if key != REASONING_CONTENT_KEY}
     if isinstance(new_content, dict):
@@ -893,7 +895,7 @@ async def prepare_large_message(
         when this coroutine completed without yielding.
 
     """
-    # The last step before Matrix: the text goes without tool markers, the sidecar included.
+    # The last step before Matrix: the text goes without tool markers.
     content = tool_markers_out_of_text(content)
     is_edit = is_edit_message(content)
     size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
@@ -906,6 +908,8 @@ async def prepare_large_message(
     current_size = calculate_event_size(content)
     if current_size <= size_limit and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
         return content
+    # A message too large for one event keeps its markers, sidecar included: they draw its calls on the preview.
+    current_size = calculate_event_size(content := tool_markers_in_text(content))
 
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]

@@ -38,7 +38,7 @@ from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
 from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.events import html_block_spans, is_visible_tool_marker_line, moved_tool_positions
+from mindroom.tool_system.events import is_visible_tool_marker_line, tool_markers_in_text, tool_markers_out_of_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -103,6 +103,9 @@ def _plan_thread_copy(
             # The copy keeps counting them as mentioned earlier in the thread, so a team the thread formed carries on.
             content[COPIED_MENTIONS_KEY] = mentioned
         entity = entity_name_for_sender(message.sender)
+        if entity is None:
+            # Only MindRoom's own posts carry tool calls; the router relays nobody else's as its own.
+            content.pop(TOOL_TRACE_CONTENT_KEY, None)
         speaks_for = message.content.get(ORIGINAL_SENDER_KEY)
         if entity is not None and isinstance(speaks_for, str) and speaks_for:
             # MindRoom's own posts on someone's behalf (voice transcripts,
@@ -121,6 +124,8 @@ def _attribute_relay(content: dict[str, Any], sender: str, name: str) -> None:
     """Name the original poster on a router-posted copy."""
     # No source kind: the relay is attributed in prompts but never becomes a human turn.
     content.setdefault(ORIGINAL_SENDER_KEY, sender)
+    # The name goes before the text as it reads with its tool markers; sending takes them out again.
+    content.update(tool_markers_in_text(content))
     body = str(content.get("body", ""))
     if is_matrix_media_msgtype(content.get("msgtype")):
         # With a filename present, clients show the body as the caption.
@@ -129,12 +134,7 @@ def _attribute_relay(content: dict[str, Any], sender: str, name: str) -> None:
     separator = "\n\n" if is_visible_tool_marker_line(body.split("\n", 1)[0]) else " "
     content["body"] = f"{name}:{separator}{body}"
     if "formatted_body" in content:
-        sent_html = str(content["formatted_body"])
-        content["formatted_body"] = f"<strong>{html.escape(name)}</strong>: {sent_html}"
-        if TOOL_TRACE_CONTENT_KEY in content:
-            # The name adds blocks before every call of a reply sent without its markers.
-            added = len(html_block_spans(content["formatted_body"])) - len(html_block_spans(sent_html))
-            content[TOOL_TRACE_CONTENT_KEY] = moved_tool_positions(content[TOOL_TRACE_CONTENT_KEY], added)
+        content["formatted_body"] = f"<strong>{html.escape(name)}</strong>: {content['formatted_body']}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,8 +372,8 @@ async def _mark_source_moved(
 
 def _lost_content(content: dict[str, Any], content_sent: dict[str, Any]) -> bool:
     """Return whether a large message went out cut short because its full content could not be attached."""
-    # A message that fits goes out unchanged; one that does not carries its full content as an attachment.
-    return content_sent != content and not holds_unresolved_sidecar(content_sent)
+    # A message that fits goes out as sent without tool markers; one that does not carries its full content attached.
+    return content_sent != tool_markers_out_of_text(content) and not holds_unresolved_sidecar(content_sent)
 
 
 def _permalink(room_id: str, event_id: str, via: str) -> str:
