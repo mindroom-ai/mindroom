@@ -1780,12 +1780,12 @@ async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: P
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cap", ["lines", "tokens"])
-async def test_file_backend_capped_entrypoint_withholds_the_oldest_entries(
+async def test_file_backend_capped_entrypoint_keeps_its_first_lines(
     storage_path: Path,
     config: Config,
     cap: str,
 ) -> None:
-    """add_memory appends, so a capped preload keeps the curated head and the newest entries, not the oldest."""
+    """A capped preload keeps the file's first lines, so lines appended past the cap never shift it."""
     if cap == "lines":
         config.memory.file.max_entrypoint_lines = 3
     else:
@@ -1800,31 +1800,11 @@ async def test_file_backend_capped_entrypoint_withholds_the_oldest_entries(
 
     prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
 
-    assert "# Memory\nCurated fact.\n- [id=m3] Newest entry." in prompt_parts.session_preamble
-    assert "Oldest entry." not in prompt_parts.session_preamble
+    assert "# Memory\nCurated fact.\n- [id=m1] Oldest entry." in prompt_parts.session_preamble
     assert "Middle entry." not in prompt_parts.session_preamble
+    assert "Newest entry." not in prompt_parts.session_preamble
     assert "[Memory entrypoint truncated - showing 3 of 5 lines" in prompt_parts.session_preamble
-
-
-@pytest.mark.asyncio
-async def test_file_backend_oversized_oldest_entry_does_not_withhold_newer_entries(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """An oldest entry too long for the token cap is withheld alone, not with every newer entry."""
-    config.memory.file.max_entrypoint_tokens = 15
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text(
-        f"# Memory\nCurated fact.\n- [id=m1] {'Long oldest entry. ' * 5}\n- [id=m2] Newest entry.\n",
-        encoding="utf-8",
-    )
-
-    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
-
-    assert "# Memory\nCurated fact.\n- [id=m2] Newest entry." in prompt_parts.session_preamble
-    assert "Long oldest entry." not in prompt_parts.session_preamble
+    assert "condense" in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
@@ -1942,17 +1922,45 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_lines_are_in
 
 
 @pytest.mark.asyncio
+async def test_file_backend_capped_conversation_keeps_its_entrypoint_after_memories_are_added(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Lines appended past the cap leave a running conversation's copy, marker included, as sent.
+
+    Only the marker's counts change, and they must not reload the copy; an edited line inside the head does.
+    """
+    config.memory.file.max_entrypoint_lines = 3
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await _conversation_preamble(config, thread)
+    assert "showing 3 of 4 lines" in first
+
+    await add_agent_memory("Added fact.", "general", config)
+    await add_agent_memory("Another added fact.", "general", config)
+    assert await _conversation_preamble(config, thread) == first
+    fresh = await _conversation_preamble(config, None)
+    assert "showing 3 of 6 lines" in fresh
+    assert "Added fact." not in fresh
+
+    memory_path.write_text(memory_path.read_text(encoding="utf-8").replace("Fact two.", "Fact 2."), "utf-8")
+    edited = await _conversation_preamble(config, thread)
+    assert "Fact 2." in edited
+    assert "Fact two." not in edited
+
+
+@pytest.mark.asyncio
 async def test_file_backend_capped_conversation_reloads_its_entrypoint_after_a_line_is_inserted(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A capped copy keeps main's rule, only lines added at its end, so a line inserted mid-file loads it again."""
+    """A capped copy keeps only lines added at its end, so a line inserted inside its head loads it again."""
     config.memory.file.max_entrypoint_lines = 3
     memory_path = _memory_file(storage_path, _ENTRIES)
     thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
     assert "truncated" in await _conversation_preamble(config, thread)
 
-    memory_path.write_text(_ENTRIES.replace("Fact two.\n", "Fact two.\nInserted.\n"), encoding="utf-8")
+    memory_path.write_text(_ENTRIES.replace("Fact one.\n", "Fact one.\nInserted.\n"), encoding="utf-8")
     assert "Inserted." in await _conversation_preamble(config, thread)
 
 
@@ -2148,11 +2156,11 @@ async def test_file_backend_entrypoint_fits_the_cap_before_the_vocabulary_loads(
 
 
 @pytest.mark.asyncio
-async def test_file_backend_entrypoint_over_the_cap_keeps_the_head_and_the_newest_entries(
+async def test_file_backend_entrypoint_over_the_cap_keeps_its_first_entries(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A file over the cap keeps its curated head, then the newest entries that fit."""
+    """A file over the cap keeps its first lines that fit, entries included, and withholds the newest."""
     config.memory.file.max_entrypoint_tokens = 120
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -2165,7 +2173,7 @@ async def test_file_backend_entrypoint_over_the_cap_keeps_the_head_and_the_newes
     kept = [entry for entry in entries if entry in counted.session_preamble]
     assert "# Memory\nCurated fact." in counted.session_preamble
     assert 0 < len(kept) < len(entries)
-    assert kept == entries[len(entries) - len(kept) :]
+    assert kept == entries[: len(kept)]
     assert _line_tokens(counter, ["# Memory", "Curated fact.", *kept]) <= 120
 
 
