@@ -16,10 +16,10 @@ from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import (
     GeneratedSummary,
-    clamp_generated_title,
     generate_summary,
     resolve_thread_summary_model_name,
     room_summary_instructions,
+    title_error,
 )
 from mindroom.thread_summary.notices import (
     ThreadSummaryWriteError,
@@ -71,7 +71,7 @@ _FORKED_TITLE_SUFFIX = " (forked)"
 def _keepable_title(title: str | None, *, retitle: bool) -> str | None:
     """Return the title a check may keep: one within the short-title rule, never for a retitle."""
     base = (title or "").removesuffix(_FORKED_TITLE_SUFFIX)
-    return title if base and not retitle and clamp_generated_title(base) == base else None
+    return title if base and not retitle and title_error(base) is None else None
 
 
 def _title_key(title: str) -> str:
@@ -86,7 +86,7 @@ def _title_to_deliver(
     history: Sequence[ResolvedVisibleMessage],
     thread_id: str,
 ) -> str:
-    """Return ``current`` when the model kept it, by its answer or an echo escaped or not, else the new title cut."""
+    """Return ``current`` when the model kept it, by its answer or an echo escaped or not, else the new title."""
     echoes = {_title_key(generated.summary), _title_key(unescape(generated.summary))}
     if current is not None and (generated.keep_current or _title_key(current) in echoes):
         return current
@@ -94,12 +94,12 @@ def _title_to_deliver(
 
 
 def _publishable_title(title: str, history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str:
-    """Return a new title normalized and cut to the short-title limits, marked once as a fork's when it is one."""
+    """Return a new title normalized, marked once as a fork's when it is one."""
     base = normalize_thread_summary_text(title)
     if not base or fork_parent_thread_id(history, thread_id) is None:
-        return clamp_generated_title(base)
+        return base
     # The marker is outside the limits, and a fork of a fork stays "X (forked)".
-    return f"{clamp_generated_title(base.removesuffix(_FORKED_TITLE_SUFFIX))}{_FORKED_TITLE_SUFFIX}"
+    return f"{base.removesuffix(_FORKED_TITLE_SUFFIX)}{_FORKED_TITLE_SUFFIX}"
 
 
 async def _provisional_title(
