@@ -1528,6 +1528,18 @@ def test_kubernetes_worker_manifest_the_client_rejects_keeps_the_running_deploym
     assert "hunter2" not in str(raised.value)
 
 
+def test_kubernetes_deployment_read_before_its_status_is_not_ready() -> None:
+    """A typed Deployment read before the controller writes status is unready, not an error."""
+    from kubernetes import client as kubernetes_client  # noqa: PLC0415
+
+    backend, _apps_api, _core_api = _backend()
+    spec = {"replicas": 1, "selector": {}, "template": {}}
+    deployment = kubernetes_client.V1Deployment.from_dict({"metadata": {"name": "mindroom-worker-a"}, "spec": spec})
+
+    assert deployment.status is None
+    assert not backend._deployment_ready(deployment)
+
+
 def test_kubernetes_state_root_retirement_goes_through_the_installed_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """Retiring an older release's worker lists raw Deployments and Pods and scales it down with a strategic patch."""
     monkeypatch.setattr(legacy_state_root_mounts, "_warn_to_check_for_links", lambda *_args: None)

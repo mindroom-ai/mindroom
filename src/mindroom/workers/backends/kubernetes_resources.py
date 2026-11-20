@@ -186,7 +186,7 @@ class KubernetesDeployment(Protocol):
     def spec(self) -> _KubernetesDeploymentSpec: ...  # noqa: D102
 
     @property
-    def status(self) -> _KubernetesDeploymentStatus: ...  # noqa: D102
+    def status(self) -> _KubernetesDeploymentStatus | None: ...  # noqa: D102
 
 
 @dataclass(slots=True)
