@@ -773,10 +773,19 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_handle_command_config_set_confirmation_records_preview_event_id(tmp_path: Path) -> None:
-    """Config preview replies should persist confirmation state and record the preview event ID."""
+async def test_config_preview_is_kept_locally_and_writes_no_room_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room that gives the agent no power still gets a preview its sender resolves, also after a restart.
+
+    The preview records the requester an alias stands for and the turn that sent it.
+    """
+    client = make_matrix_client_mock(user_id="@agent:example.org")
+    client.room_send.return_value = nio.RoomSendResponse("$reaction", "!room:example.org")
+    client.room_messages.return_value = nio.RoomMessagesResponse("!room:example.org", [], "", None)
     context = make_test_command_handler_context(
-        client=AsyncMock(),
+        client=client,
         config=Config(
             **_handler_config_fields(
                 config_command_enabled=True,
@@ -792,79 +801,6 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$preview"),
     )
-    room = SimpleNamespace(room_id="!room:example.org")
-    event = SimpleNamespace(
-        sender="@telegram_alice:example.org",
-        event_id="$event",
-        source={"content": {"body": "!config set defaults.markdown false"}},
-    )
-    command = Command(
-        type=CommandType.CONFIG,
-        args={"args_text": "set defaults.markdown false"},
-        raw_text="!config set defaults.markdown false",
-    )
-    change_info = {
-        "config_path": "defaults.markdown",
-        "new_value": False,
-        "new_value_withheld": False,
-    }
-    with (
-        patch(
-            "mindroom.commands.handler.handle_config_command",
-            AsyncMock(return_value=("preview", change_info)),
-        ),
-        patch(
-            "mindroom.commands.handler.config_confirmation.ensure_pending_change",
-            new_callable=AsyncMock,
-        ) as mock_ensure_pending,
-    ):
-        await handle_command(
-            context=context,
-            room=room,
-            event=event,
-            command=command,
-            requester_user_id="@telegram_alice:example.org",
-        )
-
-    mock_ensure_pending.assert_awaited_once_with(
-        context.client,
-        context.runtime_paths,
-        event_id="$preview",
-        room_id="!room:example.org",
-        thread_id=None,
-        config_path="defaults.markdown",
-        new_value=False,
-        new_value_withheld=False,
-        requester="@alice:example.org",
-    )
-    context.record_handled_turn.assert_called_once_with(
-        TurnRecord.create(
-            ["$event"],
-            response_event_id="$preview",
-        ),
-    )
-
-
-@pytest.mark.asyncio
-async def test_config_preview_is_kept_locally_and_writes_no_room_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A room that gives the agent no power still gets a preview its sender resolves, also after a restart."""
-    client = make_matrix_client_mock(user_id="@agent:example.org")
-    client.room_send.return_value = nio.RoomSendResponse("$reaction", "!room:example.org")
-    client.room_messages.return_value = nio.RoomMessagesResponse("!room:example.org", [], "", None)
-    context = make_test_command_handler_context(
-        client=client,
-        config=Config(**_handler_config_fields(config_command_enabled=True, administrators=["@alice:example.org"])),
-        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
-        logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
-        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=AsyncMock(),
-        record_command_result=AsyncMock(),
-        send_response=AsyncMock(return_value="$preview"),
-    )
     body = "!config set defaults.markdown false"
     change_info = {"config_path": "defaults.markdown", "new_value": False, "new_value_withheld": False}
     monkeypatch.setattr(config_confirmation, "_pending_changes", {})
@@ -872,9 +808,13 @@ async def test_config_preview_is_kept_locally_and_writes_no_room_state(
         await handle_command(
             context=context,
             room=SimpleNamespace(room_id="!room:example.org"),
-            event=SimpleNamespace(sender="@alice:example.org", event_id="$event", source={"content": {"body": body}}),
+            event=SimpleNamespace(
+                sender="@telegram_alice:example.org",
+                event_id="$event",
+                source={"content": {"body": body}},
+            ),
             command=Command(type=CommandType.CONFIG, args={"args_text": body[8:]}, raw_text=body),
-            requester_user_id="@alice:example.org",
+            requester_user_id="@telegram_alice:example.org",
         )
     # A restart forgets the process memory; the local store still holds the preview.
     monkeypatch.setattr(config_confirmation, "_pending_changes", {})
@@ -891,12 +831,15 @@ async def test_config_preview_is_kept_locally_and_writes_no_room_state(
 
     assert await resolve("@other:example.org") is None
     restored = await resolve("@agent:example.org")
-    assert (restored.config_path, restored.new_value, restored.requester) == (
-        "defaults.markdown",
-        False,
-        "@alice:example.org",
-    )
-    context.record_handled_turn.assert_awaited_once()
+    assert (
+        restored.config_path,
+        restored.new_value,
+        restored.new_value_withheld,
+        restored.requester,
+        restored.room_id,
+        restored.thread_id,
+    ) == ("defaults.markdown", False, False, "@alice:example.org", "!room:example.org", None)
+    context.record_handled_turn.assert_called_once_with(TurnRecord.create(["$event"], response_event_id="$preview"))
     client.room_put_state.assert_not_awaited()
     client.room_get_state.assert_not_awaited()
     client.room_get_state_event.assert_not_awaited()
