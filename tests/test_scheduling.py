@@ -2526,11 +2526,10 @@ async def test_schedule_task_rejects_invalid_history_limit_before_parsing(
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_with_a_failed_state_write_and_no_fallback_writer_fails(tmp_path: Path) -> None:
-    """Scheduling fails without starting the task when Matrix state persistence fails."""
+async def test_schedule_task_where_the_runtime_names_no_steward_fails_without_writing(tmp_path: Path) -> None:
+    """With no running bot joined to the room, scheduling fails unstarted, and the asking client does not write."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    serve_full_room_state(client, "!test:server")
-    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
     room = _matrix_room("!test:server")
     runtime_paths = schedule_runtime_paths(tmp_path)
     config, ids = _assistant_config(runtime_paths)
@@ -2568,26 +2567,8 @@ async def test_schedule_task_with_a_failed_state_write_and_no_fallback_writer_fa
 
     message = str(exc_info.value)
     assert message == "Failed to schedule: I need moderator rights in this room to save schedules."
+    assert isinstance(exc_info.value.__cause__, ScheduledTaskStateRefusedError)
     start_task.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_schedule_state_is_refused_before_any_write_where_the_runtime_names_no_steward() -> None:
-    """With no running bot joined to the room, the asking client does not write, though the room would let it."""
-    client = make_matrix_client_mock(user_id="@mindroom_general:server")
-    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
-    writers = scheduled_task_runtime(_runtime_paths(), config=Config())
-
-    with pytest.raises(ScheduledTaskStateRefusedError) as exc_info:
-        await scheduling._put_scheduled_task_state_content(
-            client=client,
-            room_id="!test:server",
-            task_id="taskfail",
-            content={},
-            writers=writers,
-        )
-
-    assert str(exc_info.value) == "I need moderator rights in this room to save schedules."
     client.room_put_state.assert_not_awaited()
 
 
