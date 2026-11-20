@@ -87,11 +87,9 @@ class _Thread:
 
 
 def _counted(store: EventJournalStore, *, page_cache: reads.PageCache | None = None) -> EventJournalStore:
-    """Return a store over the same database, with a page cache of its own, whose reads are counted."""
+    """Return a store over the same database whose reads are counted, reading through ``page_cache`` or none."""
     inner = store.backend
     backend = cast("Backend", _CountingBackend(inner.inner if isinstance(inner, _CountingBackend) else inner))
-    if page_cache is None:
-        return EventJournalStore(backend=backend, approval_signals=store.approval_signals)
     return EventJournalStore(backend=backend, approval_signals=store.approval_signals, page_cache=page_cache)
 
 
@@ -109,7 +107,8 @@ async def _seed(store: PrincipalStore, replies: int = REPLIES) -> None:
 @pytest_asyncio.fixture
 async def thread(journal_database: Callable[[], EventJournalStore]) -> _Thread:
     """Return a seeded thread that has been read once."""
-    thread = _thread(_counted(journal_database()))
+    opened = journal_database()
+    thread = _thread(_counted(opened, page_cache=opened.page_cache))
     await _seed(thread.store)
     page, loaded = await thread.read()
     assert len(page.messages) == loaded == REPLIES + 1
@@ -217,6 +216,25 @@ class TestNothingStale:
         assert page.refresh_pending == ()
         assert (page.messages[7].revision_event_id, page.messages[7].content["body"]) == ("$reply-007", "reply 7")
 
+    async def test_a_refetch_storing_another_body_under_a_read_revision_is_read(self, thread: _Thread) -> None:
+        """A refetch may store a revision a read already loaded with other content of the same size and time."""
+        await admit(thread.store, "$edit", ts=6_000, content=edit("$reply-007", "secret"))
+        assert (await thread.bodies())[7] == "secret"
+        await admit(thread.store, "$redaction", ts=7_000, redacts="$edit", kind=EventKind.REDACTION)
+        page, _ = await thread.read()
+
+        assert await thread.store.install_refetched_revision(
+            page.refresh_pending[0],
+            revision_event_id="$reply-007",
+            revision_ts=1_007,
+            revision_sender=ALICE,
+            content=text("REPLY 7"),
+        )
+        warm, _ = await thread.read()
+        cold, _ = await _thread(_counted(thread.journal)).read()
+        assert warm.messages[7].content["body"] == "REPLY 7"
+        assert warm == cold
+
     async def test_a_redacted_message_is_gone(self, thread: _Thread) -> None:
         """Redacting the original removes the message from the next read."""
         await admit(thread.store, "$redaction", ts=7_000, redacts="$reply-007", kind=EventKind.REDACTION)
@@ -290,7 +308,7 @@ async def test_a_store_that_read_before_reads_what_a_store_reading_first_does(
     journal_database: Callable[[], EventJournalStore],
     seed: int,
 ) -> None:
-    """Whatever order replies, edits, redactions and refetches land in, every page equals a first read's."""
+    """Whatever order replies, edits, redactions and refetches of any body land in, every page equals a first read's."""
     rng = random.Random(seed)  # noqa: S311 - a reproducible order, not a secret
     journal = journal_database()
     warm = journal.principal("agent@alice")
@@ -319,7 +337,7 @@ async def test_a_store_that_read_before_reads_what_a_store_reading_first_does(
                     revision_event_id=revision,
                     revision_ts=ts,
                     revision_sender=ALICE,
-                    content=events[revision],
+                    content=text(rng.choice(_BODIES)),
                 )
         cold = EventJournalStore(backend=journal.backend, approval_signals=journal.approval_signals)
         for thread_id, limit in ((ROOT, WINDOW), (ROOT, rng.randint(1, 8)), (None, WINDOW)):
@@ -345,7 +363,7 @@ class TestWhoseRows:
         assert await bob.bodies() == ["root", "only bob saw this edit", "bob's 2"]
 
     async def test_a_departure_empties_the_thread_and_a_rejoin_reads_what_it_delivers(self, thread: _Thread) -> None:
-        """Rows a membership held are not read under the next one."""
+        """Rows a membership held are not read under the next one, even delivered again at the same revision and size."""
         await admit_room_membership(thread.store, ROOM, "leave", source=DepartureSource.LOCAL)
         assert await thread.bodies() == []
 
@@ -355,7 +373,7 @@ class TestWhoseRows:
             thread_id=ROOT,
             events=(
                 projection(ROOT, ts=1_000, content=text("root")),
-                projection("$reply-001", ts=1_001, thread_id=ROOT, content=text("reply 1")),
+                projection("$reply-001", ts=1_001, thread_id=ROOT, content=text("REPLY 1")),
                 projection("$reply-002", ts=1_002, thread_id=ROOT, content=text("reply 2")),
             ),
             complete=True,
@@ -364,7 +382,7 @@ class TestWhoseRows:
         await admit(thread.store, "$long", ts=6_000, content=sidecar(edit("$reply-002", "preview")))
 
         page, _ = await thread.read()
-        assert [message.content["body"] for message in page.messages] == ["root", "reply 1"]
+        assert [message.content["body"] for message in page.messages] == ["root", "REPLY 1"]
         assert [message.revision_event_id for message in page.messages] == [ROOT, "$reply-001"]
         assert [request.membership_epoch for request in page.refresh_pending] == [epoch]
 

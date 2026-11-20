@@ -8,7 +8,8 @@ rather than something it is trusted not to do.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -28,6 +29,7 @@ from .models import (
     IngestionConsumer,
     IngestionConsumerBindingError,
 )
+from .projection import StoredBody
 from .tool_jobs import SavedToolJob  # noqa: TC001 - part of this module's runtime return types
 from .views import (
     ApprovalDeliveryView,
@@ -39,7 +41,7 @@ from .views import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
@@ -102,7 +104,7 @@ class PrincipalStore(
     """
 
     _approval_signals: ApprovalSignals
-    _page_cache: reads.PageCache
+    _page_cache: reads.PageCache | None
 
     async def load_or_create_ingestion_consumer(self, *, new_generation: UUID) -> IngestionConsumer:  # noqa: D102
         return await self._write(_consumer, new_generation, None)
@@ -181,6 +183,12 @@ class PrincipalStore(
         )
 
 
+def _publish(approval_signals: ApprovalSignals, page_cache: reads.PageCache, signals: Sequence[object]) -> None:
+    """Tell one store's page cache, then its approval listeners, what a committed batch of writes signalled."""
+    page_cache.forget([signal for signal in signals if isinstance(signal, StoredBody)])
+    approval_signals.publish([signal for signal in signals if not isinstance(signal, StoredBody)])
+
+
 @dataclass(frozen=True, slots=True)
 class EventJournalStore:
     """The shared backend, which hands out per-principal views."""
@@ -189,23 +197,26 @@ class EventJournalStore:
     # What this store's committed approval writes tell the process; its backend publishes them here.
     approval_signals: ApprovalSignals
     # Content this store's conversation reads loaded, shared by its principals and bounded for all of them together.
-    page_cache: reads.PageCache = field(default_factory=reads.PageCache)
+    # Only a store opened here has one, because only its backend tells the cache which bodies its writes replaced.
+    page_cache: reads.PageCache | None = None
 
     @classmethod
     def open_sqlite(cls, database_path: Path) -> EventJournalStore:
         """Open a single-writer SQLite store."""
         from .sqlite_backend import SqliteBackend  # noqa: PLC0415 - backend chosen at runtime
 
-        signals = ApprovalSignals()
-        return cls(backend=SqliteBackend.open(database_path, publish=signals.publish), approval_signals=signals)
+        signals, page_cache = ApprovalSignals(), reads.PageCache()
+        backend = SqliteBackend.open(database_path, publish=partial(_publish, signals, page_cache))
+        return cls(backend=backend, approval_signals=signals, page_cache=page_cache)
 
     @classmethod
     def open_postgres(cls, database_url: str) -> EventJournalStore:
         """Open a PostgreSQL store."""
         from .postgres_backend import PostgresBackend  # noqa: PLC0415 - keeps psycopg optional
 
-        signals = ApprovalSignals()
-        return cls(backend=PostgresBackend.open(database_url, publish=signals.publish), approval_signals=signals)
+        signals, page_cache = ApprovalSignals(), reads.PageCache()
+        backend = PostgresBackend.open(database_url, publish=partial(_publish, signals, page_cache))
+        return cls(backend=backend, approval_signals=signals, page_cache=page_cache)
 
     def principal(self, principal_id: str) -> PrincipalStore:
         """Return the bound view for one bot."""

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 
@@ -34,6 +34,14 @@ _REL_TYPE = "rel_type"
 _REPLACE_REL_TYPE = "m.replace"
 _THREAD_REL_TYPE = "m.thread"
 _NEW_CONTENT = "m.new_content"
+
+
+class StoredBody(NamedTuple):
+    """What every write that stores a visible message's body signals, so no reader keeps the body it replaced."""
+
+    principal_id: str
+    room_id: str
+    logical_event_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +238,7 @@ def _project_original(
             membership_epoch,
         ),
     )
+    transaction.signal(StoredBody(principal_id, event.room_id, event.event_id))
     record_projected_prompt(
         transaction,
         principal_id,
@@ -504,6 +513,7 @@ def _install_revision(
             logical_event_id,
         ),
     )
+    transaction.signal(StoredBody(principal_id, room_id, logical_event_id))
 
 
 def scrub_redacted_projection(
@@ -682,6 +692,7 @@ def install_refetched_revision(
     )
     if row is None:
         return None
+    transaction.signal(StoredBody(principal_id, room_id, logical_event_id))
     record_projected_prompt(
         transaction,
         principal_id,

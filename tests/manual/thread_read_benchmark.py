@@ -198,6 +198,7 @@ async def main() -> None:
         store = EventJournalStore(
             backend=cast("Backend", _CountingBackend(opened.backend, loaded)),
             approval_signals=opened.approval_signals,
+            page_cache=opened.page_cache,
         )
         try:
             print(f"backend={target.split(':')[0]} turns={TURNS} window={HYDRATED_PROMPT_WINDOW_MESSAGES}")

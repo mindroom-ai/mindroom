@@ -23,9 +23,11 @@ from .models import (
     RoomPage,
     VisibleMessage,
 )
-from .projection import decode_content
+from .projection import StoredBody, decode_content
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .backend import Row, Transaction
 
 _PAGE_COLUMNS = """
@@ -103,9 +105,10 @@ class PageCache:
     page asks for it with the values its own snapshot reports. Every other column of a row is read from that
     snapshot each time, and a removed row is never asked for. An edit installs another revision, and a redaction or
     an unresolved sidecar clears the body, which leaves it no stored size, so a row that changed finds nothing here
-    under its new values, whichever store or process changed it. A body is only ever stored as the content of the
-    event its revision names, which Matrix never changes, so a refetch that names an earlier revision again finds
-    that event's content.
+    under its new values, whichever store or process changed it. A refetch, or a row removed and delivered again,
+    can store another body under values a page already read, so every write that stores a body signals
+    ``StoredBody``, and the store's one writer has the row forgotten once the write commits, before its caller
+    resumes. Only a store that publishes those signals here may read through a cache.
 
     Only what the database stored is kept. Each page decodes its own content, so no two readers share an object.
 
@@ -114,28 +117,44 @@ class PageCache:
     """
 
     budget_bytes: int = _PAGE_CACHE_BYTES
-    _contents: OrderedDict[_ContentKey, _Content] = field(default_factory=OrderedDict, init=False, repr=False)
+    # Each row's content at the revision last read, under its principal, room and logical event.
+    _contents: OrderedDict[tuple[str, ...], tuple[_ContentKey, _Content]] = field(
+        default_factory=OrderedDict,
+        init=False,
+        repr=False,
+    )
     _held_bytes: int = field(default=0, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def kept(self, keys: list[_ContentKey]) -> dict[_ContentKey, _Content]:
         """Return the content kept under each of ``keys``, marking it read just now."""
         with self._lock:
-            found = {key: self._contents[key] for key in keys if key in self._contents}
-            for key in found:
-                self._contents.move_to_end(key)
+            found: dict[_ContentKey, _Content] = {}
+            for key in keys:
+                if (entry := self._contents.get(key[:3])) is not None and entry[0] == key:
+                    self._contents.move_to_end(key[:3])
+                    found[key] = entry[1]
             return found
 
     def keep(self, loaded: dict[_ContentKey, _Content]) -> None:
         """Keep content a page just loaded, dropping what was read longest ago once the budget is passed."""
         with self._lock:
             for key, content in loaded.items():
-                if key not in self._contents:
-                    self._held_bytes += (key[-1] or 0) + _CACHED_ROW_OVERHEAD_BYTES
-                self._contents[key] = content
+                self._forget(key[:3])
+                self._contents[key[:3]] = (key, content)
+                self._held_bytes += (key[-1] or 0) + _CACHED_ROW_OVERHEAD_BYTES
             while self._held_bytes > self.budget_bytes:
-                dropped, _ = self._contents.popitem(last=False)
-                self._held_bytes -= (dropped[-1] or 0) + _CACHED_ROW_OVERHEAD_BYTES
+                self._forget(next(iter(self._contents)))
+
+    def forget(self, stored: Sequence[StoredBody]) -> None:
+        """Drop every row a committed batch of writes stored a body for."""
+        with self._lock:
+            for row in stored:
+                self._forget(row)
+
+    def _forget(self, row: tuple[str, ...]) -> None:
+        if (entry := self._contents.pop(row, None)) is not None:
+            self._held_bytes -= (entry[0][-1] or 0) + _CACHED_ROW_OVERHEAD_BYTES
 
 
 # Everything older than one page's last row, spelled as a row value.
