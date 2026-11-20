@@ -33,12 +33,14 @@ class WorkflowRuntimeLifecycle:
     async def _maintain(self) -> None:
         """End the runs whose attempts ended, then delete the runs that ended before the script runtime's retention.
 
-        The script runtime prunes its own runs after this, so an error here is logged and waits for the next pass.
+        The script runtime prunes its own runs after this, inside the same pass, so this gets half of the pass's time,
+        and an error or a timeout here is logged and waits for the next pass.
         """
         try:
-            await self.engine.reconcile()
-            cutoff = datetime.now(UTC) - timedelta(seconds=self.script_runtime.retention_seconds)
-            await asyncio.to_thread(self.engine.store.prune, utc_timestamp(cutoff))
+            async with asyncio.timeout(self.script_runtime.pass_timeout_seconds / 2):
+                await self.engine.reconcile()
+                cutoff = datetime.now(UTC) - timedelta(seconds=self.script_runtime.retention_seconds)
+                await asyncio.to_thread(self.engine.store.prune, utc_timestamp(cutoff))
         except Exception:
             logger.exception("workflow_maintenance_pass_failed")
 

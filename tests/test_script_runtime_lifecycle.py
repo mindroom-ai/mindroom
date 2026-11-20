@@ -48,6 +48,7 @@ from mindroom.orchestration.script_runtime import (
     build_script_runtime,
     optional_script_gateway_url,
 )
+from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
 from mindroom.script_runs.models import (
@@ -3660,6 +3661,39 @@ async def test_terminal_run_is_pruned_only_after_retention_and_approval_cleanup(
     assert store.get_run(run_id).state is ScriptRunState.EXITED
 
     await _prune_once(runtime, now=finished_at + timedelta(seconds=61))
+    with pytest.raises(ScriptRunNotFoundError):
+        store.get_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_stalled_workflow_maintenance_never_skips_script_pruning(tmp_path: Path) -> None:
+    """The workflow pass gets its own share of a pass, so a workflow store that hangs leaves time to prune scripts."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run_id = f"script-{'e' * 32}"
+    running = _stored_run_pinned_to_worker(store, runtime_paths, run_id=run_id)
+    store.record_process_exit(running.run_id, exit_code=0, error=None, output="", cancellation_reason="Exited.")
+    store.finalize_cleaned_run(running.run_id, state=ScriptRunState.EXITED)
+    runtime = _lifecycle(
+        runtime_paths,
+        store=store,
+        manager=_manager_stub(gateway_url="", reconcile_durable=AsyncMock()),
+        retention_seconds=0.001,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
+    )
+    runtime.bind_api("http://primary.test/api/script-gateway")
+    stalled = asyncio.Event()
+
+    async def stall() -> None:
+        stalled.set()
+        await asyncio.Event().wait()
+
+    workflows = WorkflowRuntimeLifecycle(engine=SimpleNamespace(reconcile=stall), script_runtime=runtime)  # type: ignore[arg-type]
+    await workflows.start()
+
+    await asyncio.wait_for(runtime._run_complete_pass(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    assert stalled.is_set()
     with pytest.raises(ScriptRunNotFoundError):
         store.get_run(run_id)
 

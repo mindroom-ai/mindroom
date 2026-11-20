@@ -669,7 +669,7 @@ async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
 ) -> None:
     """A run whose attempt record is gone ends interrupted, and neither it nor a failing run stops the pass."""
     with workflow_stack(tmp_path) as stack:
-        script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0)
+        script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0, pass_timeout_seconds=30.0)
         lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
         await lifecycle.start()
         orphan = await stack.start()
@@ -712,7 +712,7 @@ async def test_workflow_store_error_never_fails_the_script_runtime_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The script runtime prunes its own runs after this pass, so a workflow store it cannot read must not raise there."""
-    script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0)
+    script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0, pass_timeout_seconds=30.0)
     lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
     await lifecycle.start()
 
