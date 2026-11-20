@@ -413,13 +413,32 @@ async def test_disabling_personal_rooms_drops_a_queued_retry(coordination: Coord
 
 
 @pytest.mark.asyncio
+async def test_every_bot_consumes_the_lobby_command_and_its_steward_alone_onboards(coordination: Coordination) -> None:
+    """Each bot in the lobby takes the configured command as handled, and only the lobby's steward runs it, once."""
+    lifecycle = coordination.lifecycle
+    consumed = []
+    # The same command reaches a bot that does not steward the lobby, then the steward.
+    for is_steward in (False, True):
+        lifecycle.is_steward = lambda _room_id, is_steward=is_steward: is_steward
+        consumed.append(await lifecycle.handle_command(LOBBY, command(), "@alice:localhost"))
+        assert coordination.owner.ensure.await_count == int(is_steward)
+    assert consumed == [True, True]
+    # Other text, and the command outside the lobby, stay every bot's to answer.
+    lifecycle.is_steward = lambda _room_id: False
+    assert not await lifecycle.handle_command(LOBBY, command("!help"), "@alice:localhost")
+    other_room = nio.MatrixRoom("!other:localhost", LOBBY.own_user_id)
+    assert not await lifecycle.handle_command(other_room, command(), "@alice:localhost")
+
+
+@pytest.mark.asyncio
 async def test_non_steward_never_routes_onboarding(coordination: Coordination) -> None:
     """A bot that stewards no onboarding room and took no trigger selects and invokes no target service."""
     lifecycle = coordination.lifecycle
     lifecycle.is_steward = lambda _room_id: False
     lifecycle.runtime.config.personal_rooms.backfill = True
     assert not lifecycle._observes_onboarding_joins
-    assert not await lifecycle.handle_command(
+    # It still takes the lobby's command as handled, so it never answers it as an unknown command.
+    assert await lifecycle.handle_command(
         nio.MatrixRoom("!lobby:localhost", "@helper:localhost"),
         command(),
         "@alice:localhost",

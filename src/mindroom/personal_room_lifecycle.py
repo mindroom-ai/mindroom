@@ -428,23 +428,24 @@ class PersonalRoomLifecycle:
         event: nio.RoomMessageFormatted,
         requester_user_id: str,
     ) -> bool:
-        """Recognize exact self-onboarding commands, typed with `!` or `/`; ``requester_user_id`` is the event's trusted requester."""
+        """Recognize exact self-onboarding commands, typed with `!` or `/`; ``requester_user_id`` is the event's trusted requester.
+
+        Every bot in an onboarding room takes its command as handled, so none answers it as an unknown command, and
+        only the room's steward runs it.
+        """
         settings = self.runtime.config.personal_rooms
-        if settings is None or not self.is_steward(room.room_id):
+        if settings is None:
             return False
         body = event.body.strip()
         command = f"!{body[1:]}" if body.startswith("/") else body
         # Only a configured command reads the onboarding rooms, which can read saved Matrix state.
         if command not in settings.commands or not self.onboards_from(room.room_id):
             return False
-        if is_human_requester_id(
-            event.sender,
-            self.runtime.config,
-            self.runtime_paths,
-        ) and requester_user_id == resolve_human_requester_alias(
-            event.sender,
-            self.runtime.config,
-            self.runtime_paths,
+        if (
+            self.is_steward(room.room_id)
+            and is_human_requester_id(event.sender, self.runtime.config, self.runtime_paths)
+            and requester_user_id
+            == resolve_human_requester_alias(event.sender, self.runtime.config, self.runtime_paths)
         ):
             await self._onboard_live(event.sender, room.room_id)
         return True
