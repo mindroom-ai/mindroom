@@ -428,7 +428,7 @@ async def test_untagged_follow_up_in_a_moved_team_thread_still_gets_the_team(con
         display_names={},
         mentioned_user_ids=lambda content: history_mentioned_user_ids(content, config, runtime_paths_for(config)),
     )
-    history = [make_visible_message(sender=general_id, content=copy.content) for copy in copies]
+    history = [make_visible_message(sender=general_id, content=copy) for copy in copies]
     context = _context(thread_id="$moved:localhost", thread_history=history)
 
     general_plan = await _plan(_policy_for(config, "general"), room, _dispatch(context, agent_name="general"))
