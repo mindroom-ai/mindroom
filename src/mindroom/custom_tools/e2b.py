@@ -151,7 +151,7 @@ class MindRoomE2BTools(E2BTools):
         raise ValueError(msg)
 
     # AGNO_COMPAT: E2BTools.run_python_code reads sandbox code output without a size bound.
-    # Reason: Agno 3.0.9 calls Sandbox.run_code, which in e2b-code-interpreter 2.1.1 reads each output line whole,
+    # Reason: Agno 3.2.1 calls Sandbox.run_code, which in e2b-code-interpreter 2.1.1 reads each output line whole,
     # so one large print or image grows the primary's memory before any callback runs. This override copies
     # Agno's result formatting, and _run_code_within_read_limit copies the SDK's /execute request.
     # Upstream issue: Tracking gap; no matching issue has been verified.
@@ -194,7 +194,7 @@ class MindRoomE2BTools(E2BTools):
         return json.dumps(results)
 
     # AGNO_COMPAT: E2BTools.run_command keeps a command's whole output without a size bound.
-    # Reason: Agno 3.0.9 waits on the E2B SDK's commands.run, which in e2b 2.2.3 keeps all stdout and stderr
+    # Reason: Agno 3.2.1 waits on the E2B SDK's commands.run, which in e2b 2.2.3 keeps all stdout and stderr
     # until the command ends, so a chatty command grows the primary's memory without limit.
     # Upstream issue: Tracking gap; no matching issue has been verified.
     # Upstream PR: No matching fix has been verified.

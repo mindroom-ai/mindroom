@@ -292,7 +292,7 @@ class _MindRoomFileTools(AgnoFileTools):
         if not search_dir.is_dir():
             return f"Error: '{directory}' is not a directory"
         # AGNO_COMPAT: FileTools.search_content cannot search outside base_dir.
-        # Reason: Agno 3.0.9 relativizes every hit and exclusion check against
+        # Reason: Agno 3.2.1 relativizes every hit and exclusion check against
         # self.base_dir, so unrestricted agents cannot search other directories.
         # Searching a shallow copy rooted at the target relies on that method
         # deriving all state from self.base_dir.
@@ -316,7 +316,7 @@ class _MindRoomFileTools(AgnoFileTools):
     def _search_workspace_content(self, query: str, directory: str | None, search_dir: Path, limit: int) -> str:
         """Search like Agno, reading each walked file through the same checks and descriptors as ``read_file``."""
         # AGNO_COMPAT: FileTools.search_content checks one path and then opens another.
-        # Reason: Agno 3.0.9 checks each walked file with safe_join_relative_path, which
+        # Reason: Agno 3.2.1 checks each walked file with safe_join_relative_path, which
         # NFKC-normalizes the path and strips trailing dots and spaces from every segment, then
         # opens the unsanitized path by name and follows its links, so worker code that writes the
         # workspace can plant `d /x.txt` linked to any file beside a real `d/x.txt` and make a
