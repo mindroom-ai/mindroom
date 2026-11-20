@@ -34,7 +34,6 @@ from tests.identity_helpers import entity_ids
 from tests.scheduling_helpers import (
     persist_schedule_writer,
     scheduled_task_runtime,
-    scheduled_task_state_event,
     scheduling_bot,
     serve_task_state_events,
 )
@@ -476,27 +475,6 @@ async def test_restore_names_a_room_whose_state_it_cannot_read(tmp_path: Path) -
     assert [log["room_id"] for log in logs if log["event"] == "scheduled_task_room_state_unread"] == [ROOM_ID]
 
 
-def _room_state(writer_id: str, agent_id: str, task_content: dict[str, Any], *, agent_level: int) -> list[dict]:
-    """Return a room's full state: one agent joined at a power level, no router, and a task ``writer_id`` wrote."""
-
-    def state(event_type: str, state_key: str, content: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "type": event_type,
-            "state_key": state_key,
-            "content": content,
-            "sender": agent_id,
-            "event_id": f"${event_type}:{state_key}",
-            "origin_server_ts": 1,
-            "room_id": ROOM_ID,
-        }
-
-    return [
-        state("m.room.member", agent_id, {"membership": "join"}),
-        state("m.room.power_levels", "", {"users": {agent_id: agent_level}, "state_default": 50}),
-        scheduled_task_state_event(TASK_ID, task_content, room_id=ROOM_ID, sender=writer_id),
-    ]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_may_write", [True, False])
 async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_down(
@@ -509,18 +487,9 @@ async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_d
     persist_schedule_writer(runtime_paths, retired_id, entity_name="retired")
     workflow = _workflow(due=False)
     content = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"}
-    client = make_matrix_client_mock(user_id=ids["general"])
-    client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(
-        _room_state(retired_id, ids["general"], content, agent_level=100 if agent_may_write else 0),
-        room_id=ROOM_ID,
-    )
-
-    async def read_task(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
-        return nio.RoomGetStateEventResponse(dict(content), event_type, state_key, room_id)
-
-    client.room_get_state_event.side_effect = read_task
-    client.room_put_state.return_value = nio.RoomPutStateResponse("$failed", ROOM_ID)
-    serve_task_state_events(client, sender=retired_id)
+    room = _SharedRoom({ids["general"]: 100 if agent_may_write else 0})
+    room._put("com.mindroom.scheduled.task", TASK_ID, content, retired_id)
+    client = room.client(ids["general"])
     bot = scheduling_bot(client, agent_name="general")
     runtime = _runtime(runtime_paths, config, {"general": bot})
 
@@ -541,18 +510,14 @@ async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_d
 
 @pytest.mark.asyncio
 async def test_restore_by_a_bot_that_does_not_own_the_task_starts_no_runner(tmp_path: Path) -> None:
-    """Only the owner the rule picks starts a task's runner; another bot joining the room leaves it alone."""
+    """An ownerless task runs under the agent that last wrote it; another bot restoring the room leaves it alone."""
     config, runtime_paths, ids = _config_and_ids(tmp_path)
     workflow = _workflow(due=False)
     content = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"}
-    # The router is not joined, so the agent that wrote the task owns it.
-    state = _room_state(ids["general"], ids["general"], content, agent_level=100)
-    router_client = make_matrix_client_mock(user_id=ids["router"])
-    router_client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(state, room_id=ROOM_ID)
-    agent_client = make_matrix_client_mock(user_id=ids["general"])
-    agent_client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(state, room_id=ROOM_ID)
-    router = scheduling_bot(router_client)
-    agent = scheduling_bot(agent_client, agent_name="general")
+    room = _SharedRoom({ids["general"]: 100})
+    room._put("com.mindroom.scheduled.task", TASK_ID, content, ids["general"])
+    router = scheduling_bot(room.client(ids["router"]))
+    agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
     runtime = _runtime(runtime_paths, config, {"router": router, "general": agent})
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
