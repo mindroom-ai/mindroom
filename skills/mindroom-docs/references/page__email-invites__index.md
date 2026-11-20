@@ -2,7 +2,7 @@
 
 With the `email_invite` tool, a person can ask an agent "invite alice@example.com to this room".
 When the person asking may invite, or after someone who may invite confirms a waiting request, the address gets a link that works once.
-The newcomer opens it in MindRoom Chat, signs up or signs in the normal way on any homeserver that federates with yours, clicks Join, and is invited to the room by the router.
+The newcomer opens it in MindRoom Chat, signs up or signs in the normal way on any homeserver that federates with yours, clicks Join, and is invited to the room by the agent that sent the link.
 No server-admin rights and no public MindRoom endpoint are needed, so this also works for MindRoom on your own machine behind NAT.
 
 ## Set-Up
@@ -35,7 +35,7 @@ To send mail, set two environment variables:
 | `MINDROOM_SMTP_URL` | `smtps://[user:password@]host[:port]` (TLS from the start, default port 465) or `smtp://[user:password@]host[:port]` (default port 587, `STARTTLS` required unless the host is `localhost` or a loopback address); any other scheme sends nothing; user and password are URL-encoded, and the variable is kept from workers like other secrets |
 | `MINDROOM_SMTP_FROM` | The sender, for example `MindRoom <invites@example.org>` |
 
-The router must be in the room and allowed to invite there; without the router, the tool call is denied with the hint to run [`invite_router`](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing).
+The agent (or team) that takes the request sends the Matrix invite from its own account, so it must be allowed to invite in the room; otherwise the call answers "I need moderator rights in this room to invite people."
 Personal rooms, onboarding rooms and spaces are refused.
 
 ## Who Approves
@@ -58,11 +58,11 @@ Everyone who can read it there is already in the room, the link works once, and 
 ## What the Link Allows
 
 The link is a bearer token: whoever holds it can join the room once, with any Matrix account.
-MindRoom cannot check that the account belongs to the mailed address, so when someone uses a link, the router posts "Invite for alice@example.com (approved by @bas:example.org) was used by @alice:example.org." in the thread where the invite was asked for.
-A link stops working once used, when it expires, or when it is revoked. A link causes at most one Matrix invite: once the router starts sending it, the link cannot be revoked and never sends again.
+MindRoom cannot check that the account belongs to the mailed address, so when someone uses a link, the agent that sent it posts "Invite for alice@example.com (approved by @bas:example.org) was used by @alice:example.org." in the thread where the invite was asked for.
+A link stops working once used, when it expires, or when it is revoked. A link causes at most one Matrix invite: once the agent starts sending it, the link cannot be revoked and never sends again.
 The approver's right is checked again when the link is used; if they lost it, the invite is revoked.
 A person removed from the room cannot use the same link to come back.
-When the Matrix invite does not clearly succeed (a refusal, a timeout or an unexpected error), or the router stopped while sending it, the link stops working and the thread is told once that the invite may or may not have gone out; the approver can send a new link, which is not blocked by the old one.
+When the Matrix invite does not clearly succeed (a refusal, a timeout or an unexpected error), or the agent stopped while sending it, the link stops working and the thread is told once that the invite may or may not have gone out; the approver can send a new link, which is not blocked by the old one.
 
 In an encrypted room, the newcomer does not see messages sent before they joined; the mail says so.
 Whether agents answer the newcomer follows the normal [access rules](https://docs.mindroom.chat/authorization/): in a room that is not one of an agent's managed rooms, the agent may stay silent for them.
@@ -83,7 +83,7 @@ Known limits:
 
 - Without a `tool_approval` rule that requires approval for `invite_by_email` (and with `tool_approval.default: auto_approve`), an agent can send invite mail without a card, within the caps; the asker must still have the invite right. Auto-approval (timed card approval, `!auto_approve`) covers it like any tool.
 
-- The router's Matrix sync store keeps the claim event, code included, in plain text on the router's own disk. The code works once and is bound to the first account that uses it.
-- A claim that arrives just before the router crashes may get no answer; the person clicks Join again.
+- The Matrix sync store of the agent that sent the link keeps the claim event, code included, in plain text on the agent's own disk. The code works once and is bound to the first account that uses it.
+- A claim that arrives just before the agent crashes, or while it is not running, may get no answer; the person clicks Join again.
 - A revoke that lands while a claim's Matrix invite is already on its way does not stop that invite; the thread is then told the outcome.
 Members who may not invite can fill a room's 20 open requests; someone who may invite clears them with `revoke_email_invite`.

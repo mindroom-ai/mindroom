@@ -4474,10 +4474,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.email_invites.receiver"
 depends_on = [
-    "mindroom.constants",
     "mindroom.email_invites.policy",
     "mindroom.email_invites.store",
-    "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.mcp_gateway.admission",
 ]
@@ -4486,11 +4484,9 @@ depends_on = [
 path = "mindroom.custom_tools.email_invite"
 depends_on = [
     "mindroom.approval.tool_approval",
-    "mindroom.constants",
     "mindroom.email_invites.mail",
     "mindroom.email_invites.policy",
     "mindroom.email_invites.store",
-    "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",

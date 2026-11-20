@@ -38,7 +38,11 @@ class EmailInviteLimitError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class EmailInvite:
-    """One stored invite request; `inviter_id`, `sent_at` are None while it waits for approval."""
+    """One stored invite request; `inviter_id`, `sent_at` are None while it waits for approval.
+
+    `agent_name` is the entity whose Matrix account took the request and, once the link is sent, the one whose
+    account the link names: it alone answers the claim, sends the Matrix invite and posts the notices.
+    """
 
     id: int
     room_id: str
@@ -107,7 +111,7 @@ def _enforce(connection: sqlite3.Connection, limit: _LimitName, maximum: int, wh
 
 
 class Request(NamedTuple):
-    """Where a request is made and by whom: the room, its thread, the address, the person, and the agent."""
+    """Where a request is made and by whom: the room, its thread, the address, the person, and the answering entity."""
 
     room_id: str
     thread_id: str | None
@@ -161,10 +165,12 @@ def issue_code(
         _enforce(connection, "deployment", 50, "sent_at > ?", (current - _DAY,))
         expires_at = current + expiry_days * _DAY
         connection.execute(
-            "UPDATE email_invites SET inviter_id = ?, code_hash = ?, sent_at = ?, expires_at = ? WHERE id = ?",
-            (request.person, _hash(code), current, expires_at, invite.id),
+            "UPDATE email_invites SET inviter_id = ?, agent_name = ?, code_hash = ?, sent_at = ?, expires_at = ?"
+            " WHERE id = ?",
+            (request.person, request.agent_name, _hash(code), current, expires_at, invite.id),
         )
-    return replace(invite, inviter_id=request.person, sent_at=current, expires_at=expires_at), code
+    sent = replace(invite, inviter_id=request.person, agent_name=request.agent_name, sent_at=current)
+    return replace(sent, expires_at=expires_at), code
 
 
 def open_invites(paths: RuntimePaths, room_id: str, now: int | None = None) -> list[EmailInvite]:
@@ -224,13 +230,16 @@ def start_sending(paths: RuntimePaths, invite_id: int, claimant: str, now: int |
     return _update(paths, current, sql, (current, invite_id, claimant, current))
 
 
-def abandon_sending(paths: RuntimePaths, invite_id: int | None = None) -> list[EmailInvite]:
-    """Revoke one request, or at startup all, left sending with an unknown outcome; return those this call revoked."""
-    where = "sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0" + (
+def abandon_sending(paths: RuntimePaths, *, invite_id: int | None = None, agent_name: str) -> list[EmailInvite]:
+    """Revoke one request of an entity, or at its start all, left sending with an unknown outcome.
+
+    Return those this call revoked. Another entity's request is left alone: its own account may still be sending it.
+    """
+    where = "sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0 AND agent_name = ?" + (
         "" if invite_id is None else " AND id = ?"
     )
     with _write(paths, _now(None)) as connection:
-        rows = _select(connection, where, () if invite_id is None else (invite_id,))
+        rows = _select(connection, where, (agent_name,) if invite_id is None else (agent_name, invite_id))
         connection.executemany("UPDATE email_invites SET revoked = 1 WHERE id = ?", [(row.id,) for row in rows])
     return rows
 

@@ -1,4 +1,4 @@
-"""Tests for the router's email-invite claim receiver."""
+"""Tests for the email-invite claim receiver of the account that sent a link."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import nio
 import pytest
 import pytest_asyncio
 
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.email_invites import receiver as receiver_module
 from mindroom.email_invites import store
 from mindroom.email_invites.receiver import _CLAIM_EVENT_TYPE, _RESULT_EVENT_TYPE, register_email_invite_receiver
@@ -40,6 +40,7 @@ class Harness:
         """Register the receiver with fakes for room state."""
         self.config = bind_runtime_paths(
             Config(
+                agents={"code": AgentConfig(display_name="Code", role="Write code")},
                 router=RouterConfig(model="default"),
                 models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
                 bot_accounts=["@bridge:example.org"],
@@ -47,14 +48,14 @@ class Harness:
             test_runtime_paths(tmp_path),
         )
         self.paths: RuntimePaths = runtime_paths_for(self.config)
-        self.router_id = entity_identity_registry(self.config, self.paths).current_id(ROUTER_AGENT_NAME).full_id
+        self.account_id = entity_identity_registry(self.config, self.paths).current_id("code").full_id
         self.memberships: dict[str, str | None] = {}
-        self.rights: dict[str, bool | None] = {BAS: True, self.router_id: True}
+        self.rights: dict[str, bool | None] = {BAS: True, self.account_id: True}
         self.rights_hook: Callable[[], None] = lambda: None
         self.refused: str | None = None
         self.events: list[str] = []
         self.client = AsyncMock()
-        self.client.user_id, self.client.device_id = self.router_id, "ROUTERDEV"
+        self.client.user_id, self.client.device_id = self.account_id, "CODEDEV"
         self.client.rooms = {}
         self.client.room_invite = AsyncMock(return_value=nio.RoomInviteResponse())
         self.notices: list[dict[str, Any]] = []
@@ -98,11 +99,11 @@ class Harness:
         )
 
     async def start(self) -> None:
-        """Register the receiver, as the router does at each start."""
+        """Register the receiver, as the `code` agent's bot does at each start."""
         self.callbacks.clear()
         await register_email_invite_receiver(
             client=self.client,
-            agent_name=ROUTER_AGENT_NAME,
+            agent_name="code",
             runtime_paths=self.paths,
             config_getter=lambda: self.config,
             callback_wrapper=lambda callback: callback,
@@ -152,7 +153,7 @@ class Harness:
 
 @pytest_asyncio.fixture
 async def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
-    """A router receiver with one approver who may invite."""
+    """The `code` agent's receiver with one approver who may invite."""
     started = Harness(tmp_path, monkeypatch)
     await started.start()
     return started
@@ -217,9 +218,9 @@ async def test_malformed_claims_get_no_answer(harness: Harness, content: dict[st
 
 @pytest.mark.asyncio
 async def test_agent_and_bot_senders_are_ignored(harness: Harness) -> None:
-    """The router itself and configured bot accounts are not claimants."""
+    """An agent's own account and configured bot accounts are not claimants."""
     _invite, code = harness.sent_invite()
-    assert await harness.claim(harness.router_id, code) is None
+    assert await harness.claim(harness.account_id, code) is None
     assert await harness.claim("@bridge:example.org", code) is None
     harness.client.room_invite.assert_not_awaited()
 
@@ -289,10 +290,10 @@ async def test_unreadable_state_answers_retry_and_keeps_binding(harness: Harness
 
 
 @pytest.mark.asyncio
-async def test_router_without_right_answers_retry(harness: Harness) -> None:
-    """A router that lost the invite right answers retry."""
+async def test_account_without_right_answers_retry(harness: Harness) -> None:
+    """An account that lost the invite right answers retry."""
     _invite, code = harness.sent_invite()
-    harness.rights[harness.router_id] = False
+    harness.rights[harness.account_id] = False
     assert (await harness.claim(ALICE, code) or {})["status"] == "retry"
     harness.client.room_invite.assert_not_awaited()
 
@@ -358,19 +359,20 @@ async def test_notice_failure_keeps_result(harness: Harness) -> None:
 
 
 @pytest.mark.asyncio
-async def test_registered_for_router_only(harness: Harness) -> None:
-    """Only the router registers the to-device callback."""
+async def test_a_link_is_answered_and_abandoned_only_by_the_account_that_sent_it(harness: Harness) -> None:
+    """Another entity's link is rejected here, and this account's restart leaves that entity's send alone."""
     harness.client.add_to_device_callback.assert_called_once()
     assert harness.client.add_to_device_callback.call_args.args[1] is nio.UnknownToDeviceEvent
-    other = MagicMock()
-    await register_email_invite_receiver(
-        client=other,
-        agent_name="code",
-        runtime_paths=harness.paths,
-        config_getter=lambda: harness.config,
-        callback_wrapper=lambda callback: callback,
-    )
-    other.add_to_device_callback.assert_not_called()
+    request = store.Request(ROOM, "$thread", "bob@example.com", BAS, "other")
+    invite, code = store.issue_code(harness.paths, request, expiry_days=7)
+    assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
+    assert harness.row(invite.id).claimed_by is None
+    assert store.bind_claim(harness.paths, invite.id, ALICE)
+    assert store.start_sending(harness.paths, invite.id, ALICE)
+    await harness.start()
+    assert harness.row(invite.id).revoked is False
+    assert harness.notices == []
+    harness.client.room_invite.assert_not_awaited()
 
 
 @pytest.mark.asyncio
