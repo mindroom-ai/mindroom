@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import time
-import uuid
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
-from nio.durable.model import RecordKind, SyncRecord
-from nio.durable.store import DurableStore
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -20,7 +16,6 @@ from mindroom.email_invites import receiver as receiver_module
 from mindroom.email_invites import store
 from mindroom.email_invites.receiver import _CLAIM_EVENT_TYPE, _RESULT_EVENT_TYPE, register_email_invite_receiver
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.client_session import olm_store_dir
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -142,8 +137,8 @@ class Harness:
 
     def row(self, invite_id: int) -> store.EmailInvite:
         """Return one row whatever its state."""
-        row = store.get(self.paths, invite_id)
-        assert row is not None
+        with store._connection(self.paths) as connection:
+            (row,) = store._select(connection, "id = ?", (invite_id,))
         return row
 
 
@@ -293,32 +288,46 @@ async def test_router_without_right_answers_retry(harness: Harness) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("outcome", "status"),
-    [
-        (nio.RoomInviteError("forbidden", "M_FORBIDDEN"), "rejected"),
-        (nio.RoomInviteError("unknown", "M_UNKNOWN"), "retry"),
-        (TimeoutError(), "retry"),
-    ],
-)
-async def test_forbidden_invite_is_rejected_other_errors_retry(
-    harness: Harness,
-    outcome: object,
-    status: str,
-) -> None:
-    """M_FORBIDDEN is final; other failures may be retried; the claim stays bound."""
+async def test_forbidden_invite_is_rejected_and_keeps_the_link(harness: Harness) -> None:
+    """M_FORBIDDEN is a definite refusal: no notice, and the link stays bound and open."""
     invite, code = harness.sent_invite()
-    harness.client.room_invite = (
-        AsyncMock(side_effect=outcome)
-        if isinstance(outcome, Exception)
-        else AsyncMock(
-            return_value=outcome,
-        )
-    )
-    assert (await harness.claim(ALICE, code) or {})["status"] == status
+    harness.client.room_invite = AsyncMock(return_value=nio.RoomInviteError("forbidden", "M_FORBIDDEN"))
+    assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
     row = harness.row(invite.id)
-    assert row.claimed_by == ALICE
-    assert row.invited_at is None
+    assert (row.claimed_by, row.revoked, row.invited_at) == (ALICE, False, None)
+    assert harness.notices == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [nio.RoomInviteError("unknown", "M_UNKNOWN"), TimeoutError()])
+async def test_unknown_invite_outcome_kills_the_link_with_one_notice(harness: Harness, outcome: object) -> None:
+    """Two claims meet an unknown outcome: the link dies, one notice says so, and a new link can be sent."""
+    invite, code = harness.sent_invite()
+    release, both = asyncio.Event(), asyncio.Event()
+
+    async def unknown(_room: str, _user: str) -> object:
+        if harness.client.room_invite.await_count == 2:
+            both.set()
+        await release.wait()
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    harness.client.room_invite = AsyncMock(side_effect=unknown)
+    (callback,) = harness.callbacks
+    claims = [asyncio.create_task(callback(_event(ALICE, code, f"r{n}"))) for n in (1, 2)]
+    await both.wait()
+    release.set()
+    await asyncio.gather(*claims)
+    statuses = [call.args[0].content["status"] for call in harness.client.to_device.await_args_list]
+    assert statuses == ["rejected", "rejected"]
+    assert harness.row(invite.id).revoked is True
+    (notice,) = harness.notices
+    assert "may or may not have gone out" in notice["body"]
+    assert f"{BAS} can send a new link if needed" in notice["body"]
+    fresh, fresh_code = harness.sent_invite()
+    assert fresh.id != invite.id
+    assert fresh_code != code
 
 
 @pytest.mark.asyncio
@@ -405,28 +414,27 @@ async def test_expiry_during_rights_read_wins(harness: Harness, monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_overlapping_claims_of_one_account_send_one_invite(harness: Harness) -> None:
-    """Two claims from the same account at once send one Matrix invite; the other is told to retry."""
+async def test_one_success_posts_one_notice(harness: Harness) -> None:
+    """A second claim that sees the invite before the first one's response returns wins the record; one notice."""
     _invite, code = harness.sent_invite()
-    release = asyncio.Event()
+    release, posted = asyncio.Event(), asyncio.Event()
 
-    async def slow_invite(_room: str, _user: str) -> nio.RoomInviteResponse:
+    async def slow_invite(_room: str, user: str) -> nio.RoomInviteResponse:
+        harness.memberships[user] = "invite"
+        posted.set()
         await release.wait()
         return nio.RoomInviteResponse()
 
     harness.client.room_invite = AsyncMock(side_effect=slow_invite)
     (callback,) = harness.callbacks
-    started = asyncio.Event()
-    harness.rights_hook = started.set
     first = asyncio.create_task(callback(_event(ALICE, code, "r1")))
-    await started.wait()
-    for _ in range(20):
-        await asyncio.sleep(0)
+    await posted.wait()
     await callback(_event(ALICE, code, "r2"))
     release.set()
     await first
     statuses = [call.args[0].content["status"] for call in harness.client.to_device.await_args_list]
-    assert sorted(statuses) == ["invited", "retry"]
+    assert statuses == ["invited", "invited"]
+    assert len(harness.notices) == 1
     harness.client.room_invite.assert_awaited_once()
 
 
@@ -445,25 +453,10 @@ async def test_invite_sent_before_a_crash_is_completed_once(harness: Harness) ->
     """An invite the homeserver accepted before a crash is recorded, with one notice, and never sent again."""
     invite, code = harness.sent_invite()
     assert store.bind_claim(harness.paths, invite.id, ALICE)
-    assert store.start_dispatch(harness.paths, invite.id, ALICE)
     harness.memberships[ALICE] = "invite"
     assert (await harness.claim(ALICE, code) or {})["status"] == "invited"
     assert (await harness.claim(ALICE, code) or {})["status"] == "invited"
     assert len(harness.notices) == 1
-    harness.client.room_invite.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_unproven_dispatch_fails_closed(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A dispatch whose outcome no state proves is not repeated: soon it answers retry, later rejected."""
-    invite, code = harness.sent_invite()
-    assert store.bind_claim(harness.paths, invite.id, ALICE)
-    assert store.start_dispatch(harness.paths, invite.id, ALICE)
-    harness.memberships[ALICE] = "leave"
-    assert (await harness.claim(ALICE, code) or {})["status"] == "retry"
-    later = time.time() + 120
-    monkeypatch.setattr(receiver_module.time, "time", lambda: later)
-    assert (await harness.claim(ALICE, code, "r2") or {})["status"] == "rejected"
     harness.client.room_invite.assert_not_awaited()
 
 
@@ -482,22 +475,6 @@ async def test_room_that_became_a_space_revokes(harness: Harness) -> None:
     harness.refused = "space"
     assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
     assert harness.row(invite.id).revoked is True
-
-
-@pytest.mark.asyncio
-async def test_sync_store_keeps_no_plain_code(harness: Harness) -> None:
-    """After a claim is handled, the router's durable sync store holds the code nowhere, WAL included."""
-    _invite, code = harness.sent_invite()
-    directory = olm_store_dir(harness.router_id, harness.paths)
-    sync_store = DurableStore(directory, user_id=harness.router_id, device_id="ROUTERDEV", consumer_id=uuid.uuid4())
-    source = {"type": _CLAIM_EVENT_TYPE, "sender": ALICE, "content": {"version": 1, "request_id": "r1", "code": code}}
-    with sync_store.transaction():
-        batch = sync_store.publish((SyncRecord(RecordKind.TO_DEVICE, None, source),))
-    sync_store.ack(batch)
-    assert any(code.encode() in path.read_bytes() for path in directory.iterdir() if path.is_file())
-    assert (await harness.claim(ALICE, code) or {})["status"] == "invited"
-    assert not any(code.encode() in path.read_bytes() for path in directory.iterdir() if path.is_file())
-    sync_store.close()
 
 
 def _event(sender: str, code: str, request_id: str) -> nio.UnknownToDeviceEvent:

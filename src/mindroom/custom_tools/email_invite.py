@@ -141,10 +141,8 @@ class EmailInviteTools(Toolkit):
         if invite is not None and store.revoke(context.runtime_paths, invite.id):
             return f"Revoked the invite for {address}."
         # A revoke that loses to a claim reports the account that claimed.
-        used = store.used_invite(context.runtime_paths, room_id=context.room_id, email=address) or (
-            invite and store.get(context.runtime_paths, invite.id)
-        )
-        if used is not None and used.claimed_by is not None:
+        used = store.used_invite(context.runtime_paths, room_id=context.room_id, email=address)
+        if used is not None:
             return f"The invite for {address} was already used by {used.claimed_by}; nothing was changed."
         return f"No open invite for {address} in this room."
 

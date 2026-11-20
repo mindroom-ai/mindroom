@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -456,6 +456,23 @@ async def test_pending_card_listing_keeps_only_the_approvers_open_cards_in_one_t
         (6, "delivery-6"),
         (9, "delivery-9"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_starting_a_window_never_approves_a_waiting_email_invite(tmp_path: Path) -> None:
+    """The bulk approval at window start skips invite cards by their stored call; each needs its own answer."""
+    invite = replace(_stored("$invite", created_at_ns=1), tool_name="invite_by_email")
+    shell = replace(_stored("$shell", created_at_ns=2), tool_name="shell")
+    cards = MagicMock()
+    cards.approvals.pending_approval_cards = AsyncMock(return_value=(invite, shell))
+    manager = approval_manager_for_test(test_runtime_paths(tmp_path), send_approval_delivery=AsyncMock(), cards=cards)
+
+    try:
+        event_ids = await manager.pending_card_event_ids(room_id=ROOM_ID, thread_id=THREAD_ID, approver_user_id=HUMAN)
+    finally:
+        await manager.shutdown()
+
+    assert event_ids == ("$shell",)
 
 
 @pytest.mark.asyncio

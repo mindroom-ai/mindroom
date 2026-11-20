@@ -212,10 +212,6 @@ def resolve_tool_approval_approver(
     return canonical_requester_id
 
 
-# Functions an auto-approve window never approves: each call shows its own card, as an email invite must.
-_CARD_ONLY_TOOL_NAMES = frozenset({"invite_by_email"})
-
-
 def human_gate(
     runtime_paths: RuntimePaths,
     *,
@@ -230,7 +226,7 @@ def human_gate(
     call no one may approve, or one in a room without the router, is denied with a reason; the router's tells the agent
     how to invite it.
     """
-    if tool_name not in _CARD_ONLY_TOOL_NAMES and (
+    if tool_name not in approval_manager.CARD_ONLY_TOOL_NAMES and (
         auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
         is not None
     ):

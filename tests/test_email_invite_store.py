@@ -153,23 +153,19 @@ def test_reissue_replaces_and_a_refused_cap_changes_nothing(tmp_path: Path) -> N
     assert second_code
 
 
-def test_dispatch_decides_between_claim_and_revoke(tmp_path: Path) -> None:
-    """Once a claim wins the dispatch, revoke fails and reissue refuses; a revoke first makes the dispatch fail."""
+def test_revoke_wins_once_and_frees_the_address(tmp_path: Path) -> None:
+    """Revoke wins only once and not after use; a revoked link no longer binds, and a new one may be sent."""
     paths = test_runtime_paths(tmp_path)
-    invite, _code = _sent(paths)
+    invite, code = _sent(paths)
     assert store.bind_claim(paths, invite.id, "@alice:example.org", now=NOW + 1)
-    assert store.start_dispatch(paths, invite.id, "@mallory:example.org", now=NOW + 1) is False
-    assert store.start_dispatch(paths, invite.id, "@alice:example.org", now=NOW + 1) is True
-    assert store.start_dispatch(paths, invite.id, "@alice:example.org", now=NOW + 1) is False
+    assert store.revoke(paths, invite.id, now=NOW + 2) is True
     assert store.revoke(paths, invite.id, now=NOW + 2) is False
-    with pytest.raises(ValueError, match="being used"):
-        _issue(paths, now=NOW + 2)
-    store.end_dispatch(paths, invite.id)
-    assert store.revoke(paths, invite.id, now=NOW + 3) is True
-    assert store.start_dispatch(paths, invite.id, "@alice:example.org", now=NOW + 3) is False
-    other, _other_code = _sent(paths, email="bob@example.com")
-    assert store.bind_claim(paths, other.id, "@bob:example.org", now=NOW + 1)
-    assert store.start_dispatch(paths, other.id, "@bob:example.org", now=NOW + 8 * DAY) is False
+    assert store.bind_claim(paths, invite.id, "@alice:example.org", now=NOW + 2) is False
+    assert store.find_by_code(paths, code, now=NOW + 2) is None
+    fresh, _fresh_code = _issue(paths, now=NOW + 3)
+    assert fresh.id != invite.id
+    assert store.mark_invited(paths, fresh.id, now=NOW + 4) is True
+    assert store.revoke(paths, fresh.id, now=NOW + 5) is False
 
 
 def test_two_claimants_one_winner(tmp_path: Path) -> None:

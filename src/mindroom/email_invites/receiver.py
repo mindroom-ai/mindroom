@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import sqlite3
-import time
-from contextlib import closing
 from typing import TYPE_CHECKING, Literal, TypeGuard
 
 import aiohttp
@@ -17,7 +13,6 @@ from mindroom.email_invites.policy import may_invite, refused_room_kind
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.client_session import olm_store_dir
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.mcp_gateway.admission import OnboardingRateLimiter
 from mindroom.requester_identity import is_human_requester_id
@@ -31,8 +26,6 @@ if TYPE_CHECKING:
 _CLAIM_EVENT_TYPE = "io.mindroom.email_invite.claim"
 _RESULT_EVENT_TYPE = "io.mindroom.email_invite.result"
 _CLAIM_KEYS = {"version", "request_id", "code"}
-# A dispatch older than this whose outcome no state proves is treated as spent: the link fails closed.
-_DISPATCH_SECONDS = 60
 
 _Status = Literal["invited", "rejected", "retry"]
 logger = get_logger(__name__)
@@ -54,15 +47,6 @@ def _claim(event: nio.UnknownToDeviceEvent) -> tuple[str, str] | None:
     version, request_id, code = content["version"], content["request_id"], content["code"]
     valid = type(version) is int and version == 1 and _text(request_id, 64) and _text(code, 128)
     return (request_id, code) if valid else None
-
-
-def _scrub_sync_store(path: str) -> None:
-    """Move the acknowledged sync records, which held the plain code, out of the durable store's WAL."""
-    try:
-        with closing(sqlite3.connect(path, timeout=1)) as connection:
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.Error:
-        logger.warning("email_invite_sync_store_scrub_failed")
 
 
 class _Receiver:
@@ -92,9 +76,6 @@ class _Receiver:
             logger.warning("email_invite_result_send_failed", sender=event.sender, status_code=response.status_code)
         if notice is not None and invite is not None:
             await self._notice(invite, notice)
-        database = olm_store_dir(self.client.user_id, self.paths) / f"{self.client.user_id}_{self.client.device_id}.db"
-        if database.is_file():
-            await asyncio.to_thread(_scrub_sync_store, str(database))
 
     async def _membership(self, room_id: str, user_id: str) -> str | None:
         """Return the user's membership, None when they have no member event, or raise when unreadable."""
@@ -106,18 +87,16 @@ class _Receiver:
         raise _UnreadableError
 
     async def _handle(self, invite: store.EmailInvite | None, sender: str) -> tuple[_Status, str | None]:  # noqa: PLR0911
-        """Bind the code to the sender, recheck the rights, and win the one Matrix invite before sending it."""
+        """Bind the code to the sender, recheck the rights, and send the Matrix invite; a notice comes with a won update."""
         if invite is None or invite.claimed_by not in (None, sender):
             return "rejected", None
         if invite.invited_at is not None:
             return "invited", None
-        notice = f"Invite for {invite.email} (approved by {invite.inviter_id}) was used by {sender}."
         room_id, config = invite.room_id, self.config_getter()
         membership = await self._membership(room_id, sender)
         if membership in ("join", "invite"):
             # A bound claim whose invite went through before a restart is completed here, notice included.
-            first = invite.claimed_by == sender and store.mark_invited(self.paths, invite.id)
-            return "invited", notice if first else None
+            return "invited", self._used(invite, sender) if invite.claimed_by == sender else None
         if membership == "ban" or not store.bind_claim(self.paths, invite.id, sender):
             return "rejected", None
         kind = await refused_room_kind(self.client, config, self.paths, room_id)
@@ -128,25 +107,31 @@ class _Receiver:
         router_id = entity_identity_registry(config, self.paths).current_id(ROUTER_AGENT_NAME).full_id
         if kind == "unknown" or approver_right is None or await may_invite(self.client, room_id, router_id) is not True:
             return "retry", None
-        if not store.start_dispatch(self.paths, invite.id, sender):
-            current = store.get(self.paths, invite.id)
-            if current is None or current.revoked:
-                return "rejected", None
-            if current.invited_at is not None:
-                return "invited", None
-            fresh = current.dispatched_at is not None and time.time() - current.dispatched_at < _DISPATCH_SECONDS
-            return ("retry" if fresh else "rejected"), None
-        status = await self._invite(invite, sender)
-        return status, notice if status == "invited" else None
+        if not store.bind_claim(self.paths, invite.id, sender):  # A revoke or expiry during the reads wins.
+            return "rejected", None
+        return await self._invite(invite, sender)
 
-    async def _invite(self, invite: store.EmailInvite, sender: str) -> _Status:
-        """Send the Matrix invite this claim won; an unanswered request keeps the dispatch, so it fails closed."""
-        response = await self.client.room_invite(invite.room_id, sender)
+    async def _invite(self, invite: store.EmailInvite, sender: str) -> tuple[_Status, str | None]:
+        """Send the Matrix invite; an unknown outcome kills the link, and the call that revoked it posts the notice."""
+        try:
+            response = await self.client.room_invite(invite.room_id, sender)
+        except (aiohttp.ClientError, TimeoutError):
+            response = None
         if isinstance(response, nio.RoomInviteResponse):
-            store.mark_invited(self.paths, invite.id)
-            return "invited"
-        store.end_dispatch(self.paths, invite.id)
-        return "rejected" if getattr(response, "status_code", None) == "M_FORBIDDEN" else "retry"
+            return "invited", self._used(invite, sender)
+        if getattr(response, "status_code", None) == "M_FORBIDDEN":
+            return "rejected", None
+        # An unknown outcome kills the link; a new approved invite for the address is not blocked by it.
+        unknown = (
+            f"The invite for {invite.email} may or may not have gone out, so its link no longer works."
+            f" {invite.inviter_id} can send a new link if needed."
+        )
+        return "rejected", unknown if store.revoke(self.paths, invite.id) else None
+
+    def _used(self, invite: store.EmailInvite, sender: str) -> str | None:
+        """Record the invite as used and return its notice, only for the call that recorded it."""
+        first = store.mark_invited(self.paths, invite.id)
+        return f"Invite for {invite.email} (approved by {invite.inviter_id}) was used by {sender}." if first else None
 
     async def _notice(self, invite: store.EmailInvite, body: str) -> None:
         thread, notice = invite.thread_id, {"msgtype": "m.notice"}

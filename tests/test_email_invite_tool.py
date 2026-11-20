@@ -409,12 +409,14 @@ async def test_unbuildable_mail_cancels_the_invite(harness: Harness) -> None:
 
 @pytest.mark.asyncio
 async def test_revoke_losing_to_a_claim_reports_the_claimant(harness: Harness) -> None:
-    """A revoke after a claim won the dispatch changes nothing and names the account."""
+    """A revoke after the invite was used changes nothing and names the account."""
     harness.smtp = False
     await harness.call("invite_by_email", BAS, "alice@example.com")
     (row,) = harness.rows()
     assert store.bind_claim(harness.paths, row.id, "@alice:example.org")
-    assert store.start_dispatch(harness.paths, row.id, "@alice:example.org")
+    assert store.mark_invited(harness.paths, row.id)
     result = await harness.call("revoke_email_invite", BAS, "alice@example.com")
     assert result == "The invite for alice@example.com was already used by @alice:example.org; nothing was changed."
-    assert harness.rows()[0].revoked is False
+    used = store.used_invite(harness.paths, room_id=ROOM, email="alice@example.com")
+    assert used is not None
+    assert used.revoked is False

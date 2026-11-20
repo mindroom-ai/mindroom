@@ -65,14 +65,14 @@ The tool context carries no message text, and such a rule breaks follow-ups such
 
 ### 5. Kept from the plan
 
-- **Refuse while an auto-approve window is open.** `!auto_approve` also approves tools that ask for their own confirmation, so inside a window no card would appear. The tool refuses and asks for `!auto_approve off`.
+- **No auto-approval ever approves an invite.** `!auto_approve` also approves tools that ask for their own confirmation. The approval core therefore has one rule (`CARD_ONLY_TOOL_NAMES` in `approval/manager.py`) that both auto-approve paths read: a window does not approve a new `invite_by_email` call, which shows its card as usual, and starting a window does not bulk-approve waiting invite cards (decided from the stored call's tool name, not the card text). The card offers no timed approval because the tool asks for its own confirmation. Each invite needs its own card answer. (Revised after review: the earlier body-time refusal is gone.)
 - **SMTP from the environment only.** `MINDROOM_SMTP_URL` and `MINDROOM_SMTP_FROM`, standard-library `smtplib`. The URL holds a password, so it is added to the secret environment list.
 - **Fixed plain-text mail.** No text written by the model; the tool has no message argument.
 - **The requesting room only.** No other room, no space, no power above the default, no personal agent.
 - **Personal rooms and onboarding rooms are refused.** A personal room removes members it does not permit. Joining an onboarding room creates a personal agent and a Matrix account.
 - **Daily caps** per asker, per address and per deployment, counted from the store so a restart does not reset them.
 - **List and revoke.**
-- **Codes are stored hashed.**
+- **Codes are stored hashed** in the invite store. The router's Matrix sync store still holds the claim event in plain text (see Known limits).
 
 ### 6. The two assumptions, verified by reading code
 
@@ -113,7 +113,7 @@ Chat, new folder `src/app/invites/`: `inviteLink.ts` (parse the fragment), `invi
 
 1. A person asks; the agent calls `invite_by_email(email)`.
 2. The approval card appears for the asker (existing `ToolGate.CONFIRM`). A room without the router is denied by the existing gate, with its hint to run `invite_router`.
-3. After approval the tool body checks, in this order: no auto-approve window is open in this conversation; the address is valid; the room is not a personal or onboarding room; the router is joined and may invite.
+3. After approval the tool body checks, in this order: the address is valid; the room is not a personal or onboarding room; the router is joined and may invite.
 4. The tool looks for an open request for this room and address, and decides by whether the asker may invite:
    - May not invite, no open request: store a waiting request (caps: asker, room). Answer: stored, waiting for a person who may invite.
    - May not invite, open request exists: answer that it is already waiting, or already sent.
@@ -125,8 +125,8 @@ Chat, new folder `src/app/invites/`: `inviteLink.ts` (parse the fragment), `invi
 7. On the invite page the newcomer clicks Join. Chat sends the claim.
 8. The router's receiver admits the event (shape, rate limits, human sender) and finds the request by the code's hash. A code that is unknown, revoked, expired, or bound to another account is `rejected`. A request this sender already used is answered `invited` again.
 9. If the sender is already joined or already invited to the room, it answers `invited`, and records the invitation when the request is bound to this sender.
-10. Otherwise it binds the request to the sender with one conditional update, checks again that the approver may invite, that the router may invite and that the room is not refused, and invites the sender.
-11. It records the invitation, answers `invited` with the room ID, and posts the notice "Invite for alice@example.com (approved by @bas:example.org) was used by @alice:example.org." in the thread of the request.
+10. Otherwise it binds the request to the sender with one conditional update, checks again that the approver may invite, that the router may invite and that the room is not refused, repeats the conditional update (so a revoke or expiry during those reads wins), and invites the sender. There is no dispatch lock: a second claim by the same account may send the same Matrix invite again, which is harmless because a Matrix invite of the same user is idempotent.
+11. It records the invitation with a conditional update (`invited_at IS NULL`), answers `invited` with the room ID, and, only when that update won, posts the notice "Invite for alice@example.com (approved by @bas:example.org) was used by @alice:example.org." in the thread of the request.
 12. Chat joins the room, with the router's server as `via`, and opens it.
 
 ### Storage
@@ -160,16 +160,16 @@ Rows stay one day past expiry, so the 24-hour counts are complete, and are purge
 |---|---|
 | Router not in the room | Existing denial with the `invite_router` hint. Nothing stored. |
 | Router joined but may not invite | Tool refuses. Nothing stored. |
-| Auto-approve window open | Tool refuses. Nothing stored. |
+| Auto-approve window open | The card appears as usual; the window does not approve it, and starting a window does not approve waiting invite cards. |
 | A cap is reached | Tool refuses and names the cap. Nothing sent. |
 | SMTP send fails | Request revoked; the error text goes back to the agent. The attempt still counts toward the caps. |
 | MindRoom offline when the claim is sent | The homeserver queues the event; it is handled on the next sync. Chat shows the offline text and keeps listening. |
 | Room state unreadable at claim | `retry`. The claim stays bound. |
 | Matrix invite refused (`M_FORBIDDEN`) | `rejected`. The claim stays bound; it is never reopened for another account. |
-| Matrix invite fails otherwise | `retry`. A repeat claim by the same account tries again. |
-| Claim repeated (page reload, durable replay) | Same account: `invited` again once the invite succeeded, with no second Matrix invite. Another account: `rejected`. |
+| Matrix invite outcome unknown (timeout, connection error, any error other than `M_FORBIDDEN`) | `rejected`. The request is revoked, so the link is dead; the call whose revoke won posts exactly one notice in the thread: the invite may or may not have gone out, and the approver can send a new link if needed. A fresh `invite_by_email` for the address is not blocked. nio retrying the POST is harmless (idempotent invite). Stricter than a retry: the person may need a new link. |
+| Claim repeated (page reload, durable replay) | Same account: `invited` again once the invite succeeded, with no second Matrix invite. Another account: `rejected`. Chat sends each claim once; a duplicate `request_id` gets no special handling. |
 | Claimant already joined, or already invited | `invited`. The request is marked used only when it is bound to this account; otherwise it is not changed. |
-| Revoke races a claim | The conditional update decides. A revoke that loses reports the account that claimed. |
+| Revoke races a claim | The conditional updates decide; a revoke before the claim's last update wins. A revoke that lands while the Matrix invite is already being sent does not stop it; the notice then reports the use. A revoke of a used link reports the account that used it. |
 | Approver lost the right before the claim | Request revoked, `rejected`. |
 | Router lost the invite right before the claim | `retry`. The claim stays bound; a room admin can restore the router's power. |
 | Room became a personal or onboarding room before the claim | Request revoked, `rejected`. |
@@ -233,7 +233,7 @@ What each party can do:
 Checks that carry this:
 
 - The claimant is `event.sender`, never a field of the content. Agents, the router and configured bot accounts are refused as claimants.
-- Codes are compared by SHA-256 lookup, stored only as hashes, and never logged. With SMTP configured, the code never reaches the model.
+- Codes are compared by SHA-256 lookup, stored in the invite store only as hashes, and never logged. With SMTP configured, the code never reaches the model.
 - Claims are bounded before any work: at most 10 per sender per minute and 60 in total per minute, with at most 1024 senders tracked.
 - Binding is one conditional update (`claimed_by IS NULL OR claimed_by = sender`, not revoked, not expired), so two accounts cannot both win and a failed invite never frees the code for someone else.
 - Rights are read from live room state at request time and again at claim time.
@@ -246,8 +246,10 @@ Known limits:
 - **The link is a bearer token.** Whoever holds the mail can join, and in an unencrypted room with shared history can read it at once. MindRoom cannot compare the claimant's mail address without server-admin rights. The room notice gives accountability after the fact, not prevention. Phase 2 lists the hardening.
 - **Without SMTP** the link is in room history and in the model's context.
 - **The asker's card appears before the right is checked.** The gate runs before the tool body, so an asker who may not invite approves a card and is then told the request is waiting.
-- **The auto-approve refusal has a gap of an instant.** A window that ends between the gate and the tool body lets one call through without a card.
-- **The saved sign-in path holds the code.** Chat keeps the path a signed-out visitor wanted, fragment included, in local storage for at most 15 minutes and removes it on use.
+- **Plaintext code in the router's sync store.** nio's durable sync store keeps the claim event, code included, on the router's own disk. Accepted: the code is single-use and bound to the first claimant. (An earlier per-claim WAL checkpoint did not achieve hash-only storage and was removed.)
+- **A claim lost in a crash right after the sync ack gets no answer.** The person clicks Join again.
+- **An unknown Matrix-invite outcome costs a new link.** The link is revoked even if the invite went out; the thread notice says so.
+- **Store I/O is only partly offloaded.** The personal-room scan runs in a worker thread; the invite store's short SQLite transactions (2-second busy timeout) still run on the event loop.
 - **Encrypted rooms:** the newcomer cannot read messages from before they joined.
 - **Homeservers that need a registration token:** a newcomer cannot sign up there. They need an account on another federating homeserver, or Phase 2.
 - **Waiting requests fill the room's cap.** Members who may not invite can fill the 20 open requests of a room, five each per day. A person who may invite clears them with `revoke_email_invite`.
@@ -260,7 +262,7 @@ Known limits:
 ## Chat landing page
 
 Route `/invite/`, inside the protected routes, with its own route entry so it does not open as a space named "invite".
-The page reads `r` and `c` from the fragment once, keeps them in memory, and removes the fragment from the address bar with `history.replaceState`.
+The page reads `r` and `c` from the fragment once, keeps them only in memory, and removes the fragment from the address bar with `history.replaceState`. The code is never written to session or local storage, and the saved sign-in path does not include it: a signed-out newcomer signs up (or signs in) and then opens the mail link again.
 It sends nothing until the Join button is clicked, and it shows only the framed state when it runs inside a frame.
 
 | State | Shown | Leaves when |
@@ -268,7 +270,7 @@ It sends nothing until the Join button is clicked, and it shows only the framed 
 | `invalid` | "This invite link is incomplete. Open the link from the mail again." | — |
 | `framed` | "Open this page in its own tab to use the invitation." | — |
 | `ready` | "Join a room through `<router ID>` as `<my ID>`", Join button. | Click → `claiming`. |
-| `claiming` | Progress. The claim is sent at once and once more after 5 seconds, with the same `request_id`. | Result or router invite → `joining`; `rejected` → `rejected`; `retry` → `retry`; 20 seconds without an answer → `offline`. |
+| `claiming` | Progress. The claim is sent exactly once (no resend). | Result or router invite → `joining`; `rejected` → `rejected`; `retry` → `retry`; 20 seconds without an answer → `offline`. |
 | `offline` | "This MindRoom is not answering. Your request is saved; the invitation will appear in your room list when it is back." | A later result or router invite → `joining` or `rejected`. |
 | `rejected` | "This invitation is no longer valid. Ask for a new one." | — |
 | `retry` | "That did not work. Try again in a moment.", Try again button. | Click → `claiming`. |

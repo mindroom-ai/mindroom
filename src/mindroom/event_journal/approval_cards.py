@@ -103,6 +103,7 @@ class ApprovalCardView:
     responder_entity_name: str | None
     offers_timed_approval: bool
     any_arguments_offered: bool
+    tool_name: str | None = None
 
     @property
     def terminal(self) -> bool:
@@ -670,6 +671,7 @@ _VIEW_COLUMNS = f"""
     {_CURRENT_MEMBERSHIP} AS current_membership,
     calls.owner_kind AS owner_kind, calls.approver_user_id AS approver_user_id,
     calls.expires_at_ns AS expires_at_ns, calls.decision AS decision, calls.invoking_agent AS invoking_agent,
+    calls.tool_name AS tool_name,
     paused_reply.entity_name AS responder_entity_name,
     scope.delivery_id AS scope_delivery_id,
     scheduled.any_arguments_offered AS any_arguments_offered
@@ -720,6 +722,7 @@ def _view(row: Row, card_event_id: str | None) -> ApprovalCardView:
         responder_entity_name=cast("str | None", row["responder_entity_name"]),
         offers_timed_approval=row["scope_delivery_id"] is not None,
         any_arguments_offered=bool(row["any_arguments_offered"]),
+        tool_name=cast("str | None", row["tool_name"]),
     )
 
 

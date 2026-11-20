@@ -44,7 +44,7 @@ A person *may invite* when they are joined to the room with a power level at or 
 - If not, approving the card only confirms the request. It is stored as *waiting* and nothing is sent. Someone who may invite then says "approve the invite for alice@example.com" to an agent in the same room and approves their own card; the waiting request is sent in their name.
 
 Asking again for an address that was already sent replaces the old link, which stops working.
-An [auto-approve window](tool-approval.md#auto-approve-everything) does not approve `invite_by_email`, so an invitation never goes out without its card.
+No auto-approval covers `invite_by_email`: an [auto-approve window](tool-approval.md#auto-approve-everything) neither approves new calls nor the cards already waiting when it starts, and the card offers no timed approval, so every invitation needs its own card answer.
 
 `list_email_invites()` shows the room's open invites, and `revoke_email_invite(email)` revokes one; the asker, the approver, or anyone who may invite can revoke.
 
@@ -61,6 +61,7 @@ MindRoom cannot check that the account belongs to the mailed address, so when so
 A link stops working once used, when it expires, or when it is revoked; a revoke that loses to a claim already being let in says who used the link.
 The approver's right is checked again when the link is used; if they lost it, the invite is revoked.
 A person removed from the room cannot use the same link to come back.
+When the homeserver gives no clear answer to the Matrix invite (a timeout or an unexpected error), the link stops working and the thread is told once that the invite may or may not have gone out; the approver can send a new link, which is not blocked by the old one.
 
 In an encrypted room, the newcomer does not see messages sent before they joined; the mail says so.
 Whether agents answer the newcomer follows the normal [access rules](authorization.md): in a room that is not one of an agent's managed rooms, the agent may stay silent for them.
@@ -76,4 +77,10 @@ A homeserver that needs a registration token cannot be used to sign up; the newc
 | Mails per deployment | 50 per 24 hours |
 
 The counts are kept on disk, so a restart does not reset them.
+
+Known limits:
+
+- The router's Matrix sync store keeps the claim event, code included, in plain text on the router's own disk. The code works once and is bound to the first account that uses it.
+- A claim that arrives just before the router crashes may get no answer; the person clicks Join again.
+- A revoke that lands while a claim's Matrix invite is already on its way does not stop that invite; the thread is then told who used the link.
 Members who may not invite can fill a room's 20 open requests; someone who may invite clears them with `revoke_email_invite`.

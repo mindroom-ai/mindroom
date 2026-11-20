@@ -12,6 +12,16 @@
 
 **Spec:** `docs/baspowers/specs/2026-11-19-agent-invite-email-design.md`
 
+## Revisions after review (final round, binding over the text below)
+
+- **Approval.** No auto-approve path approves `invite_by_email`: `CARD_ONLY_TOOL_NAMES` in `approval/manager.py` is read by `human_gate` (a window does not approve a new call; its card appears) and by `pending_card_event_ids` (starting a window does not bulk-approve waiting invite cards; the stored call's `tool_name` decides). This replaces the "no change under `approval/`" constraint and the tool-body window refusal, both gone.
+- **Unknown `room_invite` outcome** (timeout, connection error, any error but `M_FORBIDDEN`): no dispatch lock or column. The request is revoked; the call whose revoke wins posts exactly one notice that the invite may or may not have gone out and the approver can send a new link; the claimant gets `rejected`. A fresh `invite_by_email` for the address is not blocked. A repeated POST is harmless (idempotent invite). Step 9 of Task 5 changes accordingly.
+- **Notice.** Posted only by the call whose `mark_invited` (`invited_at IS NULL`) wins, so one success gives one notice.
+- **No WAL checkpoint** of the router's sync store. Plaintext code there is a known limit.
+- **Chat sends each claim exactly once** (no `CLAIM_RESEND_MS`); the receiver gives a duplicate `request_id` no special handling.
+- **Chat keeps the code only in memory.** No session or local storage of the code, and the saved sign-in path drops the fragment: a signed-out newcomer signs up, then opens the mail link again. Task 6's `keeps the invite fragment through sign-in` test becomes `drops the invite fragment from the saved sign-in path`; Task 9's 15-minute item becomes "sign up, then open the mail link again".
+- **Known limits** (spec): plaintext code in the router's sync store; a claim lost in a crash right after the sync ack gets no answer (click Join again); store transactions still run on the event loop.
+
 ## Global Constraints
 
 - Event types: `io.mindroom.email_invite.claim`, `io.mindroom.email_invite.result`. Protocol `version` is the integer `1`.
@@ -20,7 +30,7 @@
 - Claim limits: 10 per sender per minute, 60 in total per minute, at most 1024 senders tracked.
 - Environment: `MINDROOM_SMTP_URL` (secret), `MINDROOM_SMTP_FROM`. No new dependency in either repository.
 - Mail subject, exactly: `You are invited to a MindRoom room`. Mail body: the template in the spec, verbatim.
-- No change under `src/mindroom/approval/`. No tool function takes a room, a Matrix ID, a subject, or body text.
+- No change under `src/mindroom/approval/` beyond the card-only rule (see Revisions). No tool function takes a room, a Matrix ID, a subject, or body text.
 - The claimant is always the event's `sender`, never a content field.
 - Backend tests: `NIX_PATH=nixpkgs=flake:nixpkgs nix-shell --run 'uv run pytest tests/<file>.py -x -n 0 --no-cov'`; run each new test file once with the default options too.
 - Chat tests: `just test src/app/invites`; `just check` before the pull request.
@@ -309,7 +319,7 @@ Handling, in this order (each `→` sends the result and stops):
 6. `refused_room_kind(...)` is set → `revoke`, `rejected`.
 7. `may_invite(client, room, invite.inviter_id, config.email_invites.approvers)`: `False` → `revoke`, `rejected`; `None` → `retry`.
 8. `may_invite(client, room, <router ID>)` is not `True` → `retry`.
-9. `client.room_invite(room, sender)`: `RoomInviteResponse` → `mark_invited`, `invited`, then the notice. `RoomInviteError` with `status_code == "M_FORBIDDEN"` → `rejected`. Any other error response, `aiohttp.ClientError` or `TimeoutError` → `retry`.
+9. `client.room_invite(room, sender)`: `RoomInviteResponse` → `mark_invited`, `invited`, then the notice. `RoomInviteError` with `status_code == "M_FORBIDDEN"` → `rejected`. Any other error response, `aiohttp.ClientError` or `TimeoutError` → `revoke`, `rejected`, and the one "may or may not have gone out" notice from the call whose revoke won (see Revisions).
 
 Result: `client.to_device(nio.ToDeviceMessage(type=RESULT_EVENT_TYPE, recipient=sender, recipient_device="*", content={"version": 1, "request_id": ..., "status": ...}))`, with `"room_id"` added for `invited`. A failed send is logged and nothing else changes.
 Notice: body `Invite for {email} (approved by {inviter_id}) was used by {sender}.`, `msgtype` `m.notice`, in thread `invite.thread_id` when set, sent with `build_message_content` and `send_message_result`. A failed notice is logged; the result stays `invited`.
@@ -389,7 +399,6 @@ export const parseInviteFragment = (hash: string): InviteLink | undefined;
 export const CLAIM_EVENT = 'io.mindroom.email_invite.claim';
 export const RESULT_EVENT = 'io.mindroom.email_invite.result';
 export const CLAIM_TIMEOUT_MS = 20_000;
-export const CLAIM_RESEND_MS = 5_000;
 
 export type ClaimOutcome =
   | { status: 'invited'; roomId: string }
@@ -415,15 +424,15 @@ export const pendingRouterInvite = (
 ): string | undefined;
 ```
 
-- The claim is sent with `mx.sendToDevice(CLAIM_EVENT, new Map([[link.routerId, new Map([['*', { version: 1, request_id, code: link.code }]])]]))`, at once and once more after `CLAIM_RESEND_MS` with the same `request_id` (`crypto.randomUUID()`).
+- The claim is sent with `mx.sendToDevice(CLAIM_EVENT, new Map([[link.routerId, new Map([['*', { version: 1, request_id, code: link.code }]])]]))`, exactly once, with a fresh `request_id` (`crypto.randomUUID()`); no resend.
 - A result counts only when `message.type === RESULT_EVENT`, `message.sender === link.routerId`, `content.version === 1` and `content.request_id` is the one sent. It is read from `ClientEvent.ReceivedToDeviceMessage`, encrypted or not.
 - Fallback without a result: before sending, note the rooms where `pendingRouterInvite` already holds. On `RoomEvent.MyMembership`, an invitation from `link.routerId` to a room not in that note reports `{ status: 'invited', roomId }`.
 - `invited`, `rejected` and `retry` are final: listeners and timers are removed. `offline` is reported once and listening continues.
 - `pendingRouterInvite` reads `room.getMember(mx.getSafeUserId())?.events.member?.getSender()` on rooms whose own membership is `invite`, as `rooms/join/JoinBeforeNavigate.tsx:110` does.
 
 - [ ] **Step 1: Write the failing tests** with a fake client (an `EventEmitter` with `sendToDevice`, `getSafeUserId`, `getRooms`) and fake timers:
-  - `sends the claim to the router's devices and resends once`: two `sendToDevice` calls, both to `'@router:example.org'` / `'*'`, same `request_id`, the second at 5 s.
-  - `reports the router's result`: a matching `invited` result gives `{ status: 'invited', roomId: '!room:example.org' }` and stops the resend.
+  - `sends the claim to the router's devices once`: one `sendToDevice` call to `'@router:example.org'` / `'*'`, and none later.
+  - `reports the router's result`: a matching `invited` result gives `{ status: 'invited', roomId: '!room:example.org' }`.
   - `ignores a result from another sender`, `ignores another request_id`, `ignores an invited result without room_id`.
   - `reports rejected and retry`.
   - `reports offline after 20 seconds and still reports a late result`.
@@ -481,7 +490,7 @@ Not on lab or production. Fresh homeserver, backend from the pull request 1 bran
 - [ ] Existing account uses a link.
 - [ ] A second account opens the used link: `rejected`.
 - [ ] Member who may not invite asks: nothing is mailed; `list_email_invites` shows `waiting`; an admin says "approve the invite for …", gets a card, and the mail arrives.
-- [ ] `!auto_approve 10` then an invite request: refused, no mail.
+- [ ] `!auto_approve 10` then an invite request: the card still appears; a card waiting when the window starts stays waiting.
 - [ ] Revoke, then open the link: `rejected`.
 - [ ] Stop MindRoom, click Join, see `offline`, start MindRoom: the page joins the room.
 - [ ] Encrypted room: join works; a message sent after the join is readable; the mail has the encryption line.
