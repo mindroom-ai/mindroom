@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
     from mindroom.script_runs.models import ScriptCallRecord, ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.workflow_runs.models import WorkflowRun
 
 _APPEND = tool_args("counter", "append", line="a")
 _CALL = "call-1"
@@ -691,6 +692,29 @@ async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
     assert node is not None
     assert node.state is WorkflowNodeState.INDETERMINATE
     assert left == [broken.run_id]
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_error_never_fails_the_script_runtime_pass(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The script runtime prunes its own runs after this pass, so a workflow store it cannot read must not raise there."""
+    script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0)
+    lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
+    await lifecycle.start()
+
+    def locked(*_args: object, **_options: object) -> list[WorkflowRun]:
+        msg = "database is locked"
+        raise sqlite3.OperationalError(msg)
+
+    for name in ("list_runs", "prune"):
+        with monkeypatch.context() as patched:
+            patched.setattr(stack.store, name, locked)
+            await script_runtime.after_reconcile()
+
+    await stack.end_attempt(ScriptRunState.EXITED)
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.FAILED
 
 
 @pytest.mark.asyncio
