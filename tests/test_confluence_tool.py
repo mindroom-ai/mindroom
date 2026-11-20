@@ -34,6 +34,8 @@ class _ConfluenceServer:
     def answer(self, request: _Request) -> tuple[int, object]:
         path = request.path.removeprefix(self.base_path)
         title = request.query.get("title", [""])[0]
+        if (request.method, path, title) == ("GET", "/rest/api/content", "Restricted"):
+            return 404, {"message": "No content found with title Restricted"}
         if (request.method, path) == ("GET", "/rest/api/content") and "title" not in request.query:
             start = int(request.query.get("start", ["0"])[0])
             batch = [{"id": str(number), "title": f"Page {number}"} for number in range(start, min(start + 50, 51))]
@@ -97,6 +99,10 @@ def test_get_page_content_returns_the_page_or_a_not_found_error(site: tuple[str,
     assert json.loads(toolkit.get_page_content("Engineering", "Runbook")) == _PAGE
     assert json.loads(toolkit.get_page_content("Engineering", "Missing")) == {
         "error": "Page 'Missing' not found in space 'Engineering'",
+    }
+    # Confluence answers 404 for content the user may not view; 4.0.7 reported that as a permission error.
+    assert json.loads(toolkit.get_page_content("Engineering", "Restricted")) == {
+        "error": "The calling user does not have permission to view the content",
     }
     lookup = next(request for request in server.requests if request.path.endswith("/rest/api/content"))
     assert lookup.query == {
@@ -164,19 +170,15 @@ def test_update_page_puts_the_next_version(site: tuple[str, _ConfluenceServer]) 
 
 
 def test_space_and_page_listings(site: tuple[str, _ConfluenceServer]) -> None:
-    """Space details and every page of a space, read in batches of 50, come from the v1 listings."""
+    """Space details and the first 50 pages of a space, as 4.0.7 listed them, come from the v1 listings."""
     url, server = site
     toolkit = _toolkit(url)
 
     assert ast.literal_eval(toolkit.get_all_space_detail()) == _SPACES["results"]
     assert ast.literal_eval(toolkit.get_all_page_from_space("ENG")) == [
-        {"id": str(number), "title": f"Page {number}"} for number in range(51)
+        {"id": str(number), "title": f"Page {number}"} for number in range(50)
     ]
     listings = [request for request in server.requests if request.path.endswith("/rest/api/content")]
     assert [(listing.path, listing.query) for listing in listings] == [
         (f"{server.base_path}/rest/api/content", {"spaceKey": ["ENG"], "limit": ["50"], "type": ["page"]}),
-        (
-            f"{server.base_path}/rest/api/content",
-            {"spaceKey": ["ENG"], "start": ["50"], "limit": ["50"], "type": ["page"]},
-        ),
     ]

@@ -7,7 +7,9 @@ from typing import Any
 import requests
 from agno.tools.confluence import ConfluenceTools
 from atlassian.confluence.server import Server
+from atlassian.errors import ApiPermissionError
 
+# atlassian-python-api 4.0.7 returned the first batch of a space's pages.
 _PAGE_BATCH = 50
 
 
@@ -20,11 +22,18 @@ class _V1Confluence(Server):
         title: str,
         expand: str | None = None,
     ) -> dict[str, Any] | None:
-        """Return the first page with this title in the space, or None."""
+        """Return the first page with this title in the space, or None; a 404 means the content is not viewable."""
         params: dict[str, Any] = {"start": 0, "limit": 1}
         if expand is not None:
             params["expand"] = expand
-        results = super().get_page_by_title(space_key, title, **params).get("results")
+        try:
+            response = super().get_page_by_title(space_key, title, **params)
+        except requests.HTTPError as error:
+            if error.response is not None and error.response.status_code == 404:
+                msg = "The calling user does not have permission to view the content"
+                raise ApiPermissionError(msg, reason=error) from error
+            raise
+        results = response.get("results")
         return results[0] if results else None
 
     def get_all_pages_from_space(  # ty: ignore[incompatible-method-override] - 4.x signature
@@ -34,20 +43,15 @@ class _V1Confluence(Server):
         expand: str | None = None,
         content_type: str = "page",
     ) -> list[dict[str, Any]]:
-        """Return every page of the space as a list, reading it in batches by offset."""
-        pages: list[dict[str, Any]] = []
-        while True:
-            batch = self.get_all_pages_from_space_raw(
-                space=space_key,
-                start=len(pages),
-                limit=_PAGE_BATCH,
-                status=status,
-                expand=expand,
-                content_type=content_type,
-            ).get("results", [])
-            pages.extend(batch)
-            if len(batch) < _PAGE_BATCH:
-                return pages
+        """Return the space's first batch of pages as a list, as 4.0.7 did."""
+        return self.get_all_pages_from_space_raw(
+            space=space_key,
+            start=0,
+            limit=_PAGE_BATCH,
+            status=status,
+            expand=expand,
+            content_type=content_type,
+        ).get("results", [])
 
 
 # AGNO_COMPAT: ConfluenceTools calls atlassian-python-api 4's Confluence client, which version 5 split apart.
@@ -56,6 +60,7 @@ class _V1Confluence(Server):
 # atlassian-python-api 5, Confluence(url=...) picks a Cloud client for *.atlassian.net URLs that has no create_page
 # or update_page and lists spaces as a v2 generator, and both its Cloud and Server get_page_by_title return the
 # whole search response and get_all_pages_from_space a generator, so most of the toolkit fails or misreports.
+# Version 5 also stopped mapping a title lookup's 404 (content the user may not view) to a permission error.
 # The toolkit therefore talks to the v1 REST API as 4.0.7 did, for Cloud and Server URLs alike.
 # Upstream issue: Tracking gap; a search of agno-agi/agno issues on November 20, 2026 found none. Agno pinned
 # atlassian-python-api<5 in https://github.com/agno-agi/agno/pull/9601 and called porting the toolkit a follow-up.
