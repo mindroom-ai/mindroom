@@ -240,9 +240,7 @@ async def test_live_sdk_routes_delegation_and_closes_owned_work(provider: _Provi
         provider.socket.feed(
             {"type": "session.input_transcript.delta", "delta": "Check status.", "start_ms": 0, "end_ms": 100},
         )
-        provider.socket.feed(
-            {"type": "session.delegation.created", "offset_ms": 150, "delegation": {"id": "first", "target": "client"}},
-        )
+        provider.socket.feed({"type": "session.delegation.created", "delegation": {"id": "first", "target": "client"}})
         reply = await provider.socket.next_event("session.commentary.append")
         assert reply["delegation_id"] == "first"
         assert reply["content"] == "The task is complete."
@@ -251,13 +249,7 @@ async def test_live_sdk_routes_delegation_and_closes_owned_work(provider: _Provi
         provider.socket.feed(
             {"type": "session.input_transcript.delta", "delta": "Check again.", "start_ms": 2000, "end_ms": 2100},
         )
-        provider.socket.feed(
-            {
-                "type": "session.delegation.created",
-                "offset_ms": 2150,
-                "delegation": {"id": "second", "target": "client"},
-            },
-        )
+        provider.socket.feed({"type": "session.delegation.created", "delegation": {"id": "second", "target": "client"}})
         await asyncio.wait_for(second_started.wait(), timeout=2)
         assert ("user", "Check status.") in transcript
     finally:
@@ -307,9 +299,7 @@ async def test_live_sdk_identical_spoken_retry_survives_delegate_failure(
         provider.socket.feed(
             {"type": "session.input_transcript.delta", "delta": "Send the update.", "start_ms": 0, "end_ms": 100},
         )
-        provider.socket.feed(
-            {"type": "session.delegation.created", "offset_ms": 150, "delegation": {"id": "first", "target": "client"}},
-        )
+        provider.socket.feed({"type": "session.delegation.created", "delegation": {"id": "first", "target": "client"}})
         failure = await provider.socket.next_event("session.commentary.append")
         assert failure["delegation_id"] == "first"
         assert "could not complete" in failure["content"]
@@ -318,25 +308,18 @@ async def test_live_sdk_identical_spoken_retry_survives_delegate_failure(
         session = agent.duplex_session
         assert isinstance(session, GPTLiveSession)
         session.on("input_audio_transcription_completed", on_transcribed)
-        # Delegating answered the original turn, so the gap after it makes the SDK finalize the original
-        # before starting the identical retry. Both its transcript and delegation wiring stay real.
+        # The gap makes the SDK finalize the original before starting the
+        # identical retry. Both its transcript and delegation wiring stay real.
         provider.socket.feed(
             {"type": "session.input_transcript.delta", "delta": "Send the update.", "start_ms": 2000, "end_ms": 2100},
         )
         await asyncio.wait_for(retry_transcribed.wait(), timeout=2)
         if finalize_retry:
             session.push_audio(
-                # Two seconds of quiet audio after the fragment's span end a turn that no reply ended.
-                rtc.AudioFrame(data=bytes(144000), sample_rate=24000, num_channels=1, samples_per_channel=72000),
+                rtc.AudioFrame(data=bytes(48000), sample_rate=24000, num_channels=1, samples_per_channel=24000),
             )
         assert transcript.count(("user", "Send the update.")) == 1 + int(finalize_retry)
-        provider.socket.feed(
-            {
-                "type": "session.delegation.created",
-                "offset_ms": 2150,
-                "delegation": {"id": "retry", "target": "client"},
-            },
-        )
+        provider.socket.feed({"type": "session.delegation.created", "delegation": {"id": "retry", "target": "client"}})
         reply = await provider.socket.next_event("session.commentary.append")
 
         assert reply["delegation_id"] == "retry"

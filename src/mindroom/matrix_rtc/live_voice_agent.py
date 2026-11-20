@@ -70,9 +70,7 @@ class _LiveDelegationRunner:
         """Snapshot new speech synchronously before the SDK finalizes pending text."""
         from livekit.agents.llm import ChatMessage  # noqa: PLC0415
 
-        # Since livekit-agents 1.8.12 the event also reports work the SDK runs on a backend model; only client
-        # delegations are this call's to answer.
-        if self._closed or delegation.mode != "client" or delegation.id in self._delegation_ids:
+        if self._closed or delegation.id in self._delegation_ids:
             return
         self._delegation_ids.add(delegation.id)
         self._created_at[delegation.id] = time.monotonic()

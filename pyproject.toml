@@ -309,10 +309,10 @@ lumalabs = [
 ]
 matrix_api = []
 matrix_calls = [
-  # 1.8.12 reports backend delegations too, needs the delegation's offset to end a caller's turn, and keeps a turn
-  # open until the model replies, which the call agent follows. Each release pins livekit exactly (1.8.13 on 1.2.1),
-  # and the call tests cover the audio mixer of the locked one.
-  "livekit-agents[openai]>=1.8.13",
+  # 1.8.9 runs on OpenAI SDK 3. Each release pins livekit exactly (1.8.9 to 1.8.10 on 1.1.21, 1.8.11 on 1.2.0), and the
+  # call tests cover the audio mixer of the locked one. 1.8.12 changes GPT Live delegation events and transcript
+  # delivery, which the call agent does not follow yet.
+  "livekit-agents[openai]>=1.8.9,<1.8.12",
 ]
 matrix-e2ee = []
 matrix_message = []
