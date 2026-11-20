@@ -158,7 +158,13 @@ async def plan_approval_calls(
         decision, reason = ApprovalDecision.APPROVED, None
         if requires_approval:
             # Read after the awaited policy, so a window that ended meanwhile approves nothing.
-            gate = human_gate(runtime_paths, approver_id=approver_id, room_id=room_id, thread_id=thread_id)
+            gate = human_gate(
+                runtime_paths,
+                approver_id=approver_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                tool_name=tool.tool_name,
+            )
             decision, reason = (
                 (None, None)
                 if gate is None

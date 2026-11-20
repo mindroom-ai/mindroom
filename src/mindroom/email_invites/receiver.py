@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 import time
-from collections import OrderedDict, deque
-from typing import TYPE_CHECKING, Literal
+from contextlib import closing
+from typing import TYPE_CHECKING, Literal, TypeGuard
 
 import aiohttp
 import nio
@@ -15,8 +17,9 @@ from mindroom.email_invites.policy import may_invite, refused_room_kind
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.client_room_admin import get_room_membership
+from mindroom.matrix.client_session import olm_store_dir
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.mcp_gateway.admission import OnboardingRateLimiter
 from mindroom.requester_identity import is_human_requester_id
 
 if TYPE_CHECKING:
@@ -27,118 +30,131 @@ if TYPE_CHECKING:
 
 _CLAIM_EVENT_TYPE = "io.mindroom.email_invite.claim"
 _RESULT_EVENT_TYPE = "io.mindroom.email_invite.result"
-_WINDOW_SECONDS = 60
-_SENDER_LIMIT, _TOTAL_LIMIT, _TRACKED_SENDERS = 10, 60, 1024
+_CLAIM_KEYS = {"version", "request_id", "code"}
+# A dispatch older than this whose outcome no state proves is treated as spent: the link fails closed.
+_DISPATCH_SECONDS = 60
 
 _Status = Literal["invited", "rejected", "retry"]
 logger = get_logger(__name__)
 
 
+class _UnreadableError(Exception):
+    """Room state needed for the claim could not be read."""
+
+
+def _text(value: object, limit: int) -> TypeGuard[str]:
+    return isinstance(value, str) and 0 < len(value) <= limit
+
+
 def _claim(event: nio.UnknownToDeviceEvent) -> tuple[str, str] | None:
     """Return `(request_id, code)` of a well-formed version 1 claim, or None."""
     content = event.source.get("content")
-    if (
-        event.type != _CLAIM_EVENT_TYPE
-        or not isinstance(content, dict)
-        or set(content) != {"version", "request_id", "code"}
-    ):
+    if event.type != _CLAIM_EVENT_TYPE or not isinstance(content, dict) or content.keys() != _CLAIM_KEYS:
         return None
-    request_id, code = content["request_id"], content["code"]
-    if type(content["version"]) is not int or content["version"] != 1:
-        return None
-    if (
-        not isinstance(request_id, str)
-        or not isinstance(code, str)
-        or not (0 < len(request_id) <= 64 and 0 < len(code) <= 128)
-    ):
-        return None
-    return request_id, code
+    version, request_id, code = content["version"], content["request_id"], content["code"]
+    valid = type(version) is int and version == 1 and _text(request_id, 64) and _text(code, 128)
+    return (request_id, code) if valid else None
+
+
+def _scrub_sync_store(path: str) -> None:
+    """Move the acknowledged sync records, which held the plain code, out of the durable store's WAL."""
+    try:
+        with closing(sqlite3.connect(path, timeout=1)) as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        logger.warning("email_invite_sync_store_scrub_failed")
 
 
 class _Receiver:
     def __init__(self, client: nio.AsyncClient, paths: RuntimePaths, config_getter: Callable[[], Config]) -> None:
         self.client, self.paths, self.config_getter = client, paths, config_getter
-        self.total: deque[float] = deque()
-        self.senders: OrderedDict[str, deque[float]] = OrderedDict()
+        self.limiter = OnboardingRateLimiter(60, 10)
 
-    def admit(self, event: nio.UnknownToDeviceEvent) -> bool:
+    def admit(self, event: nio.UnknownToDeviceEvent) -> tuple[str, str] | None:
         """Admit a well-formed claim from a person within the rate limits, before any task or store read."""
-        if _claim(event) is None or not is_human_requester_id(event.sender, self.config_getter(), self.paths):
-            return False
-        now = time.monotonic()
-        cutoff = now - _WINDOW_SECONDS
-        while self.total and self.total[0] <= cutoff:
-            self.total.popleft()
-        while self.senders and next(iter(self.senders.values()))[-1] <= cutoff:
-            self.senders.popitem(last=False)
-        stamps = self.senders.get(event.sender, deque())
-        while stamps and stamps[0] <= cutoff:
-            stamps.popleft()
-        tracked = event.sender in self.senders or len(self.senders) < _TRACKED_SENDERS
-        if len(self.total) >= _TOTAL_LIMIT or len(stamps) >= _SENDER_LIMIT or not tracked:
-            logger.info("email_invite_claim_rate_limited", sender=event.sender)
-            return False
-        stamps.append(now)
-        self.total.append(now)
-        self.senders[event.sender] = stamps
-        self.senders.move_to_end(event.sender)
-        return True
-
-    async def on_event(self, event: nio.UnknownToDeviceEvent) -> None:
         claim = _claim(event)
-        if claim is None:
-            return
-        request_id, code = claim
+        if claim is None or not self.limiter.allow(event.sender):
+            return None
+        return claim if is_human_requester_id(event.sender, self.config_getter(), self.paths) else None
+
+    async def on_event(self, event: nio.UnknownToDeviceEvent, request_id: str, code: str) -> None:
         invite = store.find_by_code(self.paths, code)
         try:
-            status = await self._handle(invite, event.sender)
-        except (aiohttp.ClientError, TimeoutError):
-            status = "retry"
+            status, notice = await self._handle(invite, event.sender)
+        except (aiohttp.ClientError, TimeoutError, _UnreadableError):
+            status, notice = "retry", None
         content: dict[str, object] = {"version": 1, "request_id": request_id, "status": status}
         if status == "invited" and invite is not None:
             content["room_id"] = invite.room_id
         logger.info("email_invite_claim", sender=event.sender, invite_id=invite and invite.id, status=status)
-        message = nio.ToDeviceMessage(_RESULT_EVENT_TYPE, event.sender, "*", content)
-        response = await self.client.to_device(message)
+        response = await self.client.to_device(nio.ToDeviceMessage(_RESULT_EVENT_TYPE, event.sender, "*", content))
         if isinstance(response, nio.ToDeviceError):
-            logger.warning("email_invite_result_send_failed", sender=event.sender, error=str(response))
+            logger.warning("email_invite_result_send_failed", sender=event.sender, status_code=response.status_code)
+        if notice is not None and invite is not None:
+            await self._notice(invite, notice)
+        database = olm_store_dir(self.client.user_id, self.paths) / f"{self.client.user_id}_{self.client.device_id}.db"
+        if database.is_file():
+            await asyncio.to_thread(_scrub_sync_store, str(database))
 
-    async def _handle(self, invite: store.EmailInvite | None, sender: str) -> _Status:  # noqa: PLR0911
-        """Bind the code to the sender and invite them, as the claim steps of the spec say."""
+    async def _membership(self, room_id: str, user_id: str) -> str | None:
+        """Return the user's membership, None when they have no member event, or raise when unreadable."""
+        response = await self.client.room_get_state_event(room_id, "m.room.member", user_id)
+        if isinstance(response, nio.RoomGetStateEventResponse):
+            return response.content.get("membership")
+        if getattr(response, "status_code", None) == "M_NOT_FOUND":
+            return None
+        raise _UnreadableError
+
+    async def _handle(self, invite: store.EmailInvite | None, sender: str) -> tuple[_Status, str | None]:  # noqa: PLR0911
+        """Bind the code to the sender, recheck the rights, and win the one Matrix invite before sending it."""
         if invite is None or invite.claimed_by not in (None, sender):
-            return "rejected"
+            return "rejected", None
         if invite.invited_at is not None:
-            return "invited"
+            return "invited", None
+        notice = f"Invite for {invite.email} (approved by {invite.inviter_id}) was used by {sender}."
         room_id, config = invite.room_id, self.config_getter()
-        membership = await get_room_membership(self.client, room_id, sender)
-        if membership == "ban":
-            return "rejected"
+        membership = await self._membership(room_id, sender)
         if membership in ("join", "invite"):
-            if invite.claimed_by == sender:
-                store.mark_invited(self.paths, invite.id)
-            return "invited"
-        if not store.bind_claim(self.paths, invite.id, sender):
-            return "rejected"
+            # A bound claim whose invite went through before a restart is completed here, notice included.
+            first = invite.claimed_by == sender and store.mark_invited(self.paths, invite.id)
+            return "invited", notice if first else None
+        if membership == "ban" or not store.bind_claim(self.paths, invite.id, sender):
+            return "rejected", None
+        kind = await refused_room_kind(self.client, config, self.paths, room_id)
         approver_right = await may_invite(self.client, room_id, invite.inviter_id or "", config.email_invites.approvers)
-        if refused_room_kind(config, self.paths, room_id) is not None or approver_right is False:
+        if kind not in (None, "unknown") or approver_right is False:
             store.revoke(self.paths, invite.id)
-            return "rejected"
+            return "rejected", None
         router_id = entity_identity_registry(config, self.paths).current_id(ROUTER_AGENT_NAME).full_id
-        if approver_right is None or await may_invite(self.client, room_id, router_id) is not True:
-            return "retry"
-        return await self._invite(invite, sender)
+        if kind == "unknown" or approver_right is None or await may_invite(self.client, room_id, router_id) is not True:
+            return "retry", None
+        if not store.start_dispatch(self.paths, invite.id, sender):
+            current = store.get(self.paths, invite.id)
+            if current is None or current.revoked:
+                return "rejected", None
+            if current.invited_at is not None:
+                return "invited", None
+            fresh = current.dispatched_at is not None and time.time() - current.dispatched_at < _DISPATCH_SECONDS
+            return ("retry" if fresh else "rejected"), None
+        status = await self._invite(invite, sender)
+        return status, notice if status == "invited" else None
 
     async def _invite(self, invite: store.EmailInvite, sender: str) -> _Status:
+        """Send the Matrix invite this claim won; an unanswered request keeps the dispatch, so it fails closed."""
         response = await self.client.room_invite(invite.room_id, sender)
-        if not isinstance(response, nio.RoomInviteResponse):
-            return "rejected" if getattr(response, "status_code", None) == "M_FORBIDDEN" else "retry"
-        store.mark_invited(self.paths, invite.id)
-        body = f"Invite for {invite.email} (approved by {invite.inviter_id}) was used by {sender}."
+        if isinstance(response, nio.RoomInviteResponse):
+            store.mark_invited(self.paths, invite.id)
+            return "invited"
+        store.end_dispatch(self.paths, invite.id)
+        return "rejected" if getattr(response, "status_code", None) == "M_FORBIDDEN" else "retry"
+
+    async def _notice(self, invite: store.EmailInvite, body: str) -> None:
+        thread, notice = invite.thread_id, {"msgtype": "m.notice"}
         content = build_message_content(
             body,
-            thread_event_id=invite.thread_id,
-            latest_thread_event_id=invite.thread_id,
-            extra_content={"msgtype": "m.notice"},
+            thread_event_id=thread,
+            latest_thread_event_id=thread,
+            extra_content=notice,
         )
         try:
             delivered = await send_message_result(self.client, invite.room_id, content)
@@ -146,7 +162,6 @@ class _Receiver:
             delivered = None
         if delivered is None:
             logger.warning("email_invite_notice_failed", invite_id=invite.id)
-        return "invited"
 
 
 def register_email_invite_receiver(
@@ -155,7 +170,7 @@ def register_email_invite_receiver(
     agent_name: str,
     runtime_paths: RuntimePaths,
     config_getter: Callable[[], Config],
-    callback_wrapper: Callable[[Callable[[nio.UnknownToDeviceEvent], Awaitable[None]]], Callable[..., Awaitable[None]]],
+    callback_wrapper: Callable[[Callable[..., Awaitable[None]]], Callable[..., Awaitable[None]]],
 ) -> None:
     """Register the claim receiver on the router only, admitting claims before a task is created."""
     if agent_name != ROUTER_AGENT_NAME:
@@ -164,7 +179,7 @@ def register_email_invite_receiver(
     wrapped = callback_wrapper(receiver.on_event)
 
     async def on_event(event: nio.UnknownToDeviceEvent) -> None:
-        if receiver.admit(event):
-            await wrapped(event)
+        if (claim := receiver.admit(event)) is not None:
+            await wrapped(event, *claim)
 
     client.add_to_device_callback(on_event, nio.UnknownToDeviceEvent)

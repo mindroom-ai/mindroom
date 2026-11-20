@@ -29,11 +29,11 @@ To send mail, set two environment variables:
 
 | Variable | Meaning |
 |---|---|
-| `MINDROOM_SMTP_URL` | `smtps://[user:password@]host[:port]` (TLS from the start, default port 465) or `smtp://[user:password@]host[:port]` (default port 587, `STARTTLS` required unless the host is `localhost` or a loopback address); user and password are URL-encoded, and the variable is kept from workers like other secrets |
+| `MINDROOM_SMTP_URL` | `smtps://[user:password@]host[:port]` (TLS from the start, default port 465) or `smtp://[user:password@]host[:port]` (default port 587, `STARTTLS` required unless the host is `localhost` or a loopback address); any other scheme sends nothing; user and password are URL-encoded, and the variable is kept from workers like other secrets |
 | `MINDROOM_SMTP_FROM` | The sender, for example `MindRoom <invites@example.org>` |
 
 The router must be in the room and allowed to invite there; without the router, the tool call is denied with the hint to run [`invite_router`](tool-approval.md#when-the-router-is-missing).
-Personal rooms and onboarding rooms are refused.
+Personal rooms, onboarding rooms and spaces are refused.
 
 ## Who Approves
 
@@ -44,7 +44,7 @@ A person *may invite* when they are joined to the room with a power level at or 
 - If not, approving the card only confirms the request. It is stored as *waiting* and nothing is sent. Someone who may invite then says "approve the invite for alice@example.com" to an agent in the same room and approves their own card; the waiting request is sent in their name.
 
 Asking again for an address that was already sent replaces the old link, which stops working.
-While an [auto-approve window](tool-approval.md#auto-approve-everything) is open in the conversation, the tool refuses and asks for `!auto_approve off`, so an invitation never goes out without a card.
+An [auto-approve window](tool-approval.md#auto-approve-everything) does not approve `invite_by_email`, so an invitation never goes out without its card.
 
 `list_email_invites()` shows the room's open invites, and `revoke_email_invite(email)` revokes one; the asker, the approver, or anyone who may invite can revoke.
 
@@ -58,7 +58,7 @@ Everyone who can read it there is already in the room, the link works once, and 
 
 The link is a bearer token: whoever holds it can join the room once, with any Matrix account.
 MindRoom cannot check that the account belongs to the mailed address, so when someone uses a link, the router posts "Invite for alice@example.com (approved by @bas:example.org) was used by @alice:example.org." in the thread where the invite was asked for.
-A link stops working once used, when it expires, or when it is revoked.
+A link stops working once used, when it expires, or when it is revoked; a revoke that loses to a claim already being let in says who used the link.
 The approver's right is checked again when the link is used; if they lost it, the invite is revoked.
 A person removed from the room cannot use the same link to come back.
 

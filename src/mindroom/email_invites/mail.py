@@ -34,7 +34,7 @@ class EmailInviteMailError(Exception):
 
 def normalize_email(raw: str) -> str | None:
     """Return one plain ASCII address lower-cased, or None when it is anything else."""
-    address = raw.strip()
+    address = raw.strip(" ")
     if len(address) > _MAX_ADDRESS_LENGTH or not _ADDRESS.fullmatch(address):
         return None
     return address.lower()
@@ -99,7 +99,7 @@ def _send(smtp_url: str, message: EmailMessage) -> None:
         host, port = parsed.hostname, parsed.port or _DEFAULT_PORTS.get(parsed.scheme)
     except ValueError:
         host = port = None
-    if not host or port is None:
+    if not host or port is None or parsed.scheme not in _DEFAULT_PORTS:
         msg = f"{_SMTP_URL_ENV} is malformed"
         raise EmailInviteMailError(msg)
     context = ssl.create_default_context()

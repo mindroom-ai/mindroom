@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Literal
 
 import aiohttp
@@ -21,14 +22,10 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+_Kind = Literal["personal", "onboarding", "space", "unknown"]
 
 
-async def may_invite(
-    client: nio.AsyncClient,
-    room_id: str,
-    user_id: str,
-    approvers: Sequence[str] = (),
-) -> bool | None:
+async def may_invite(client: nio.AsyncClient, room_id: str, user_id: str, approvers: Sequence[str] = ()) -> bool | None:
     """Return whether a user may invite to the room from live state, or None when the state is unreadable.
 
     A listed approver may invite anywhere; anyone else must be joined at or above the room's `invite` level.
@@ -47,16 +44,18 @@ async def may_invite(
     if creators is None or not isinstance(power_levels, nio.RoomGetStateEventResponse):
         logger.warning("email_invite_room_state_unreadable", room_id=room_id, error=str(power_levels))
         return None
-    return user_power_level(power_levels.content, user_id, creators) >= invite_power_level(power_levels.content)
+    needed = invite_power_level(power_levels.content)
+    return None if needed is None else user_power_level(power_levels.content, user_id, creators) >= needed
 
 
-def refused_room_kind(config: Config, paths: RuntimePaths, room_id: str) -> Literal["personal", "onboarding"] | None:
-    """Return why a room refuses email invites: it is a personal room or an onboarding room."""
-    if is_personal_room(paths, room_id):
+async def refused_room_kind(client: nio.AsyncClient, config: Config, paths: RuntimePaths, room_id: str) -> _Kind | None:
+    """Return why a room refuses email invites, or "unknown" when its create event is unreadable."""
+    if await asyncio.to_thread(is_personal_room, paths, room_id):
         return "personal"
-    if config.personal_rooms is not None and room_id in resolve_room_aliases(
-        config.personal_rooms.onboarding_rooms,
-        paths,
-    ):
+    onboarding = config.personal_rooms.onboarding_rooms if config.personal_rooms is not None else []
+    if room_id in resolve_room_aliases(onboarding, paths):
         return "onboarding"
-    return None
+    create = await client.room_get_state_event(room_id, "m.room.create")
+    if not isinstance(create, nio.RoomGetStateEventResponse):
+        return "unknown"
+    return "space" if create.content.get("type") == "m.space" else None

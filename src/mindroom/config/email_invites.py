@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mindroom.origins import is_local_origin, normalized_origin
+from mindroom.config.access import validate_concrete_matrix_user_ids
+from mindroom.origins import parse_browser_origin
 
 
 class EmailInvitesConfig(BaseModel):
@@ -27,18 +26,14 @@ class EmailInvitesConfig(BaseModel):
     @field_validator("chat_url")
     @classmethod
     def require_origin(cls, value: str) -> str:
-        """Accept an https origin, or an http origin on a local address, with no path."""
-        if normalized_origin(value) != value or (urlsplit(value).scheme != "https" and not is_local_origin(value)):
-            msg = "email_invites.chat_url must be an https origin, or an http origin on a local address, with no path"
+        """Accept an https origin, or an http origin on a local address, written exactly as its origin."""
+        if parse_browser_origin(value) != value:
+            msg = f"email_invites.chat_url must be written as its origin: {parse_browser_origin(value)}"
             raise ValueError(msg)
         return value
 
     @field_validator("approvers")
     @classmethod
     def require_user_ids(cls, approvers: list[str]) -> list[str]:
-        """Accept only Matrix user IDs."""
-        for approver in approvers:
-            if not approver.startswith("@") or ":" not in approver:
-                msg = f"email_invites.approvers entry is not a Matrix user ID: {approver}"
-                raise ValueError(msg)
-        return approvers
+        """Accept only unique, concrete Matrix user IDs."""
+        return validate_concrete_matrix_user_ids(approvers, field_name="email_invites.approvers")

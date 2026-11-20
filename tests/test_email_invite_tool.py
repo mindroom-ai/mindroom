@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.approval.auto_approve_windows import start_auto_approve
+from mindroom.approval.tool_approval import human_gate
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -89,6 +90,7 @@ class Harness:
         self.monkeypatch.setattr(tool_module, "smtp_configured", lambda _paths: self.smtp)
         self.monkeypatch.setattr(tool_module, "get_room_name", AsyncMock(return_value="Project"))
         self.monkeypatch.setattr(tool_module, "room_encryption_enabled", AsyncMock(return_value=False))
+        self.monkeypatch.setattr(tool_module, "refused_room_kind", AsyncMock(return_value=None))
 
     async def call(self, function: str, requester: str, *args: str, room_id: str = ROOM) -> str:
         """Run one toolkit function as `requester`."""
@@ -129,17 +131,14 @@ def test_invite_by_email_is_confirm_gated() -> None:
     assert set(gates) == {"invite_by_email", "list_email_invites", "revoke_email_invite"}
 
 
-@pytest.mark.asyncio
-async def test_refuses_inside_auto_approve_window(harness: Harness) -> None:
-    """An open auto-approve window refuses before anything is stored."""
+def test_auto_approve_window_never_approves_an_invite(harness: Harness) -> None:
+    """Inside a window the invite still asks for its card, at the reply and script gates alike."""
     start_auto_approve(harness.paths, room_id=ROOM, thread_id="$thread", requester_id=BAS, duration=timedelta(hours=1))
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
-    assert result == (
-        'Error: auto-approve is on in this conversation. Send "!auto_approve off" and ask again, '
-        "so the invitation gets its own approval."
-    )
-    assert harness.rows() == []
-    assert harness.mails == []
+    gate = {"approver_id": BAS, "room_id": ROOM, "thread_id": "$thread"}
+    assert human_gate(harness.paths, **gate, tool_name="invite_by_email") is None
+    approved = human_gate(harness.paths, **gate, tool_name="list_email_invites")
+    assert approved is not None
+    assert approved.approved is True
 
 
 @pytest.mark.asyncio
@@ -153,10 +152,13 @@ async def test_refuses_bad_address(harness: Harness) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("kind", "text"), [("personal", "a personal room"), ("onboarding", "an onboarding room")])
+@pytest.mark.parametrize(
+    ("kind", "text"),
+    [("personal", "a personal room"), ("onboarding", "an onboarding room"), ("space", "a space")],
+)
 async def test_refuses_refused_rooms(harness: Harness, kind: str, text: str) -> None:
     """Personal and onboarding rooms are refused."""
-    harness.monkeypatch.setattr(tool_module, "refused_room_kind", lambda _config, _paths, _room: kind)
+    harness.monkeypatch.setattr(tool_module, "refused_room_kind", AsyncMock(return_value=kind))
     result = await harness.call("invite_by_email", BAS, "alice@example.com")
     assert result == f"Error: people cannot be invited by email to {text}."
     assert harness.rows() == []
@@ -318,8 +320,7 @@ async def test_cap_texts(harness: Harness, limit: str, text: str) -> None:
     def raise_limit(*_args: object, **_kwargs: object) -> None:
         raise store.EmailInviteLimitError(limit)  # type: ignore[arg-type]
 
-    target = "create_request" if limit in {"asker", "room"} else "issue_code"
-    harness.monkeypatch.setattr(tool_module.store, target, raise_limit)
+    harness.monkeypatch.setattr(tool_module.store, "issue_code", raise_limit)
     result = await harness.call("invite_by_email", BAS, "alice@example.com")
     assert result == f"Error: limit reached: {text}."
     assert harness.mails == []
@@ -332,11 +333,7 @@ async def test_list_is_room_scoped(harness: Harness) -> None:
     await harness.call("invite_by_email", BAS, "sent@example.com")
     store.create_request(
         harness.paths,
-        room_id="!other:example.org",
-        thread_id=None,
-        email="elsewhere@example.com",
-        requested_by=BAS,
-        agent_name="code",
+        store.Request("!other:example.org", None, "elsewhere@example.com", BAS, "code"),
         expiry_days=7,
     )
     result = await harness.call("list_email_invites", BAS)
@@ -397,3 +394,27 @@ async def test_resend_at_cap_keeps_old_link(harness: Harness) -> None:
     assert result == "Error: limit reached: at most 3 mails per address per day."
     assert store.find_by_code(harness.paths, codes[-1]) is not None
     assert len(harness.rows()) == 1
+
+
+@pytest.mark.asyncio
+async def test_unbuildable_mail_cancels_the_invite(harness: Harness) -> None:
+    """A sender with a line break cancels the invite with a clean error and leaves no row shown as sent."""
+    real = tool_module.build_invite_mail
+    bad_sender = {"sender": "a@example.org\nBcc: x@example.org"}
+    harness.monkeypatch.setattr(tool_module, "build_invite_mail", lambda **kwargs: real(**{**kwargs, **bad_sender}))
+    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    assert result == "Error: the mail could not be sent (the sender address is invalid). The invite was cancelled."
+    assert harness.rows() == []
+
+
+@pytest.mark.asyncio
+async def test_revoke_losing_to_a_claim_reports_the_claimant(harness: Harness) -> None:
+    """A revoke after a claim won the dispatch changes nothing and names the account."""
+    harness.smtp = False
+    await harness.call("invite_by_email", BAS, "alice@example.com")
+    (row,) = harness.rows()
+    assert store.bind_claim(harness.paths, row.id, "@alice:example.org")
+    assert store.start_dispatch(harness.paths, row.id, "@alice:example.org")
+    result = await harness.call("revoke_email_invite", BAS, "alice@example.com")
+    assert result == "The invite for alice@example.com was already used by @alice:example.org; nothing was changed."
+    assert harness.rows()[0].revoked is False

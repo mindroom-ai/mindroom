@@ -58,6 +58,8 @@ def test_normalize_email() -> None:
         "ä@b.co",
         "a@bücher.de",
         "a" * 64 + "@" + "b" * 186 + ".com",
+        "a@b.co\n",
+        "\r\na@b.co",
     ):
         assert mail.normalize_email(raw) is None, raw
     assert len("a" * 64 + "@" + "b" * 186 + ".com") == 255
@@ -222,7 +224,12 @@ async def test_send_failure_hides_url(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "p@x" not in str(caught.value)
     assert "smtps://" not in str(caught.value)
 
-    for bad_url in ("ftp://mail.example.org", "smtp://", "smtps://u:p%40x@mail.example.org:notaport"):
+    for bad_url in (
+        "ftp://mail.example.org",
+        "smtp://",
+        "smtps://u:p%40x@mail.example.org:notaport",
+        "smtpx://u:p%40x@mail.example.org:25",
+    ):
         bad = _paths(tmp_path / bad_url.split(":")[0], MINDROOM_SMTP_URL=bad_url, MINDROOM_SMTP_FROM="a@example.org")
         with pytest.raises(mail.EmailInviteMailError) as caught:
             await mail.send_invite_mail(bad, _message())
@@ -238,3 +245,17 @@ def test_smtp_configured_needs_both(tmp_path: Path) -> None:
     assert mail.smtp_configured(_paths(tmp_path / "url", **url)) is False
     assert mail.smtp_configured(_paths(tmp_path / "from", **sender)) is False
     assert mail.smtp_configured(_paths(tmp_path / "both", **url, **sender)) is True
+
+
+@pytest.mark.asyncio
+async def test_unknown_scheme_with_port_opens_no_connection(
+    tmp_path: Path,
+    fake_smtp: dict[str, type[_FakeSMTP]],
+) -> None:
+    """A misspelled scheme never falls back to a plain connection, even with an explicit port."""
+    for url in ("smtpx://u:p@mail.example.org:25", "SMTP+tls://mail.example.org:587", "http://mail.example.org:25"):
+        paths = _paths(tmp_path / str(len(fake_smtp["plain"].instances)) / url[:4], MINDROOM_SMTP_URL=url)
+        with pytest.raises(mail.EmailInviteMailError, match="malformed"):
+            await mail.send_invite_mail(paths, _message())
+    assert fake_smtp["plain"].instances == []
+    assert fake_smtp["ssl"].instances == []

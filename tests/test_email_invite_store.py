@@ -31,20 +31,20 @@ def _request(
 ) -> store.EmailInvite:
     return store.create_request(
         paths,
-        room_id=room_id,
-        thread_id="$thread",
-        email=email,
-        requested_by=requested_by,
-        agent_name="general",
+        store.Request(room_id, "$thread", email, requested_by, "general"),
         expiry_days=7,
         now=now,
     )
 
 
+def _issue(paths: RuntimePaths, *, email: str = "alice@example.com", now: int = NOW) -> tuple[store.EmailInvite, str]:
+    request = store.Request(ROOM, "$thread", email, "@bas:example.org", "general")
+    return store.issue_code(paths, request, expiry_days=7, now=now)
+
+
 def _sent(paths: RuntimePaths, *, email: str = "alice@example.com", now: int = NOW) -> tuple[store.EmailInvite, str]:
-    invite = _request(paths, email=email, now=now)
-    code = store.issue_code(paths, invite.id, inviter_id="@bas:example.org", expiry_days=7, now=now)
-    return invite, code
+    _request(paths, email=email, now=now)
+    return _issue(paths, email=email, now=now)
 
 
 def _db_path(paths: RuntimePaths) -> Path:
@@ -110,41 +110,66 @@ def test_address_and_deployment_caps(tmp_path: Path) -> None:
         assert store.revoke(paths, invite.id, now=NOW + index) is True
     blocked = _request(paths, now=NOW + 3)
     with pytest.raises(store.EmailInviteLimitError) as caught:
-        store.issue_code(paths, blocked.id, inviter_id="@bas:example.org", expiry_days=7, now=NOW + 3)
+        _issue(paths, now=NOW + 3)
     assert caught.value.limit == "address"
     store.revoke(paths, blocked.id, now=NOW + 3)
 
-    for index in range(47):
-        invite = _request(paths, email=f"user{index}@example.com", requested_by=f"@asker{index}:example.org")
-        store.issue_code(paths, invite.id, inviter_id="@bas:example.org", expiry_days=7, now=NOW + 10)
-        store.revoke(paths, invite.id, now=NOW + 10)
-    last = _request(paths, email="last@example.com", requested_by="@last:example.org")
+    for index in range(48):
+        email = f"user{index}@example.com"
+        _request(paths, email=email, requested_by=f"@asker{index}:example.org", now=NOW + 10)
+        if index < 47:
+            invite, _code = _issue(paths, email=email, now=NOW + 10)
+            store.revoke(paths, invite.id, now=NOW + 10)
     with pytest.raises(store.EmailInviteLimitError) as caught:
-        store.issue_code(paths, last.id, inviter_id="@bas:example.org", expiry_days=7, now=NOW + 10)
+        _issue(paths, email="user47@example.com", now=NOW + 10)
     assert caught.value.limit == "deployment"
 
 
 def test_issue_code_extends_expiry(tmp_path: Path) -> None:
-    """Issuing the code restarts the expiry from that moment."""
+    """Issuing the code restarts the expiry from that moment, and uses the waiting request."""
     paths = test_runtime_paths(tmp_path)
     invite = _request(paths)
     assert invite.expires_at == NOW + 7 * DAY
-    code = store.issue_code(paths, invite.id, inviter_id="@bas:example.org", expiry_days=7, now=NOW + 3 * DAY)
+    issued, code = _issue(paths, now=NOW + 3 * DAY)
+    assert issued.id == invite.id
+    assert issued.requested_by == "@bas:example.org"
     found = store.find_by_code(paths, code, now=NOW + 3 * DAY)
     assert found is not None
-    assert found.expires_at == NOW + 10 * DAY
+    assert found.expires_at == issued.expires_at == NOW + 10 * DAY
 
 
-def test_issue_code_needs_open_row_without_code(tmp_path: Path) -> None:
-    """A code is issued once, and never for a revoked row."""
+def test_reissue_replaces_and_a_refused_cap_changes_nothing(tmp_path: Path) -> None:
+    """A second send replaces the sent request; a send a cap refuses leaves the sent link working."""
+    paths = test_runtime_paths(tmp_path)
+    first, first_code = _sent(paths)
+    second, second_code = _issue(paths, now=NOW + 1)
+    assert second.id != first.id
+    assert store.find_by_code(paths, first_code, now=NOW + 1) is None
+    _issue(paths, now=NOW + 2)
+    with pytest.raises(store.EmailInviteLimitError):
+        _issue(paths, now=NOW + 3)
+    (still_open,) = store.open_invites(paths, ROOM, now=NOW + 3)
+    assert still_open.sent_at == NOW + 2
+    assert second_code
+
+
+def test_dispatch_decides_between_claim_and_revoke(tmp_path: Path) -> None:
+    """Once a claim wins the dispatch, revoke fails and reissue refuses; a revoke first makes the dispatch fail."""
     paths = test_runtime_paths(tmp_path)
     invite, _code = _sent(paths)
-    with pytest.raises(ValueError, match="open"):
-        store.issue_code(paths, invite.id, inviter_id="@bas:example.org", expiry_days=7, now=NOW)
-    revoked = _request(paths, email="bob@example.com")
-    store.revoke(paths, revoked.id, now=NOW)
-    with pytest.raises(ValueError, match="open"):
-        store.issue_code(paths, revoked.id, inviter_id="@bas:example.org", expiry_days=7, now=NOW)
+    assert store.bind_claim(paths, invite.id, "@alice:example.org", now=NOW + 1)
+    assert store.start_dispatch(paths, invite.id, "@mallory:example.org", now=NOW + 1) is False
+    assert store.start_dispatch(paths, invite.id, "@alice:example.org", now=NOW + 1) is True
+    assert store.start_dispatch(paths, invite.id, "@alice:example.org", now=NOW + 1) is False
+    assert store.revoke(paths, invite.id, now=NOW + 2) is False
+    with pytest.raises(ValueError, match="being used"):
+        _issue(paths, now=NOW + 2)
+    store.end_dispatch(paths, invite.id)
+    assert store.revoke(paths, invite.id, now=NOW + 3) is True
+    assert store.start_dispatch(paths, invite.id, "@alice:example.org", now=NOW + 3) is False
+    other, _other_code = _sent(paths, email="bob@example.com")
+    assert store.bind_claim(paths, other.id, "@bob:example.org", now=NOW + 1)
+    assert store.start_dispatch(paths, other.id, "@bob:example.org", now=NOW + 8 * DAY) is False
 
 
 def test_two_claimants_one_winner(tmp_path: Path) -> None:

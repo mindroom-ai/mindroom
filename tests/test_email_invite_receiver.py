@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+import uuid
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from nio.durable.model import RecordKind, SyncRecord
+from nio.durable.store import DurableStore
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -15,6 +20,7 @@ from mindroom.email_invites import receiver as receiver_module
 from mindroom.email_invites import store
 from mindroom.email_invites.receiver import _CLAIM_EVENT_TYPE, _RESULT_EVENT_TYPE, register_email_invite_receiver
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.client_session import olm_store_dir
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -46,30 +52,47 @@ class Harness:
         self.router_id = entity_identity_registry(self.config, self.paths).current_id(ROUTER_AGENT_NAME).full_id
         self.memberships: dict[str, str | None] = {}
         self.rights: dict[str, bool | None] = {BAS: True, self.router_id: True}
+        self.rights_hook: Callable[[], None] = lambda: None
         self.refused: str | None = None
+        self.events: list[str] = []
         self.client = AsyncMock()
+        self.client.user_id, self.client.device_id = self.router_id, "ROUTERDEV"
         self.client.room_invite = AsyncMock(return_value=nio.RoomInviteResponse())
-        self.client.to_device = AsyncMock(return_value=nio.ToDeviceResponse("txn"))
         self.notices: list[dict[str, Any]] = []
         self.notice_error = False
 
-        async def membership(_client: object, room_id: str, user_id: str) -> str | None:
+        async def membership(room_id: str, _event_type: str, user_id: str) -> object:
             assert room_id == ROOM
-            return self.memberships.get(user_id)
+            value = self.memberships.get(user_id)
+            if value is None:
+                return nio.RoomGetStateEventError("absent", "M_NOT_FOUND")
+            if value == "unreadable":
+                return nio.RoomGetStateEventError("busy", "M_LIMIT_EXCEEDED")
+            return nio.RoomGetStateEventResponse({"membership": value}, "m.room.member", user_id, room_id)
 
         async def may_invite(_client: object, room_id: str, user_id: str, _approvers: object = ()) -> bool | None:
             assert room_id == ROOM
+            self.rights_hook()
             return self.rights.get(user_id, False)
 
         async def send_notice(_client: object, room_id: str, content: dict[str, Any]) -> object:
             assert room_id == ROOM
+            self.events.append("notice")
             self.notices.append(content)
             return None if self.notice_error else MagicMock()
 
-        monkeypatch.setattr(receiver_module, "get_room_membership", membership)
+        async def refused(*_args: object) -> str | None:
+            return self.refused
+
+        async def to_device(_message: object) -> nio.ToDeviceResponse:
+            self.events.append("result")
+            return nio.ToDeviceResponse("txn")
+
+        self.client.room_get_state_event = AsyncMock(side_effect=membership)
+        self.client.to_device = AsyncMock(side_effect=to_device)
         monkeypatch.setattr(receiver_module, "may_invite", may_invite)
         monkeypatch.setattr(receiver_module, "send_message_result", send_notice)
-        monkeypatch.setattr(receiver_module, "refused_room_kind", lambda *_args: self.refused)
+        monkeypatch.setattr(receiver_module, "refused_room_kind", refused)
         self.callbacks: list[Callable[[Any], Awaitable[None]]] = []
         self.client.add_to_device_callback = MagicMock(
             side_effect=lambda callback, _type: self.callbacks.append(callback),
@@ -84,16 +107,11 @@ class Harness:
 
     def sent_invite(self) -> tuple[store.EmailInvite, str]:
         """Store one sent invite and return it with its code."""
-        invite = store.create_request(
+        return store.issue_code(
             self.paths,
-            room_id=ROOM,
-            thread_id="$thread",
-            email="alice@example.com",
-            requested_by=BAS,
-            agent_name="code",
+            store.Request(ROOM, "$thread", "alice@example.com", BAS, "code"),
             expiry_days=7,
         )
-        return invite, store.issue_code(self.paths, invite.id, inviter_id=BAS, expiry_days=7)
 
     async def claim(
         self,
@@ -124,8 +142,9 @@ class Harness:
 
     def row(self, invite_id: int) -> store.EmailInvite:
         """Return one row whatever its state."""
-        with store._connection(self.paths) as connection:
-            return store._select(connection, "id = ?", (invite_id,))[0]
+        row = store.get(self.paths, invite_id)
+        assert row is not None
+        return row
 
 
 @pytest.fixture
@@ -363,3 +382,128 @@ async def test_encrypted_claim_is_handled(harness: Harness) -> None:
     _invite, code = harness.sent_invite()
     result = await harness.claim(ALICE, code, event_class=nio.AuthenticatedToDeviceEvent)
     assert (result or {})["status"] == "invited"
+
+
+@pytest.mark.asyncio
+async def test_revoke_during_rights_read_wins(harness: Harness) -> None:
+    """A revoke that lands while the rights are read means no Matrix invite follows."""
+    invite, code = harness.sent_invite()
+    revoked: list[bool] = []
+    harness.rights_hook = lambda: revoked.append(store.revoke(harness.paths, invite.id)) if not revoked else None
+    assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
+    assert revoked == [True]
+    harness.client.room_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_expiry_during_rights_read_wins(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link that expires while the rights are read lets no one in."""
+    invite, code = harness.sent_invite()
+    harness.rights_hook = lambda: monkeypatch.setattr(store.time, "time", lambda: invite.expires_at + 1)
+    assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
+    harness.client.room_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_claims_of_one_account_send_one_invite(harness: Harness) -> None:
+    """Two claims from the same account at once send one Matrix invite; the other is told to retry."""
+    _invite, code = harness.sent_invite()
+    release = asyncio.Event()
+
+    async def slow_invite(_room: str, _user: str) -> nio.RoomInviteResponse:
+        await release.wait()
+        return nio.RoomInviteResponse()
+
+    harness.client.room_invite = AsyncMock(side_effect=slow_invite)
+    (callback,) = harness.callbacks
+    started = asyncio.Event()
+    harness.rights_hook = started.set
+    first = asyncio.create_task(callback(_event(ALICE, code, "r1")))
+    await started.wait()
+    for _ in range(20):
+        await asyncio.sleep(0)
+    await callback(_event(ALICE, code, "r2"))
+    release.set()
+    await first
+    statuses = [call.args[0].content["status"] for call in harness.client.to_device.await_args_list]
+    assert sorted(statuses) == ["invited", "retry"]
+    harness.client.room_invite.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_membership_answers_retry_without_binding(harness: Harness) -> None:
+    """A membership read that fails is not taken as a fresh claimant."""
+    invite, code = harness.sent_invite()
+    harness.memberships[ALICE] = "unreadable"
+    assert (await harness.claim(ALICE, code) or {})["status"] == "retry"
+    assert harness.row(invite.id).claimed_by is None
+    harness.client.room_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invite_sent_before_a_crash_is_completed_once(harness: Harness) -> None:
+    """An invite the homeserver accepted before a crash is recorded, with one notice, and never sent again."""
+    invite, code = harness.sent_invite()
+    assert store.bind_claim(harness.paths, invite.id, ALICE)
+    assert store.start_dispatch(harness.paths, invite.id, ALICE)
+    harness.memberships[ALICE] = "invite"
+    assert (await harness.claim(ALICE, code) or {})["status"] == "invited"
+    assert (await harness.claim(ALICE, code) or {})["status"] == "invited"
+    assert len(harness.notices) == 1
+    harness.client.room_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unproven_dispatch_fails_closed(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dispatch whose outcome no state proves is not repeated: soon it answers retry, later rejected."""
+    invite, code = harness.sent_invite()
+    assert store.bind_claim(harness.paths, invite.id, ALICE)
+    assert store.start_dispatch(harness.paths, invite.id, ALICE)
+    harness.memberships[ALICE] = "leave"
+    assert (await harness.claim(ALICE, code) or {})["status"] == "retry"
+    later = time.time() + 120
+    monkeypatch.setattr(receiver_module.time, "time", lambda: later)
+    assert (await harness.claim(ALICE, code, "r2") or {})["status"] == "rejected"
+    harness.client.room_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_result_is_answered_before_the_notice(harness: Harness) -> None:
+    """The claimant hears the result before the room notice is sent."""
+    _invite, code = harness.sent_invite()
+    await harness.claim(ALICE, code)
+    assert harness.events == ["result", "notice"]
+
+
+@pytest.mark.asyncio
+async def test_room_that_became_a_space_revokes(harness: Harness) -> None:
+    """A space refuses the claim and revokes the invite."""
+    invite, code = harness.sent_invite()
+    harness.refused = "space"
+    assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
+    assert harness.row(invite.id).revoked is True
+
+
+@pytest.mark.asyncio
+async def test_sync_store_keeps_no_plain_code(harness: Harness) -> None:
+    """After a claim is handled, the router's durable sync store holds the code nowhere, WAL included."""
+    _invite, code = harness.sent_invite()
+    directory = olm_store_dir(harness.router_id, harness.paths)
+    sync_store = DurableStore(directory, user_id=harness.router_id, device_id="ROUTERDEV", consumer_id=uuid.uuid4())
+    source = {"type": _CLAIM_EVENT_TYPE, "sender": ALICE, "content": {"version": 1, "request_id": "r1", "code": code}}
+    with sync_store.transaction():
+        batch = sync_store.publish((SyncRecord(RecordKind.TO_DEVICE, None, source),))
+    sync_store.ack(batch)
+    assert any(code.encode() in path.read_bytes() for path in directory.iterdir() if path.is_file())
+    assert (await harness.claim(ALICE, code) or {})["status"] == "invited"
+    assert not any(code.encode() in path.read_bytes() for path in directory.iterdir() if path.is_file())
+    sync_store.close()
+
+
+def _event(sender: str, code: str, request_id: str) -> nio.UnknownToDeviceEvent:
+    content = {"version": 1, "request_id": request_id, "code": code}
+    return nio.UnknownToDeviceEvent(
+        {"type": _CLAIM_EVENT_TYPE, "sender": sender, "content": content},
+        sender,
+        _CLAIM_EVENT_TYPE,
+    )

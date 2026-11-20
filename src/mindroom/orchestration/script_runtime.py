@@ -299,6 +299,7 @@ class _LiveScriptRuntimeResolver:
             approver_id=approver_user_id,
             room_id=context.room_id,
             thread_id=context.resolved_thread_id,
+            tool_name=grant.function_name,
         )
         if gate is not None:
             return gate

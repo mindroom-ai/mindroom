@@ -63,7 +63,6 @@ def _client(
 async def test_default_invite_level_lets_members_invite() -> None:
     """Without an `invite` entry, members at the default level may invite."""
     assert invite_power_level({}) == 0
-    assert invite_power_level({"invite": "50"}) == 0
     assert await may_invite(_client(), ROOM, USER) is True
 
 
@@ -75,6 +74,20 @@ async def test_raised_invite_level() -> None:
     assert await may_invite(_client(power_levels=levels), ROOM, USER) is False
     levels_at_50: dict[str, object] = {"invite": 50, "users": {USER: 50}}
     assert await may_invite(_client(power_levels=levels_at_50), ROOM, USER) is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_string_power_levels() -> None:
+    """Integer strings of older room versions are read as their numbers, and anything else fails closed."""
+    assert invite_power_level({"invite": "50"}) == 50
+    assert invite_power_level({"invite": "fifty"}) is None
+    levels: dict[str, object] = {"invite": "50", "users": {USER: "0"}}
+    assert await may_invite(_client(power_levels=levels), ROOM, USER) is False
+    levels = {"invite": "50", "users": {USER: " 50 "}}
+    assert await may_invite(_client(power_levels=levels), ROOM, USER) is True
+    levels = {"invite": "50", "users_default": "50"}
+    assert await may_invite(_client(power_levels=levels), ROOM, USER) is True
+    assert await may_invite(_client(power_levels={"invite": 1.5}), ROOM, USER) is None
 
 
 @pytest.mark.asyncio
@@ -125,7 +138,8 @@ async def test_listed_approver() -> None:
     client.room_get_state.assert_not_called()
 
 
-def test_refused_rooms(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_refused_rooms(tmp_path: Path) -> None:
     """Personal rooms and configured onboarding rooms are refused."""
     paths = test_runtime_paths(tmp_path)
     record = PersonalRoomRecord(
@@ -148,7 +162,13 @@ def test_refused_rooms(tmp_path: Path) -> None:
 
     assert is_personal_room(paths, "!personal:example.org") is True
     assert is_personal_room(paths, ROOM) is False
-    assert refused_room_kind(config, paths, "!personal:example.org") == "personal"
-    assert refused_room_kind(config, paths, "!lobby:example.org") == "onboarding"
-    assert refused_room_kind(config, paths, ROOM) is None
-    assert refused_room_kind(Config(router=RouterConfig(model="default")), paths, "!lobby:example.org") is None
+    client = _client()
+    assert await refused_room_kind(client, config, paths, "!personal:example.org") == "personal"
+    assert await refused_room_kind(client, config, paths, "!lobby:example.org") == "onboarding"
+    assert await refused_room_kind(client, config, paths, ROOM) is None
+    plain = Config(router=RouterConfig(model="default"))
+    assert await refused_room_kind(client, plain, paths, "!lobby:example.org") is None
+    client._contents["m.room.create"] = {"room_version": "11", "type": "m.space"}
+    assert await refused_room_kind(client, config, paths, ROOM) == "space"
+    del client._contents["m.room.create"]
+    assert await refused_room_kind(client, config, paths, ROOM) == "unknown"

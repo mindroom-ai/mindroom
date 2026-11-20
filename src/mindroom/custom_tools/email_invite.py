@@ -6,7 +6,6 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.email_invites import store
@@ -38,7 +37,8 @@ _LIMITS = {
     "address": "at most 3 mails per address per day",
     "deployment": "at most 50 mails per day",
 }
-_ROOM_KINDS = {"personal": "a personal room", "onboarding": "an onboarding room"}
+_ROOM_KINDS = {"personal": "a personal room", "onboarding": "an onboarding room", "space": "a space"}
+_UNREADABLE = "Error: room state unreadable; try again in a moment."
 
 
 def _date(timestamp: int) -> str:
@@ -53,18 +53,13 @@ def _caller(context: ToolRuntimeContext | None) -> tuple[ToolRuntimeContext, str
     return (context, person) if person is not None else "Error: only a person can ask for an email invite."
 
 
-def _refusal(context: ToolRuntimeContext, approver: str, address: str | None) -> str | None:
-    """Return why the invite is refused before any Matrix read, or None."""
-    paths, room_id = context.runtime_paths, context.room_id
-    thread_id = context.target.resolved_thread_id
-    if auto_approve_expires_at(paths, room_id=room_id, thread_id=thread_id, requester_id=approver) is not None:
-        return (
-            'Error: auto-approve is on in this conversation. Send "!auto_approve off" and ask again, '
-            "so the invitation gets its own approval."
-        )
+async def _refusal(context: ToolRuntimeContext, address: str | None) -> str | None:
+    """Return why the invite is refused before the rights are read, or None."""
     if address is None:
         return _BAD_ADDRESS
-    kind = refused_room_kind(context.current_config, paths, room_id)
+    kind = await refused_room_kind(context.client, context.current_config, context.runtime_paths, context.room_id)
+    if kind == "unknown":
+        return _UNREADABLE
     return None if kind is None else f"Error: people cannot be invited by email to {_ROOM_KINDS[kind]}."
 
 
@@ -97,14 +92,14 @@ class EmailInviteTools(Toolkit):
         context, approver = caller
         config, paths, room_id = context.current_config, context.runtime_paths, context.room_id
         address = normalize_email(email)
-        if (refusal := _refusal(context, approver, address)) or address is None:
+        if (refusal := await _refusal(context, address)) or address is None:
             return refusal or _BAD_ADDRESS
         router_id = entity_identity_registry(config, paths).current_id(ROUTER_AGENT_NAME).full_id
         if await may_invite(context.client, room_id, router_id) is not True:
             return "Error: the router may not invite people to this room."
         rights = await may_invite(context.client, room_id, approver, config.email_invites.approvers)
         if rights is None:
-            return "Error: room state unreadable; try again in a moment."
+            return _UNREADABLE
         return await _request(context, approver, address, router_id, rights=rights)
 
     async def list_email_invites(self) -> str:
@@ -145,8 +140,11 @@ class EmailInviteTools(Toolkit):
             return "Error: only the asker, the approver, or someone who may invite can revoke this."
         if invite is not None and store.revoke(context.runtime_paths, invite.id):
             return f"Revoked the invite for {address}."
-        used = store.used_invite(context.runtime_paths, room_id=context.room_id, email=address)
-        if used is not None:
+        # A revoke that loses to a claim reports the account that claimed.
+        used = store.used_invite(context.runtime_paths, room_id=context.room_id, email=address) or (
+            invite and store.get(context.runtime_paths, invite.id)
+        )
+        if used is not None and used.claimed_by is not None:
             return f"The invite for {address} was already used by {used.claimed_by}; nothing was changed."
         return f"No open invite for {address} in this room."
 
@@ -159,63 +157,50 @@ async def _request(context: ToolRuntimeContext, approver: str, address: str, rou
         if existing.inviter_id is None:
             return f"An invite for {address} is already waiting for someone who may invite."
         return f"An invite for {address} was already sent; it is valid until {_date(existing.expires_at)}."
+    request = store.Request(room_id, context.target.resolved_thread_id, address, approver, context.agent_name)
     try:
-        if existing is not None and existing.inviter_id is not None:
-            # A new send replaces the old one, so the old link stops working, but only once the caps allow it.
-            store.check_caps(paths, requested_by=approver, email=address)
-            store.revoke(paths, existing.id)
-            existing = None
-        invite = existing or store.create_request(
-            paths,
-            room_id=room_id,
-            thread_id=context.target.resolved_thread_id,
-            email=address,
-            requested_by=approver,
-            agent_name=context.agent_name,
-            expiry_days=config.email_invites.expiry_days,
-        )
         if not rights:
+            store.create_request(paths, request, expiry_days=config.email_invites.expiry_days)
             return (
                 f"Stored, nothing sent: {approver} may not invite people to this room. Someone who may invite "
                 f'can approve it by asking an agent here: "approve the invite for {address}".'
             )
-        return await _send(context, invite, approver, router_id)
+        return await _send(context, request, router_id)
     except store.EmailInviteLimitError as exc:
         return f"Error: limit reached: {_LIMITS[exc.limit]}."
     except ValueError:
         return _CHANGED
 
 
-async def _send(context: ToolRuntimeContext, invite: store.EmailInvite, approver: str, router_id: str) -> str:
+async def _send(context: ToolRuntimeContext, request: store.Request, router_id: str) -> str:
     """Issue the code and mail the link, or return it when no mail server is configured."""
     paths, settings = context.runtime_paths, context.current_config.email_invites
     if mailing := smtp_configured(paths):
         # Read before the code exists, so a failed read leaves no unsent code.
         room_name = await get_room_name(context.client, context.room_id)
         encrypted = await room_encryption_enabled(context.client, context.room_id) is True
-    code = store.issue_code(paths, invite.id, inviter_id=approver, expiry_days=settings.expiry_days)
-    issued = store.find_by_code(paths, code)
-    if issued is None:
-        return _CHANGED
-    link, date = invite_link(settings.chat_url, router_id, code), _date(issued.expires_at)
+    invite, code = store.issue_code(paths, request, expiry_days=settings.expiry_days)
+    address, approver = request.email, request.person
+    link, date = invite_link(settings.chat_url, router_id, code), _date(invite.expires_at)
     if not mailing:
         return (
-            f"No mail server is configured, so nothing was mailed. Give this link to {invite.email} yourself. "
+            f"No mail server is configured, so nothing was mailed. Give this link to {address} yourself. "
             f"It works once, expires on {date}, and lets whoever opens it join this room: {link}"
         )
-    message = build_invite_mail(
-        sender=paths.env_value(SMTP_FROM_ENV, default=""),
-        recipient=invite.email,
-        inviter_name=(context.room.user_name(approver) if context.room is not None else None) or approver,
-        inviter_id=approver,
-        room_name=room_name,
-        link=link,
-        expires_at=issued.expires_at,
-        encrypted=encrypted,
-    )
     try:
+        message = build_invite_mail(
+            sender=paths.env_value(SMTP_FROM_ENV, default=""),
+            recipient=address,
+            inviter_name=(context.room.user_name(approver) if context.room is not None else None) or approver,
+            inviter_id=approver,
+            room_name=room_name,
+            link=link,
+            expires_at=invite.expires_at,
+            encrypted=encrypted,
+        )
         await send_invite_mail(paths, message)
-    except EmailInviteMailError as exc:
+    except (EmailInviteMailError, ValueError) as exc:
         store.revoke(paths, invite.id)
-        return f"Error: the mail could not be sent ({exc}). The invite was cancelled."
-    return f"Invitation mailed to {invite.email}. The link works once and expires on {date}."
+        reason = exc if isinstance(exc, EmailInviteMailError) else "the sender address is invalid"
+        return f"Error: the mail could not be sent ({reason}). The invite was cancelled."
+    return f"Invitation mailed to {address}. The link works once and expires on {date}."

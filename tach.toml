@@ -4283,7 +4283,6 @@ visibility = [
     "mindroom.matrix.room_accounts",
     "mindroom.room_tree.note",
     "mindroom.email_invites.policy",
-    "mindroom.email_invites.receiver",
 ]
 
 [[modules]]
@@ -4330,6 +4329,7 @@ visibility = [
     "mindroom.matrix.user_masquerade",
     "mindroom.matrix.users",
     "mindroom.orchestration.runtime",
+    "mindroom.email_invites.receiver",
 ]
 
 [[modules]]
@@ -4450,7 +4450,8 @@ depends_on = [
     "mindroom.email_invites.store",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.client_session",
+    "mindroom.mcp_gateway.admission",
 ]
 
 [[modules]]
