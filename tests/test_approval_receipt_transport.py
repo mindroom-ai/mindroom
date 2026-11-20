@@ -52,19 +52,13 @@ def _bot(name: str, *, device: str | None = None) -> MagicMock:
     )
 
 
-def _transport(
-    bots: dict[str, MagicMock],
-    senders: dict[str, str | None] | None = None,
-    cards: ApprovalDeliveryView | None = None,
-) -> ApprovalMatrixTransport:
-    """Return the transport over these bots, reading each card's sender from ``senders`` or from ``cards``."""
+def _transport(bots: dict[str, MagicMock], cards: ApprovalDeliveryView | None = None) -> ApprovalMatrixTransport:
+    """Return the transport over these bots, reading card senders from ``cards`` or else knowing one card of code's."""
     if cards is None:
-        known = senders or {}
         cards = MagicMock(principal_id=_BOOKS)
         cards.approvals.approval_card_sender = AsyncMock(
-            side_effect=lambda *, delivery_id: (known[delivery_id], _ROOM) if delivery_id in known else None,
+            side_effect=lambda *, delivery_id: (_CODE, _ROOM) if delivery_id == "card-1" else None,
         )
-        cards.approvals.unavailable_notice = AsyncMock(return_value=None)
     return ApprovalMatrixTransport(
         bots=lambda: bots,
         room_poster=lambda _room_id: next(iter(bots.values()), None),
@@ -108,7 +102,7 @@ async def test_card_is_sent_by_asking_agent(sending_clients: list[nio.AsyncClien
     """The bot of the account a card records sends the card and its terminal edit, with another bot in the room."""
     bots = {"other": _bot("other"), "code": _bot("code")}
 
-    send, _resolve, device_id = await _transport(bots, {"card-1": _CODE}).pinned_delivery("card-1")
+    send, _resolve, device_id = await _transport(bots).pinned_delivery("card-1")
     await send(_delivery(edits_event_id=edits_event_id))
 
     assert sending_clients == [bots["code"].client]
@@ -123,7 +117,7 @@ async def test_delivery_goes_out_through_the_client_pinned_with_its_device(
     bots = {"code": _bot("code", device="device-a")}
     pinned = bots["code"].client
 
-    send, _resolve, device_id = await _transport(bots, {"card-1": _CODE}).pinned_delivery("card-1")
+    send, _resolve, device_id = await _transport(bots).pinned_delivery("card-1")
     bots["code"] = _bot("code", device="device-b")
     await send(_delivery())
 
@@ -135,7 +129,7 @@ async def test_sender_outside_the_room_or_without_a_bot_pins_nothing() -> None:
     """A sender whose client is not joined, or whose bot is being replaced, defers the delivery unclaimed."""
     bots = {"code": _bot("code")}
     bots["code"].client.rooms = {}
-    transport = _transport(bots, {"card-1": _CODE})
+    transport = _transport(bots)
 
     assert transport.sender_bot(_CODE, _ROOM) is None
     with pytest.raises(ToolApprovalTransportError, match="not ready"):
@@ -246,7 +240,7 @@ def _card_event(sender: str) -> MagicMock:
 async def test_click_on_card_from_other_account_is_rejected() -> None:
     """A card event counts only when the account of the card's recorded sender sent it."""
     bots = {"other": _bot("other"), "code": _bot("code")}
-    transport = _transport(bots, {"card-1": _CODE})
+    transport = _transport(bots)
     reader = bots["other"].client
 
     reader.room_get_event = AsyncMock(return_value=_card_event("@mindroom_other:example.org"))
@@ -263,7 +257,7 @@ async def test_click_is_verified_by_the_sender_when_another_account_cannot_read_
     bots = {"other": _bot("other"), "code": _bot("code")}
     bots["other"].client.room_get_event = AsyncMock(return_value=forbidden)
     bots["code"].client.room_get_event = AsyncMock(return_value=_card_event("@mindroom_code:example.org"))
-    transport = _transport(bots, {"card-1": _CODE})
+    transport = _transport(bots)
 
     assert await transport.resolve_approval_action_delivery(_ROOM, "$card") == "card-1"
 
@@ -284,14 +278,14 @@ async def test_click_is_verified_while_the_fleet_changes_under_the_readers() -> 
     bots["other"].client.room_get_event = forbidden_after_a_reload
     bots["code"].client.room_get_event = AsyncMock(return_value=_card_event("@mindroom_code:example.org"))
 
-    assert await _transport(bots, {"card-1": _CODE}).resolve_approval_action_delivery(_ROOM, "$card") == "card-1"
+    assert await _transport(bots).resolve_approval_action_delivery(_ROOM, "$card") == "card-1"
 
 
 @pytest.mark.asyncio
 async def test_approval_works_in_room_with_one_agent_and_no_owner(sending_clients: list[nio.AsyncClient]) -> None:
     """One agent alone in a room it was never invited to, as its personal room, prepares and sends its own card."""
     bots = {"code": _bot("code")}
-    transport = _transport(bots, {"card-1": _CODE})
+    transport = _transport(bots)
     content = {"approval_id": "card-1", "body": "Approval required"}
 
     assert await transport.prepare_approval_event(_ROOM, None, content, "code") == content
@@ -331,15 +325,21 @@ async def test_restart_edits_card_through_its_recorded_sender(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sender", ["stopped", "absent"])
 async def test_recovery_without_the_senders_client_leaves_a_fresh_card_unattempted(
     tmp_path: Path,
     journal: EventJournalStore,
     sending_clients: list[nio.AsyncClient],
+    sender: str,
 ) -> None:
-    """A card whose sender is still starting is not claimed, so it is sent whole once the sender runs."""
+    """A sweep finding the card's sender still starting, or with no bot during a reload gap, claims nothing.
+
+    The card is sent whole once the sender runs, or once the replacement bot is there.
+    """
     cards = journal.principal(_BOOKS)
-    bots = {"code": _bot("code")}
-    bots["code"].running = False
+    bot = _bot("code")
+    bot.running = sender != "stopped"
+    bots = {} if sender == "absent" else {"code": bot}
     manager = _manager(tmp_path, bots, cards)
     try:
         await _reserve_card(cards)
@@ -349,34 +349,10 @@ async def test_recovery_without_the_senders_client_leaves_a_fresh_card_unattempt
         initial = await cards.load_matrix_delivery(delivery_id="card-1", stage=DeliveryStage.INITIAL)
         assert initial is not None
         assert not initial.attempted
-        bots["code"].running = True
+        bot.running = True
+        bots["code"] = bot
         assert (await manager.recover_cards_on_startup()).complete
-        assert sending_clients == [bots["code"].client]
-    finally:
-        await manager.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_sweep_during_a_reload_gap_leaves_the_card_for_the_replacement_bot(
-    tmp_path: Path,
-    journal: EventJournalStore,
-    sending_clients: list[nio.AsyncClient],
-) -> None:
-    """A sweep that finds no bot for a card's sender claims and refuses nothing; the replacement bot sends the card."""
-    cards = journal.principal(_BOOKS)
-    bots: dict[str, MagicMock] = {}
-    manager = _manager(tmp_path, bots, cards)
-    try:
-        await _reserve_card(cards)
-
-        assert not (await manager.recover_cards_on_startup()).complete
-
-        initial = await cards.load_matrix_delivery(delivery_id="card-1", stage=DeliveryStage.INITIAL)
-        assert initial is not None
-        assert not initial.attempted
-        bots["code"] = _bot("code")
-        assert (await manager.recover_cards_on_startup()).complete
-        assert sending_clients == [bots["code"].client]
+        assert sending_clients == [bot.client]
     finally:
         await manager.shutdown()
 
