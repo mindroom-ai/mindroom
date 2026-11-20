@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import traceback
 from typing import TYPE_CHECKING
 
 import pytest
@@ -66,6 +67,10 @@ def test_removing_a_key_sets_closed_before_adding_does_not() -> None:
     book = LinkBook(links=[alice, bob], keys={ALICE: [first]})
 
     set_keys(book, ALICE, [first, second], now=5.0)
+    assert alice.closed_before == 1.0
+
+    set_keys(book, ALICE, [first, f"{second} renamed"], now=6.0)
+    assert book.keys == {ALICE: [first, f"{second} renamed"]}
     assert alice.closed_before == 1.0
 
     set_keys(book, ALICE, [f"{second} renamed"], now=7.0)
@@ -168,6 +173,29 @@ def test_update_links_round_trips_and_writes_under_tracking(tmp_path: Path) -> N
     with pytest.raises(RuntimeError, match="boom"):
         update_links(runtime_paths, fail)
     assert read_links(runtime_paths) == book
+
+
+def test_invalid_file_error_names_fields_but_not_secrets(tmp_path: Path) -> None:
+    """A corrupt record is reported by path and field, never with its host key, on read and on update."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    record = new_link(ALICE, "mind_alice", ALICE_KEY, "mind-alice", now=1.0).model_dump(mode="json")
+    del record["hostname"]
+    record["desired"] = "sideways"
+    path = tracking_dir(runtime_paths) / "tailnet_ssh.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"links": [record], "keys": {}}), encoding="utf-8")
+    secret = record["host_key"].splitlines()[1]
+
+    for call in (lambda: read_links(runtime_paths), lambda: update_links(runtime_paths, lambda _book: None)):
+        with pytest.raises(ValueError, match="invalid") as caught:
+            call()
+        rendered = "".join(traceback.format_exception(caught.value))
+        assert str(path) in rendered
+        assert "links.0.hostname: missing" in rendered
+        assert "links.0.desired: literal_error" in rendered
+        assert secret not in rendered
+        assert "sideways" not in rendered
+        assert "mind-alice" not in rendered
 
 
 def test_one_link_per_requester_and_agent() -> None:
