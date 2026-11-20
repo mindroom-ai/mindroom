@@ -120,6 +120,16 @@ _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
 )
 _EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
 _EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
+# Where the allowed keys can carry a Kubernetes quantity; "*" is every list item or mapping value.
+_EXTRA_CONTAINER_QUANTITY_PATHS = (
+    ("resources", "requests", "*"),
+    ("resources", "limits", "*"),
+    ("env", "*", "valueFrom", "resourceFieldRef", "divisor"),
+)
+_EXTRA_VOLUME_QUANTITY_PATHS = (
+    ("emptyDir", "sizeLimit"),
+    ("projected", "sources", "*", "downwardAPI", "items", "*", "resourceFieldRef", "divisor"),
+)
 _DNS_SUBDOMAIN_RE = re.compile(
     r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*",
 )
@@ -293,6 +303,36 @@ def _validate_unique_names(
         seen_names.add(name)
 
 
+def _with_string_quantity(value: object, path: tuple[str, ...], location: str) -> object:
+    """Return ``value`` with the quantity at ``path`` as a string: the API server takes a JSON number, the client not."""
+    if not path:
+        if isinstance(value, bool):
+            msg = f"{location} must be a Kubernetes quantity such as 1, 0.5, or 512Mi, not a boolean."
+            raise WorkerBackendError(msg)
+        return str(value) if isinstance(value, int | float) else value
+    key, rest = path[0], path[1:]
+    if key == "*" and isinstance(value, list):
+        return [_with_string_quantity(item, rest, f"{location}[{index}]") for index, item in enumerate(value)]
+    if key == "*" and isinstance(value, dict):
+        return {name: _with_string_quantity(item, rest, f"{location}.{name}") for name, item in value.items()}
+    if isinstance(value, dict) and key in value:
+        return {**value, key: _with_string_quantity(value[key], rest, f"{location}.{key}")}
+    return value
+
+
+def _with_string_quantities(
+    items: tuple[dict[str, object], ...],
+    paths: tuple[tuple[str, ...], ...],
+    env_name: str,
+) -> tuple[dict[str, object], ...]:
+    normalized: list[dict[str, object]] = []
+    for index, item in enumerate(items):
+        for path in paths:
+            item = cast("dict[str, object]", _with_string_quantity(item, path, f"{env_name}[{index}]"))  # noqa: PLW2901
+        normalized.append(item)
+    return tuple(normalized)
+
+
 def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
     containers = read_json_object_list_env(env, _EXTRA_CONTAINERS_JSON_ENV)
     for index, container in enumerate(containers):
@@ -304,7 +344,7 @@ def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "name")
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "image")
     _validate_unique_names(containers, _EXTRA_CONTAINERS_JSON_ENV, RESERVED_EXTRA_CONTAINER_NAMES)
-    return containers
+    return _with_string_quantities(containers, _EXTRA_CONTAINER_QUANTITY_PATHS, _EXTRA_CONTAINERS_JSON_ENV)
 
 
 def _read_image_pull_secrets_env(env: Mapping[str, str]) -> tuple[str, ...]:
@@ -333,7 +373,7 @@ def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], 
             msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] must set exactly one of secret, configMap, emptyDir, projected."
             raise WorkerBackendError(msg)
     _validate_unique_names(volumes, _EXTRA_VOLUMES_JSON_ENV, RESERVED_EXTRA_VOLUME_NAMES)
-    return volumes
+    return _with_string_quantities(volumes, _EXTRA_VOLUME_QUANTITY_PATHS, _EXTRA_VOLUMES_JSON_ENV)
 
 
 @dataclass(frozen=True, slots=True)

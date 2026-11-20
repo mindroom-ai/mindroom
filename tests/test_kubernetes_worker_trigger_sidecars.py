@@ -14,7 +14,10 @@ import yaml
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.kubernetes_config import KubernetesWorkerBackendConfig
+from mindroom.workers.backends.kubernetes_config import (
+    KubernetesWorkerBackendConfig,
+    kubernetes_backend_config_signature,
+)
 from mindroom.workers.backends.kubernetes_resources import KubernetesResourceManager
 from mindroom.workers.runtime import build_worker_launch_config
 
@@ -198,6 +201,8 @@ def test_kubernetes_config_reads_trigger_sidecars_and_volumes_from_env(tmp_path:
         (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state","emptyDir":{},"hostPath":{"path":"/tmp"}}]'),
         (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state","emptyDir":{}},{"name":"trigger-state","emptyDir":{}}]'),
         (_EXTRA_VOLUMES_ENV, '[{"name":"worker-storage","emptyDir":{}}]'),
+        (_EXTRA_CONTAINERS_ENV, '[{"name":"trigger-listener","image":"busybox","resources":{"limits":{"cpu":true}}}]'),
+        (_EXTRA_VOLUMES_ENV, '[{"name":"trigger-state","emptyDir":{"sizeLimit":false}}]'),
     ],
 )
 def test_kubernetes_config_rejects_invalid_trigger_sidecar_json(
@@ -210,6 +215,55 @@ def test_kubernetes_config_rejects_invalid_trigger_sidecar_json(
 
     with pytest.raises(WorkerBackendError, match=env_name):
         KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+def test_kubernetes_config_writes_numeric_sidecar_quantities_as_strings(tmp_path: Path) -> None:
+    """JSON-number quantities become the strings the client's models require, and sign the config like strings."""
+
+    def config_for(cpu: object, divisor: object, size_limit: object) -> KubernetesWorkerBackendConfig:
+        container = {
+            "name": "trigger-listener",
+            "image": "busybox",
+            "env": [{"name": "CPU", "valueFrom": {"resourceFieldRef": {"resource": "limits.cpu", "divisor": divisor}}}],
+            "resources": {"requests": {"cpu": cpu, "memory": "32Mi"}, "limits": {"cpu": cpu}},
+        }
+        volumes = [
+            {"name": "trigger-state", "emptyDir": {"sizeLimit": size_limit}},
+            {
+                "name": "pod-info",
+                "projected": {
+                    "sources": [
+                        {
+                            "downwardAPI": {
+                                "items": [
+                                    {"path": "cpu", "resourceFieldRef": {"resource": "limits.cpu", "divisor": divisor}},
+                                ],
+                            },
+                        },
+                    ],
+                },
+            },
+        ]
+        env = _base_env(**{_EXTRA_CONTAINERS_ENV: json.dumps([container]), _EXTRA_VOLUMES_ENV: json.dumps(volumes)})
+        return KubernetesWorkerBackendConfig.from_runtime(_runtime_paths(tmp_path, env))
+
+    numeric = config_for(0.5, 1, 1024)
+    strings = config_for("0.5", "1", "1024")
+
+    assert numeric == strings
+    container = numeric.extra_containers[0]
+    assert container["resources"] == {"requests": {"cpu": "0.5", "memory": "32Mi"}, "limits": {"cpu": "0.5"}}
+    assert container["env"][0]["valueFrom"]["resourceFieldRef"]["divisor"] == "1"
+    assert numeric.extra_volumes[0]["emptyDir"] == {"sizeLimit": "1024"}
+    projected = numeric.extra_volumes[1]["projected"]["sources"][0]["downwardAPI"]["items"][0]
+    assert projected["resourceFieldRef"]["divisor"] == "1"
+    runtime_paths = _runtime_paths(tmp_path, {})
+    assert kubernetes_backend_config_signature(
+        numeric,
+        runtime_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    ) == kubernetes_backend_config_signature(strings, runtime_paths, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path)
 
 
 def test_worker_pod_template_appends_trigger_sidecar_and_volume_without_main_mount(tmp_path: Path) -> None:
