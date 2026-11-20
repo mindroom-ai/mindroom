@@ -166,9 +166,9 @@ def test_the_band_is_the_configured_reductions_of_the_measured_size(tmp_path: Pa
 def test_memory_past_its_preload_limit_asks_for_a_cut_under_the_token_trigger(tmp_path: Path) -> None:
     """The end of a file over max_preload_file_chars never reaches the prompt, so it triggers a pass on its own."""
     config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
-    config.defaults.max_preload_file_chars = len(MEMORY.strip())
+    config.defaults.max_preload_file_chars = len(MEMORY)
     assert _plan_curation(config, root, "mind", automation, fake_token_counter()) is None
-    config.defaults.max_preload_file_chars = len(MEMORY.strip()) - 1
+    config.defaults.max_preload_file_chars = len(MEMORY) - 1
 
     plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
 
@@ -176,7 +176,7 @@ def test_memory_past_its_preload_limit_asks_for_a_cut_under_the_token_trigger(tm
     assert (plan.measured_tokens, plan.over_limit) == (1292, ("MEMORY.md",))
     assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
     prompt = _curation_prompt(config, plan)
-    limit = len(MEMORY.strip()) - 1
+    limit = len(MEMORY) - 1
     assert f"up to its first {limit} characters; files over that limit: MEMORY.md." in prompt
     assert f"If a file is over the {limit}-character limit, take content out of it first" in prompt
 

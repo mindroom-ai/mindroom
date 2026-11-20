@@ -1981,6 +1981,37 @@ async def test_file_backend_conversation_reloads_its_entrypoint_when_its_limit_o
 
 
 @pytest.mark.asyncio
+async def test_file_backend_cut_conversation_reloads_its_entrypoint_once_the_file_fits(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A copy that was cut drops its condense marker once the file fits, though the kept lines are unchanged."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "prompt limit" in await _conversation_preamble(config, thread)
+
+    memory_path.write_text(_ENTRIES.replace("- [id=m3] Fact three.\n", ""), encoding="utf-8")
+    fitted = await _conversation_preamble(config, thread)
+    assert "Fact two." in fitted
+    assert "prompt limit" not in fitted
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_reloads_its_entrypoint_when_a_line_break_changes(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Only a line feed ends a line, so turning a carriage return into one is an edit, not an inserted line."""
+    memory_path = _memory_file(storage_path, "# Memory\nx\ra\n")
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    await _conversation_preamble(config, thread)
+
+    memory_path.write_text("# Memory\nx\na\n", encoding="utf-8")
+    assert (await _conversation_preamble(config, thread)).endswith("\nx\na")
+
+
+@pytest.mark.asyncio
 async def test_file_backend_conversation_clears_its_entrypoint_once_memory_is_emptied(
     storage_path: Path,
     config: Config,

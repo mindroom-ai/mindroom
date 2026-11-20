@@ -3377,9 +3377,12 @@ _LONG_FILE = "".join(f"line {index:02} of the file\n" for index in range(10))
 
 def test_preload_keeps_the_first_whole_lines_of_a_file_over_its_limit(tmp_path: Path) -> None:
     """Each line counts with its newline: 3 lines of 21 characters fill 63, so the 4th is left out, marked."""
-    role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, 70)
+    with capture_logs() as logs:
+        role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, 70)
     soul = agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
 
+    [cut_log] = [entry for entry in logs if entry["event"] == "context_file_preload_cut"]
+    assert (cut_log["agent"], cut_log["path"]) == ("general", str(soul))
     kept = "line 00 of the file\nline 01 of the file\nline 02 of the file"
     assert f"### {soul}\n{kept}\n{_cut_marker(soul, 70)}" in role
     assert "line 03" not in role
@@ -3448,9 +3451,10 @@ async def _memory_preamble(tmp_path: Path, text: str, max_chars: int) -> str:
     ("text", "max_chars", "kept"),
     [
         (_LONG_FILE, 70, "line 00 of the file\nline 01 of the file\nline 02 of the file"),
-        ("aa\r\nbb\r\ncc\r\n", 6, "aa\r"),
+        ("aa\r\nbb\r\ncc\r\n", 6, "aa"),
+        ("  a\nz", 3, "a"),
     ],
-    ids=["lines", "crlf"],
+    ids=["lines", "crlf", "leading-space"],
 )
 async def test_memory_entrypoint_and_a_context_file_get_the_same_cut(
     tmp_path: Path,
@@ -3468,17 +3472,27 @@ async def test_memory_entrypoint_and_a_context_file_get_the_same_cut(
 
 
 @pytest.mark.asyncio
-async def test_a_file_over_the_read_cap_keeps_its_cut_as_it_grows(tmp_path: Path) -> None:
-    """A one-line file past the 1 MiB read cap still inlines its first characters and the marker, unchanged by appends."""
-    huge = "x" * ((1 << 20) + 10)
+@pytest.mark.parametrize(
+    ("text", "max_chars", "appended"),
+    [("aa\nbb\n", 5, "cc\n"), ("x" * ((1 << 20) + 10), 100, "y")],
+    ids=["lines", "past-the-read-cap"],
+)
+async def test_both_preloads_are_unchanged_by_text_added_past_the_cut(
+    tmp_path: Path,
+    text: str,
+    max_chars: int,
+    appended: str,
+) -> None:
+    """Text added past the cut leaves both renders as they were, even for a one-line file past the 1 MiB read."""
     workspace = agent_workspace_root_path(tmp_path, "general")
-    role = _context_files_role(tmp_path, {"SOUL.md": huge}, 100)
-    preamble = await _memory_preamble(tmp_path, huge, 100)
+    role = _context_files_role(tmp_path, {"SOUL.md": text}, max_chars)
+    preamble = await _memory_preamble(tmp_path, text, max_chars)
 
-    assert f"\n{'x' * 100}\n{_cut_marker(workspace / 'SOUL.md', 100)}" in role
-    assert preamble.endswith(f"\n{'x' * 100}\n{_cut_marker(workspace / 'MEMORY.md', 100)}")
-    assert _context_files_role(tmp_path, {"SOUL.md": huge + "y"}, 100) == role
-    assert await _memory_preamble(tmp_path, huge + "y", 100) == preamble
+    assert _cut_marker(workspace / "SOUL.md", max_chars) in role
+    assert preamble.endswith(_cut_marker(workspace / "MEMORY.md", max_chars))
+    assert text[:3] in preamble
+    assert _context_files_role(tmp_path, {"SOUL.md": text + appended}, max_chars) == role
+    assert await _memory_preamble(tmp_path, text + appended, max_chars) == preamble
 
 
 def test_agent_context_section_states_files_are_preloaded(
@@ -4510,6 +4524,10 @@ def test_config_ignores_the_retired_shared_preload_budget() -> None:
     assert Config(defaults={"max_preload_file_chars": 500}).defaults.max_preload_file_chars == 500
     with pytest.raises(ValidationError):
         Config(defaults={"max_preload_file_chars": 0})
+    # The limit's next character must fit the 1 MiB read even at 4 bytes a character.
+    assert Config(defaults={"max_preload_file_chars": 200_000}).defaults.max_preload_file_chars == 200_000
+    with pytest.raises(ValidationError):
+        Config(defaults={"max_preload_file_chars": 200_001})
 
 
 @pytest.mark.parametrize("field", ["learning", "learning_mode", "compress_tool_results"])
