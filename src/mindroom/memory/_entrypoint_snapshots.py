@@ -114,7 +114,8 @@ def stable_entrypoint_preamble(
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
 
     ``fresh_body`` is this turn's preamble without the truncation marker, whose counts change as lines are added
-    past a cap; its header is compared too, so an edited prompt override loads again.
+    past a cap; its header is compared too, so an edited prompt override loads again. A kept copy keeps its own
+    marker, so it can show old counts, or no marker after the file grows past a cap, until it loads again.
     ``lines`` holds the file's lines when the caps withhold none, else None. A copy that withheld none is also kept
     while ``lines`` holds its every line in order and each prompt in ``frame`` (its header) is unchanged, so lines
     inserted anywhere keep it; ``lines`` fit the caps this turn, so the copy's, which they hold, still fit them.
