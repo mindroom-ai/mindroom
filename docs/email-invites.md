@@ -5,7 +5,7 @@ icon: lucide/mail-plus
 # Email Invites
 
 With the `email_invite` tool, a person can ask an agent "invite alice@example.com to this room".
-After someone who may invite approves, the address gets a link that works once.
+When the person asking may invite, or after someone who may invite confirms a waiting request, the address gets a link that works once.
 The newcomer opens it in MindRoom Chat, signs up or signs in the normal way on any homeserver that federates with yours, clicks Join, and is invited to the room by the router.
 No server-admin rights and no public MindRoom endpoint are needed, so this also works for MindRoom on your own machine behind NAT.
 
@@ -23,7 +23,14 @@ email_invites:
   chat_url: https://chat.mindroom.chat   # origin of the Chat web app the link opens; default shown
   expiry_days: 7                         # 1 to 30
   approvers: []                          # Matrix user IDs who may approve in any room
+
+tool_approval:
+  rules:
+    - match: invite_by_email
+      action: require_approval             # recommended: every invitation shows an approval card
 ```
+
+`invite_by_email` is an ordinary tool for [tool approval](tool-approval.md): whether a call asks first is up to your config, and the rule above is recommended.
 
 To send mail, set two environment variables:
 
@@ -37,14 +44,12 @@ Personal rooms, onboarding rooms and spaces are refused.
 
 ## Who Approves
 
-`invite_by_email(email)` always shows an approval card to the person who asked.
 A person *may invite* when they are joined to the room with a power level at or above its `invite` level (0 unless the room raised it), or when they are listed in `email_invites.approvers`.
 
-- If the asker may invite, approving the card sends the invitation.
-- If not, approving the card only confirms the request. It is stored as *waiting* and nothing is sent. Someone who may invite then says "approve the invite for alice@example.com" to an agent in the same room and approves their own card; the waiting request is sent in their name.
+- If the asker may invite, the call sends the invitation (after its approval card, with the rule above).
+- If not, the call only stores the request as *waiting* and nothing is sent. Someone who may invite then says "approve the invite for alice@example.com" to an agent in the same room; their call sends the waiting request in their name.
 
 Asking again for an address that was already sent replaces the old link, which stops working.
-No auto-approval covers `invite_by_email`: an [auto-approve window](tool-approval.md#auto-approve-everything) neither approves new calls nor the cards already waiting when it starts, and the card offers no timed approval, so every invitation needs its own card answer.
 
 `list_email_invites()` shows the room's open invites, and `revoke_email_invite(email)` revokes one; the asker, the approver, or anyone who may invite can revoke.
 
@@ -79,6 +84,8 @@ A homeserver that needs a registration token cannot be used to sign up; the newc
 The counts are kept on disk, so a restart does not reset them.
 
 Known limits:
+
+- Without a `tool_approval` rule that requires approval for `invite_by_email` (and with `tool_approval.default: auto_approve`), an agent can send invite mail without a card, within the caps; the asker must still have the invite right. Auto-approval (timed card approval, `!auto_approve`) covers it like any tool.
 
 - The router's Matrix sync store keeps the claim event, code included, in plain text on the router's own disk. The code works once and is bound to the first account that uses it.
 - A claim that arrives just before the router crashes may get no answer; the person clicks Join again.

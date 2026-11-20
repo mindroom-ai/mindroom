@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -23,11 +22,9 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_room_admin import get_room_name, room_encryption_enabled
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.tool_function import ToolFunction
 
 _BAD_ADDRESS = "Error: that is not an email address this tool accepts (one plain ASCII address)."
 _CHANGED = "Error: the invite changed meanwhile; ask again."
@@ -71,10 +68,6 @@ class EmailInviteTools(Toolkit):
             name="email_invite",
             tools=[self.invite_by_email, self.list_email_invites, self.revoke_email_invite],
         )
-
-    def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Require a person's confirmation of every invitation."""
-        return replace(function, gate=ToolGate.CONFIRM) if function.name == "invite_by_email" else function
 
     async def invite_by_email(self, email: str) -> str:
         """Invite one email address to this room.

@@ -6852,7 +6852,6 @@ class TestApprovalContinuations:
         assert card.delivery_id == "approval-card-1"
         assert card.call == CallKey("approval-1", 0, "call-1")
         assert card.owner_kind == "reply"
-        assert card.tool_name == "shell"
         assert card.approver_user_id == "@user:example.org"
         assert not card.decided
         continuation = await alice.approvals.approval_continuation("approval-1")

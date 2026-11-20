@@ -75,8 +75,6 @@ _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
 _MANAGER: ApprovalManager | None = None
 logger = get_logger(__name__)
-# Functions no auto-approve window approves, new or waiting: each call needs its own card answer.
-CARD_ONLY_TOOL_NAMES = frozenset({"invite_by_email"})
 
 
 def _approval_action_authorized(card: ApprovalCardView, authorize_responder: Callable[[str], bool]) -> bool:
@@ -1002,13 +1000,12 @@ class ApprovalManager:
         thread_id: str | None,
         approver_user_id: str,
     ) -> tuple[str, ...]:
-        """Return the open approvable cards of one approver in one conversation that a window may approve."""
+        """Return the unexpired, unanswered, approvable cards one approver has in one conversation, scheduled calls aside."""
         return tuple(
             [
                 cast("str", card.card_event_id)
                 async for card in self._waiting_cards(room_id)
                 if card.owner_kind != "scheduled"
-                and card.tool_name not in CARD_ONLY_TOOL_NAMES
                 and card.thread_id == thread_id
                 and card.approver_user_id == approver_user_id
                 and card.approvable

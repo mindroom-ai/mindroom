@@ -39,7 +39,7 @@ An Olm-encrypted claim would not even arrive: nio marks a to-device event as aut
 
 ### 2. Who approves
 
-Only the turn's requester can answer an approval card, and this work does not change the approval core.
+`invite_by_email` is an ordinary tool for approval: no special casing in the approval core and no gate of its own. Whether a call asks first is the operator's config; the docs recommend `tool_approval.rules: [{match: invite_by_email, action: require_approval}]`. With that rule, only the turn's requester answers the card. The invite right below is authorization in the tool body, independent of approval.
 
 - **The asker may invite.** They approve their own card and the invitation is sent. "May invite" means: joined to the room with a power level at or above the room's `invite` level (default 0), room creators counted in room versions with privileged creators; or listed in `email_invites.approvers`.
 - **The asker may not invite.** They still answer their own card, which confirms that they made the request. The request is then stored as *waiting* and nothing is sent. A person who may invite says "approve the invite for alice@example.com" to an agent in the same room. That is their own turn, so they get their own card. On approval the waiting request is sent in their name.
@@ -65,7 +65,7 @@ The tool context carries no message text, and such a rule breaks follow-ups such
 
 ### 5. Kept from the plan
 
-- **No auto-approval ever approves an invite.** `!auto_approve` also approves tools that ask for their own confirmation. The approval core therefore has one rule (`CARD_ONLY_TOOL_NAMES` in `approval/manager.py`) that both auto-approve paths read: a window does not approve a new `invite_by_email` call, which shows its card as usual, and starting a window does not bulk-approve waiting invite cards (decided from the stored call's tool name, not the card text). The card offers no timed approval because the tool asks for its own confirmation. Each invite needs its own card answer. (Revised after review: the earlier body-time refusal is gone.)
+- **Approval is ordinary tool approval** (Bas, PR review). No card-only rule, no `ToolGate.CONFIRM`; windows and timed approvals cover the tool like any other. The setup docs recommend the `require_approval` rule.
 - **SMTP from the environment only.** `MINDROOM_SMTP_URL` and `MINDROOM_SMTP_FROM`, standard-library `smtplib`. The URL holds a password, so it is added to the secret environment list.
 - **Fixed plain-text mail.** No text written by the model; the tool has no message argument.
 - **The requesting room only.** No other room, no space, no power above the default, no personal agent.
@@ -112,7 +112,7 @@ Chat, new folder `src/app/invites/`: `inviteLink.ts` (parse the fragment), `invi
 ### Data flow
 
 1. A person asks; the agent calls `invite_by_email(email)`.
-2. The approval card appears for the asker (existing `ToolGate.CONFIRM`). A room without the router is denied by the existing gate, with its hint to run `invite_router`.
+2. If the operator's approval rules gate the tool (recommended), the approval card appears for the asker. A room without the router is denied by the existing gate, with its hint to run `invite_router`.
 3. After approval the tool body checks, in this order: the address is valid; the room is not a personal or onboarding room; the router is joined and may invite.
 4. The tool looks for an open request for this room and address, and decides by whether the asker may invite:
    - May not invite, no open request: store a waiting request (caps: asker, room). Answer: stored, waiting for a person who may invite.
@@ -171,7 +171,6 @@ Rows stay one day past expiry, so the 24-hour counts are complete, and are purge
 |---|---|
 | Router not in the room | Existing denial with the `invite_router` hint. Nothing stored. |
 | Router joined but may not invite | Tool refuses. Nothing stored. |
-| Auto-approve window open | The card appears as usual; the window does not approve it, and starting a window does not approve waiting invite cards. |
 | A cap is reached | Tool refuses and names the cap. Nothing sent. |
 | SMTP send fails | Request revoked; the error text goes back to the agent. The attempt still counts toward the caps. |
 | MindRoom offline when the claim is sent | The homeserver queues the event; it is handled on the next sync. Chat shows the offline text and keeps listening. |
@@ -191,7 +190,7 @@ Rows stay one day past expiry, so the 24-hour counts are complete, and are purge
 
 Toolkit `email_invite`, added to an agent's `tools` like any other tool; it needs room context and the primary runtime.
 
-- `invite_by_email(email)`: gated with `ToolGate.CONFIRM`. Behaviour as in the data flow.
+- `invite_by_email(email)`: no gate of its own; approval follows the operator's `tool_approval` config. Behaviour as in the data flow.
 - `list_email_invites()`: the open requests of this room, each with address, state (`waiting` or `sent`), asker, approver and expiry. Not gated.
 - `revoke_email_invite(email)`: revokes the open request for that address in this room. Allowed for its asker, its approver, and anyone who may invite. Not gated. If the request was already used, it changes nothing and reports the account that used it.
 
@@ -234,7 +233,7 @@ What each party can do:
 
 | Party | Can | Cannot |
 |---|---|---|
-| Agent or model (also when prompt-injected) | Propose an address. | Send anything without a person's card; choose room, text, or recipient account. |
+| Agent or model (also when prompt-injected) | Propose an address. | Send anything without a person's card (with the recommended approval rule); choose room, text, or recipient account. |
 | Asker without the invite right | Store a waiting request, within the caps. | Cause a mail or a link. |
 | Approver | Send one fixed mail per card, within the caps. | Change the text; invite to another room. |
 | Holder of the link | Join the room once, with any Matrix account. | Join twice; join after expiry or revoke; learn the room before a valid claim. |
@@ -254,9 +253,10 @@ Checks that carry this:
 
 Known limits:
 
+- **Without the recommended approval rule** (and with `tool_approval.default: auto_approve`) an agent can send invite mail without a card, within the caps; the asker must still have the invite right.
 - **The link is a bearer token.** Whoever holds the mail can join, and in an unencrypted room with shared history can read it at once. MindRoom cannot compare the claimant's mail address without server-admin rights. The room notice gives accountability after the fact, not prevention. Phase 2 lists the hardening.
 - **Without SMTP** the link is in room history and in the model's context.
-- **The asker's card appears before the right is checked.** The gate runs before the tool body, so an asker who may not invite approves a card and is then told the request is waiting.
+- **The asker's card appears before the right is checked** (with the approval rule). The gate runs before the tool body, so an asker who may not invite approves a card and is then told the request is waiting.
 - **Plaintext code in the router's sync store.** nio's durable sync store keeps the claim event, code included, on the router's own disk. Accepted: the code is single-use and bound to the first claimant. (An earlier per-claim WAL checkpoint did not achieve hash-only storage and was removed.)
 - **A claim lost in a crash right after the sync ack gets no answer.** The person clicks Join again.
 - **Revoking a link that is `sending`** fails; the tool reports no open invite, and the outcome's notice follows.
@@ -316,7 +316,7 @@ The feature is on for an agent when `email_invite` is in its `tools`.
 ## Docs
 
 A new page `docs/email-invites.md`: set-up, the approval rule, what happens without SMTP and its cost, the bearer-link limit, encrypted rooms, access rules for the newcomer, the caps.
-A row for the tool in `docs/tools/`, a sentence in `docs/tool-approval.md` under "Auto-Approve Everything" on the refusal, and the config section in the configuration reference.
+A row for the tool in `docs/tools/`, the recommended `require_approval` rule in the setup section of `docs/email-invites.md`, and the config section in the configuration reference.
 
 ## Phase 2 (not part of this work)
 

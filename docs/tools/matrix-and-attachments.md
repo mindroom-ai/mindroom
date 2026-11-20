@@ -266,7 +266,7 @@ react("$event_id", "👍")
 
 ## [`email_invite`]
 
-`invite_by_email(email)` invites one address to the current room and always asks for approval first.
+`invite_by_email(email)` invites one address to the current room; whether it asks for approval first follows your [approval rules](../tool-approval.md), and a `require_approval` rule for it is recommended.
 When the person asking may invite, it mails a single-use link, or returns the link to forward by hand when no mail server is configured; otherwise the request waits until someone who may invite asks an agent in the room to "approve the invite for" that address.
 `list_email_invites()` lists the room's open invites with their state (`waiting` or `sent`), asker, approver and expiry.
 `revoke_email_invite(email)` revokes the open invite for an address; its asker, its approver, or anyone who may invite can do so, and an invite already used is reported with the account that used it.

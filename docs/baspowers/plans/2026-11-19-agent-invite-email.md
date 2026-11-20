@@ -14,7 +14,7 @@
 
 ## Revisions after review (final round, binding over the text below)
 
-- **Approval.** No auto-approve path approves `invite_by_email`: `CARD_ONLY_TOOL_NAMES` in `approval/manager.py` is read by `human_gate` (a window does not approve a new call; its card appears) and by `pending_card_event_ids` (starting a window does not bulk-approve waiting invite cards; the stored call's `tool_name` decides). This replaces the "no change under `approval/`" constraint and the tool-body window refusal, both gone.
+- **Approval** (Bas, PR review; supersedes earlier rounds). `invite_by_email` is an ordinary tool: no `CARD_ONLY_TOOL_NAMES`, no `offered_function`/`ToolGate.CONFIRM`, no change under `src/mindroom/approval/`. The setup docs recommend `tool_approval.rules: [{match: invite_by_email, action: require_approval}]`; Known limit: without it an agent can send invite mail without a card, within the caps, and the asker still needs the invite right. Task 4's gate/window items and tests, and Task 9's `!auto_approve` item, are dropped.
 - **Unknown `room_invite` outcome** (timeout, connection error, any error but `M_FORBIDDEN`): no dispatch lock or column. The request is revoked; the call whose revoke wins posts exactly one notice that the invite may or may not have gone out and the approver can send a new link; the claimant gets `rejected`. A fresh `invite_by_email` for the address is not blocked. A repeated POST is harmless (idempotent invite). Step 9 of Task 5 changes accordingly.
 - **Notice.** Posted only by the call whose `mark_invited` (`invited_at IS NULL`) wins, so one success gives one notice.
 - **One Matrix invite per link, ever** (supersedes "no dispatch lock" above). Before `room_invite`, `store.start_sending` moves the row `open → sending` in one conditional update; only the winner sends. A claim finding `sending` is `rejected`; `used` answers `invited` to its claimant. Success → `used` + notice; any other outcome, `M_FORBIDDEN` included → `store.abandon_sending` → `revoked` + the "may or may not" notice. `register_email_invite_receiver` (now async) revokes every row left `sending` at startup, with the same notice, before any claim. Tests: overlapping claims → one `room_invite`; crash while sending → revoked at restart, no second invite for a removed member.
@@ -31,7 +31,7 @@
 - Claim limits: 10 per sender per minute, 60 in total per minute, at most 1024 senders tracked.
 - Environment: `MINDROOM_SMTP_URL` (secret), `MINDROOM_SMTP_FROM`. No new dependency in either repository.
 - Mail subject, exactly: `You are invited to a MindRoom room`. Mail body: the template in the spec, verbatim.
-- No change under `src/mindroom/approval/` beyond the card-only rule (see Revisions). No tool function takes a room, a Matrix ID, a subject, or body text.
+- No change under `src/mindroom/approval/`. No tool function takes a room, a Matrix ID, a subject, or body text.
 - The claimant is always the event's `sender`, never a content field.
 - Backend tests: `NIX_PATH=nixpkgs=flake:nixpkgs nix-shell --run 'uv run pytest tests/<file>.py -x -n 0 --no-cov'`; run each new test file once with the default options too.
 - Chat tests: `just test src/app/invites`; `just check` before the pull request.

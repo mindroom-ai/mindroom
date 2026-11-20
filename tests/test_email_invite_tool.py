@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.approval.auto_approve_windows import start_auto_approve
-from mindroom.approval.tool_approval import human_gate
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -122,23 +119,11 @@ def _code_from(text: str) -> str:
     return text.rsplit("&c=", 1)[1]
 
 
-def test_invite_by_email_is_confirm_gated() -> None:
-    """Only invite_by_email asks for confirmation."""
+def test_no_function_asks_for_confirmation_itself() -> None:
+    """Approval is the operator's `tool_approval` config; the toolkit gates nothing itself."""
     gates = {function.name: function.gate for function in adapt_toolkit(EmailInviteTools()).functions}
-    assert gates["invite_by_email"] is ToolGate.CONFIRM
-    assert gates["list_email_invites"] is not ToolGate.CONFIRM
-    assert gates["revoke_email_invite"] is not ToolGate.CONFIRM
     assert set(gates) == {"invite_by_email", "list_email_invites", "revoke_email_invite"}
-
-
-def test_auto_approve_window_never_approves_an_invite(harness: Harness) -> None:
-    """Inside a window the invite still asks for its card, at the reply and script gates alike."""
-    start_auto_approve(harness.paths, room_id=ROOM, thread_id="$thread", requester_id=BAS, duration=timedelta(hours=1))
-    gate = {"approver_id": BAS, "room_id": ROOM, "thread_id": "$thread"}
-    assert human_gate(harness.paths, **gate, tool_name="invite_by_email") is None
-    approved = human_gate(harness.paths, **gate, tool_name="list_email_invites")
-    assert approved is not None
-    assert approved.approved is True
+    assert ToolGate.CONFIRM not in gates.values()
 
 
 @pytest.mark.asyncio
