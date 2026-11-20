@@ -25,7 +25,7 @@ from mindroom.logging_config import get_logger
 
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, SchemaDialect, render
-from .upgrades import upgrade_schema
+from .upgrades import build_staged_indexes, upgrade_schema
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 if TYPE_CHECKING:
@@ -197,9 +197,10 @@ class SqliteBackend:
     def _connect_writer(self) -> sqlite3.Connection:
         upgrading = self._writer_connection()
         try:
-            upgrading.execute("BEGIN IMMEDIATE")
-            upgrade_schema(_SqliteTransaction(upgrading), _SqliteSchemaInspector(upgrading))
-            upgrading.execute("COMMIT")
+            for step in (upgrade_schema, build_staged_indexes):
+                upgrading.execute("BEGIN IMMEDIATE")
+                step(_SqliteTransaction(upgrading), _SqliteSchemaInspector(upgrading))
+                upgrading.execute("COMMIT")
         finally:
             upgrading.close()
         # An upgrade can leave planner state on its connection, such as the row counts a conversion's statistics

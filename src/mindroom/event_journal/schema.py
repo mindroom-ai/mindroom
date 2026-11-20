@@ -687,6 +687,17 @@ _TABLES = (
 )
 
 
+# Built in a transaction after the schema's: over an older journal it reads the whole table, 5 to 11 s at 1.75 GB.
+FINGERPRINT_INDEX = """
+    -- An export pass reads every thread's fingerprint, mostly to find it
+    -- unchanged. From the table, each row costs a page of its own, plus every
+    -- overflow page of its content on the way to `refresh_token`.
+    CREATE INDEX IF NOT EXISTS visible_messages_content_fingerprint
+    ON visible_messages (
+        principal_id, room_id, thread_id, logical_event_id, revision_event_id, refresh_token, content_generation
+    )
+    """
+
 _INDEXES = (
     """
     CREATE INDEX IF NOT EXISTS approval_card_scopes_scope ON approval_card_scopes (principal_id, scope_key)
@@ -738,15 +749,7 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS visible_messages_revision
     ON visible_messages (principal_id, room_id, revision_event_id)
     """,
-    """
-    -- An export pass reads every thread's fingerprint, mostly to find it
-    -- unchanged. From the table, each row costs a page of its own, plus every
-    -- overflow page of its content on the way to `refresh_token`.
-    CREATE INDEX IF NOT EXISTS visible_messages_content_fingerprint
-    ON visible_messages (
-        principal_id, room_id, thread_id, logical_event_id, revision_event_id, refresh_token, content_generation
-    )
-    """,
+    FINGERPRINT_INDEX,
     """
     -- A redaction deletes the prompts of the revision it names, so its cost must
     -- not grow with how many questions a principal holds.

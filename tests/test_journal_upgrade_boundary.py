@@ -430,13 +430,17 @@ async def test_messages_from_before_content_generations_get_one(legacy_database:
     finally:
         await store.close()
     legacy_database.execute("DROP INDEX visible_messages_content_fingerprint")
-    legacy_database.execute(
+    old_index = (
         "CREATE INDEX visible_messages_fingerprint ON visible_messages "
-        "(principal_id, room_id, thread_id, logical_event_id, revision_event_id, refresh_token)",
+        "(principal_id, room_id, thread_id, logical_event_id, revision_event_id, refresh_token)"
     )
+    legacy_database.execute(old_index)
     legacy_database.execute("ALTER TABLE visible_messages DROP COLUMN content_generation")
 
-    for _ in range(2):
+    # The second open follows an older release that put its index back beside the new column.
+    for reopened_by_older_release in (False, True):
+        if reopened_by_older_release:
+            legacy_database.execute(old_index)
         store = legacy_database.open()
         try:
             fingerprint = await store.principal("agent@alice").thread_fingerprint(room_id=room_id, thread_id="$root")
@@ -444,6 +448,13 @@ async def test_messages_from_before_content_generations_get_one(legacy_database:
             await store.close()
         assert fingerprint is not None
         assert fingerprint[1] == {("$root", "$root", None, 0)}
+        catalog = (
+            "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()"
+            if legacy_database.postgres
+            else "SELECT name FROM sqlite_master WHERE type = 'index'"
+        )
+        indexes = {str(name) for (name,) in legacy_database.query(catalog) if "fingerprint" in str(name)}
+        assert indexes == {"visible_messages_content_fingerprint"}
 
     store = legacy_database.open()
     try:

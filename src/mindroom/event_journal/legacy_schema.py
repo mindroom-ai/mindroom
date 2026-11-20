@@ -95,16 +95,19 @@ def upgrade_hydration_walk_version(transaction: Transaction, inspector: SchemaIn
 # Legacy format: visible_messages without a content_generation column, and the visible_messages_fingerprint index.
 # Last legacy release: v2026.11.472; replacement: the next release numbers every body a message stores, because a
 # refetch can store a different body under the revision, time and refresh state the message had before.
-# Handling: adds content_generation as 0 to every message and drops the index, which the schema replaces with one
-# that holds the new column. A body stored later takes a later number, so none is taken for one read before it.
+# Handling: adds content_generation as 0 to every message; `build_staged_indexes` then builds the index that holds
+# it and drops the old one. A body stored later takes a later number, so none is taken for one read before it.
 # Coverage: tests/test_journal_upgrade_boundary.py::test_messages_from_before_content_generations_get_one.
 def upgrade_content_generation(transaction: Transaction, inspector: SchemaInspector) -> None:
-    """Number the stored bodies of a journal created before content generations, inside the schema transaction."""
+    """Number the stored bodies of a journal created before content generations, inside the schema transaction.
+
+    One runtime holds a journal at a time, so no older release writes beside this one. Stop this release before an
+    older one opens the journal: a body the older one stores keeps its number, which reads here as unchanged.
+    """
     columns = inspector.columns("visible_messages")
     if not columns or "content_generation" in columns:
         return
     transaction.execute("ALTER TABLE visible_messages ADD COLUMN content_generation BIGINT NOT NULL DEFAULT 0")
-    transaction.execute("DROP INDEX IF EXISTS visible_messages_fingerprint")
 
 
 _PRE_REPLY_OUTBOX_COLUMNS = (

@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 
 from .offloading import ThreadOffload, settled
 from .schema import POSTGRES_DIALECT, SchemaDialect, render
-from .upgrades import upgrade_schema
+from .upgrades import build_staged_indexes, upgrade_schema
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 # An arbitrary constant that only this schema setup uses, so the lock it
@@ -175,16 +175,17 @@ class PostgresBackend:
         return psycopg.connect(self.database_url, autocommit=False, **_CLIENT_KEEPALIVES)
 
     def _create_schema(self) -> None:
-        with self._writer.cursor(row_factory=dict_row) as cursor:
-            # `IF NOT EXISTS` is not itself race-free: two processes creating
-            # the same table or index at once can still collide in the system
-            # catalogue, and PostgreSQL resolves that by failing one of them.
-            # Serializing the whole of schema setup on a transaction-scoped
-            # advisory lock costs nothing at steady state, because the
-            # statements are all no-ops once the schema exists.
-            cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
-            upgrade_schema(_PostgresTransaction(cursor), _PostgresSchemaInspector(cursor))
-        self._writer.commit()
+        for step in (upgrade_schema, build_staged_indexes):
+            with self._writer.cursor(row_factory=dict_row) as cursor:
+                # `IF NOT EXISTS` is not itself race-free: two processes creating
+                # the same table or index at once can still collide in the system
+                # catalogue, and PostgreSQL resolves that by failing one of them.
+                # Serializing the whole of schema setup on a transaction-scoped
+                # advisory lock costs nothing at steady state, because the
+                # statements are all no-ops once the schema exists.
+                cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
+                step(_PostgresTransaction(cursor), _PostgresSchemaInspector(cursor))
+            self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit."""
