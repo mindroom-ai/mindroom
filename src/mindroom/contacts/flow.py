@@ -370,7 +370,9 @@ async def request_contact(
         requester, side = person_party(config, paths, actor.owner), ContactSide()
     else:
         requester, side = own, ContactSide()
-        _change_side(side, rules, _validate_side_tools(config, paths, agent_name, tools))
+        # The stored side holds the validated names, so a repeat is compared by them too.
+        tools = _validate_side_tools(config, paths, agent_name, tools)
+        _change_side(side, rules, tools)
     _check_pair(requester, target_party)
     if (problem := answerer_problem(config, target_party.local_owner)) is not None:
         raise ValueError(problem)
@@ -427,7 +429,8 @@ async def _request_remote(
         raise ValueError(_REMOTE_NEEDS_AN_AGENT)
     agent_name, paths = requester.id, actor.runtime_paths
     side = ContactSide()
-    _change_side(side, rules, _validate_side_tools(actor.config, paths, agent_name, tools))
+    tools = _validate_side_tools(actor.config, paths, agent_name, tools)
+    _change_side(side, rules, tools)
     pair = partial(_pair_contact, requester=requester, target=target, rules=rules, tools=tools)
     if (found := await run_blocking_until_complete(update_contacts, paths, pair)) is not None:
         return found, False
