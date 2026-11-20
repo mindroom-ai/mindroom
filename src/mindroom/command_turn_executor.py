@@ -200,6 +200,7 @@ class CommandTurnExecutor:
             controller_identity=self.deps.controller_identity,
             agent_reply_memberships=self.deps.runtime.agent_reply_memberships,
             scheduled_tasks=orchestrator.scheduled_tasks,
+            budget_monitor=orchestrator.budgets,
         )
         await handle_command(
             context=context,

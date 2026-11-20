@@ -289,6 +289,7 @@ Matrix sync callback
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
 | `agent_cli/minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |
 | `commands/mode_commands.py` | Authorized agent mode selection with canonical session scope and deployment preflight |
+| `commands/compact_commands.py` | `!compact`: authorized manual compaction requests for the agents and teams of one conversation |
 | `api/agent_cli.py` | Authenticated transport for response-owned CLI operations and live call receipts |
 | `agent_cli/cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
 | `agent_cli/cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and the end of each scope, which it reports to the approval runner |

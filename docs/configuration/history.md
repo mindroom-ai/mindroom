@@ -144,6 +144,12 @@ Add the `compact_context` tool to an agent's `tools` to let it request compactio
 The request runs before the next reply in the same conversation and always uses text compaction.
 It requires a summary model with a `context_window` and the same 2,000-token summary input budget; otherwise the tool returns `Error: Compaction is unavailable for this scope because ...` with the reason.
 
+You can request the same compaction from chat with `/compact` (or `!compact`).
+`/compact <agent_or_team>` requests it for one agent or configured team; `/compact` alone requests it for all of them.
+Both forms only reach agents and configured teams you may address that already have a conversation here.
+The conversation is the thread, or the whole room for an agent or team in room mode; for a thread-mode agent, send it inside the thread.
+The reply has one line per agent or team, with the reason when compaction is unavailable for it.
+
 ## Team History and Compaction
 
 Named teams accept `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history`, and `compaction`, with the same meaning, limits, and mutual exclusion as for agents.
