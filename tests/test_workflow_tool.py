@@ -98,6 +98,11 @@ async def _inline(stack: WorkflowStack, runs: int = 1, **options: object) -> asy
     return call
 
 
+async def _waits_for_admission(stack: WorkflowStack) -> None:
+    """Wait until a start has written its intent and waits for the job runtime, whose lock the test holds."""
+    await stack.until(lambda: stack.store.list_runs() and stack.jobs._lock._waiters)
+
+
 async def _refused(stack: WorkflowStack, name: str, **options: object) -> str:
     """Return the sentence a refused call fails with."""
     with pytest.raises(CallFailed) as refusal:
@@ -150,22 +155,63 @@ async def test_refused_admission_starts_no_process_and_reserves_no_run(stack: Wo
 
 
 @pytest.mark.asyncio
-async def test_a_start_cancelled_before_its_job_is_admitted_leaves_no_intent(
+async def test_a_start_cancelled_before_its_job_is_admitted_leaves_its_intent_for_the_redelivered_call(
     stack: WorkflowStack,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The intent is written before admission, so a call cancelled in between deletes it again."""
-
-    async def cancelled(*_args: object, **_options: object) -> None:
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(stack.jobs, "start", cancelled)
-
+    """A cancelled call cannot know whether its job was admitted, so it deletes nothing: the same call finds its run."""
+    async with stack.jobs._lock:
+        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await _waits_for_admission(stack)
+        first.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await stack.call("start_workflow", source=SCRIPT)
+        await first
+    [intent] = stack.store.list_runs()
 
-    assert stack.store.list_runs() == []
-    assert stack.scripts.launched == []
+    assert (intent.state, intent.attempt, stack.scripts.launched) == (WorkflowRunState.STARTING, 0, [])
+    again = await _started(stack, call_id="call-1")
+    assert again["run_id"] == intent.run_id
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_delivery_takes_no_run_from_the_delivery_admitted_beside_it(stack: WorkflowStack) -> None:
+    """Two deliveries of one call wait for admission and the first is cancelled: the other gets one run, one attempt."""
+    async with stack.jobs._lock:
+        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await _waits_for_admission(stack)
+        second = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await asyncio.sleep(0.05)
+        first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    handle = json.loads(await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+    await stack.finish_attempt(result="the report")
+
+    assert (await _ended_job(stack, handle["job_id"])).status == "completed"
+    assert [run.run_id for run in stack.store.list_runs()] == [handle["run_id"]]
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refused_delivery_takes_back_only_its_own_intent(stack: WorkflowStack) -> None:
+    """Deliveries of one call take turns: the next one prepares its job only after a refused one took its intent back."""
+    grants = iter(["denied"])
+    stack.jobs._grant = lambda _job: next(grants, "allowed")
+    async with stack.jobs._lock:
+        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await _waits_for_admission(stack)
+        second = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await asyncio.sleep(0.05)
+    with pytest.raises(CallFailed, match="not available"):
+        await first
+    handle = json.loads(await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+
+    assert [run.run_id for run in stack.store.list_runs()] == [handle["run_id"]]
+    assert len(stack.scripts.launched) == 1
 
 
 @pytest.mark.asyncio

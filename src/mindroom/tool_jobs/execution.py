@@ -451,37 +451,47 @@ async def _run_managed_call(
     job: JobSpec | None = None
     reference: ExecutionResourceReference | None = None
     try:
-        job = await _call_job(
-            inner,
-            function,
-            job_call,
-            detached,
-            scope,
-            owner,
-            job_id=job_id,
-        )
-        reference = scope.resources.acquire()
-        span = current_span()
-        # A workflow run's job is tied to no reply, so a later Stop of the reply that started it does not end the run.
-        reply = None if span is None or job.kind == "workflow" else span
-        _, claim = await runtime.start(
-            job_id,
-            tool_name=job.tool_name,
-            depth=depth,
-            kind=job.kind,
-            toolkit_name=job.toolkit_name,
-            source_event_id=context.membership_turn_id,
-            source_kind=context.source_kind,
-            adapter=job.adapter,
-            owner=owner,
-            operation=partial(_releasing, reference, job.operation, function.name),
-            cancel=job.cancel,
-            reattach=True,
-            # A Stop of the reply making the call refuses the job every later approval, and a stopped span starts none.
-            reply_id=None if reply is None else reply.reply_id,
-            reply_stop_order=None if reply is None else reply.reply.stop_receipt_order,
-            span_stopped=None if span is None else span.stopped,
-        )
+        # Deliveries of one call take turns from preparing the job to the runtime's answer.
+        async with runtime.admission(job_id):
+            job = await _call_job(
+                inner,
+                function,
+                job_call,
+                detached,
+                scope,
+                owner,
+                job_id=job_id,
+            )
+            reference = scope.resources.acquire()
+            span = current_span()
+            # A workflow run's job is tied to no reply, so a later Stop of the reply that started it ends no run.
+            reply = None if span is None or job.kind == "workflow" else span
+            try:
+                _, claim = await runtime.start(
+                    job_id,
+                    tool_name=job.tool_name,
+                    depth=depth,
+                    kind=job.kind,
+                    toolkit_name=job.toolkit_name,
+                    source_event_id=context.membership_turn_id,
+                    source_kind=context.source_kind,
+                    adapter=job.adapter,
+                    owner=owner,
+                    operation=partial(_releasing, reference, job.operation, function.name),
+                    cancel=job.cancel,
+                    reattach=True,
+                    # A Stop of the reply making the call refuses the job every later approval, and a stopped span
+                    # starts none.
+                    reply_id=None if reply is None else reply.reply_id,
+                    reply_stop_order=None if reply is None else reply.reply.stop_receipt_order,
+                    span_stopped=None if span is None else span.stopped,
+                )
+            except Exception:
+                if job.refused is not None:
+                    # A cancelled start may have been admitted, so only a start the runtime refused takes
+                    # back what preparing its job wrote.
+                    job.refused()
+                raise
         waited = await runtime.wait(
             job_id,
             owner=owner,
@@ -517,9 +527,6 @@ async def _run_managed_call(
         raise
     finally:
         admitted = job is not None and runtime.owns_execution(job_id, job.adapter)
-        if job is not None and job.refused is not None and not admitted:
-            # Before any await, so a cancelled call still takes back what preparing its job wrote.
-            job.refused()
         if not retained:
             await runtime.release_wait(job_id, claim)
         if reference is not None and job is not None and not admitted:
