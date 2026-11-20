@@ -7,6 +7,7 @@ import math
 import os
 import threading
 import time
+from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -90,6 +91,9 @@ _READY_WORKER_REVALIDATE_SECONDS = 300.0
 _PROCESS_STARTED_AT = time.time()
 # How long a worker directory must have had no Deployment before it counts as left behind by a failed removal.
 _ORPHANED_STATE_GRACE_SECONDS = 300.0
+# What follows a worker directory's name in the name of the file beside it that says the directory is being removed.
+# The file holds the worker's key, since a removal cut short may have deleted the manifest that names it.
+_RETIREMENT_MARKER_SUFFIX = ".retiring"
 # Where a worker's startup manifest names the worker key its files belong to.
 _STATE_IDENTITY_PATH = (".runtime", "startup_manifest.json")
 _STATE_IDENTITY_FIELD_PATH = ("runtime_paths", "process_env", SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"])
@@ -120,6 +124,14 @@ class _ReadyWorkerCacheEntry:
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
     shared_directory_mounts: tuple[SharedDirectoryMount, ...]
+
+
+def _retiring_worker_key(marker: Path) -> str | None:
+    """Return the worker key the retirement marker ``marker`` holds, or None when no removal left one."""
+    try:
+        return marker.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
 
 
 def standalone_resource_manager(runtime_paths: RuntimePaths) -> resources.KubernetesResourceManager:
@@ -487,13 +499,16 @@ class KubernetesWorkerBackend:
         if not state_parts:
             msg = f"Kubernetes worker state path is invalid for retirement: {state_subpath!r}."
             raise WorkerBackendError(msg)
+        marker = self.storage_root.joinpath(*state_parts[:-1], state_parts[-1] + _RETIREMENT_MARKER_SUFFIX)
         try:
             self._require_retirement_deployment(worker_id, worker_key, state_subpath)
+            # An earlier removal of these files that was cut short checked whose they are before it began.
+            resumed = _retiring_worker_key(marker) == worker_key
             with open_worker_state_root(
                 self.storage_root,
                 workers_subpath=state_parts[:-1],
                 worker_name=state_parts[-1],
-                expected_worker_key=worker_key,
+                expected_worker_key=None if resumed else worker_key,
                 identity_path=_STATE_IDENTITY_PATH,
                 identity_field_path=_STATE_IDENTITY_FIELD_PATH,
             ) as state:
@@ -506,7 +521,11 @@ class KubernetesWorkerBackend:
                     worker_id,
                     timeout_seconds=self.config.ready_timeout_seconds,
                 )
+                if state.exists:
+                    # Kept until the files are gone, so a removal that fails or dies partway is finished later.
+                    marker.write_text(worker_key, encoding="utf-8")
                 state.remove()
+            marker.unlink(missing_ok=True)
         except WorkerBackendError:
             raise
         except (OSError, RecursionError, TypeError, ValueError, self._resources.api_exception) as exc:
@@ -607,19 +626,26 @@ class KubernetesWorkerBackend:
         *,
         now: float,
     ) -> None:
-        """Remove the files a pinned worker left behind when its removal failed after its Deployment was deleted.
+        """Remove the files a worker left behind when its removal failed after its Deployment was deleted.
 
         Idle cleanup finds workers by their Deployments, so nothing else would retry that removal. A worker directory
-        without a Deployment is removed once it has stayed that way for the grace period and its startup manifest
-        names a subagent's or a named worker's key; every other directory is kept.
+        without a Deployment is removed once it has stayed that way for the grace period and either a removal of it
+        began, or its startup manifest names a subagent's or a named worker's key; every other directory is kept.
         """
         prefix_parts = tuple(part for part in self.config.storage_subpath_prefix.strip().split("/") if part)
+        workers_root = self.storage_root.joinpath(*prefix_parts)
         try:
-            with os.scandir(self.storage_root.joinpath(*prefix_parts)) as entries:
-                directories = {entry.name for entry in entries if entry.is_dir(follow_symlinks=False)}
+            with os.scandir(workers_root) as entries:
+                names = {entry.name: entry.is_dir(follow_symlinks=False) for entry in entries}
         except OSError:
             # Without the listing nothing is known to be left behind, and the rest of the pass still runs.
-            directories = set()
+            names = {}
+        directories = {name for name, is_directory in names.items() if is_directory}
+        for name in names.keys() - directories:
+            if name.endswith(_RETIREMENT_MARKER_SUFFIX) and name.removesuffix(_RETIREMENT_MARKER_SUFFIX) not in names:
+                # The removal ended, but not before the process did.
+                with suppress(OSError):
+                    (workers_root / name).unlink()
         deployed = {
             (deployment.metadata.annotations or {}).get(resources.ANNOTATION_STATE_SUBPATH, "").rpartition("/")[2]
             for deployment in deployments
@@ -629,7 +655,12 @@ class KubernetesWorkerBackend:
         for name in sorted(stateless):
             if now - self._stateless_since[name] < _ORPHANED_STATE_GRACE_SECONDS:
                 continue
-            worker_key = self._orphaned_pinned_worker_key(prefix_parts, name)
+            try:
+                worker_key = self._left_behind_worker_key(prefix_parts, name)
+            except OSError:
+                # Unreadable now, as on a storage error, so it is read again after another grace period.
+                self._stateless_since[name] = now
+                continue
             if worker_key is None:
                 self._stateless_since[name] = math.inf
                 continue
@@ -645,20 +676,28 @@ class KubernetesWorkerBackend:
             finally:
                 worker_lock.release()
 
-    def _orphaned_pinned_worker_key(self, prefix_parts: tuple[str, ...], name: str) -> str | None:
-        """Return the pinned worker key whose files the directory ``name`` holds, or None for any other directory."""
+    def _left_behind_worker_key(self, prefix_parts: tuple[str, ...], name: str) -> str | None:
+        """Return the key of the worker whose removal left the directory ``name``, or None for any other directory.
+
+        That is the key a removal that began wrote beside the directory, or else the pinned key its startup manifest
+        names. A file that cannot be read raises ``OSError``.
+        """
+        marker = self.storage_root.joinpath(*prefix_parts, name + _RETIREMENT_MARKER_SUFFIX)
         try:
-            with open_worker_state_root(self.storage_root, workers_subpath=prefix_parts, worker_name=name) as state:
-                if state.worker_fd is None:
+            worker_key = _retiring_worker_key(marker)
+            if worker_key is None:
+                with open_worker_state_root(self.storage_root, workers_subpath=prefix_parts, worker_name=name) as state:
+                    if state.worker_fd is None:
+                        return None
+                    identity = read_worker_identity(
+                        state.worker_fd,
+                        identity_path=_STATE_IDENTITY_PATH,
+                        identity_field_path=_STATE_IDENTITY_FIELD_PATH,
+                    )
+                if not isinstance(identity, str) or pinned_worker_kind(identity) is None:
                     return None
-                worker_key = read_worker_identity(
-                    state.worker_fd,
-                    identity_path=_STATE_IDENTITY_PATH,
-                    identity_field_path=_STATE_IDENTITY_FIELD_PATH,
-                )
-        except (OSError, TypeError, ValueError):
-            return None
-        if not isinstance(worker_key, str) or pinned_worker_kind(worker_key) is None:
+                worker_key = identity
+        except (TypeError, ValueError):
             return None
         return worker_key if self._state_subpath(worker_key).rpartition("/")[2] == name else None
 

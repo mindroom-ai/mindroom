@@ -4160,6 +4160,127 @@ def test_kubernetes_maintenance_removes_the_files_a_failed_removal_left_behind(
     assert pinned_root.exists() is False
 
 
+def _remove_only_the_manifest(state_root: Path) -> Callable[..., None]:
+    """Return a tree removal that deletes the worker's startup manifest and then fails, as a removal cut short does."""
+
+    def remove(*_args: object) -> None:
+        (state_root / ".runtime" / "startup_manifest.json").unlink()
+        msg = "stale file handle"
+        raise OSError(msg)
+
+    return remove
+
+
+@pytest.mark.parametrize("pin", [subagent_worker_key, named_worker_key], ids=["subagent", "named"])
+def test_kubernetes_maintenance_finishes_a_removal_that_was_cut_short_before_a_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pin: Callable[[str, str], str],
+) -> None:
+    """Files a removal left without their manifest are still removed, also by the process that starts next."""
+    backend, apps_api, _core_api = _named_backend(tmp_path, named_worker_idle_timeout_seconds=5.0)
+    backend.idle_timeout_seconds = 5.0
+    pinned = backend.ensure_worker(
+        _spec(pin(_TEST_SCOPED_WORKER_KEY_A, "d" * 32), state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A),
+        now=0.0,
+    )
+    _expire(apps_api, pinned.worker_id, replicas=0)
+    pinned_root = backend.storage_root / backend._state_subpath(pinned.worker_key)
+    (pinned_root / "cache").mkdir(exist_ok=True)
+    (pinned_root / "cache" / "wheel").write_text("left behind", encoding="utf-8")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(worker_retirement_module, "_remove_tree", _remove_only_the_manifest(pinned_root))
+        backend.maintain_workers(now=10.0)
+    assert pinned.worker_id not in apps_api.deployments
+    assert (pinned_root / "cache" / "wheel").is_file()
+    assert not (pinned_root / ".runtime" / "startup_manifest.json").exists()
+
+    # The next process knows nothing of the removal but what is on disk.
+    grace = kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS
+    restarted, _apps_api, _core_api = _named_backend(tmp_path)
+    restarted.maintain_workers(now=20.0)
+    assert pinned_root.is_dir()
+    restarted.maintain_workers(now=20.0 + grace)
+
+    assert pinned_root.exists() is False
+    assert [path.name for path in pinned_root.parent.iterdir()] == []
+
+
+def test_kubernetes_backend_retires_a_worker_again_after_a_removal_that_was_cut_short(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script run that retires its worker again, after a removal that deleted only some files, finishes it."""
+    backend, apps_api, _core_api = _named_backend(tmp_path)
+    base_key = "v1:test:user_agent:@alice:example.test:watcher"
+    script_key = script_worker_key_for_run(base_key, f"script-{'c' * 32}")
+    script = backend.ensure_worker(
+        _spec(script_key, private_agent_names=frozenset(), state_scope_worker_key=base_key),
+        now=0.0,
+    )
+    script_root = backend.storage_root / backend._state_subpath(script_key)
+
+    with monkeypatch.context() as failing:
+        failing.setattr(worker_retirement_module, "_remove_tree", _remove_only_the_manifest(script_root))
+        with pytest.raises(WorkerBackendError, match="stale file handle"):
+            backend.retire_worker(script_key)
+    assert script.worker_id not in apps_api.deployments
+    assert script_root.is_dir()
+
+    backend.retire_worker(script_key)
+
+    assert script_root.exists() is False
+    assert [path.name for path in script_root.parent.iterdir()] == []
+
+
+def test_kubernetes_maintenance_drops_the_marker_of_a_removal_that_finished(tmp_path: Path) -> None:
+    """A marker whose directory is gone, as when the process died right after removing it, is removed too."""
+    backend, _apps_api, _core_api = _named_backend(tmp_path)
+    named = backend.ensure_worker(_named_spec(), now=0.0)
+    named_root = backend.storage_root / backend._state_subpath(named.worker_key)
+    finished = named_root.with_name("gone-worker.retiring")
+    finished.write_text("v1:tenant-123:shared:gone", encoding="utf-8")
+    # A marker that names another worker than its directory's never removes that directory.
+    named_root.with_name(f"{named_root.name}.retiring").write_text(_TEST_SCOPED_WORKER_KEY_B, encoding="utf-8")
+    del _apps_api.deployments[named.worker_id]
+
+    backend.maintain_workers(now=1.0)
+    backend.maintain_workers(now=1.0 + kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS)
+
+    assert not finished.exists()
+    assert named_root.is_dir()
+
+
+def test_kubernetes_maintenance_reads_an_unreadable_manifest_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Files whose manifest could not be read, as on a storage error, are looked at again instead of kept forever."""
+    backend, apps_api, _core_api = _named_backend(tmp_path)
+    grace = kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS
+    named = backend.ensure_worker(_named_spec(), now=0.0)
+    named_root = backend.storage_root / backend._state_subpath(named.worker_key)
+    del apps_api.deployments[named.worker_id]
+    backend.maintain_workers(now=1.0)
+
+    def unreadable(*_args: object, **_kwargs: object) -> object:
+        msg = "input/output error"
+        raise OSError(msg)
+
+    with monkeypatch.context() as failing:
+        failing.setattr(kubernetes_backend_module, "read_worker_identity", unreadable)
+        backend.maintain_workers(now=1.0 + grace)
+    assert named_root.is_dir()
+
+    # It is read again once it has stayed without a Deployment for another grace period.
+    backend.maintain_workers(now=2.0 + grace)
+    assert named_root.is_dir()
+    backend.maintain_workers(now=1.0 + 2 * grace)
+
+    assert named_root.exists() is False
+
+
 def test_kubernetes_maintenance_keeps_files_that_are_not_an_orphaned_pinned_workers(tmp_path: Path) -> None:
     """Only a pinned worker's own files without a Deployment are removed; every other directory stays."""
     backend, apps_api, _core_api = _named_backend(tmp_path, named_worker_idle_timeout_seconds=10_000.0)
