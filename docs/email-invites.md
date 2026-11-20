@@ -27,7 +27,7 @@ email_invites:
 tool_approval:
   rules:
     - match: invite_by_email
-      action: require_approval             # recommended: every invitation shows an approval card
+      action: require_approval             # recommended: an invitation needs approval, like any gated tool
 ```
 
 `invite_by_email` is an ordinary tool for [tool approval](tool-approval.md): whether a call asks first is up to your config, and the rule above is recommended.
