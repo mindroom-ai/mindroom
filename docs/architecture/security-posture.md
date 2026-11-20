@@ -335,7 +335,7 @@ A worker's sshd never starts at boot: the primary asks the runner to start it on
 Before it starts sshd, the primary writes `sshd_config`, `authorized_keys` with every line `restrict,pty`, and the link's own Ed25519 host private key into `<worker root>/.runtime/ssh/`, which the worker mounts read-only, so worker code can read the host key, as sshd's own uid, but cannot change what sshd admits.
 The links, each person's SSH public keys, and every link's host private key live in `tracking/tailnet_ssh.json`, which only the primary reads and no worker mounts.
 A removed key, portal or operator, and a disconnected or removed link move the link's `closed_before`, which tells the gateway to close the sessions opened before it.
-A disconnected or removed link's worker, while it runs, gets an empty `authorized_keys`, written under the same lock as every key change and connect, and then the primary asks its runner to stop sshd; a worker that does not run is left alone, as only a connect of a link that is on starts its sshd again, and that connect writes the keys first.
+A disconnected or removed link's worker, while it runs, gets an empty `authorized_keys`, written under the same lock as every key change and connect and retried at every reconcile until it is written, and then the primary asks its runner, apart from any response, to stop sshd, which the runner does only while that file admits nobody, so a stop that arrives after a newer connect leaves that connect's sshd; a worker that does not run is left alone, as only a connect of a link that is on starts its sshd again, and that connect writes the keys first.
 
 ## Known gaps
 
