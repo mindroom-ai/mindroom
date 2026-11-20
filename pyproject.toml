@@ -292,7 +292,7 @@ jira = [
   "jira>=3.10.5",
 ]
 knowledge_graph = [
-  "graphiti-core[falkordblite]==0.31.1",
+  "graphiti-core[falkordblite]==0.31.2",
   # C parser for FalkorDB replies; redis-py parses large ones in pure Python on the event loop otherwise.
   "hiredis",
   "psutil",
@@ -551,7 +551,7 @@ desktop-helper = [
   "mindroom-nio[e2e]",
   "pillow>=10.2",
   "pyautogui>=0.9.54",
-  "pyinstaller==6.16",
+  "pyinstaller==6.22.3",
   "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
