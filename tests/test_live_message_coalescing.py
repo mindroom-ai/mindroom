@@ -7751,7 +7751,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         patch.object(bot._coalescing_gate, "_on_dispatch_failure", new=retry_pending_source),
         patch.object(
             bot._inbound_turn_normalizer,
-            "prepare_file_sidecar_text_event",
+            "resolve_text_event",
             new=AsyncMock(return_value=hydrated),
         ),
         patch.object(

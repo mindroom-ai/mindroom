@@ -1625,7 +1625,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             },
         },
     )
-    bot._inbound_turn_normalizer.prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=prepared_text_event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=_dispatch_context(bot),
     )
@@ -1694,7 +1694,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             },
         },
     )
-    bot._inbound_turn_normalizer.prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=prepared_text_event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=_dispatch_context(bot),
     )

@@ -1912,7 +1912,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),
@@ -2001,7 +2001,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),

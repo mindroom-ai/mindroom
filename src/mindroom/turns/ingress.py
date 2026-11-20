@@ -262,7 +262,7 @@ class TurnIngress:
 
     @staticmethod
     async def _normalize_with_ingress_timing(
-        normalize: Awaitable[PreparedIngress | None],
+        normalize: Awaitable[PreparedIngress],
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> PreparedIngress:
         """Await one text-like normalization while recording ingress timing boundaries."""
@@ -271,7 +271,6 @@ class TurnIngress:
         prepared_event = await normalize
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_ready")
-        assert prepared_event is not None
         attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         return prepared_event
 
@@ -906,7 +905,7 @@ class TurnIngress:
     ) -> TurnDispatchOutcome:
         """Dispatch one sidecar-backed file preview through the normal text pipeline."""
         prepared_text_event = await self._normalize_with_ingress_timing(
-            self.deps.normalizer.prepare_file_sidecar_text_event(event),
+            self.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=event)),
             get_dispatch_pipeline_timing(event.source),
         )
         return await self._dispatch_prepared_text_like_ingress(
