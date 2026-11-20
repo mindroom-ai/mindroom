@@ -53,10 +53,6 @@ export interface MemoryConfig {
       dimensions?: number;
     };
   };
-  file?: {
-    max_entrypoint_lines?: number;
-    max_entrypoint_tokens?: number;
-  };
   search?: {
     mode?: MemorySearchMode;
     include?: string[];

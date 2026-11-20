@@ -1841,11 +1841,11 @@
           "title": "Allow Self Config",
           "type": "boolean"
         },
-        "max_preload_chars": {
-          "default": 50000,
-          "description": "Hard cap for extra role preload context loaded from context_files",
+        "max_preload_file_chars": {
+          "default": 30000,
+          "description": "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; a longer file keeps its first whole lines within this limit",
           "minimum": 1,
-          "title": "Max Preload Chars",
+          "title": "Max Preload File Chars",
           "type": "integer"
         },
         "automations": {
@@ -3896,14 +3896,6 @@
           "default": null,
           "description": "LLM configuration for memory"
         },
-        "file": {
-          "$ref": "#/$defs/_MemoryFileConfig",
-          "default": {
-            "max_entrypoint_lines": 200,
-            "max_entrypoint_tokens": 50000
-          },
-          "description": "File-backed memory configuration"
-        },
         "search": {
           "$ref": "#/$defs/MemorySearchConfig",
           "default": {
@@ -4753,7 +4745,7 @@
         },
         "trigger_tokens": {
           "default": 20000,
-          "description": "Post the prompt once MEMORY.md and the context files total more than this many of the agent model's tokens; a MEMORY.md the preload cannot show whole (memory.file.max_entrypoint_lines or max_entrypoint_tokens) also posts it",
+          "description": "Post the prompt once MEMORY.md and the context files total more than this many of the agent model's tokens; a file the preload cannot show whole (over defaults.max_preload_file_chars) also posts it",
           "minimum": 1,
           "title": "Trigger Tokens",
           "type": "integer"
@@ -5947,28 +5939,6 @@
       "title": "_MemoryEmbedderConfig",
       "type": "object"
     },
-    "_MemoryFileConfig": {
-      "additionalProperties": false,
-      "description": "File-backed memory configuration.",
-      "properties": {
-        "max_entrypoint_lines": {
-          "default": 200,
-          "description": "Maximum number of lines to preload from MEMORY.md",
-          "minimum": 1,
-          "title": "Max Entrypoint Lines",
-          "type": "integer"
-        },
-        "max_entrypoint_tokens": {
-          "default": 50000,
-          "description": "Maximum tokens, as the turn's model counts them, of whole lines to preload from MEMORY.md",
-          "minimum": 1,
-          "title": "Max Entrypoint Tokens",
-          "type": "integer"
-        }
-      },
-      "title": "_MemoryFileConfig",
-      "type": "object"
-    },
     "_MemoryLLMConfig": {
       "additionalProperties": false,
       "description": "Memory LLM configuration.",
@@ -6248,7 +6218,7 @@
         "allow_shell_without_worker": false,
         "worker_grantable_credentials": null,
         "allow_self_config": false,
-        "max_preload_chars": 50000,
+        "max_preload_file_chars": 30000,
         "automations": [],
         "tool_output_auto_save_threshold_bytes": 51200,
         "streaming": {
@@ -6282,10 +6252,6 @@
           "provider": "openai"
         },
         "llm": null,
-        "file": {
-          "max_entrypoint_lines": 200,
-          "max_entrypoint_tokens": 50000
-        },
         "search": {
           "exclude": [],
           "include": [
