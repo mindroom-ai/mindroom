@@ -738,9 +738,8 @@ class DockerWorkerBackend:
         incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
-        del (
-            incarnation
-        )  # A worker's record counts its starts for as long as its key exists, so the count tells them apart.
+        # A worker's record counts its starts for as long as its key exists, so the count tells them apart.
+        del incarnation
         timestamp = time.time() if now is None else now
         with self._worker_locks.for_key(worker_key):
             paths = self._worker_paths(worker_key)
