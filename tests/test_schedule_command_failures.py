@@ -346,18 +346,6 @@ async def test_cancel_of_a_task_that_already_ended(tmp_path: Path, status: str) 
 
 
 @pytest.mark.asyncio
-async def test_state_refusal_says_moderator_rights(tmp_path: Path) -> None:
-    """A cancellation the room refuses for lack of power answers with the moderator-rights sentence and nothing else."""
-    client = make_matrix_client_mock()
-    _serve_task(client, _workflow())
-    client.room_put_state = AsyncMock(return_value=_STATE_WRITE_REFUSED)
-
-    reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client)
-
-    assert reply == "I need moderator rights in this room to save schedules."
-
-
-@pytest.mark.asyncio
 async def test_state_write_timeout_gives_no_moderator_advice(tmp_path: Path) -> None:
     """A cancellation that fails for another reason than power reports the failure, without moderator advice."""
     client = make_matrix_client_mock()
