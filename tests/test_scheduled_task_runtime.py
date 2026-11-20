@@ -952,6 +952,64 @@ async def test_restores_that_straddle_a_power_change_start_one_runner_for_a_rout
 
 
 @pytest.mark.asyncio
+async def test_a_ready_heir_of_a_later_restore_replaces_one_that_never_became_ready(tmp_path: Path) -> None:
+    """A router task whose first heir never finishes its sync fires through the ready heir a later read elects."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "alpha", "general", "helper")
+    assert ids["alpha"] < ids["general"] < ids["helper"]
+    room = _SharedRoom({ids["alpha"]: 0, ids["general"]: 0, ids["helper"]: 100})
+    power = {"state_default": 50, "events_default": 50}
+    # Every agent may post when the first bot reads the room, so that read elects the lowest Matrix ID.
+    room._put("m.room.power_levels", "", {"users": dict.fromkeys(room.members, 100), **power}, ids["helper"])
+    content = {"task_id": TASK_ID, "workflow": _workflow().model_dump_json(), "status": "pending"}
+    room._put("com.mindroom.scheduled.task", TASK_ID, {**content, "owner": ids["router"]}, ids["router"])
+    bots = {name: scheduling_bot(room.client(ids[name]), agent_name=name) for name in ("alpha", "general", "helper")}
+    bots["alpha"].first_sync_complete = False
+    runtime = _runtime(runtime_paths, config, bots)
+
+    with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()) as execute:
+        assert await runtime.restore_room(bots["general"], ROOM_ID) == 1
+        waiting = runtime._runners[TASK_ID]
+        assert waiting[0].owner == "alpha"
+        # Only the helper may post by the time it reads the room, so its read elects itself.
+        room._put("m.room.power_levels", "", {"users": dict(room.members), **power}, ids["helper"])
+        assert await runtime.restore_room(bots["helper"], ROOM_ID) == 1
+        await asyncio.wait_for(runtime._runners[TASK_ID][1], timeout=2)
+        # A third read finds the task done and its runner gone.
+        assert await runtime.restore_room(bots["general"], ROOM_ID) == 0
+
+    assert waiting[1].cancelled()
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0] is bots["helper"].client
+    assert room.task()["content"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_an_heir_that_used_its_bot_keeps_a_router_task_through_its_restart(tmp_path: Path) -> None:
+    """A later read never replaces the runner of an heir that already worked on the task, ready or not."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "alpha", "helper")
+    room = _SharedRoom({ids["alpha"]: 100, ids["helper"]: 100})
+    content = {"task_id": TASK_ID, "workflow": _workflow(due=False).model_dump_json(), "status": "pending"}
+    room._put("com.mindroom.scheduled.task", TASK_ID, {**content, "owner": ids["router"]}, ids["router"])
+    bots = {name: scheduling_bot(room.client(ids[name]), agent_name=name) for name in ("alpha", "helper")}
+    runtime = _runtime(runtime_paths, config, bots)
+
+    assert await runtime.restore_room(bots["helper"], ROOM_ID) == 1
+    runner = runtime._runners[TASK_ID][0]
+    async with asyncio.timeout(2):
+        while not runner.used_owner:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    # Its sync restarts, and only the helper may post by the time the helper reads the room.
+    bots["alpha"].first_sync_complete = False
+    levels = {"users": {ids["alpha"]: 0, ids["helper"]: 100}, "state_default": 50, "events_default": 50}
+    room._put("m.room.power_levels", "", levels, ids["helper"])
+    assert await runtime.restore_room(bots["helper"], ROOM_ID) == 0
+
+    assert runtime._runners[TASK_ID][0] is runner
+    assert runner.owner == "alpha"
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_restore_skips_a_router_task_in_a_room_without_an_agent(tmp_path: Path) -> None:
     """A task the router owned stays pending, with a warning, where no agent is joined to take it over."""
     config, runtime_paths, ids = _config_and_ids(tmp_path)

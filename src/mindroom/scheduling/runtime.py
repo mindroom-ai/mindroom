@@ -91,13 +91,20 @@ class ScheduledTaskRuntime:
     _stopping: bool = field(default=False, init=False)
 
     def _start_runner(self, owner: str, task_id: str, workflow: ScheduledWorkflow) -> bool:
-        """Start one task's runner under its owner unless a runner for it already runs."""
+        """Start one task's runner under its owner unless a runner for it already runs.
+
+        Only a task the router owned is ever started under another owner: a ready heir replaces the runner of an
+        heir that is not ready and never used its bot, which a later read of the room no longer elects.
+        """
         if self._stopping:
             return False
         running = self._runners.get(task_id)
         if running is not None and not running[1].done():
-            logger.debug("Scheduled task already running; skipping duplicate start", task_id=task_id)
-            return False
+            waiting, ready = self._ready_bot(running[0].owner) is None, self._ready_bot(owner) is not None
+            if running[0].owner == owner or running[0].used_owner or not (waiting and ready):
+                logger.debug("Scheduled task already running; skipping duplicate start", task_id=task_id)
+                return False
+            running[1].cancel()
         if not workflow.room_id:
             logger.error("No room_id provided for scheduled task", task_id=task_id)
             return False
@@ -382,7 +389,7 @@ class ScheduledTaskRuntime:
             del self._runners[task_id]
 
 
-@dataclass(frozen=True)
+@dataclass
 class _TaskRunner:
     """Run one scheduled task, borrowing its owner's live bot for each Matrix operation."""
 
@@ -390,6 +397,14 @@ class _TaskRunner:
     owner: str
     room_id: str
     task_id: str
+    # Whether this runner ever borrowed its owner's bot; one that did is never replaced.
+    used_owner: bool = field(default=False, init=False)
+
+    @asynccontextmanager
+    async def _operation(self) -> AsyncIterator[tuple[AgentBot, nio.AsyncClient]]:
+        async with self.runtime.operation(self.owner) as borrowed:
+            self.used_owner = True
+            yield borrowed
 
     async def _runnable_task(self) -> ScheduledTaskRecord | None:  # noqa: C901
         """Return runnable state, cancelling departed creators' tasks and retrying uncertainty."""
@@ -398,7 +413,7 @@ class _TaskRunner:
         task: ScheduledTaskRecord | None = None
         while True:
             try:
-                async with runtime.operation(self.owner) as (_bot, client):
+                async with self._operation() as (_bot, client):
                     task = await _get_pending_task_record(
                         client=client,
                         room_id=self.room_id,
@@ -466,7 +481,7 @@ class _TaskRunner:
 
     async def _checkpoint_identity(self) -> tuple[str, str]:
         """Return the homeserver and account that key the owner's recurring checkpoint."""
-        async with self.runtime.operation(self.owner) as (_bot, client):
+        async with self._operation() as (_bot, client):
             return client.homeserver, client.user_id
 
     async def _plan_occurrence(self, workflow: ScheduledWorkflow, cron: str) -> RecurringOccurrence:
@@ -491,7 +506,7 @@ class _TaskRunner:
         workflow: ScheduledWorkflow,
         occurrence: RecurringOccurrence | None = None,
     ) -> scheduling_executor.ScheduledWorkflowOutcome:
-        async with self.runtime.operation(self.owner) as (bot, client):
+        async with self._operation() as (bot, client):
             return await scheduling_executor.execute_scheduled_workflow(
                 client,
                 workflow,
@@ -506,7 +521,7 @@ class _TaskRunner:
             )
 
     async def _send_failure_notice(self, target: MessageTarget, message: str) -> None:
-        async with self.runtime.operation(self.owner) as (bot, client):
+        async with self._operation() as (bot, client):
             await scheduling_executor.send_scheduled_failure_notice(
                 client,
                 target,
@@ -528,7 +543,7 @@ class _TaskRunner:
         give_up_at = loop.time() + _STATUS_WRITE_RETRY_SECONDS
         retrying = False
         while True:
-            async with self.runtime.operation(self.owner) as (_bot, client):
+            async with self._operation() as (_bot, client):
                 try:
                     async with scheduled_task_state_lock(client, self.room_id, self.task_id):
                         if retrying and task != (
