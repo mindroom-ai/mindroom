@@ -380,14 +380,19 @@ def _agent_logins(transaction: Transaction) -> dict[str, tuple[str, ...]]:
 def drop_dense_turn_source_indexes(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Drop the full turn-source indexes the partial ones replace, inside the schema transaction."""
     for name in ("turn_sources_selected_revision", "turn_sources_discovery"):
-        if inspector.dialect is SQLITE_DIALECT:
-            transaction.execute(f"DROP INDEX IF EXISTS {name}")
-        # A PostgreSQL name resolves through the search path, which can reach another journal's schema.
-        elif transaction.fetchone(
-            "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ?",
-            (name,),
-        ):
-            transaction.execute(f"DROP INDEX {name}")
+        drop_own_index(transaction, inspector, name)
+
+
+def drop_own_index(transaction: Transaction, inspector: SchemaInspector, name: str) -> None:
+    """Drop one index if this journal's own schema holds it."""
+    if inspector.dialect is SQLITE_DIALECT:
+        transaction.execute(f"DROP INDEX IF EXISTS {name}")
+    # A PostgreSQL name resolves through the search path, which can reach another journal's schema.
+    elif transaction.fetchone(
+        "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ?",
+        (name,),
+    ):
+        transaction.execute(f"DROP INDEX {name}")
 
 
 def _apply_redaction(transaction: Transaction, agent_name: str, room_id: str, event_id: str) -> None:

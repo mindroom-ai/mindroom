@@ -21,7 +21,7 @@ from .legacy_schema import (
     upgrade_legacy_journal,
     upgrade_outbox_reply_rows,
 )
-from .legacy_turn_rows import drop_dense_turn_source_indexes, upgrade_turn_records_to_rows
+from .legacy_turn_rows import drop_dense_turn_source_indexes, drop_own_index, upgrade_turn_records_to_rows
 from .schema import FINGERPRINT_INDEX, create_statement, schema_statements
 
 if TYPE_CHECKING:
@@ -77,8 +77,9 @@ def upgrade_schema(transaction: Transaction, inspector: SchemaInspector) -> None
 def build_staged_indexes(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Build the fingerprint index in a transaction after the schema's, then drop by name the one it replaces.
 
-    The schema's transaction holds the locks of its upgrades, on PostgreSQL one that stops readers; this one stops
-    only writers. The drop runs on every open, so a journal an older release opened in between does not keep both.
+    The schema's transaction holds the locks of its upgrades, on PostgreSQL one that stops readers; the build stops
+    only writers. The drop, which on PostgreSQL briefly stops readers too, runs on every open, so a journal an older
+    release opened in between does not keep both.
     """
     transaction.execute(create_statement(FINGERPRINT_INDEX, inspector.dialect))
-    transaction.execute("DROP INDEX IF EXISTS visible_messages_fingerprint")
+    drop_own_index(transaction, inspector, "visible_messages_fingerprint")
