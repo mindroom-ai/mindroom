@@ -227,7 +227,7 @@ def test_calls_with_the_broker_off_import_no_broker_code(
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
 ) -> None:
-    """Without a broker port, a worker-routed shell or python call never imports broker code and adds no broker env."""
+    """With the broker off, a worker-routed shell or python call never imports broker code and adds no broker env."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
@@ -238,6 +238,7 @@ def test_calls_with_the_broker_off_import_no_broker_code(
             "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner:8765",
             "MINDROOM_SANDBOX_PROXY_TOKEN": "proxy-token",
             "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_EGRESS_BROKER_PORT": "off",
         },
     )
     for module in pkgutil.iter_modules(mindroom.egress_broker.__path__):

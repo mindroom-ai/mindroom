@@ -220,8 +220,9 @@ def _validated_host_addresses(
     resolve_hostnames: bool,
     allow_loopback: bool = False,
     private_networks: tuple[_IPNetwork, ...] = (),
+    resolve_lan_names: bool = False,
 ) -> list[_IPAddress]:
-    """Validate a host and optionally return addresses that are safe to dial."""
+    """Validate a host and optionally return addresses that are safe to dial; `resolve_lan_names` admits `*.local`."""
     host = _normalize_hostname(hostname)
     direct_address = _ip_address_from_host(host)
     if direct_address is not None:
@@ -238,7 +239,8 @@ def _validated_host_addresses(
         _deny("metadata_hostname")
 
     loopback_hostname = ascii_host == "localhost" or ascii_host.endswith(".localhost")
-    if _is_local_hostname(ascii_host) and not (allow_private_networks or (allow_loopback and loopback_hostname)):
+    allowed = allow_private_networks or (resolve_lan_names and ascii_host.endswith(".local"))
+    if _is_local_hostname(ascii_host) and not (allowed or (allow_loopback and loopback_hostname)):
         _deny("private_hostname")
     if not resolve_hostnames:
         return []
@@ -321,6 +323,7 @@ def validated_connect_addresses(
     allow_private_networks: bool,
     allow_loopback: bool = False,
     private_networks: tuple[_IPNetwork, ...] = (),
+    resolve_lan_names: bool = False,
 ) -> list[_IPAddress]:
     """Resolve and validate the addresses used for an actual TCP connection.
 
@@ -335,6 +338,7 @@ def validated_connect_addresses(
         resolve_hostnames=True,
         allow_loopback=allow_loopback,
         private_networks=private_networks,
+        resolve_lan_names=resolve_lan_names,
     )
 
 

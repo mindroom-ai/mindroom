@@ -1256,6 +1256,8 @@ agents:
         defer: true
       - name: temporary_secrets
         defer: true
+      - name: egress_credentials
+        defer: true
       - name: config_manager
         defer: true
       - name: duckduckgo

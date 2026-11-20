@@ -34,6 +34,9 @@ class WorkerClaims:
     channel: Literal["matrix", "openai_compat", "headless", "mcp"]
     agent_name: str
     requester_id: str | None
+    # Minted for a shell call in the primary, which can dial around the broker anyway, so its private-address guard
+    # protects nothing and the broker opens private networks for it. Tokens without the claim are worker tokens.
+    primary_shell: bool = False
 
     @staticmethod
     def from_worker_target(target: ResolvedWorkerTarget) -> WorkerClaims | None:
@@ -150,7 +153,9 @@ class TokenSigner:
         exp = int(now + self._ttl_seconds)
 
         # Build payload with sorted keys and compact separators
-        payload_dict = {"claims": asdict(claims), "exp": exp}
+        # A worker token leaves out `primary_shell`, keeping the format releases without the claim accept.
+        signed_claims = {key: value for key, value in asdict(claims).items() if key != "primary_shell" or value}
+        payload_dict = {"claims": signed_claims, "exp": exp}
         payload_bytes = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
         mac = self._mac(payload_bytes)
@@ -240,7 +245,8 @@ def _unexpired_claims(payload_bytes: bytes, *, now: float) -> dict[str, Any] | N
 
 def _claims_from_dict(claims_dict: dict[str, Any]) -> WorkerClaims | None:
     """Return the claims when exactly the expected keys are present, each with its expected type, or None."""
-    if set(claims_dict) != _CLAIM_KEYS:
+    claims_dict = {"primary_shell": False, **claims_dict}
+    if set(claims_dict) != _CLAIM_KEYS or not isinstance(claims_dict["primary_shell"], bool):
         return None
     if not isinstance(claims_dict["worker_key"], str) or not isinstance(claims_dict["agent_name"], str):
         return None

@@ -197,6 +197,19 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "env": [],
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -4806,6 +4819,19 @@
           "placeholder": null,
           "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "env": [],
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         }
       ],
@@ -12022,7 +12048,7 @@
         },
         {
           "authored_override": true,
-          "default": "always",
+          "default": null,
           "description": null,
           "env": [],
           "label": "Livecrawl",
@@ -12135,6 +12161,71 @@
           "placeholder": null,
           "required": false,
           "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": null,
+          "env": [],
+          "label": "Include Text",
+          "name": "include_text",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": null,
+          "env": [],
+          "label": "Exclude Text",
+          "name": "exclude_text",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": null,
+          "env": [],
+          "label": "User Location",
+          "name": "user_location",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": null,
+          "env": [],
+          "label": "Moderation",
+          "name": "moderation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": null,
+          "env": [],
+          "label": "Highlights",
+          "name": "highlights",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         },
         {

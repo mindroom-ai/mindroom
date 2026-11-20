@@ -52,6 +52,7 @@ from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+from mindroom.tool_system import dependencies as tool_dependencies
 from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
@@ -244,7 +245,7 @@ def test_init_supabase_auth_raises_when_auto_install_disabled(
 
     monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
     monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: False)
-    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
+    monkeypatch.setattr(tool_dependencies, "_auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
         auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
@@ -267,7 +268,7 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
 
     monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
     monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: True)
-    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
+    monkeypatch.setattr(tool_dependencies, "_auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
         auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
@@ -304,7 +305,7 @@ def test_init_supabase_auth_retries_import_after_auto_install(
         return True
 
     monkeypatch.setattr(auth.importlib, "import_module", import_module)
-    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", auto_install)
+    monkeypatch.setattr(tool_dependencies, "_auto_install_optional_extra", auto_install)
 
     supabase_auth = auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 

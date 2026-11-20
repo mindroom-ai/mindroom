@@ -1085,7 +1085,7 @@ class TestConsolidatedConfigManager:
     @pytest.mark.parametrize("broker_on", [False, True])
     def test_get_info_offers_the_egress_tool_only_while_the_broker_is_on(self, tmp_path: Path, broker_on: bool) -> None:
         """The tool list and tool details offer egress_credentials only while the egress broker is on."""
-        process_env = {"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}
+        process_env = {"MINDROOM_EGRESS_BROKER_PORT": "8768" if broker_on else "off"}
         runtime_paths = resolve_runtime_paths(config_path=_minimal_config_path(tmp_path), process_env=process_env)
         cm = ConfigManagerTools(runtime_paths)
 

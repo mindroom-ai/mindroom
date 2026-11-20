@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 from urllib.parse import unquote, urlsplit
 
+import aiohttp
+import aioresponses.core as aioresponses_core
 import httpcore
 import httpcore2
 import httpx
@@ -74,6 +76,7 @@ import mindroom.reply_turn.locked_turn as locked_turn_module
 import mindroom.reply_turn.request as reply_request_module
 import mindroom.response_runner as response_runner_module
 import mindroom.streaming as streaming_module
+import mindroom.tls_trust as tls_trust_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools.shell as shell_tool_module
@@ -222,6 +225,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
+    from _pytest.capture import CaptureResult
     from _typeshed import DataclassInstance
     from xdist.workermanage import WorkerController
 
@@ -240,6 +244,26 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from tests.team_turn_helpers import ProbeToolkit
 
+
+# aioresponses 0.7.9 predates aiohttp 3.14: its fake responses lack the `stream_writer` aiohttp 3.14.4 requires, and
+# their body stream has no parser for the flow control a body over 128 KiB starts. This mirrors the fix proposed
+# upstream; remove it once a release includes https://github.com/pnuckowski/aioresponses/pull/292.
+class _AioresponsesClientResponse(aiohttp.ClientResponse):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("stream_writer", SimpleNamespace(output_size=0))
+        super().__init__(*args, **kwargs)
+
+
+def _aioresponses_stream_reader(loop: asyncio.AbstractEventLoop | None = None) -> aiohttp.StreamReader:
+    reader = _AIORESPONSES_STREAM_READER(loop)
+    reader._protocol._parser = MagicMock()
+    reader._protocol._parser.feed_data.return_value = ([], False, b"")
+    return reader
+
+
+_AIORESPONSES_STREAM_READER = aioresponses_core.stream_reader_factory
+aioresponses_core.ClientResponse = _AioresponsesClientResponse
+aioresponses_core.stream_reader_factory = _aioresponses_stream_reader
 
 _STRUCTLOG_CONFIGURE = structlog.configure
 _REAL_BUILD_MODEL_PROVIDER = provider_registry.build_model_provider
@@ -3753,6 +3777,48 @@ def loop_runs_while_blocked(loop: asyncio.AbstractEventLoop) -> bool:
     return loop_ran.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
 
+def _flush_queued_stderr_records() -> None:
+    """Write the records `setup_logging` still holds for stderr, whose writer thread would add them later."""
+    for handler in logging.getLogger().handlers:
+        # The log file's handler is left alone, so a test can stall it while reading stderr.
+        if handler.name == "console":
+            handler.flush()
+
+
+def _flush_stderr_before_reads(
+    capture: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    read = capture.readouterr
+
+    def readouterr() -> "CaptureResult[str]":
+        _flush_queued_stderr_records()
+        return read()
+
+    monkeypatch.setattr(capture, "readouterr", readouterr)
+    yield capture
+    # Before the capture closes, so the writer thread never writes into its closed buffer.
+    _flush_queued_stderr_records()
+
+
+@pytest.fixture
+def capsys(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    """Capture stderr with every record logged before a read in that read."""
+    yield from _flush_stderr_before_reads(capsys, monkeypatch)
+
+
+@pytest.fixture
+def capfd(
+    capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    """Capture file descriptors with every record logged before a read in that read."""
+    yield from _flush_stderr_before_reads(capfd, monkeypatch)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_structlog_configuration(
     monkeypatch: pytest.MonkeyPatch,
@@ -3774,6 +3840,10 @@ def _isolate_structlog_configuration(
     root_logger = logging.getLogger()
     root_handlers, root_level = root_logger.handlers[:], root_logger.level
     yield
+    for handler in set(root_logger.handlers).difference(root_handlers):
+        # Stops the writer threads of the handlers `setup_logging` added.
+        if handler.name in {"console", "file"}:
+            handler.close()
     root_logger.handlers[:] = root_handlers
     root_logger.setLevel(root_level)
     _configure_quiet_structlog()
@@ -3850,6 +3920,12 @@ def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None]:
     api_main = sys.modules.get("mindroom.api.main")
     if api_main is not None:
         api_main.unbind_embedded_runtime(api_main.app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_shared_tls_context() -> None:
+    """Build the shared TLS context anew in each test, so a test that patches CA loading sees its patch."""
+    tls_trust_module._shared_context.cache_clear()
 
 
 @pytest.fixture(autouse=True)

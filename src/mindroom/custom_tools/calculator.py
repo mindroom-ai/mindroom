@@ -16,7 +16,7 @@ class CalculatorTools(AgnoCalculatorTools):
     """Agno calculator with argument bounds, because it runs in the process shared by every agent."""
 
     # AGNO_COMPAT: CalculatorTools.factorial accepts arguments whose result cannot be returned.
-    # Reason: Agno 3.0.9 runs math.factorial(n) for any n, which holds the GIL until it finishes, and json.dumps
+    # Reason: Agno 3.2.1 runs math.factorial(n) for any n, which holds the GIL until it finishes, and json.dumps
     # then refuses results above 4300 digits, so one chat message can stall the primary shared by every agent.
     # Upstream issue: Tracking gap; no matching issue has been verified.
     # Upstream PR: No matching fix has been verified.
@@ -37,7 +37,7 @@ class CalculatorTools(AgnoCalculatorTools):
         return super().factorial(n)
 
     # AGNO_COMPAT: CalculatorTools.is_prime trial-divides without a bound.
-    # Reason: Agno 3.0.9 trial-divides up to sqrt(n) for any n, so one large prime checks for hours in the
+    # Reason: Agno 3.2.1 trial-divides up to sqrt(n) for any n, so one large prime checks for hours in the
     # primary shared by every agent.
     # Upstream issue: Tracking gap; no matching issue has been verified.
     # Upstream PR: No matching fix has been verified.

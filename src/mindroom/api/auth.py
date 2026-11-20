@@ -11,6 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.error import HTTPError
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import jwt
@@ -29,6 +30,7 @@ from mindroom.api.auth_user import (
 )
 from mindroom.api.connections_session_cookie import connections_session_cookie, read_connections_session
 from mindroom.api.open_access import open_access_rejection
+from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
     try_parse_historical_matrix_user_id,
@@ -54,6 +56,7 @@ if TYPE_CHECKING:
     from mindroom.api.connections_session_cookie import ConnectionsSession
     from mindroom.constants import RuntimePaths
 
+logger = get_logger(__name__)
 router = APIRouter(tags=["auth"])
 
 
@@ -257,6 +260,8 @@ def _build_trusted_upstream_jwt_client(settings: _TrustedUpstreamAuthSettings) -
         cache_jwk_set=True,
         lifespan=_TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS,
         timeout=_TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS,
+        # PyJWT 2.14 waits 30 seconds after a fetch before refetching for an unknown `kid`; rotated keys work at once.
+        cooldown_duration=0,
     )
 
 
@@ -366,6 +371,7 @@ async def _verified_trusted_upstream_jwt_claims(
     if not token:
         raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
     if len(token.encode("utf-8")) > _JWT_MAX_BYTES:
+        logger.warning("Trusted upstream JWT rejected", detail=invalid_detail, error="too_large")
         raise HTTPException(status_code=401, detail=invalid_detail)
 
     try:
@@ -385,6 +391,22 @@ async def _verified_trusted_upstream_jwt_claims(
             options={"require": list(required_claims)},
         )
     except PyJWTError as exc:
+        if isinstance(exc, jwt.PyJWKClientConnectionError):
+            # PyJWT refuses JWKS redirects, so a URL that redirects never yields keys.
+            redirected = isinstance(exc.__cause__, HTTPError) and 300 <= exc.__cause__.code < 400
+            # Name the setting, not its value: the URL may carry a credential in its query string.
+            logger.warning(
+                "Trusted upstream JWKS fetch failed",
+                setting="MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
+                reason="redirect refused; configure the direct JWKS URL" if redirected else "unreachable",
+            )
+        # PyJWT messages can quote unverified header text such as `kid`, so log only the class and a missing claim.
+        logger.warning(
+            "Trusted upstream JWT rejected",
+            detail=invalid_detail,
+            error=type(exc).__name__,
+            claim=exc.claim if isinstance(exc, jwt.MissingRequiredClaimError) else None,
+        )
         raise HTTPException(status_code=401, detail=invalid_detail) from exc
     return claims
 
@@ -1025,17 +1047,21 @@ async def _require_service_jwt(
         audience=audience,
         issuer=settings.issuer,
         algorithms=("RS256",),
-        required_claims=("exp", "iat", "iss", "aud", "type", "common_name", "sub"),
+        required_claims=("exp", "iat", "iss", "aud", "type", "common_name"),
         invalid_detail=invalid_detail,
     )
 
-    if (
-        claims.get("type") != "app"
-        or claims.get("sub") != ""
-        or not isinstance(claims.get("common_name"), str)
-        or claims["common_name"] != client_id
-    ):
-        raise HTTPException(status_code=401, detail=invalid_detail)
+    # Cloudflare sends `sub: ""` for service tokens but has also sent none at all; a person's `sub` is never empty.
+    if claims.get("type") != "app":
+        failed_check = "type"
+    elif claims.get("sub", "") != "":
+        failed_check = "sub"
+    elif not isinstance(claims.get("common_name"), str) or claims["common_name"] != client_id:
+        failed_check = "common_name"
+    else:
+        return
+    logger.warning("Service JWT rejected", detail=invalid_detail, failed_check=failed_check)
+    raise HTTPException(status_code=401, detail=invalid_detail)
 
 
 async def _require_signed_matrix_user(request: Request, *, label: str) -> SignedMatrixUser:

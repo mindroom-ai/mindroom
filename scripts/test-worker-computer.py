@@ -28,7 +28,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import async_playwright
 from testing.worker_computer_matrix import create_matrix_fixture
-from testing.worker_computer_native import connect_viewer, docker_environment, native_json, native_tabs, shell_stdout
+from testing.worker_computer_native import connect_viewer, docker_environment, native_json, native_tabs
 
 from mindroom.api import computers, config_lifecycle
 from mindroom.api.app_state import ensure_app_state
@@ -445,7 +445,7 @@ class Fixture:
             kwargs["args"] = ["bash", "-c", 'nohup "$@" > /dev/null 2>&1 &', "bash", *args]
         body = await self.execute("shell", "run_shell_command", kwargs, user=user)
         assert body["ok"], body
-        return shell_stdout(body["result"])
+        return body["result"]
 
     async def prepare_page(self) -> dict[str, Any]:
         """Serve deterministic page/download content inside the worker loopback network."""

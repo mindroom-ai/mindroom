@@ -561,6 +561,17 @@ async def test_a_turn_a_restart_cut_short_says_so_on_its_frames() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_titled_run_s_snapshots_carry_its_title() -> None:
+    """A run its call named carries the title next to its task; an untitled one carries none, so clients show the task."""
+    room = FrameRoom()
+    room.publish(make_snapshot(title="Measure cold start"))
+    room.publish(make_snapshot(delegation_id="d2"))
+    await _until(lambda: len(room.sent) == 2)
+
+    assert [frame["meta"].get("title") for frame in room.sent] == ["Measure cold start", None]
+
+
+@pytest.mark.asyncio
 async def test_retry_resends_a_snapshot() -> None:
     """A frame the homeserver failed to take is followed by a snapshot, so clients never apply a delta to a gap."""
     room = FrameRoom(nio.RoomSendEphemeralResponse(FRAME_ROOM_ID), _refusal("M_UNKNOWN_TOKEN"))

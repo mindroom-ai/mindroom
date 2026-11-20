@@ -1037,7 +1037,7 @@
       },
       {
         "name": "inline_image",
-        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.",
+        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.\nIn an encrypted room, or when this refuses, send the file with ``matrix_message(attachments=[...])`` instead.\nNever link an image to a placeholder or made-up address.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -6014,6 +6014,10 @@
               ],
               "description": "Configured model name from models; omitted or null uses normal model selection."
             },
+            "title": {
+              "type": "string",
+              "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -6028,7 +6032,8 @@
             }
           },
           "required": [
-            "task"
+            "task",
+            "title"
           ],
           "additionalProperties": false
         },
@@ -8941,13 +8946,13 @@
       },
       {
         "name": "request_secret",
-        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nGive `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to\nhint at the key's form.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.",
+        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nGive `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to\nhint at the key's form.\nFor a service that does not exist yet, propose it with `new_service` instead of editing config.yaml; saving\nadds it with the key.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.\nAfter `saved`, test the key with one request; if it is refused, tell the user why (such as a token of the\nwrong owner or read-only access) and ask again.",
         "parameters": {
           "type": "object",
           "properties": {
             "service": {
               "type": "string",
-              "description": "The service's `name` from `list_egress_credentials`."
+              "description": "The service's `name` from `list_egress_credentials`, or the name of the service `new_service`\nproposes (lowercase letters, digits, `-` and `_`)."
             },
             "reason": {
               "type": "string",
@@ -8974,6 +8979,21 @@
                 }
               ],
               "description": "A hint the empty field shows, such as the key's form (`sk-…`). Never a real value."
+            },
+            "new_service": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A new service of the user's own that takes this key, with only these fields of a service in\nconfig.yaml: `display_name`, `description`, `preset`, `rules` (each with `host`, optional `path_prefix`\nand `port`, and `auth`: `type` `bearer`, `basic` with `username`, `header` or `query` with `name`, and\noptional `template` containing `{secret}`), `placeholder_env`, `restrict_to_rules`. Key only, never\nan account login."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11308,7 +11328,7 @@
             },
             "limit": {
               "type": "integer",
-              "description": "(int) The maximum number of pull requests to return. Defaults to 20."
+              "description": "(int) The maximum number of pull requests to return. Defaults to 50."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13286,7 +13306,8 @@
               "description": "Maximum number of threads to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string"
+              "type": "string",
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13347,7 +13368,8 @@
               "description": "Maximum number of drafts to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string"
+              "type": "string",
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13686,7 +13708,7 @@
       },
       {
         "name": "find_available_slots",
-        "description": "Find available time slots within a date range based on your calendar.\nChecks existing events against working hours to find free windows.",
+        "description": "Find available time slots within a date range based on your calendar.\nChecks existing events against working hours to find free windows.\nDates, working hours and the returned slots are in your Google Calendar timezone, or UTC if that\ntimezone cannot be loaded; the result's \"timezone\" field names the one used.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -25246,7 +25268,7 @@
     "functions": [
       {
         "name": "run_shell_command",
-        "description": "Runs a shell command and returns the output or error.\nThe last ``tail`` lines of stdout are returned; on non-zero exit, useful\nstdout is preserved together with stderr. A command still running after\n``timeout`` seconds is stopped with the processes it started, and its\noutput so far is returned. Without ``timeout``, a call that runs as part\nof a background job has no time limit; that includes every call that\naccepts ``background_after`` and, with background jobs on, a subagent's\ncalls for its delegated task, whether or not its caller waits for it. A\ncall that accepts ``background_after`` and leaves it unset returns a job\nhandle after 120 seconds while its command runs on. Any other command\nstops after 120 seconds. Set ``timeout`` on a command that might not\nend on its own, such as a watcher or a test run that can hang. Start a\nserver or anything else meant to keep running with\n``nohup cmd > out.log 2>&1 &``, which keeps running after the command\nends; in the foreground it would keep the call running until its job is\ncancelled.\n\nWith ``mindroom_output_path``, capture the complete supported output\nwithin the redirect byte limit instead of applying ``tail``; a stopped\ncommand saves no file.\n\nCommand strings use non-login Bash with the prepared execution environment.\nUse explicit ``[\"bash\", \"-lc\", command]`` only when login startup is needed.\n\nThe command runs in your agent workspace as its working directory (echoed as a `[cwd: ...]` first line in the result). Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` to the workspace, while local execution maps it to the host home.\n\nWorking method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead of printing everything, but compute results over the full input. Match filters against the extracted field value, not the whole line, and check them on a few sample records. When combining the lines or words of several text files, do not concatenate them raw: a file may lack its final newline, which merges its last word or record with the next file's first, so process each file separately or add a separator, and test with files that lack a trailing newline (joining split chunks of one file byte for byte is different). When only one value must change, replace just that span and keep every other byte, including comments and spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run available tests, and recheck suspicious results such as a zero count.",
+        "description": "Runs a shell command and returns the output or error.\nThe last ``tail`` lines of stdout, then of stderr, are returned; on\nnon-zero exit, all of stderr is kept. A command still running after\n``timeout`` seconds is stopped with the processes it started, and its\noutput so far is returned. Without ``timeout``, a call that runs as part\nof a background job has no time limit; that includes every call that\naccepts ``background_after`` and, with background jobs on, a subagent's\ncalls for its delegated task, whether or not its caller waits for it. A\ncall that accepts ``background_after`` and leaves it unset returns a job\nhandle after 120 seconds while its command runs on. Any other command\nstops after 120 seconds. Set ``timeout`` on a command that might not\nend on its own, such as a watcher or a test run that can hang. Start a\nserver or anything else meant to keep running with\n``nohup cmd > out.log 2>&1 &``, which keeps running after the command\nends; in the foreground it would keep the call running until its job is\ncancelled. Wait for something inside one command, such as\n``until <check>; do sleep 10; done`` with a ``timeout``, not with\nrepeated ``sleep`` calls: every call is a model turn.\n\nWith ``mindroom_output_path``, capture the complete supported output\nwithin the redirect byte limit instead of applying ``tail``; a stopped\ncommand saves no file.\n\nCommand strings use non-login Bash with the prepared execution environment.\nUse explicit ``[\"bash\", \"-lc\", command]`` only when login startup is needed.\n\nThe command runs in your agent workspace as its working directory. Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` to the workspace, while local execution maps it to the host home.\n\nWorking method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead of printing everything, but compute results over the full input. Match filters against the extracted field value, not the whole line, and check them on a few sample records. When combining the lines or words of several text files, do not concatenate them raw: a file may lack its final newline, which merges its last word or record with the next file's first, so process each file separately or add a separator, and test with files that lack a trailing newline (joining split chunks of one file byte for byte is different). When only one value must change, replace just that span and keep every other byte, including comments and spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run available tests, and recheck suspicious results such as a zero count.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -27197,7 +27219,7 @@
             },
             "limit": {
               "type": "integer",
-              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results."
+              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results.\nNon-positive values return no rows."
             },
             "mindroom_output_path": {
               "anyOf": [

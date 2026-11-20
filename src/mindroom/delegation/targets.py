@@ -19,7 +19,7 @@ from mindroom.delegation.personas import (
 )
 from mindroom.delegation.recovery import load_settled_subagent
 from mindroom.delegation.sessions import SubagentSessionError
-from mindroom.delegation.state import CONTINUE_SUBAGENT
+from mindroom.delegation.state import CONTINUE_SUBAGENT, display_title
 from mindroom.delegation.workers import dedicated_worker_refusal
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.plugins import config_plugins
@@ -45,6 +45,8 @@ class DelegationTarget:
     agent_name: str
     task: str
     previous_child: DelegationChild | None = None
+    # What people watching the run see it as (``display_title``); empty when the call named none.
+    title: str = ""
     agent_mode: AgentMode = "standard"
     persona: SubagentPersona | None = None
     model: str | None = None
@@ -161,11 +163,11 @@ def resolve_fresh_target(
     ``cap`` is the persona of the authored subagent making the call, if any.
     """
     child_name, task, minimal = args.get("agent_name"), args.get("task"), args.get("minimal")
-    model = cast("str | None", args.get("model"))
+    model, title = cast("str | None", args.get("model")), args.get("title")
     if child_name is None:
         child_name = caller_name
-    if minimal is not None and not isinstance(minimal, bool):
-        return "Cannot delegate: minimal must be a boolean or null."
+    if refusal := _option_refusal(minimal, title):
+        return refusal
     if not isinstance(child_name, str) or not isinstance(task, str):
         return "Cannot delegate: task must be a string and agent_name must be a string or null."
     if retained is not None:
@@ -207,12 +209,23 @@ def resolve_fresh_target(
     return DelegationTarget(
         child_name,
         task,
+        # Stored, copied to follow-ups, and shown as the same short value.
+        title=display_title(title),
         agent_mode=request.agent_mode,
         persona=request.persona,
         model=request.model,
         dedicated_worker=dedicated_worker,
         resource_profile=resource_profile,
     )
+
+
+def _option_refusal(minimal: object, title: object) -> str | None:
+    """Say why a call's ``minimal`` or ``title`` is unusable; a call stored before the title, or a direct one, has none."""
+    if minimal is not None and not isinstance(minimal, bool):
+        return "Cannot delegate: minimal must be a boolean or null."
+    if title is not None and (not isinstance(title, str) or not title.strip()):
+        return "Cannot delegate: title must name the task in a few words."
+    return None
 
 
 def _dedicated_worker_request(

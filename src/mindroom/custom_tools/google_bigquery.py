@@ -182,6 +182,9 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             JSON with the table description and each column's name, type, mode and description.
 
         """
+        # google-cloud-bigquery 3.47 reads `project.dataset.a.b` as dataset `dataset.a`, so a dotted name is refused here.
+        if "." in table_id:
+            return json.dumps({"error": "Invalid table_id"})
         client = self._client()
         try:
             table = client.get_table(f"{self.project}.{self.dataset}.{table_id}")

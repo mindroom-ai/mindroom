@@ -193,12 +193,13 @@ MINDROOM_USAGE_SERVICE_CLIENT_ID=usage-export-client.example.org
 
 The service sends its assertion in the trusted-upstream JWT header on every request, including polls.
 The assertion must be signed with `RS256` by the trusted-upstream issuer and JWKS, and contain valid `exp`, `iat`, `iss`, and `aud` claims, where `aud` is `MINDROOM_USAGE_SERVICE_JWT_AUDIENCE` rather than the browser audience.
-It must also contain `type=app`, `common_name` exactly equal to `MINDROOM_USAGE_SERVICE_CLIENT_ID`, and an empty `sub`.
+It must also contain `type=app` and `common_name` exactly equal to `MINDROOM_USAGE_SERVICE_CLIENT_ID`, and its `sub` must be empty or absent.
 
 | Status | Meaning |
 | --- | --- |
 | `503` `Usage export service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a service setting is missing |
-| `401` `Invalid usage service JWT` | Missing or invalid assertion |
+| `401` `Invalid usage service JWT` | Invalid assertion; a `Service JWT rejected` or `Trusted upstream JWT rejected` warning in the MindRoom log names the failed check |
+| `401` `Missing trusted upstream JWT header: <header>` | The request carried no assertion |
 
 A service assertion authorizes only `/api/usage/export`, not `/api/usage`, personal usage, configuration, or other administrator routes.
 

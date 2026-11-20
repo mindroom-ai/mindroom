@@ -63,11 +63,6 @@ def test_native_result_parser_accepts_void_page_actions() -> None:
     assert _helper().native_json("### Result\nundefined\n### Ran Playwright code\n...") is None
 
 
-def test_shell_readback_removes_only_known_cwd_header() -> None:
-    """Native absolute upload paths use command stdout, not the display header."""
-    assert _helper().shell_stdout("[cwd: /workspace]\n/workspace\n") == "/workspace\n"
-
-
 def test_native_tab_indices_remain_current() -> None:
     """The native server exposes mutable indices, not stable CDP targets."""
     module = _helper()

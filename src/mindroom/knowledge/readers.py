@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agno.knowledge.chunking.document import DocumentChunking
 from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.document.base import Document
 from agno.knowledge.reader import ReaderFactory
@@ -12,6 +13,7 @@ from agno.knowledge.reader.text_reader import TextReader
 
 __all__ = [
     "Document",
+    "DocumentChunking",
     "FixedSizeChunking",
     "JSONReader",
     "MarkdownReader",

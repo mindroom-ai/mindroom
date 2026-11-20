@@ -185,7 +185,7 @@ class GoogleDriveTools(
     _oauth_provider = google_oauth_provider("google_drive")
     _oauth_tool_name = "google_drive"
     # AGNO_COMPAT: Drive `download_file` exports Google Vids, which the Drive API never exports.
-    # Reason: Agno 3.0.9 maps `application/vnd.google-apps.vid` to a `video/mp4` export, but `files.export` refuses
+    # Reason: Agno 3.2.1 maps `application/vnd.google-apps.vid` to a `video/mp4` export, but `files.export` refuses
     # every Vids file with `fileNotExportable`, so a Vids download, and the download advice a refused read gives,
     # end in an API error. Without the mapping, MindRoom refuses Vids as an unsupported Workspace type.
     # Upstream issue: Tracking gap; no matching issue identified.
@@ -542,7 +542,7 @@ class GoogleDriveTools(
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
     # AGNO_COMPAT: Drive `read_file` refuses text by MIME type and names a download function that may not exist.
-    # Reason: Agno 3.0.9 refuses every `application/octet-stream` file, including text MindRoom's own uploads
+    # Reason: Agno 3.2.1 refuses every `application/octet-stream` file, including text MindRoom's own uploads
     # store that way, and ends errors with "Use download_file instead." although MindRoom exposes
     # `google_drive_download_file` or disables it, and although its `download_file` refuses folders and other
     # Workspace types it cannot export. This override decides text by content instead, and refuses a binary type
@@ -550,7 +550,7 @@ class GoogleDriveTools(
     # MIME-based branch would extract without tables, grouped shapes, or line breaks, or reject with an install
     # hint when the extraction packages are missing.
     # Upstream issue: Tracking gap; no matching issue identified.
-    # Upstream PR: https://github.com/agno-agi/agno/pull/10473 (in 3.0.11; MindRoom pins 3.0.9) covers only grouped
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10473 (in 3.0.11, so in the pinned 3.2.1) covers only grouped
     # shapes and line breaks in `.pptx` text; https://github.com/agno-agi/agno/pull/10501 (open) covers only `.docx` tables.
     # Remove when: Agno's `read_file` decides text by content rather than MIME type, lets a toolkit word the advice
     # after a refused read, and extracts complete Office text with dependencies MindRoom ships or refuses it;

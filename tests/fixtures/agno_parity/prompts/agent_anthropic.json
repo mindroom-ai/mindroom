@@ -720,6 +720,10 @@
                 ],
                 "description": "Configured model name from models; omitted or null uses normal model selection."
               },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
               "mindroom_output_path": {
                 "anyOf": [
                   {
@@ -734,7 +738,8 @@
               }
             },
             "required": [
-              "task"
+              "task",
+              "title"
             ],
             "additionalProperties": false
           }
@@ -1619,6 +1624,10 @@
                 ],
                 "description": "Configured model name from models; omitted or null uses normal model selection."
               },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
               "mindroom_output_path": {
                 "anyOf": [
                   {
@@ -1633,7 +1642,8 @@
               }
             },
             "required": [
-              "task"
+              "task",
+              "title"
             ],
             "additionalProperties": false
           }

@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -70,6 +70,8 @@ if TYPE_CHECKING:
 
 THREAD_ID = "$thread-root:localhost"
 ROOM_ID = "!room:localhost"
+# The router's own client, whose account and device a typed command's result names.
+_ROUTER_CLIENT = MagicMock(spec=nio.AsyncClient, user_id="@mindroom_router:localhost", device_id="DEVICE")
 
 
 def _stored_model(runtime_paths: RuntimePaths, thread_id: str | None) -> str | None:
@@ -539,7 +541,7 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
 
-    response = handle_model_command(
+    response, _ = handle_model_command(
         "large",
         config=config,
         runtime_paths=runtime_paths,
@@ -547,6 +549,8 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
         requester_user_id="@user:localhost",
+        client=_ROUTER_CLIENT,
+        command_event_id="$command",
     )
     assert "✅" in response
     assert "`large`" in response
@@ -559,7 +563,7 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
         model_name="large",
     )
 
-    response = handle_model_command(
+    response, _ = handle_model_command(
         "reset",
         config=config,
         runtime_paths=runtime_paths,
@@ -567,6 +571,8 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
         requester_user_id="@user:localhost",
+        client=_ROUTER_CLIENT,
+        command_event_id="$command",
     )
     assert "✅" in response
     assert "room-level model selection" in response
@@ -581,7 +587,7 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
         == "large"
     )
 
-    response = handle_model_command(
+    response, _ = handle_model_command(
         "reset",
         config=config,
         runtime_paths=runtime_paths,
@@ -589,6 +595,8 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
         requester_user_id="@user:localhost",
+        client=_ROUTER_CLIENT,
+        command_event_id="$command",
     )
     assert "no model override" in response
 
@@ -598,7 +606,7 @@ def test_model_command_show(tmp_path: Path) -> None:
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
 
-    response = handle_model_command(
+    response, _ = handle_model_command(
         "",
         config=config,
         runtime_paths=runtime_paths,
@@ -606,6 +614,8 @@ def test_model_command_show(tmp_path: Path) -> None:
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
         requester_user_id="@user:localhost",
+        client=_ROUTER_CLIENT,
+        command_event_id="$command",
     )
     assert "No thread model override" in response
     assert "room-level model selection" in response
@@ -619,7 +629,7 @@ def test_model_command_show(tmp_path: Path) -> None:
         entity_names=("test_agent",),
         config=config,
     )
-    response = handle_model_command(
+    response, _ = handle_model_command(
         "",
         config=config,
         runtime_paths=runtime_paths,
@@ -627,6 +637,8 @@ def test_model_command_show(tmp_path: Path) -> None:
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
         requester_user_id="@user:localhost",
+        client=_ROUTER_CLIENT,
+        command_event_id="$command",
     )
     assert "- `large` (openai large-model) for `test_agent`" in response
 
@@ -658,7 +670,7 @@ def test_model_command_ignores_overrides_of_removed_entities(tmp_path: Path, wri
     )
 
     def model_command(args_text: str, command_config: Config = config) -> str:
-        return handle_model_command(
+        response, _ = handle_model_command(
             args_text,
             config=command_config,
             runtime_paths=runtime_paths,
@@ -666,7 +678,10 @@ def test_model_command_ignores_overrides_of_removed_entities(tmp_path: Path, wri
             room_id=ROOM_ID,
             thread_id=THREAD_ID,
             requester_user_id="@user:localhost",
+            client=_ROUTER_CLIENT,
+            command_event_id="$command",
         )
+        return response
 
     assert "`removed_agent`" not in model_command("")
     assert "✅" in model_command(write_args)
@@ -693,7 +708,7 @@ def test_model_command_list_alias_shows_models(tmp_path: Path) -> None:
     runtime_paths = runtime_paths_for(config)
 
     for thread_id in (THREAD_ID, None):
-        response = handle_model_command(
+        response, _ = handle_model_command(
             "list",
             config=config,
             runtime_paths=runtime_paths,
@@ -701,6 +716,8 @@ def test_model_command_list_alias_shows_models(tmp_path: Path) -> None:
             room_id=ROOM_ID,
             thread_id=thread_id,
             requester_user_id="@user:localhost",
+            client=_ROUTER_CLIENT,
+            command_event_id="$command",
         )
         assert "No thread model override" in response
         assert "`default`" in response
@@ -712,7 +729,7 @@ def test_model_command_rejects_unknown_model(tmp_path: Path) -> None:
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
 
-    response = handle_model_command(
+    response, _ = handle_model_command(
         "nonexistent",
         config=config,
         runtime_paths=runtime_paths,
@@ -720,6 +737,8 @@ def test_model_command_rejects_unknown_model(tmp_path: Path) -> None:
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
         requester_user_id="@user:localhost",
+        client=_ROUTER_CLIENT,
+        command_event_id="$command",
     )
     assert "Unknown model" in response
     assert _stored_model(runtime_paths, THREAD_ID) is None
@@ -730,7 +749,7 @@ def test_model_command_requires_thread_for_set(tmp_path: Path) -> None:
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
 
-    response = handle_model_command(
+    response, _ = handle_model_command(
         "large",
         config=config,
         runtime_paths=runtime_paths,
@@ -738,6 +757,8 @@ def test_model_command_requires_thread_for_set(tmp_path: Path) -> None:
         room_id=ROOM_ID,
         thread_id=None,
         requester_user_id="@user:localhost",
+        client=_ROUTER_CLIENT,
+        command_event_id="$command",
     )
     assert "only work inside a thread" in response
     assert _stored_model(runtime_paths, THREAD_ID) is None
@@ -748,7 +769,7 @@ def test_model_command_default_sets_model_instead_of_resetting(tmp_path: Path) -
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
 
-    response = handle_model_command(
+    response, _ = handle_model_command(
         "default",
         config=config,
         runtime_paths=runtime_paths,
@@ -756,6 +777,8 @@ def test_model_command_default_sets_model_instead_of_resetting(tmp_path: Path) -
         room_id=ROOM_ID,
         thread_id=THREAD_ID,
         requester_user_id="@user:localhost",
+        client=_ROUTER_CLIENT,
+        command_event_id="$command",
     )
     assert "✅" in response
     assert "`default`" in response

@@ -54,7 +54,7 @@ class WorkspaceFileGenerationTools(FileGenerationTools):
         self.output_directory = tool_output_workspace_root / self._relative_output_directory
 
     # AGNO_COMPAT: FileGenerationTools saves model-named files by path into any directory.
-    # Reason: Agno 3.0.9 writes into output_directory, or the process working directory when
+    # Reason: Agno 3.2.1 writes into output_directory, or the process working directory when
     # only save_files is set, and follows links, so a model-chosen name such as config.yaml
     # replaced MindRoom's own files and a link planted in a shared workspace redirected the write.
     # Upstream issue: Tracking gap; no matching issue identified on October 1, 2026.

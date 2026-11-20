@@ -43,7 +43,7 @@ class SpotifyTools(AgnoSpotifyTools):
         self._config = runtime_config
 
     # AGNO_COMPAT: SpotifyTools sends one fixed access token and never renews it.
-    # Reason: Agno 3.0.9 SpotifyTools takes only an access token and sends it on every request, while Spotify access
+    # Reason: Agno 3.2.1 SpotifyTools takes only an access token and sends it on every request, while Spotify access
     # tokens expire after an hour, so every call after that returns an expired-token error.
     # Upstream issue: Tracking gap; no matching issue has been verified.
     # Upstream PR: No matching fix has been verified.

@@ -278,7 +278,7 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
         provider = ScriptedProvider()
         ScriptedAgents({"helper": provider, "code": ScriptedModel([answer("child done")] * 2)}).install(monkeypatch)
         for function, initial_arguments in (
-            ("run_subagent", {"agent_name": "code", "task": "work"}),
+            ("run_subagent", {"agent_name": "code", "task": "work", "title": "Do the work"}),
             ("continue_subagent", None),
         ):
             arguments = initial_arguments
