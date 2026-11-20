@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 import yaml
-from typer.testing import CliRunner, Result
+from click.testing import Result
+from typer.testing import CliRunner
 
 from mindroom.cli.main import app
 

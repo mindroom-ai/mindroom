@@ -1050,11 +1050,14 @@ wheels = [
 
 [[package]]
 name = "click"
-version = "8.5.1"
+version = "8.4.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/45/37/edbf1b0707709013c0cf2e8317e03d97ed29bf4cac709fe328904ae92a38/click-8.5.1.tar.gz", hash = "sha256:9bbfada76703fd1d784b83eea012e3e8c6a001a876543ef104fa56aaaeb072b4", size = 399151, upload-time = "2026-11-06T17:37:01.021Z" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/d4/81420972a676e8ffea40450d8c8c92943e7218a78fe9b64359836cc9876b/click-8.4.2.tar.gz", hash = "sha256:9a6cea6e60b17ebe0a44c5cc636d94f09bd66142c1cd7d8b4cd731c4917a15f6", size = 338000, upload-time = "2026-06-24T17:45:15.148Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/31/7d/164b7ffc8624fe9efb4221bf9af485d5c1e41b9ae118045d2b6dc5457d8b/click-8.5.1-py3-none-any.whl", hash = "sha256:8bb5376d2006950386f8c6427613334a2acadc5f559cb80e638d00b4df957e37", size = 126163, upload-time = "2026-11-06T17:36:59.287Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/e2/79c688af8b210d232694e31e59da9f6ec747bae31c3f5946e4e9b98860d5/click-8.4.2-py3-none-any.whl", hash = "sha256:e6f9f66136c816745b9d65817da91d61d957fb16e02e4dcd0552553c5a197b76", size = 119243, upload-time = "2026-06-24T17:45:13.73Z" },
 ]
 
 [[package]]
@@ -3998,6 +4001,7 @@ dependencies = [
     { name = "anyio" },
     { name = "authlib" },
     { name = "certifi" },
+    { name = "click" },
     { name = "cron-descriptor" },
     { name = "croniter" },
     { name = "cryptography" },
@@ -4464,6 +4468,7 @@ requires-dist = [
     { name = "certifi", specifier = ">=2026.4.22" },
     { name = "chromadb", marker = "extra == 'chromadb'", specifier = ">=1.5.8" },
     { name = "claude-agent-sdk", marker = "extra == 'claude-agent'", specifier = ">=0.2.140" },
+    { name = "click", specifier = "<8.5" },
     { name = "composio-agno", marker = "extra == 'composio'" },
     { name = "crawl4ai", marker = "extra == 'crawl4ai'", specifier = ">=0.7.3" },
     { name = "cron-descriptor", specifier = ">=1.4.5" },
@@ -4628,7 +4633,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'sentence-transformers'", specifier = ">=5.19" },
     { name = "tweepy", marker = "extra == 'x'" },
     { name = "twilio", marker = "extra == 'twilio'" },
-    { name = "typer", specifier = ">=0.29" },
+    { name = "typer", specifier = ">=0.24,<0.26" },
     { name = "uvicorn", specifier = ">=0.35" },
     { name = "watchfiles", specifier = ">=1" },
     { name = "webexpythonsdk", marker = "extra == 'webex'" },
@@ -9094,18 +9099,17 @@ wheels = [
 
 [[package]]
 name = "typer"
-version = "0.29.2"
+version = "0.25.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "pydantic" },
+    { name = "click" },
     { name = "rich" },
     { name = "shellingham" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bf/21/37383ece7d0a4995fb8ea97729207c4292b3ff94085002f37b2387063cfb/typer-0.29.2.tar.gz", hash = "sha256:b1998dc5f2c3dedafa1517a9521fa944cc4dc1fadcea085d81a3b10ebcaeb075", size = 205728, upload-time = "2026-11-18T11:09:46.189Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/51/9aed62104cea109b820bbd6c14245af756112017d309da813ef107d42e7e/typer-0.25.1.tar.gz", hash = "sha256:9616eb8853a09ffeabab1698952f33c6f29ffdbceb4eaeecf571880e8d7664cc", size = 122276, upload-time = "2026-04-30T19:32:16.964Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/62/f3/864dcb0e165b52e9f75aa3c7e0aeeb9876f139c66eb14d87856bb173b0fa/typer-0.29.2-py3-none-any.whl", hash = "sha256:f30731f8ca758368b836b3714872e58e395cef8fcaff918c853b1969ed5274e7", size = 121041, upload-time = "2026-11-18T11:09:45.03Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/f9/2b3ff4e56e5fa7debfaf9eb135d0da96f3e9a1d5b27222223c7296336e5f/typer-0.25.1-py3-none-any.whl", hash = "sha256:75caa44ed46a03fb2dab8808753ffacdbfea88495e74c85a28c5eefcf5f39c89", size = 58409, upload-time = "2026-04-30T19:32:18.271Z" },
 ]
 
 [[package]]

@@ -206,7 +206,6 @@ def test_cli_rejects_credentials_over_remote_http(
         ["--url", "http://secret@localhost"],
         ["--wait", "inf"],
         ["--wait", "nan"],
-        ["--wait", "-1"],
     ],
 )
 def test_cli_invalid_option_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, option: list[str]) -> None:

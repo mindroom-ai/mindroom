@@ -23,6 +23,8 @@ dependencies = [
   # Authlib 1.8 moves its HTTPX client to httpx2, which our token transports and error handling do not use yet.
   "authlib>=1.6,<1.8",
   "certifi>=2026.4.22",
+  # Click 8.5 drops `typer.Argument(help=...)` text from Typer 0.25's `--help`.
+  "click<8.5",
   "cron-descriptor>=1.4.5",
   "croniter>=6",
   "cryptography>=47",
@@ -69,8 +71,8 @@ dependencies = [
   "starlette>=1.3.1",
   "structlog>=24.1",
   "tiktoken>=0.12",
-  # 0.26 vendors Click; 0.29 is the first whose `typer.prompt` takes the `Literal` choices the setup prompts pass.
-  "typer>=0.29",
+  # 0.26+ vendors Click and rerenders `--help` (`<bool>` beside every flag, `{arg}` usage), which changes our CLI docs.
+  "typer>=0.24,<0.26",
   "uvicorn>=0.35",
   "watchfiles>=1",
   "websockets>=14",
