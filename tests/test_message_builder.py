@@ -163,6 +163,11 @@ def test_loadable_image_is_kept(markdown: str) -> None:
         ("![a](https://[2001:db8::1]/x.png)", "<p>⚠️ Image not sent: a (no uploaded file)</p>\n"),
         ('<img src="https://a b/x" alt="a">', "⚠️ Image not sent: a (no uploaded file)"),
         ('<img src="mxc://server/a b" alt="a">', "⚠️ Image not sent: a (no uploaded file)"),
+        (
+            '<img src="https://example.org/Team Photo.png" alt="T">',
+            '<img src="https://example.org/Team Photo.png" alt="T">',
+        ),
+        ('<img src="https://a\tb/x" alt="a">', "⚠️ Image not sent: a (no uploaded file)"),
         ('<img src=" https://example.org/x.png " alt="ok">', '<img src="https://example.org/x.png" alt="ok">'),
         ("![chart](mxc://example.org/diagram.png)", "<p>⚠️ Image not sent: chart (no uploaded file)</p>\n"),
         ("![logo](https://%65xample.org/logo.png)", '<p><img src="https://%65xample.org/logo.png" alt="logo"></p>\n'),

@@ -329,8 +329,9 @@ def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
         web = parts.scheme.lower() in {"http", "https"} and bool(parts.hostname) and parts.port != -1  # port may raise
     except ValueError:
         web = False
+    authority = re.split(r"[/?#]", src.partition("://")[2])[0]  # raw, since urlsplit drops tabs and newlines
     mxc = src.startswith("mxc://") and valid_matrix_server_name(server) and re.fullmatch(r"[A-Za-z0-9_-]+", media_id)
-    if (web or mxc) and not any(char.isspace() for char in src):
+    if (web and not any(char.isspace() for char in authority)) or mxc:
         return None
     alt = next((value for name, value in attrs if name == "alt" and value), "image")
     return escape(f"⚠️ Image not sent: {alt} (no uploaded file)")
