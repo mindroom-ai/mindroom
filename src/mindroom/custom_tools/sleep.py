@@ -10,7 +10,7 @@ _MAX_SLEEP_SECONDS = 300
 
 
 # AGNO_COMPAT: SleepTools blocks a thread in time.sleep for any requested duration.
-# Reason: Agno 3.0.9 SleepTools.sleep is synchronous and unbounded, so each call holds a thread of the
+# Reason: Agno 3.2.1 SleepTools.sleep is synchronous and unbounded, so each call holds a thread of the
 # primary process's shared default executor for as long as the model asks, and parallel calls exhaust it.
 # Upstream issue: Tracking gap; no matching issue has been verified.
 # Upstream PR: No matching fix has been verified.

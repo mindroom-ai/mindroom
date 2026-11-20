@@ -105,7 +105,12 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
     tools = SchedulerTools()
     config = _general_config()
     orchestrator = MagicMock()
-    context = replace(_make_context(config), config_provider=lambda: config, orchestrator=orchestrator)
+    context = replace(
+        _make_context(config),
+        target=MessageTarget.resolve(room_id="!room:localhost", thread_id="$thread", reply_to_event_id="$answered"),
+        config_provider=lambda: config,
+        orchestrator=orchestrator,
+    )
 
     with (
         patch(
@@ -156,6 +161,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "history_limit": None,
         "silent": None,
         "model": None,
+        "source_event_id": "$answered",
     }
     assert second_call == {
         "room_id": context.room_id,
@@ -166,6 +172,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "history_limit": None,
         "silent": True,
         "model": None,
+        "source_event_id": "$answered",
     }
     assert third_call == {
         "room_id": context.room_id,
@@ -176,6 +183,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "history_limit": 0,
         "silent": None,
         "model": "cheap",
+        "source_event_id": "$answered",
     }
 
 

@@ -123,7 +123,7 @@ def lumalabs_tools() -> type[LumaLabTools]:
             if model is None:
                 model = "ray-2"
             # AGNO_COMPAT: Luma video creation omits the SDK's required model.
-            # Reason: Agno 3.0.9 omits model in both creation methods; lumaai 1.21.0 requires it.
+            # Reason: Agno 3.2.1 omits model in both creation methods; lumaai 1.21.0 requires it.
             # Upstream issue: Tracking gap; no matching issue has been verified for this omission.
             # Upstream PR: No matching fix has been verified.
             # Remove when: Agno forwards a configurable model to both creation paths;

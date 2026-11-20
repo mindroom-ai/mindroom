@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # AGNO_COMPAT: AgentQLTools does not pass its resolved key to SDK queries.
-# Reason: Agno 3.0.9 stores api_key but AgentQL 1.18.1 resolves auth from shared
+# Reason: Agno 3.2.1 stores api_key but AgentQL 1.18.1 resolves auth from shared
 # SDK, environment, or CLI-file state. Its Page has no per-call credential hook,
 # and the SDK also reads its host from the live process environment on every request.
 # Keep the private page dispatch and HTTP boundary local to one toolkit key;
@@ -249,7 +249,7 @@ class MindRoomAgentQLTools(AgnoAgentQLTools):
         return self._scrape(url, "{ text_content[] }", custom=False)
 
     # AGNO_COMPAT: AgentQLTools custom scraping discards extracted values.
-    # Reason: Agno 3.0.9 iterates a response dict and joins only its keys; nested
+    # Reason: Agno 3.2.1 iterates a response dict and joins only its keys; nested
     # values, lists, and even the requested page title disappear from the result.
     # Upstream issue: Tracking gap; no matching custom-result formatting issue identified.
     # Upstream PR: None identified for lossless custom query results.
@@ -273,7 +273,7 @@ class MindRoomAgentQLTools(AgnoAgentQLTools):
         return self._scrape(url, self.agentql_query, custom=True)
 
     # AGNO_COMPAT: AgentQLTools launches its browser without a destination policy.
-    # Reason: Agno 3.0.9 scrape_website and custom_scrape_website launch Chromium with no
+    # Reason: Agno 3.2.1 scrape_website and custom_scrape_website launch Chromium with no
     # proxy and navigate to the model-chosen URL, so file:// paths, redirects, and subresources
     # reached local files and loopback, private, and metadata targets from the MindRoom process.
     # Upstream issue: Tracking gap; no matching issue identified on October 1, 2026.

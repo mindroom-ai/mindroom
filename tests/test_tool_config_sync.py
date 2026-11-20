@@ -43,10 +43,8 @@ SKIP_CONFIG_FIELD_VALIDATION = {
     "openclaw_compat",
 }
 # Tools whose backing package may legitimately be absent, so a missing import is
-# not a contract failure. `apify` is here because `pyproject.toml` declares
-# `apify-client` for `platform_machine != 'aarch64'`, which means every arm64
-# host runs this suite without it.
-OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
+# not a contract failure.
+OPTIONAL_TOOL_IMPORTS = frozenset({"scrapegraph"})
 IGNORED_AGNO_PARAMS = {
     # Mappings, sessions, clients, and connections, which no text, number, boolean, or string-list setting can supply.
     "firecrawl": {"search_params"},
@@ -70,6 +68,8 @@ IGNORED_AGNO_PARAMS = {
     "zep": {"add_instructions"},
     # MindRoom sets it from `defaults.allow_shell_without_worker`, never from the tool's own settings.
     "shell": {"allow_without_worker"},
+    # Exa crawls the subpages, but Agno's result parser drops them, so the setting would only add crawl cost.
+    "exa": {"subpages"},
 }
 # Words tool-call parsing reads as None or a boolean; a string parameter keeps them, except that one with a default
 # reads the null words as left out.
