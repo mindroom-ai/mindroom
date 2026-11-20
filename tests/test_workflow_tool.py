@@ -22,6 +22,7 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.delegation import lifecycle
 from mindroom.delegation.state import SubagentPersona
+from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookRegistry, hook
 from mindroom.llm.runs import RunStatus
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.script_runs import manager as manager_module
@@ -40,6 +41,7 @@ from mindroom.workflow_runs.models import WorkflowRunState
 from tests.access_schema_support import with_responder_access
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import (
     job_actor,
     resume_job_turn,
@@ -53,6 +55,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 SCRIPT = "def main(args):\n    return 'counted'\n"
@@ -228,6 +231,52 @@ async def test_require_approval_rule_launches_only_after_the_user_approves(tmp_p
         await stack.until(lambda: [run.state for run in stack.store.list_runs()] == [WorkflowRunState.RUNNING])
         assert len(stack.scripts.launched) == 1
         await stack.close()
+
+
+def _with_hooks(stack: WorkflowStack, *hooks: object) -> ToolRuntimeContext:
+    registry = HookRegistry.from_plugins([_plugin("policy", list(hooks))])
+    return replace(stack.context, hooks=replace(stack.context.hooks, registry=registry))
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_hook_that_declines_the_start_leaves_no_intent_job_or_process(stack: WorkflowStack) -> None:
+    """A start that becomes a job passes the plugins' `tool:before_call` hooks as any call does; a decline starts nothing."""
+    seen: list[tuple[str, object]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def decline(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.arguments["source"]))
+        ctx.decline("workflows are paused")
+
+    refusal = await _refused(stack, "start_workflow", context=_with_hooks(stack, decline), source=SCRIPT)
+
+    assert "Reason: workflows are paused" in refusal
+    assert seen == [("start_workflow", SCRIPT)]
+    assert stack.store.list_runs() == []
+    assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0) == []
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_plugin_hooks_see_a_start_that_runs_once_before_it_and_once_with_its_report(stack: WorkflowStack) -> None:
+    """The hooks of a start that becomes a job run as for any call: before anything is reserved, and after the run ended."""
+    seen: list[object] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, stack.store.list_runs()))
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.result, ctx.blocked))
+
+    handle = json.loads(await stack.call("start_workflow", context=_with_hooks(stack, before, after), source=SCRIPT))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+    await stack.finish_attempt(result="the report")
+    await _ended_job(stack, handle["job_id"])
+
+    assert seen == [("start_workflow", []), ("start_workflow", "the report", False)]
 
 
 @pytest.mark.asyncio

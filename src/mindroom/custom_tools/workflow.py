@@ -21,6 +21,7 @@ from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 from mindroom.workflow_runs.engine import WorkflowLimits
@@ -207,6 +208,18 @@ class WorkflowTools(Toolkit):
             return None
         try:
             engine, context = _runtime()
+            # The plugins' hooks of a call, which the job's own task does not run for it: a decline reserves nothing.
+            hooks = partial(
+                dispatch_external_tool_hooks,
+                execution_identity=context.execution_identity,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+                tool_name=_START,
+                arguments=arguments,
+            )
+            if (declined := await hooks(before=True)) is not None:
+                await hooks(before=False, result=declined, blocked=True)
+                return declined
             run, created = await self._reserve(engine, context, job_id, arguments)
         except ValueError as exc:
             return str(exc)
@@ -215,7 +228,9 @@ class WorkflowTools(Toolkit):
         async def operation() -> BackgroundOutcome:
             await asyncio.to_thread(store.update_run, run_id, job_id=job_id)
             await engine.launch(run_id, context, limits)
-            return _workflow_job_outcome(await engine.wait(run_id))
+            outcome = _workflow_job_outcome(await engine.wait(run_id))
+            await hooks(before=False, result=outcome.result)
+            return outcome
 
         async def cancel(_job: BackgroundJob) -> BackgroundOutcome | None:
             if job_stopped_by_shutdown():
