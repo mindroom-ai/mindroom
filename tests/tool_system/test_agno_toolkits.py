@@ -214,6 +214,7 @@ _SET_FIELDS: dict[str, object] = {
     "has_side_effects": True,
     "owning_toolkit": "atlas",
     "source_toolkit": object(),
+    "bound_toolkit": object(),
 }
 
 

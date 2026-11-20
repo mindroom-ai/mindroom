@@ -239,6 +239,8 @@ async def _entrypoint_preamble(
         entrypoint.source_path,
         body,
         preamble,
+        frame=[config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{key}") for key in ("HEADER_TEMPLATE", "KEPT_COPY_NOTICE")],
+        lines=None if entrypoint.omitted_lines else entrypoint.lines,
         now=time.time(),
     )
 
@@ -281,8 +283,9 @@ async def build_memory_prompt_parts(
 ) -> MemoryPromptParts:
     """Split stable entrypoint context from turn-local searched memories.
 
-    A turn in ``conversation`` keeps the entrypoint that conversation last sent while its inlined copy only gains lines
-    and its prompt cache may be warm. ``counter`` counts tokens for the model the turn runs on.
+    A turn in ``conversation`` keeps the entrypoint that conversation last sent while its inlined copy only gains lines,
+    anywhere in a file within its preload caps, and its prompt cache may be warm. ``counter`` counts tokens for the
+    model the turn runs on.
     """
     logger.debug("Building enhanced prompt", agent=agent_name)
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:

@@ -10,6 +10,9 @@ discovers once.
 from __future__ import annotations
 
 import asyncio
+import functools
+import os
+import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -52,7 +55,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.request_context import with_request_headers
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, claude_rejects_sampling_controls
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.anthropic.native_compaction import (
     COMPACTION_BETA,
@@ -142,7 +145,16 @@ _VERTEX_ENDPOINTS = {
     "us": "https://aiplatform.us.rep.googleapis.com/v1",
     "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
 }
+# API version 2026-10-21, which every route of the SDK sends, rejects these on every model, even at their defaults.
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
+# Bedrock serves 2026-10-21 for Claude 4.7 and later only
+# (https://platform.claude.com/docs/en/api/migration-2026-10-21#upgrade), so an older model there keeps 2023-06-01,
+# which takes sampling controls. A model id's first one or two short numbers after ``claude-`` are its version.
+_BEDROCK_LEGACY_API_VERSION = "2023-06-01"
+_FIRST_API_2026_BEDROCK_VERSION = (4, 7)
+_CLAUDE_VERSION_NUMBERS = re.compile(r"(?<![0-9])[0-9]{1,2}(?![0-9])")
+# The models whose dropped sampling controls were already logged, once each.
+_SAMPLING_WARNED: set[tuple[str, str]] = set()
 # The SDK's ``messages.stream`` arguments that are request options or headers, not body fields. The SDK adds its own
 # ``stream`` flag to the body, and its Vertex AI and Bedrock clients rewrite the body for their platform.
 _SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout", "betas")
@@ -236,6 +248,11 @@ class ClaudeProvider:
     def native_history_route(self) -> NativeHistoryRoute:
         """Claude compacts history on the provider side where the route supports it or the model config authored it."""
         return self
+
+    @property
+    def keeps_legacy_api_version(self) -> bool:
+        """Return whether the model is a Claude older than 4.7 on Bedrock, which sends API version 2023-06-01."""
+        return _keeps_legacy_api_version(self.route, self.identity.id, self.settings)
 
     @property
     def model_params(self) -> dict[str, Any]:
@@ -368,11 +385,10 @@ class ClaudeProvider:
             params["output_config"] = dict(settings.output_config)
         if settings.stop_sequences:
             params["stop_sequences"] = list(settings.stop_sequences)
-        temperature = settings.temperature
-        if overrides.temperature is not None and not self.capabilities.provider_default_sampling:
-            temperature = overrides.temperature
-        sampling = {"temperature": temperature, "top_p": settings.top_p, "top_k": settings.top_k}
-        params.update({name: value for name, value in sampling.items() if value is not None})
+        if self.keeps_legacy_api_version:
+            temperature = settings.temperature if overrides.temperature is None else overrides.temperature
+            sampling = {"temperature": temperature, "top_p": settings.top_p, "top_k": settings.top_k}
+            params.update({name: value for name, value in sampling.items() if value is not None})
         if settings.context_management is not None:
             params["context_management"] = dict(settings.context_management)
         replay = request.native_compaction
@@ -380,19 +396,6 @@ class ClaudeProvider:
             params["context_management"] = compaction_context_management(replay.threshold)
         # The raw request overrides merge last, as the SDK merges a raw body.
         params.update(_raw_request_params(settings, omit_thinking_setting=overrides.omit_thinking_setting))
-        return params
-
-    def _with_sampling_in_extra_body(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Move sampling controls into ``extra_body`` and drop them for the generations that reject them."""
-        moved = {name: params.pop(name) for name in _SAMPLING_CONTROL_NAMES if name in params}
-        extra_body: dict[str, Any] = {**moved, **(params.get("extra_body") or {})}
-        if claude_rejects_sampling_controls(self.identity.id):
-            for name in _SAMPLING_CONTROL_NAMES:
-                extra_body.pop(name, None)
-        if extra_body:
-            params["extra_body"] = extra_body
-        else:
-            params.pop("extra_body", None)
         return params
 
     def _with_thinking_binding(self, params: dict[str, Any], request: ModelRequest) -> dict[str, Any]:
@@ -436,7 +439,8 @@ class ClaudeProvider:
 
         Only the direct API gets the structured-outputs beta header; Bedrock sends strict tools without it.
         """
-        params = self._with_thinking_binding(self._with_sampling_in_extra_body(self._authored_params(request)), request)
+        params = _sampling_in_extra_body(self._authored_params(request), keep=self.keeps_legacy_api_version)
+        params = self._with_thinking_binding(params, request)
         extra_body = params.get("extra_body") or {}
         compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
         extra_headers, header_betas = _split_beta_header(params.pop("extra_headers", None))
@@ -533,7 +537,8 @@ class ClaudeProvider:
         return _RequestBody(
             kwargs=body,
             messages=projected,
-            # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
+            # A strict tool uses the SDK's beta method, whose params take ``strict``; on the wire, Bedrock sends no beta
+            # marker for it.
             beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
             checkpoint_prefix=replays_checkpoint,
             flags=(route, manual_thinking, trailing_user, earlier_thinking),
@@ -562,17 +567,24 @@ class ClaudeProvider:
         if settings.timeout is not None:
             kwargs["timeout"] = settings.timeout
         kwargs.update(settings.client_params or {})
-        if (default_headers := self._authored_default_headers()) is not None:
-            kwargs["default_headers"] = dict(default_headers)
+        # The winning map replaces the one in ``client_params``, an explicit empty one included.
+        default_headers = dict(self._authored_default_headers() or {})
+        if self.keeps_legacy_api_version:
+            default_headers = {"anthropic-version": _BEDROCK_LEGACY_API_VERSION, **default_headers}
+        kwargs["default_headers"] = default_headers
         kwargs["http_client"] = self.http_client
         kwargs["max_retries"] = 0
         if self.route == "anthropic":
-            return AsyncAnthropic(**kwargs)
+            return _with_key_header(kwargs)
         if self.route == "vertexai_claude":
-            return self._vertex_client(kwargs)
-        from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
+            client = self._vertex_client(kwargs)
+        else:
+            from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
 
-        return AsyncAnthropicBedrockMantle(**kwargs)
+            client = AsyncAnthropicBedrockMantle(**kwargs)
+        # SDK 2.7 adds ANTHROPIC_CUSTOM_HEADERS, meant for the direct API, to the platform clients, with no opt-out.
+        client._custom_headers = dict(default_headers)
+        return client
 
     def _vertex_client(self, kwargs: dict[str, Any]) -> AsyncAnthropicVertex:
         """Build a Vertex client; without configured credentials it shares the adapter's ambient ones.
@@ -744,6 +756,86 @@ def _sends_thinking_binding(params: dict[str, Any]) -> bool:
     return isinstance(thinking, dict) and thinking.get("block_binding") is not None
 
 
+def _with_key_header(kwargs: dict[str, Any]) -> AsyncAnthropic:
+    """Build a direct client that sends its key in ``X-Api-Key`` (``send_key_as_x_api_key``), else as SDK 1 would.
+
+    The SDK takes one credential. A resolved key alone becomes an empty one, which keeps the SDK off the process env; an
+    ``auth_token`` beside a ``credentials``, ``config``, or ``profile`` provider goes on the client after it, so the
+    token wins at the request, as in SDK 1. Without either, the SDK discovers a credential itself.
+    """
+    key = kwargs.pop("api_key", None)
+    token = kwargs.get("auth_token")
+    if provider := any(kwargs.get(name) is not None for name in ("credentials", "config", "profile")):
+        kwargs.pop("auth_token", None)
+    elif key is not None and token is None:
+        kwargs["api_key"] = ""
+    client = AsyncAnthropic(**kwargs)
+    if provider and token is not None:
+        _warn_token_shadows_provider()
+        client.auth_token = token
+    elif key is None and token is None and client.api_key and client.auth_token is None:
+        # SDK 2 keeps only ANTHROPIC_API_KEY when both env credentials are set; SDK 1 sent the token beside it.
+        client.auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN") or None
+    return send_key_as_x_api_key(client, client.api_key if key is None else key)
+
+
+@functools.cache
+def _warn_token_shadows_provider() -> None:
+    """Warn once, as SDK 1 did, that an ``auth_token`` disables the client's credentials provider."""
+    logger.warning("claude_auth_token_shadows_credentials_provider")
+
+
+def send_key_as_x_api_key[ClientT: anthropic.Anthropic | AsyncAnthropic](client: ClientT, key: str | None) -> ClientT:
+    """Make a direct client send ``key`` in ``X-Api-Key``, as SDK 1 did, where SDK 2 sends its ``api_key`` as a bearer.
+
+    An ``X-Api-Key`` from the config, ``ANTHROPIC_CUSTOM_HEADERS``, or the request then replaces the key, and an
+    ``auth_token`` still goes out as ``Authorization`` beside it. Never copy the result with ``with_options()``: the
+    copy would keep the key header and rediscover the SDK's own credential.
+    """
+    client.api_key = None
+    if key:
+        client._custom_headers = {"X-Api-Key": key, **client._custom_headers}
+    return client
+
+
+def predates_bedrock_api_2026(model_id: str) -> bool:
+    """Return whether a Claude model id names a model older than 4.7, which Bedrock serves on API version 2023-06-01.
+
+    The version is the first one or two short numbers after ``claude-``, as in ``anthropic.claude-haiku-4-5`` or
+    ``claude-3-5-sonnet-20240620``; a date, an ARN, or an id without a version counts as current.
+    """
+    _, found, name = model_id.casefold().partition("claude-")
+    numbers = [int(number) for number in _CLAUDE_VERSION_NUMBERS.findall(name.split(":")[0])[:2]] if found else []
+    return bool(numbers) and (numbers[0], numbers[1] if len(numbers) > 1 else 0) < _FIRST_API_2026_BEDROCK_VERSION
+
+
+def _sent_model_id(model_id: str, settings: ClaudeSettings) -> str:
+    """Return the model the body names: the raw ``model`` override, ``extra_body`` first as the SDK merges, else the id."""
+    request_params = settings.request_params or {}
+    return str((request_params.get("extra_body") or {}).get("model") or request_params.get("model") or model_id)
+
+
+def _keeps_legacy_api_version(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> bool:
+    """Return whether the request goes to a Claude older than 4.7 on Bedrock, which sends API version 2023-06-01."""
+    return route == "bedrock_claude" and predates_bedrock_api_2026(_sent_model_id(model_id, settings))
+
+
+def _sampling_in_extra_body(params: dict[str, Any], *, keep: bool) -> dict[str, Any]:
+    """Move sampling controls into ``extra_body``, which the SDK's methods have no argument for, or drop them all.
+
+    Only a model on API version 2023-06-01 keeps them (``keep``); 2026-10-21 rejects them (``_SAMPLING_CONTROL_NAMES``).
+    """
+    moved = {name: params.pop(name) for name in _SAMPLING_CONTROL_NAMES if name in params}
+    extra_body: dict[str, Any] = {**moved, **(params.get("extra_body") or {})}
+    if not keep:
+        extra_body = {key: value for key, value in extra_body.items() if key not in _SAMPLING_CONTROL_NAMES}
+    if extra_body:
+        params["extra_body"] = extra_body
+    else:
+        params.pop("extra_body", None)
+    return params
+
+
 def _raw_request_params(settings: ClaudeSettings, *, omit_thinking_setting: bool) -> dict[str, Any]:
     """Return a copy of the authored raw request overrides, without thinking when the request omits the setting."""
     request_params = {
@@ -810,9 +902,8 @@ def _claude_capabilities(
             settings=settings,
             endpoint=endpoint,
         ),
-        # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
-        # non-default sampling on every route.
-        provider_default_sampling=route == "vertexai_claude" or claude_rejects_sampling_controls(model_id),
+        # Only a model that keeps API version 2023-06-01 sends sampling controls (``_SAMPLING_CONTROL_NAMES``).
+        provider_default_sampling=not _keeps_legacy_api_version(route, model_id, settings),
     )
 
 
@@ -927,7 +1018,30 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     endpoint = _route_endpoint(route, settings)
     identity = model_identity(model_config, endpoint=endpoint)
     capabilities = _claude_capabilities(route, model_config.id, settings, endpoint)
+    if capabilities.provider_default_sampling:
+        _warn_dropped_sampling(route, model_config.id, settings)
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
 
 
-__all__ = ["ClaudeProvider", "build_provider", "vertex_project_and_region"]
+def _warn_dropped_sampling(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> None:
+    """Warn once per model whose config sets sampling controls that API version 2026-10-21 makes MindRoom drop."""
+    request_params = settings.request_params or {}
+    authored = {name: getattr(settings, name) for name in _SAMPLING_CONTROL_NAMES} | {
+        name: value
+        for source in (request_params, request_params.get("extra_body") or {})
+        for name, value in source.items()
+        if name in _SAMPLING_CONTROL_NAMES
+    }
+    names = sorted(name for name, value in authored.items() if value is not None)
+    if names and (route, model_id) not in _SAMPLING_WARNED:
+        _SAMPLING_WARNED.add((route, model_id))
+        logger.warning("claude_sampling_controls_dropped", model=model_id, route=route, names=names)
+
+
+__all__ = [
+    "ClaudeProvider",
+    "build_provider",
+    "predates_bedrock_api_2026",
+    "send_key_as_x_api_key",
+    "vertex_project_and_region",
+]

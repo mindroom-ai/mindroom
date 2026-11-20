@@ -2081,7 +2081,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
-        assert heartbeat_paths == [runtime_paths]
+        # Without the API the default broker is off, so the runtime carries that setting from then on.
+        assert heartbeat_paths == [
+            replace(runtime_paths, process_env={**runtime_paths.process_env, "MINDROOM_EGRESS_BROKER_PORT": "off"}),
+        ]
         assert heartbeat_cancelled.is_set()
 
     @pytest.mark.asyncio
@@ -4010,7 +4013,7 @@ class TestMultiAgentOrchestrator:
                 monkeypatch.setattr(
                     client_session,
                     "verifying_ssl_context",
-                    lambda _env: ssl.create_default_context(cafile=certificate_path),
+                    lambda _env, **_: ssl.create_default_context(cafile=certificate_path),
                 )
             runtime_paths = resolve_runtime_paths(
                 config_path=tmp_path / "config.yaml",

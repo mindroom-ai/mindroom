@@ -59,7 +59,7 @@ def _verifying_context() -> ssl.SSLContext:
     An explicit SSL_CERT_FILE or SSL_CERT_DIR is the operator's trust choice and is left to OpenSSL unchanged,
     as for Matrix connections; OpenSSL reads both from the process environment.
     """
-    context = verifying_ssl_context(os.environ)
+    context = verifying_ssl_context(os.environ, shared=False)
     context.set_alpn_protocols(["http/1.1"])
     return context
 

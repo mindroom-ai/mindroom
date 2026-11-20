@@ -67,6 +67,9 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [pull-request-plugin](https://github.com/mindroom-ai/pull-request-plugin) | Hooks and tools | Links GitHub pull requests to a thread in Matrix room state, by a tool and automatically when an agent creates one. |
 | [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
+| [error-notifier-plugin](https://github.com/mindroom-ai/error-notifier-plugin) | Hooks | Posts a short, redacted alert to one Matrix room when MindRoom logs an error, with a suggested fix when it knows one. |
+| [injection-guard-plugin](https://github.com/mindroom-ai/injection-guard-plugin) | Hooks | Checks tool results with outside text for prompt injection with a [judgment backend](configuration/threads.md#judgment-backends) before the model reads them. |
+| [deep-research-plugin](https://github.com/mindroom-ai/deep-research-plugin) | Tools | Bounded, multi-round web research on the agent's own model that returns cited reports. |
 
 MindRoom now has a built-in [`thread_snooze`](tools/matrix-and-attachments.md#thread_snooze) toolkit, so remove `thread-snooze-plugin` from `plugins` when you upgrade.
 Its `thread_snooze` tool name collides with the built-in toolkit, so MindRoom does not load the plugin, and the built-in toolkit replaces it.
@@ -2173,7 +2176,7 @@ agents:
   mind:
     display_name: Mind
     memory_backend: file   # weekly_digest requires file memory
-    tools: [file]          # the agent writes the digest
+    tools: [filesystem]    # the agent writes the digest
     automations:
       - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
 ```

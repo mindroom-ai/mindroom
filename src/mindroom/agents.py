@@ -83,7 +83,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
 )
-from mindroom.tools.file import with_view_file_hint
+from mindroom.tools.filesystem import with_view_file_hint
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
@@ -544,7 +544,7 @@ def _file_mode_knowledge_instruction_block(
     """Describe workspace-accessible file-only knowledge bases to the model."""
     lines = [
         "File-only knowledge bases are available in the workspace.",
-        "Use file or coding tools such as grep, list, and read instead of search_knowledge_base for these sources.",
+        "Use filesystem tools such as grep, ls, and read_file instead of search_knowledge_base for these sources.",
         "Available file-only sources:",
     ]
     source_lines: list[str] = []
@@ -583,7 +583,7 @@ def _offered_entries(
     is reserved for Matrix room recovery, because its server's catalog chooses that name and can change it without
     anyone editing the config, so a new remote tool never shadows a local function or another server's; every other
     name keeps its first function (``offered_toolkits``). A configured toolkit whose every function another took is
-    reported. A ``file`` read that cannot decode an image names ``view_file`` when the run offers it and it finds the file.
+    reported. A ``filesystem`` read that cannot decode an image names ``view_file`` when the run offers it and it finds the file.
     """
     viewer = next((entry.toolkit for entry in entries if isinstance(entry.toolkit, AttachmentTools)), None)
     offered = with_view_file_hint(
@@ -890,7 +890,7 @@ def _render_tool_execution_environment(
     file_access_description = {
         "workspace": "agent workspace and attachments only"
         if workdir is None
-        else "`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir; "
+        else "`filesystem`: the workdir and your saved tool outputs, read-only outside the workdir; "
         "`view_file`: the workdir; other path tools: agent workspace and attachments only",
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
@@ -898,7 +898,7 @@ def _render_tool_execution_environment(
     if workdir is not None:
         # The prompt and the tools name workspace files by relative paths, which the workdir's tools resolve there.
         file_access_lines.append(
-            f"- Workdir: `{workdir}`, where `shell` runs and `file` and `coding` resolve relative paths; "
+            f"- Workdir: `{workdir}`, where `shell` runs and `filesystem` resolves relative paths; "
             "code that `python` runs uses this process's current directory, so give it absolute paths. "
             "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
             f"is `{workspace_root}`; name files there by absolute path.",

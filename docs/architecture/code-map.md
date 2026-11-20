@@ -207,10 +207,10 @@ Matrix sync callback
 | `egress_broker/key_access.py` | Who may use and manage an agent's Agent Keys, shared by the Agent Keys pages and secret requests |
 | `secret_requests.py` | In-memory registry of pending secret requests, the card content they post, and the store of temporary secrets requesters gave conversations (in memory, or also one private file each) |
 | `secret_request_cards.py` | The card a secret request posts and the wait for its answer, shared by `request_secret` and `request_temporary_secret` |
-| `api/secret_requests.py` | `POST /api/rooms/{room_id}/secret-requests/{request_id}`: stores the requester's key in the agent's scope, gives their temporary secret to the conversation that asked, or records a decline |
+| `api/secret_requests.py` | `POST /api/rooms/{room_id}/secret-requests/{request_id}`: stores the requester's key in the agent's scope (first adding the service the card proposed), gives their temporary secret to the conversation that asked, or records a decline |
 | `api/github_requests.py` | `/api/github/request`, `/api/github/status`, and `/api/github/token`: sends a client session user's `/repos/<owner>/<repo>` or `/graphql` call to `api.github.com` with their own saved personal access token or else their connected GitHub account, reports which, and saves or removes that token |
 | `custom_tools/temporary_secrets.py` | `temporary_secrets` agent tool: `request_temporary_secret` asks the requester for a secret that the conversation's shell commands receive as an environment variable |
-| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, where to add missing ones, and `request_secret`, which asks the requester for a key with a card |
+| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, where to add missing ones, and `request_secret`, which asks the requester for a key with a card, optionally for a new service of their own it proposes |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
 | `tool_jobs/runtime.py` | Accepted execution ownership, what a job runs and how it is known, durable outcomes, scoped discovery, and result claims |
 | `delegation/background.py` | A subagent call's job: the child it is known by, its saved snapshot, its outcome, and its cleanup inside the generic execution owner |
@@ -297,7 +297,7 @@ Matrix sync callback
 | `memory/` | Agent and team memory over Mem0 or Markdown files; an agent's lives at its state root or workspace, every team's Mem0 memory in one store at `team_memory/`, and each team's file memory at `team_memory/<team scope>/` |
 | `memory/_policy.py` | Memory scopes: the team scope ID, the team memory root and each team's file directory, the team scopes an agent reads, and the backend an agent or team uses |
 | `memory/legacy_team_memory.py` | One-time startup merge of the team memory copies earlier releases kept in every member's storage |
-| `memory/_entrypoint_snapshots.py` | Copy of each conversation's inlined `MEMORY.md`, one file per conversation under `memory_entrypoint_snapshots/` in the agent's state root (a private instance's own), reused while that copy only gains lines (not when a capped file drops its oldest kept entry) and less than an hour has passed since the last model request that sent it; any other change loads the file again, which a held prompt (`providers/pipeline/prompt_hold.py`) tells as an update when one can state it exactly, the old lines staying quoted until the hold starts over |
+| `memory/_entrypoint_snapshots.py` | Copy of each conversation's inlined `MEMORY.md`, one file per conversation under `memory_entrypoint_snapshots/` in the agent's state root (a private instance's own), reused while that copy only gains lines, anywhere in a file within its preload caps and at the end of a capped one (whose preload keeps its first lines), and less than an hour has passed since the last model request that sent it; any other change loads the file again, which a held prompt (`providers/pipeline/prompt_hold.py`) tells as an update when one can state it exactly, the old lines staying quoted until the hold starts over |
 | `memory/auto_flush.py` | Background passes that turn file-memory agents' new finished turns into daily notes, with per-conversation progress below `tracking/`, and the service that runs them while auto-flush is enabled |
 | `memory/legacy_auto_flush.py` | Auto-flush state earlier releases wrote: the reply path's queue file, removed once, and progress entries and note tags in creation order, read as log positions when auto-flush next reads the conversation |
 | `knowledge/file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
@@ -628,6 +628,7 @@ Matrix sync callback
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
 | `room_agent_access.py` | The room access check the worker Computer and plugin routes share, and each admitted agent's workspace root and file and terminal access for one caller in one room |
+| `api/agent_profiles.py` | `GET /api/rooms/{room_id}/agents/{agent_user_id}/profile`: an agent's role, the model it runs in the room, and a catalog of the toolkits its config gives its Matrix turns there (registry names, descriptions, categories; no toolkit is built), for Chat's agent card |
 | `api/workspace_files.py` | Chat clients' `/api/rooms/{room_id}` routes to the workspaces of a room's agents: list them, read and change their files, follow changes |
 | `workspace_files/operations.py` | The file operations behind those routes, confined to the workspace without following links out, and the credentials they hide (`is_hidden`) |
 | `workspace_files/watch.py` | One scanner per workspace that feeds its change streams the changed paths, scanning without following links |
@@ -666,7 +667,7 @@ Matrix sync callback
 | `custom_tools/matrix_user_writes.py` | What `matrix_user_write` does as the owner, one event per call: a message or a file, a reaction, an edit, or a redaction, each sent marked agent-authored, and joins, leaves, invitations, and new rooms, which carry no marker; a send to a person uses their existing DM and never makes one; logs one audit line per write |
 | `custom_tools/stop_reply.py` | Agent tool that stops another agent's reply with a 🛑 reaction relaying the caller's requester |
 | `custom_tools/shared_directories.py` | Agent tool that creates shared directories, invites agents at once on behalf of a user who may use them or as pending invitations otherwise, and accepts or declines invitations through the invited agent |
-| `shared_directories/` | The primary-only membership ledger and storage of shared directories, the paths agents see, and the share roots `file` and `coding` accept |
+| `shared_directories/` | The primary-only membership ledger and storage of shared directories, the paths agents see, and the share roots `filesystem` accepts |
 | `custom_tools/thread_move.py` | Copies a thread into another room as a new thread: per-entity re-posts, mention-guarded router relays, tag copy, and the moved notice in the source thread |
 | `custom_tools/computer_announcement.py` | Tool hook that shows a chat_ui agent's worker computer in MindRoom Chat on its first worker browser call in a conversation |
 | `tools/react.py` | Tool-catalog registration for the reaction-only tool |

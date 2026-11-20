@@ -241,6 +241,7 @@ agents:
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Linear API key; required unless `LINEAR_API_KEY` is set. |
+| `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 
 ```yaml
 agents:

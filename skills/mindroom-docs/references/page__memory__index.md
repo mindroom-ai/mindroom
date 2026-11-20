@@ -167,6 +167,7 @@ With `provider: ollama`, `config.host` names the Ollama server only when no `OLL
 With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
 With `provider: openai`, `config.openai_base_url` sets the server; without it, extraction uses [`OPENAI_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else OpenAI's API.
 With `provider: anthropic`, `config.anthropic_base_url` sets the server; without it, extraction uses [`ANTHROPIC_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else Anthropic's API.
+With `provider: anthropic`, Mem0 sends no `temperature`, `top_p`, or `top_k`, which Claude API version `2026-10-21` rejects on every model, so `config` sampling values have no effect.
 For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
 ```yaml
@@ -219,13 +220,13 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
+An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since it last loaded the file, for example from another conversation: lines added anywhere while the file fits the preload caps below, and lines added at the end of a file a cap truncates, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations load the current file (its first lines that fit, when a cap truncates it), and the agent can read the file directly.
 On a route that keeps the system prompt unchanged while its cache is warm and sends changes as a system prompt update, such as Claude Opus through OpenRouter with the hour-long prompt cache, an edited or deleted line that an update can state exactly reaches the conversation as such an update, and the old line can stay quoted in that conversation's later requests until its held prompt starts over: when it idles past the cache lifetime, its history is compacted or its updates alone would need that, the route or model changes, or a change comes that an update cannot state, such as one too long or one whose lines appear more than once in the prompt.
 Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their size in the turn model's tokens ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)).
-Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
+A file over either cap inlines its first lines that fit both caps and withholds the rest, so lines `add_memory` appends past a cap never reach the prompt until the file is condensed, and they leave the inlined copy unchanged.
 Only whole lines are inlined, never part of a line.
-When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
+When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest, and asks the agent to condense the file (moving detail into `memory/` files) so its newest lines fit again.
 
 ### File layout
 

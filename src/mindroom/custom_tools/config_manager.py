@@ -26,6 +26,7 @@ from mindroom.config.main import (
 )
 from mindroom.config.models import ToolConfigEntry
 from mindroom.config.schema_hints import redaction_marker_location
+from mindroom.config.tool_aliases import canonical_tool_name, canonical_tool_names
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.oauth import oauth_connect_url_requires_host_browser
@@ -284,7 +285,8 @@ def preserve_tool_overrides(
 ) -> list[ToolConfigEntry]:
     """Keep inline overrides for retained tools during string-only tool-list edits."""
     existing_by_name = {entry.name: entry for entry in existing_entries}
-    return [existing_by_name.get(tool_name, ToolConfigEntry(name=tool_name)) for tool_name in updated_tool_names]
+    names = canonical_tool_names(updated_tool_names)
+    return [existing_by_name.get(tool_name, ToolConfigEntry(name=tool_name)) for tool_name in names]
 
 
 def validate_knowledge_bases(
@@ -808,6 +810,7 @@ class ConfigManagerTools(Toolkit):
         )
         if marker_error is not None:
             return marker_error
+        tools = None if tools is None else canonical_tool_names(tools)
 
         if operation == "update":
             return self._update_agent_config(
@@ -1100,6 +1103,7 @@ class ConfigManagerTools(Toolkit):
             return load_error
         assert tool_metadata is not None
 
+        tool_name = canonical_tool_name(tool_name)
         if tool_name not in tool_metadata:
             available = ", ".join(sorted(tool_metadata.keys()))
             return f"Unknown tool: {tool_name}\n\nAvailable tools: {available}"

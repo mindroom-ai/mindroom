@@ -234,11 +234,30 @@ def _answers_tool_calls(turn: dict[str, Any]) -> bool:
 
 def _user_blocks(message: Message, provider: str) -> list[Any]:
     content = message.content or ""
-    blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+    blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else _without_citations(content)
     media = [_image_block(image, provider) for image in message.images or ()]
     media += [_document_block(file, provider) for file in message.files or ()]
     # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
     return blocks + [block for block in media if block is not None]
+
+
+def _without_citations(blocks: list[Any]) -> list[Any]:
+    """Return a user turn's blocks without the ``citations`` of their text, in search and tool results too.
+
+    API version 2026-10-21 rejects cited text in a user message; a document's or search result's citation setting
+    is no text block's and stays.
+    """
+    shaped: list[Any] = []
+    for item in blocks:
+        block = as_dict(item)
+        kind = None if block is None else block.get("type")
+        if block is not None and kind == "text" and isinstance(block.get("citations"), list):
+            shaped.append({key: value for key, value in block.items() if key != "citations"})
+        elif block is not None and kind in {"search_result", "tool_result"} and isinstance(block.get("content"), list):
+            shaped.append({**block, "content": _without_citations(block["content"])})
+        else:
+            shaped.append(item)
+    return shaped
 
 
 def _image_media_type(image: Image, data: bytes | None) -> str | None:
@@ -300,14 +319,18 @@ def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
     # writer produced.
     # Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
     # content.
-    # Handling: each block is sent as stored, and any other item as a text block.
+    # Handling: each block is sent as stored, its text without citations, and any other item as a text block.
     # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks,
     # tests/providers/test_request_tokens.py::test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks
     if isinstance(result.content, list):
-        payload = [
-            block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
-            for item in result.content
-        ]
+        payload = _without_citations(
+            [
+                block
+                if (block := as_dict(item)) is not None and block.get("type")
+                else {"type": "text", "text": str(item)}
+                for item in result.content
+            ],
+        )
     tool_result: dict[str, Any] = {"type": "tool_result", "tool_use_id": result.call_id, "content": payload}
     if result.is_error:
         tool_result["is_error"] = True

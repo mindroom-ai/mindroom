@@ -13,12 +13,11 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 
 ## Tools On This Page
 
-- [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
+- [`filesystem`] - Line-numbered reads, precise edits, writes, grep, file discovery, directory listing, and opt-in deletes; `file` and `coding` are other names for it.
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room can watch and type in when the agent's config allows it.
 - [`temporary_secrets`] - Ask the user for a password, token, or code that the agent's shell commands receive and the agent never sees.
 - [`python`] - Python code execution and package installation.
-- [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
 - [`docker`] - Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic without code execution.
@@ -34,7 +33,7 @@ None of these tools needs credentials or dashboard setup; `docker` needs Docker 
 
 ### Where these tools run
 
-`file`, `shell`, `python`, `coding`, and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
+`filesystem`, `shell`, `python`, and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
 Whether the other tools here also run in a worker depends on the [execution mode](../deployment/sandbox-proxy.md#execution-modes).
 Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](../deployment/sandbox-proxy.md#worker-routing).
 `worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](../deployment/sandbox-proxy.md#worker-scopes).
@@ -44,7 +43,7 @@ Only a worker isolates `shell`, `python`, and `docker`, because they execute cod
 ### Workspace and tool output files
 
 Every agent has a workspace: `agents/<agent>/workspace/` in the storage directory, or the requester's private root for a [`private`](../configuration/agents.md#private-instances) agent.
-It is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
+It is the working directory (`base_dir`) of `filesystem`, `shell`, and worker-routed `python`, and generated files and charts are saved inside it.
 `python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
 `base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; a [headless run](../headless.md#files) can point it at a directory the caller chooses.
 
@@ -64,7 +63,7 @@ agents:
     role: Edit code, run local checks, and export artifacts
     model: sonnet
     tools:
-      - coding
+      - filesystem
       - shell:
           extra_env_passthrough:
             - GITHUB_TOKEN
@@ -78,53 +77,66 @@ agents:
 
 Here `file_generation` saves into `exports` and `visualization` into `charts`, both inside the agent workspace.
 
-## [`file`]
+## [`filesystem`]
 
-`file` provides `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
+<a id="file"></a><a id="coding"></a>
+`filesystem` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`, and `delete_file()` when `enable_delete_file` is on.
+The tool names `file` and `coding` select it too wherever a tool name is written anew, such as `tools`, `worker_tools`, `MINDROOM_SANDBOX_PROXY_TOOLS`, a new contact's tools, and subagent tools, and config saved through the dashboard or API writes `filesystem`.
+An agent's `tools` and the `defaults.tools` it takes may name it by more than one of the three names only when none of those entries has settings and their `defer` and `initial` flags agree; it then stands where the first one stood, and otherwise the config fails to load, naming both entries.
+What was saved under `file` or `coding` before the two became one toolkit is not carried over; see [Upgrading to the `filesystem` toolkit](../deployment/upgrades.md#upgrading-to-the-filesystem-toolkit).
+`read_file()` returns line-numbered output with pagination hints when a file is truncated, and names an image it cannot decode instead of returning its bytes, pointing to `view_file()` when the agent has it.
+`edit_file()` applies a list of `edits` to one file, each an `old_text` copied from the file and its `new_text`.
+Every `old_text` matches the file as it was before the call, not the results of the other edits, and must match exactly one place unless its edit sets `replace_all`, which replaces every non-overlapping match from left to right, as Python's `str.replace` does; when it has no exact match, a match that differs only in whitespace and quotes is used.
+Edits must not overlap, so an edit must not also target text that a `replace_all` edit's `old_text` matches.
+When an edit fails validation, none is written: the error names the edit, lists the lines of an `old_text` that matches several places, and, for one that matches none, shows up to three distinct lines that come close, if any do.
+A failure while writing the file is reported as a write error instead.
+On success it returns the lines each edit changed in the new file, numbered as `read_file()` numbers them, not a diff; a match whose `new_text` equals the text it replaces is left out of those lines, though the edit still counts.
+In a file whose lines all end in CRLF, `old_text` and `new_text` may use LF or CRLF and the file keeps CRLF, unless the file or an edit holds a lone CR; then, as with mixed endings, the file is matched and edited with its line endings as they are.
+A byte order mark stays in the file once, also when an edit that starts at it copies it into `old_text` or `new_text`; any other U+FEFF is ordinary text.
+In the primary, `edit_file()`, `write_file()`, and `delete_file()` calls on the same resolved path run one after another, so they never interleave; a later `write_file()` still replaces the whole file, an earlier edit included.
+In a worker, calls serialize only when they lock the same stable, readable directory; one that waits too long for that lock returns a busy error without changing the file, and a directory the agent may enter but not read cannot hold the lock, so calls there run unlocked.
+Primary and worker calls do not serialize with each other, with another primary, or with other writers such as shell commands.
+`grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
+Under `file_access: workspace`, `grep()` skips a file over 64 MiB, which `read_file()` refuses to read.
+`delete_file()` removes a file or an empty directory.
 Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access): `workspace` (the default) rejects paths outside the workspace and the agent's [shared directories](#shared_directories), and `unrestricted` allows any path the tool's process can reach.
-`save_file()`, `replace_file_chunk()`, and `delete_file()` refuse paths inside a `.git` directory.
-`read_file()` refuses files over `max_file_length` characters or `max_file_lines` lines and asks for `read_file_chunk()` instead.
-`search_files()` matches glob patterns; use `search_content()` to search inside text files.
-Prefer [`coding`](#coding) for code-editing agents.
+`write_file()`, `edit_file()`, and `delete_file()` refuse paths inside a `.git` directory.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `enable_save_file` | `boolean` | `no` | `true` | Enable `save_file()`. |
-| `enable_read_file` | `boolean` | `no` | `true` | Enable `read_file()`. |
-| `enable_delete_file` | `boolean` | `no` | `false` | Enable `delete_file()`; deletion is opt-in. |
-| `enable_list_files` | `boolean` | `no` | `true` | Enable `list_files()`. |
-| `enable_search_files` | `boolean` | `no` | `true` | Enable `search_files()`. |
-| `enable_search_content` | `boolean` | `no` | `true` | Enable `search_content()`. |
-| `enable_read_file_chunk` | `boolean` | `no` | `true` | Enable `read_file_chunk()`. |
-| `enable_replace_file_chunk` | `boolean` | `no` | `true` | Enable `replace_file_chunk()`. |
-| `expose_base_directory` | `boolean` | `no` | `false` | Include absolute file paths and `base_directory` in `search_files()` output. |
-| `max_file_length` | `number` | `no` | `10000000` | Maximum character count for `read_file()`. |
-| `max_file_lines` | `number` | `no` | `100000` | Maximum line count for `read_file()`. |
-| `line_separator` | `text` | `no` | `"\n"` | Separator used by the chunk functions. |
-| `exclude_patterns` | `string[]` | `no` | `null` | Fnmatch-style path-component patterns excluded from `search_content()`; `null` uses Agno's defaults and `[]` disables exclusions. |
-| `all` | `boolean` | `no` | `false` | Enable every `file` function. |
+| `enable_delete_file` | `boolean` | `no` | `false` | Offer `delete_file()`; deletion is opt-in. |
+
+Turn functions off with the toolkit filters every tool takes, for example `exclude_tools: [write_file, edit_file]` for an agent that only reads.
 
 ### Example
 
 ```yaml
 agents:
+  code:
+    tools:
+      - filesystem
   editor:
     tools:
-      - file:
+      - filesystem:
           enable_delete_file: true
-          max_file_lines: 2000
 ```
 
 ```python
-read_file("README.md")
-read_file_chunk("src/app.py", 0, 80)
-replace_file_chunk("docs/notes.md", 10, 12, "Updated text")
-list_files(directory="src")
-search_files("**/*.py")
-search_content("TODO", directory="src")
-save_file("temporary notes\n", "scratch/notes.txt")
+read_file("src/app.py", offset=1, limit=120)
+grep("TODO", path="src")
+find_files("**/*.md", path="docs")
+edit_file(
+    "docs/example.md",
+    edits=[
+        {"old_text": "old text", "new_text": "new text"},
+        {"old_text": "draft", "new_text": "final", "replace_all": True},
+    ],
+)
+write_file("scratch/todo.txt", "first line\nsecond line\n")
+ls("src")
+delete_file("scratch/todo.txt")
 ```
 
 ## [`shell`]
@@ -132,9 +144,13 @@ save_file("temporary notes\n", "scratch/notes.txt")
 `shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 It runs commands only in a worker unless [`defaults.allow_shell_without_worker: true`](../configuration/agents.md#defaults) lets them run in the MindRoom process; otherwise each call there is refused.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and stderr under `Stderr:`.
-With a working directory, the returned output and any saved file start with a `[cwd: <dir>]` line.
+The tool returns the last `tail` lines of stdout (default 100), then the last `tail` lines of any stderr under `Stderr:`, each capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and all of stderr under `Stderr:`.
+When `tail` or the cap leaves lines out of a successful result, it starts with a notice for each stream that lost lines, such as `[Showing the last 100 of 230 lines. Pass a larger tail, or narrow the command.]` or `[Showing the last 100 of 230 stderr lines. ...]`.
+Blank lines count as lines in a notice and in the tail; output shown whole loses only its trailing newlines, and stderr of only blank lines still gets its `Stderr:` heading.
+A result that leads with a status line keeps it first and puts the notice at the start of the stream it describes: `Exit code <code>` on a failure, `Stopped after <timeout>s.` at the timeout, and `Status: FINISHED` or `Status: RUNNING` when a background command is checked.
+The command runs in the agent's workspace, or in its workdir, and the result holds only the command's output.
 With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
+A successful command saves its stdout alone, and when it also printed to stderr, the receipt gives its size as `stderr_bytes`; add `2>&1` to the command to save that text too.
 
 A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
 Without `timeout`, a call that runs as a [background job](agent-orchestration.md#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
@@ -279,49 +295,6 @@ run_python_file_return_variable("scripts/demo.py", variable_to_return="result")
 pip_install_package("rich")
 ```
 
-## [`coding`]
-
-`coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`.
-`read_file()` returns line-numbered output with pagination hints when a file is truncated.
-`edit_file()` applies a list of `edits` to one file, each an `old_text` copied from the file and its `new_text`.
-Every `old_text` matches the file as it was before the call, not the results of the other edits, and must match exactly one place unless its edit sets `replace_all`, which replaces every non-overlapping match from left to right, as Python's `str.replace` does; when it has no exact match, a match that differs only in whitespace and quotes is used.
-Edits must not overlap, so an edit must not also target text that a `replace_all` edit's `old_text` matches.
-When an edit fails validation, none is written: the error names the edit, lists the lines of an `old_text` that matches several places, and, for one that matches none, shows up to three distinct lines that come close, if any do.
-A failure while writing the file is reported as a write error instead.
-On success it returns the lines each edit changed in the new file, numbered as `read_file()` numbers them, not a diff; a match whose `new_text` equals the text it replaces is left out of those lines, though the edit still counts.
-In a file whose lines all end in CRLF, `old_text` and `new_text` may use LF or CRLF and the file keeps CRLF, unless the file or an edit holds a lone CR; then, as with mixed endings, the file is matched and edited with its line endings as they are.
-A byte order mark stays in the file once, also when an edit that starts at it copies it into `old_text` or `new_text`; any other U+FEFF is ordinary text.
-In the primary, `edit_file()` and `write_file()` calls on the same resolved path run one after another, so they never interleave; a later `write_file()` still replaces the whole file, an earlier edit included.
-In a worker, calls serialize only when they lock the same stable, readable directory; one that waits too long for that lock returns a busy error without changing the file, and a directory the agent may enter but not read cannot hold the lock, so calls there run unlocked.
-Primary and worker calls do not serialize with each other, with another primary, or with other writers such as shell commands.
-`grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
-Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
-`coding` has no configuration fields.
-
-### Example
-
-```yaml
-agents:
-  code:
-    tools:
-      - coding
-```
-
-```python
-read_file("src/app.py", offset=1, limit=120)
-grep("TODO", path="src")
-find_files("**/*.md", path="docs")
-edit_file(
-    "docs/example.md",
-    edits=[
-        {"old_text": "old text", "new_text": "new text"},
-        {"old_text": "draft", "new_text": "final", "replace_all": True},
-    ],
-)
-write_file("scratch/todo.txt", "first line\nsecond line\n")
-ls("src")
-```
-
 ## [`shared_directories`]
 
 `shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
@@ -332,8 +305,8 @@ It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, a
 1. Run tools in dedicated Docker or Kubernetes workers.
    Set the environment variable `MINDROOM_WORKER_BACKEND=docker` as in [dedicated Docker workers](../deployment/sandbox-proxy.md#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker), or the runtime chart's Helm value `workers.backend: kubernetes` as in [Kubernetes dedicated worker mode](../deployment/kubernetes.md#dedicated-worker-mode).
    Sharing also works without workers and with the Kubernetes `static_runner` sidecar, with weaker limits; see [Access by deployment](#access-by-deployment).
-2. Give the sharing agent `shared_directories` and a tool that writes files, such as `shell`, `file`, or `coding`.
-3. Give each reading agent `shell`, `python`, `file`, or `coding`.
+2. Give the sharing agent `shared_directories` and a tool that writes files, such as `shell` or `filesystem`.
+3. Give each reading agent `shell`, `python`, or `filesystem`.
    It also needs `shared_directories` to accept invitations from users who cannot use it, as in [Sharing between personal agents](#sharing-between-personal-agents).
 4. When the user who asks for the invitation can use the reading agent outside the current room, the invitation applies at once, as described under [Rules](#rules); in the example below, every member of `lobby` can.
 
@@ -349,7 +322,7 @@ agents:
     display_name: Writer
     rooms: [lobby]
     tools:
-      - file
+      - filesystem
 ```
 
 Then ask `researcher` in `lobby`, for example: "Save your notes in a shared directory called report and invite writer."
@@ -398,8 +371,8 @@ A pending agent sees no path or file of the directory and its worker mounts noth
 An agent holds at most 10 pending invitations; a further invitation fails until it accepts or declines one, or an owner cancels one.
 The owner's `remove_from_shared_directory` and `delete_shared_directory` also cancel a pending invitation.
 
-Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories when they run in a worker or when MindRoom runs without workers.
-When MindRoom uses workers but an agent's `file` or `coding` runs in the primary process, `workspace` keeps those tools out of shared directories; add them to the agent's `worker_tools`.
+Under `file_access: workspace`, `filesystem` accepts paths inside the agent's shared directories when it runs in a worker or when MindRoom runs without workers.
+When MindRoom uses workers but an agent's `filesystem` runs in the primary process, `workspace` keeps it out of shared directories; add it to the agent's `worker_tools`.
 Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
 
 ### Access by deployment
@@ -410,7 +383,7 @@ Where tools run decides who reaches a shared directory:
 |---|---|---|---|
 | Dedicated Docker or Kubernetes workers | Read and write | Read only | No access |
 | Kubernetes `static_runner` sidecar | Read and write | Read and write | Read and write |
-| No workers, through `file` and `coding` under `file_access: workspace` | Read and write | Read only | No access |
+| No workers, through `filesystem` under `file_access: workspace` | Read and write | Read only | No access |
 
 `shell`, `python`, and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
 The documented Compose and host-container `static_runner` setups mount only scratch storage, so tools running there cannot reach shared directories; use dedicated Docker workers instead.

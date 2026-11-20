@@ -79,7 +79,7 @@ Gemini bills a replayed thought signature about as the reasoning its reply repor
   A stretch of 8,192 characters with no word start is cut anyway, which can add a token per cut.
 - While o200k_base loads, and for good when it cannot, estimates count a quarter token per character, and sizes that must not undercount (compaction input, a compaction summary before it is stored, the `MEMORY.md` preload) count UTF-8 bytes.
   The byte count is an upper bound but triples history estimates, which would compact conversations that fit on the first reply after a start.
-- The `MEMORY.md` preload counts each line with its newline and keeps the curated head, then the newest entries, within the token cap.
+- The `MEMORY.md` preload counts each line with its newline and keeps the file's first whole lines that fit the token cap.
   Counting line by line rounds each line up, so the preload can stop a little under the cap; that keeps the cut a single pass whose result never changes for an unchanged file.
 
 ## Limitations

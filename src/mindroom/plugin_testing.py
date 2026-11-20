@@ -30,6 +30,7 @@ from mindroom.api.connection_agents import AgentToolContext
 from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.main import Config
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.entity_resolution import current_entity_id, persist_offline_entity_accounts
@@ -82,7 +83,7 @@ from mindroom.turn_origin import classify_turn_origin
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-    from anyio.abc import BlockingPortal
+    from anyio.from_thread import BlockingPortal
     from starlette.testclient import WebSocketTestSession
 
     from mindroom.api.app_state import EmbeddedRuntime
@@ -305,6 +306,7 @@ class LoadedPlugin:
         no such tool or function, and ``PermissionError`` for a function that may need approval. The call runs through
         the plugins' ``tool:*`` hooks and inside the conversation ``current_plugin_context`` reads.
         """
+        tool = canonical_tool_name(tool)
         context = await self._turn_context(agent, sender, room, f"$message{next(self._event_ids)}")
         agent_tools = resolve_agent_tools(self.config, agent, context.plugins.tools)
         entry = next((entry for entry in agent_tools.candidates() if entry.name == tool), None)

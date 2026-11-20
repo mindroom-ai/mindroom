@@ -518,6 +518,21 @@ describe("egress services on the personal page", () => {
     ).toHaveLength(2);
   });
 
+  it("adds a service only as a new one, so it never replaces another's key", async () => {
+    const putHeaders = () =>
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(([, options]) => options?.method === "PUT")
+        .map(([, options]) => options?.headers as Record<string, string>);
+    await renderPage();
+    await openAdd();
+    fill("gh", "github");
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+    await waitFor(() => expect(putHeaders()).toHaveLength(1));
+    expect(putHeaders()[0]).toMatchObject({ "If-None-Match": "*" });
+  });
+
   it("keeps the editor and what is typed when the agent is closed and opened again", async () => {
     await renderPage();
     await openAdd();
@@ -633,6 +648,71 @@ describe("egress services on the personal page", () => {
         `${KEYS}/ai`,
         `${KEYS}/ai`,
       ]);
+    });
+
+    it("adds only once: a change saved after its own create replaces it, whatever the list says", async () => {
+      let keyAttempts = 0;
+      mutation = (_method, path) =>
+        !path.startsWith(SERVICES) && keyAttempts++ === 0
+          ? json({ detail: "The key vault is read-only" }, 409)
+          : new Response(null, { status: 204 });
+      const putHeaders = () =>
+        vi
+          .mocked(fetch)
+          .mock.calls.filter(
+            ([input, options]) =>
+              options?.method === "PUT" && String(input).startsWith(SERVICES),
+          )
+          .map(
+            ([, options]) =>
+              (options?.headers as Record<string, string>)["If-None-Match"],
+          );
+      await renderPage();
+      await openAdd();
+      // The list has not caught up with this editor's own create.
+      fillOpenAi("sk-secret");
+      await screen.findByRole("alert");
+      fireEvent.click(screen.getByRole("button", { name: "More options" }));
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: "Changed" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+      await waitFor(() => expect(putHeaders()).toHaveLength(2));
+      expect(putHeaders()).toEqual(["*", undefined]);
+    });
+
+    it("remembers its own create when Keep editing answers another row's Edit", async () => {
+      let keyAttempts = 0;
+      mutation = (_method, path) =>
+        !path.startsWith(SERVICES) && keyAttempts++ === 0
+          ? json({ detail: "The key vault is read-only" }, 409)
+          : new Response(null, { status: 204 });
+      const putHeaders = () =>
+        vi
+          .mocked(fetch)
+          .mock.calls.filter(
+            ([input, options]) =>
+              options?.method === "PUT" && String(input).startsWith(SERVICES),
+          )
+          .map(
+            ([, options]) =>
+              (options?.headers as Record<string, string>)["If-None-Match"],
+          );
+      await renderPage();
+      await openAdd();
+      fillOpenAi("sk-secret");
+      await screen.findByText(/its key was not/);
+      fireEvent.click(screen.getByRole("button", { name: "More options" }));
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: "Changed" },
+      });
+      fireEvent.click(await rowAction("Edit service for My API"));
+      fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+      fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+      await waitFor(() => expect(putHeaders()).toHaveLength(2));
+      expect(putHeaders()).toEqual(["*", undefined]);
     });
 
     it("sets a key while editing a service", async () => {
@@ -3162,5 +3242,357 @@ describe("adding another account", () => {
     for (const name of ["Gmail", "GitHub"])
       expect(await screen.findByRole("row", { name })).toBeVisible();
     expect(screen.queryByRole("button", { name: /^Add another / })).toBeNull();
+  });
+});
+
+describe("using the connected account", () => {
+  const login = {
+    provider: "github",
+    display_name: "GitHub",
+    connected: true,
+    account_label: "example-user",
+  };
+  const githubPreset = egressPresets.presets.find(
+    (preset) => preset.id === "github",
+  )!;
+  // The GitHub service once saved, as the listing sends it: the account serves only the tools.
+  const added = (oauth: Partial<EgressCredentialService["oauth"]>) =>
+    credentialService({
+      source: "user",
+      rules: githubPreset.rules,
+      oauth: oauthStatus({
+        connected: true,
+        account_label: "example-user",
+        reuse_enabled: false,
+        reuse_access: null,
+        ...oauth,
+      }),
+    });
+  const BARE = "/api/connections/egress/agents/bare";
+  const ADDED = `${BARE}/services/github`;
+  const KEY = `${BARE}/github`;
+  const REUSE = `${KEY}/oauth-reuse`;
+  let listing: EgressCredentialAgent[];
+  let calls: { method: string; path: string; body: unknown }[];
+  let answers: Record<string, () => Response>;
+
+  const writes = () => calls.filter((call) => call.method !== "GET");
+  const ok = () => new Response(null, { status: 204 });
+
+  beforeEach(() => {
+    calls = [];
+    // Personal Mind already lets commands use the account for its own `github`.
+    listing = [
+      {
+        ...agents[0],
+        services: [added({ reuse_enabled: true, reuse_access: "read_write" })],
+        oauth_logins: [login],
+      },
+      { ...agents[2], oauth_logins: [login] },
+    ];
+    answers = {
+      [`PUT ${ADDED}`]: () => {
+        listing = [listing[0], { ...listing[1], services: [added({})] }];
+        return ok();
+      },
+      [`PUT ${REUSE}`]: ok,
+      [`PUT ${KEY}`]: ok,
+    };
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      const path = String(input);
+      const method = options?.method ?? "GET";
+      calls.push({
+        method,
+        path,
+        body: options?.body ? JSON.parse(String(options.body)) : undefined,
+      });
+      if (path === "/api/connections/me") return json(identity);
+      if (path === "/api/connections/egress") return json({ agents: listing });
+      if (path === PRESETS) return json(egressPresets);
+      const answer = answers[`${method} ${path}`];
+      if (answer) return answer();
+      throw new Error(`Unexpected request: ${method} ${path}`);
+    });
+  });
+
+  async function openGithubForm() {
+    await renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add service for Bare Agent" }),
+    );
+    const form = await screen.findByRole("form", { name: "Add service" });
+    await presetsReady();
+    fireEvent.change(within(form).getByLabelText("Preset"), {
+      target: { value: "github" },
+    });
+    return form;
+  }
+
+  /** The question, asked before anything is written; Continue adds the service and allows the account. */
+  async function allowFirst(
+    written: { method: string; path: string; body: unknown }[],
+  ) {
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAccessibleName(
+      "Use your GitHub account for Agent Keys?",
+    );
+    expect(dialog).toHaveTextContent("example-user");
+    expect(writes()).toEqual(written);
+    await pressInDialog("Let commands use it");
+    await waitFor(() =>
+      expect(writes()).toEqual([
+        ...written,
+        { method: "PUT", path: ADDED, body: { preset: "github" } },
+        {
+          method: "PUT",
+          path: REUSE,
+          body: { acknowledge_approval_bypass: true },
+        },
+      ]),
+    );
+  }
+
+  /** The question, cancelled: nothing is written. */
+  async function cancelFirst() {
+    expect(await screen.findByRole("dialog")).toHaveAccessibleName(
+      "Use your GitHub account for Agent Keys?",
+    );
+    await pressInDialog("Cancel");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(writes()).toEqual([]);
+  }
+
+  it("the form starts on the connected account and asks before saving", async () => {
+    const form = await openGithubForm();
+    expect(
+      within(form).getByRole("radio", {
+        name: "Use your connected GitHub account (example-user)",
+      }),
+    ).toBeChecked();
+    expect(within(form).queryByLabelText("API key")).toBeNull();
+    fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
+    await allowFirst([]);
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "Add service" })).toBeNull(),
+    );
+  });
+
+  it("cancelling the form's question writes nothing and keeps the form", async () => {
+    const form = await openGithubForm();
+    fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
+    await cancelFirst();
+    expect(
+      within(form).getByRole("button", { name: "Save service" }),
+    ).toBeEnabled();
+  });
+
+  it("Paste a token instead keeps the key field and asks nothing", async () => {
+    const form = await openGithubForm();
+    fireEvent.click(
+      within(form).getByRole("radio", { name: "Paste a token instead" }),
+    );
+    fireEvent.change(within(form).getByLabelText("API key"), {
+      target: { value: "example-token" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
+    await waitFor(() =>
+      expect(writes().map((call) => [call.path, call.body])).toEqual([
+        [ADDED, { preset: "github" }],
+        [KEY, { secret: "example-token" }],
+      ]),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("after a key that failed, picking the account asks and writes only the allowance", async () => {
+    answers[`PUT ${KEY}`] = () => json({ detail: "Key refused" }, 422);
+    const form = await openGithubForm();
+    fireEvent.click(
+      within(form).getByRole("radio", { name: "Paste a token instead" }),
+    );
+    fireEvent.change(within(form).getByLabelText("API key"), {
+      target: { value: "example-token" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
+    expect(
+      await within(form).findByText(/its key was not: Key refused/),
+    ).toBeVisible();
+    const before = writes();
+    fireEvent.click(
+      within(form).getByRole("radio", {
+        name: "Use your connected GitHub account (example-user)",
+      }),
+    );
+    fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
+    expect(await screen.findByRole("dialog")).toBeVisible();
+    expect(writes()).toEqual(before);
+    await pressInDialog("Let commands use it");
+    await waitFor(() =>
+      expect(writes()).toEqual([
+        ...before,
+        {
+          method: "PUT",
+          path: REUSE,
+          body: { acknowledge_approval_bypass: true },
+        },
+      ]),
+    );
+  });
+
+  it("a login not connected yet leaves the form as it was", async () => {
+    listing = [
+      { ...agents[2], oauth_logins: [{ ...login, connected: false }] },
+    ];
+    const form = await openGithubForm();
+    expect(within(form).queryByRole("radiogroup")).toBeNull();
+    expect(within(form).getByLabelText("API key")).toBeVisible();
+  });
+
+  it("Use it asks before anything is written, then adds and allows the account", async () => {
+    await renderPage();
+    expect(
+      await screen.findByText(
+        "Your GitHub account example-user is connected for MindRoom's tools. Let this agent's commands use it too.",
+      ),
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Use your GitHub account for Bare Agent",
+      }),
+    );
+    await allowFirst([]);
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: "Use your GitHub account for Bare Agent",
+        }),
+      ).toBeNull(),
+    );
+  });
+
+  it("cancelling Use it writes nothing, though another agent already allows the account", async () => {
+    await renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Use your GitHub account for Bare Agent",
+      }),
+    );
+    await cancelFirst();
+  });
+
+  it("an allowance that fails after the service was added is shown", async () => {
+    answers[`PUT ${REUSE}`] = () => json({ detail: "Not allowed now" }, 409);
+    await renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Use your GitHub account for Bare Agent",
+      }),
+    );
+    await pressInDialog("Let commands use it");
+    expect(await screen.findByText("Not allowed now")).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "Let commands use GitHub" }),
+    ).toBeVisible();
+  });
+
+  it("a confirmed Use it clears the error of the last try", async () => {
+    let refused = true;
+    answers[`PUT ${ADDED}`] = () => {
+      if (refused) return json({ detail: "Try later" }, 409);
+      return ok();
+    };
+    await renderPage();
+    const useIt = await screen.findByRole("button", {
+      name: "Use your GitHub account for Bare Agent",
+    });
+    fireEvent.click(useIt);
+    await pressInDialog("Let commands use it");
+    expect(await screen.findByText("Try later")).toBeVisible();
+    refused = false;
+    fireEvent.click(useIt);
+    await pressInDialog("Let commands use it");
+    await waitFor(() =>
+      expect(writes().map((call) => call.path)).toEqual([ADDED, ADDED, REUSE]),
+    );
+    expect(screen.queryByText("Try later")).toBeNull();
+  });
+
+  it.each<[string, Partial<EgressCredentialAgent>]>([
+    ["has a GitHub service", { services: [added({})] }],
+    [
+      "has an administrator's GitHub key and a repository limit",
+      {
+        services: [
+          credentialService({
+            source: "config",
+            rules: [{ host: "api.github.com", port: null, path_prefix: "/" }],
+            key_configured: true,
+            configured: true,
+            active_source: "key",
+          }),
+          credentialService({
+            name: "github-limited",
+            display_name: "GitHub limit",
+            source: "user",
+            restrict_only: true,
+            rules: [
+              { host: "api.github.com", port: null, path_prefix: "/repos/x/" },
+            ],
+          }),
+        ],
+      },
+    ],
+    [
+      "has a service on any single GitHub subdomain",
+      {
+        services: [
+          credentialService({
+            name: "gh_wild",
+            source: "user",
+            rules: [{ host: "*.github.com", port: null, path_prefix: "/" }],
+          }),
+        ],
+      },
+    ],
+    [
+      "has an ignored GitHub service of another name",
+      {
+        inactive_services: [
+          { name: "work", reason: "invalid", oauth_provider: "github" },
+        ],
+      },
+    ],
+    [
+      "has only a Google login, which has its own account choice",
+      {
+        oauth_logins: [
+          {
+            provider: "google_drive",
+            display_name: "Google Drive",
+            connected: true,
+            account_label: "user@example.org",
+          },
+        ],
+      },
+    ],
+    ["is shared", { shared: true, scope: "shared" }],
+    [
+      "has the login only ready to connect",
+      { oauth_logins: [{ ...login, connected: false }] },
+    ],
+    ["is from an older server", { oauth_logins: undefined }],
+  ])("no suggestion when the agent %s", async (_case, changes) => {
+    // Personal Mind, with no GitHub service, still gets the suggestion.
+    const control = { ...agents[0], services: [], oauth_logins: [login] };
+    listing = [control, { ...listing[1], ...changes }];
+    await renderPage();
+    expect(
+      await screen.findByRole("button", {
+        name: "Use your GitHub account for Personal Mind",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /^Use your .* for Bare Agent$/ }),
+    ).toBeNull();
   });
 });

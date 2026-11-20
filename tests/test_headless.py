@@ -68,6 +68,11 @@ def _last_tool_result(request: ModelRequest) -> str:
     return str([message for message in request.messages if message.role == "tool"][-1].content)
 
 
+def _unnumbered(text: str) -> str:
+    """Return a ``read_file`` result without its line-number gutter and pagination note."""
+    return "\n".join(line.split("| ", 1)[1] for line in text.splitlines() if "| " in line)
+
+
 def _sent(request: ModelRequest, role: str | None = None) -> str:
     """Return the content of a request's messages, or only of those with ``role``, as one string."""
     return str([message.content for message in request.messages if role is None or message.role == role])
@@ -348,7 +353,7 @@ async def test_workdir_is_shell_cwd_and_file_base(
     """`shell` runs in the workdir and `file` resolves relative names against it; MindRoom's state stays in storage."""
     provider = _install(
         monkeypatch,
-        [("run_shell_command", {"args": "pwd"}), ("save_file", {"contents": "a", "file_name": "a.txt"})],
+        [("run_shell_command", {"args": "pwd"}), ("write_file", {"path": "a.txt", "content": "a"})],
         "done",
     )
     storage = tmp_path / "storage"
@@ -418,20 +423,27 @@ class _ReadsSavedOutput(ScriptedProvider):
             receipt = ast.literal_eval(_last_tool_result(request))
             path = receipt["mindroom_tool_output"]["path"]
             call = (
-                ("save_file", {"contents": "x", "file_name": path})
+                ("write_file", {"path": path, "content": "x"})
                 if self.write_back
-                else ("read_file_chunk", {"file_name": path, "start_line": 0, "end_line": 1})
+                else ("read_file", {"path": path, "limit": 2})
             )
             self.steps.insert(0, [call])
         async for event in super().stream(request):
             yield event
 
 
+def _saving_config(**agent: object) -> dict[str, Any]:
+    """Return a config that saves any tool output over 1 KiB, so one ``read_file`` page is saved."""
+    config = _config(**agent)
+    config["defaults"]["tool_output_auto_save_threshold_bytes"] = 1024
+    return config
+
+
 def _reads_saved_output(*, write_back: bool = False) -> _ReadsSavedOutput:
     return _ReadsSavedOutput(
         steps=[
             [("run_shell_command", {"args": "seq 1 20000 > big.txt"})],
-            [("read_file", {"file_name": "big.txt"})],
+            [("read_file", {"path": "big.txt"})],
             "done",
         ],
         write_back=write_back,
@@ -450,12 +462,18 @@ async def test_saved_output_is_read_back_through_file(
     provider = _reads_saved_output()
     provider.install(monkeypatch)
     storage = tmp_path / "storage"
-    await run_turn(_config(file_access=file_access), agent="coder", prompt="go", storage=storage, workdir=workdir)
+    await run_turn(
+        _saving_config(file_access=file_access),
+        agent="coder",
+        prompt="go",
+        storage=storage,
+        workdir=workdir,
+    )
 
-    assert _last_tool_result(provider.requests[3]).splitlines() == ["1", "2"]
+    assert _last_tool_result(provider.requests[3]).splitlines()[:2] == ["1|    1| 1", "2|    2| 2"]
     assert _files(workdir) == ["big.txt"]
     (saved,) = (storage / "agents" / "coder" / "workspace" / "mindroom_tool_outputs").iterdir()
-    assert saved.read_text().startswith("1\n2\n")
+    assert saved.read_text().startswith("   1| 1\n   2| 2\n")
 
 
 @pytest.mark.asyncio
@@ -468,11 +486,11 @@ async def test_saved_outputs_are_read_only_under_workspace_access(
     provider = _reads_saved_output(write_back=True)
     provider.install(monkeypatch)
     storage = tmp_path / "storage"
-    await run_turn(_config(), agent="coder", prompt="go", storage=storage, workdir=workdir)
+    await run_turn(_saving_config(), agent="coder", prompt="go", storage=storage, workdir=workdir)
 
     assert "is in the saved tool outputs directory you can only read." in _last_tool_result(provider.requests[3])
     (saved,) = (storage / "agents" / "coder" / "workspace" / "mindroom_tool_outputs").iterdir()
-    assert saved.read_text().startswith("1\n2\n")
+    assert saved.read_text().startswith("   1| 1\n   2| 2\n")
 
 
 @pytest.mark.asyncio
@@ -596,7 +614,7 @@ async def test_workdir_may_be_a_link_under_home(tmp_path: Path, workdir: Path, m
     (tmp_path / "link").symlink_to(workdir)
     provider = _install(
         monkeypatch,
-        [("save_file", {"contents": "a", "file_name": "a.txt"}), ("run_shell_command", {"args": "pwd"})],
+        [("write_file", {"path": "a.txt", "content": "a"}), ("run_shell_command", {"args": "pwd"})],
         "done",
     )
     await run_turn(_config(), agent="coder", prompt="go", storage=tmp_path / "storage", workdir=Path("~/link"))
@@ -693,10 +711,10 @@ class _FollowsTheWorkspacePath(ScriptedProvider):
             found = re.search(r"Your workspace, [^`]* is `([^`]+)`", _sent(request, "system"))
             self.root = f"{found.group(1)}/" if found else ""
             path = f"{self.root}subagents/helper.md"
-            self.steps = [[("save_file", {"contents": _PROFILE, "file_name": path})], *self.steps]
+            self.steps = [[("write_file", {"path": path, "content": _PROFILE})], *self.steps]
         if len(self.requests) == 3:
             record = re.search(r"record: (?:\w+:)?(\S+)", _last_tool_result(request))
-            self.steps.insert(0, [("read_file", {"file_name": f"{record.group(1) if record else ''}/run.json"})])
+            self.steps.insert(0, [("read_file", {"path": f"{record.group(1) if record else ''}/run.json"})])
         async for event in super().stream(request):
             yield event
 
@@ -717,7 +735,7 @@ async def test_a_profile_and_a_record_are_found_where_the_prompt_says(
     assert provider.root == f"{storage.resolve() / 'agents' / 'coder' / 'workspace'}/"
     assert "You are HELPER-PROFILE." in _sent(provider.requests[2], "system")
     assert _last_tool_result(provider.requests[3]).startswith("ran")
-    assert json.loads(_last_tool_result(provider.requests[4]))["status"] == "completed"
+    assert json.loads(_unnumbered(_last_tool_result(provider.requests[4])))["status"] == "completed"
     assert _files(workdir) == []
 
 
@@ -759,7 +777,7 @@ class _ReadsTheReceiptRecord(ScriptedProvider):
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         if len(self.requests) == 2:
             record = re.search(r"record: (?:\w+:)?(\S+)", _last_tool_result(request))
-            self.steps.insert(0, [("read_file", {"file_name": f"{record.group(1) if record else ''}/run.json"})])
+            self.steps.insert(0, [("read_file", {"path": f"{record.group(1) if record else ''}/run.json"})])
         async for event in super().stream(request):
             yield event
 
@@ -779,7 +797,7 @@ async def test_another_agents_record_is_found_where_the_receipt_says(
     config["agents"]["helper"] = {"display_name": "Helper"}
     await run_turn(config, agent="coder", prompt="go", storage=tmp_path / "storage", workdir=workdir)
 
-    assert json.loads(_last_tool_result(provider.requests[3]))["status"] == "completed"
+    assert json.loads(_unnumbered(_last_tool_result(provider.requests[3])))["status"] == "completed"
     assert _files(workdir) == []
 
 
@@ -789,16 +807,16 @@ async def test_the_prompt_says_where_the_tools_work_beside_a_workdir(
     workdir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """File access names the workdir for `file` and `coding`, and output paths are relative to the saved outputs."""
+    """File access names the workdir for `filesystem`, and output paths are relative to the saved outputs."""
     provider = _install(monkeypatch, "done")
     await run_turn(_config(), agent="coder", prompt="go", storage=tmp_path / "storage", workdir=workdir)
 
     system = _sent(provider.requests[0], "system")
-    assert "(`file` and `coding`: the workdir and your saved tool outputs, read-only outside the workdir;" in system
-    assert f"- Workdir: `{workdir}`, where `shell` runs and `file` and `coding` resolve relative paths; " in system
+    assert "(`filesystem`: the workdir and your saved tool outputs, read-only outside the workdir;" in system
+    assert f"- Workdir: `{workdir}`, where `shell` runs and `filesystem` resolves relative paths; " in system
     assert "code that `python` runs uses this process's current directory, so give it absolute paths." in system
-    (save_file,) = (tool for tool in provider.requests[0].tools if tool.name == "save_file")
-    description = save_file.parameters["properties"]["mindroom_output_path"]["description"]
+    (write_file,) = (tool for tool in provider.requests[0].tools if tool.name == "write_file")
+    description = write_file.parameters["properties"]["mindroom_output_path"]["description"]
     assert description.startswith("Optional path under your saved tool outputs directory:")
 
 

@@ -30,6 +30,13 @@ if TYPE_CHECKING:
             required=False,
             default=None,
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=["requests"],
     docs_url="https://docs.mindroom.chat/tools/project-management/#linear",

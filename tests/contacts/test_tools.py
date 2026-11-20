@@ -422,6 +422,21 @@ async def test_asking_again_with_the_same_rules_and_tools_posts_a_notice_that_ne
 
 
 @pytest.mark.asyncio
+async def test_asking_again_under_a_toolkits_other_name_is_the_same_request(tmp_path: Path) -> None:
+    """A request naming coding stores filesystem, so the same call again is a repeat that posts the missing notice."""
+    config, paths = _setup(tmp_path, tools=["coding", "calculator", "matrix_message"])
+    runtime = _runtime()
+    with _delivered(None), pytest.raises(ValueError, match=r"could not be posted"):
+        await _request(config, paths, runtime, tools=["coding"])
+
+    with _delivered("$late"):
+        again = await _request(config, paths, runtime, tools=["coding"])
+
+    assert again.requester_side.tools == ["filesystem"]
+    assert (again.notice_event_id, _stored(paths)) == ("$late", [again])
+
+
+@pytest.mark.asyncio
 async def test_asking_again_with_other_rules_or_tools_is_refused_and_changes_nothing(tmp_path: Path) -> None:
     """Other rules or tools on a repeated request would be lost, so the request is refused and points to update_contact."""
     config, paths = _setup(tmp_path)

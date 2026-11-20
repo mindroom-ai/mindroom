@@ -618,3 +618,11 @@ def test_computer_origins_remain_primary_runtime_configuration() -> None:
     assert runtime_env_policy.public_worker_startup_env(env) == {}
     assert runtime_env_policy.isolated_worker_runtime_env(env) == {}
     assert runtime_env_policy.worker_extra_env(env) == {}
+
+
+def test_smtp_url_is_secret_env() -> None:
+    """The SMTP URL carries a password, so no worker inherits it."""
+    assert runtime_env_policy.public_worker_startup_env({"MINDROOM_SMTP_URL": "x"}) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env({"MINDROOM_SMTP_URL": "x"}) == {}
+    assert not runtime_env_policy.is_shell_passthrough_allowed_env_name("MINDROOM_SMTP_URL")
+    assert not runtime_env_policy.is_worker_extra_env_name("MINDROOM_SMTP_URL")

@@ -1014,7 +1014,7 @@ def test_upload_reports_unparseable_bodies_as_400_and_missing_files_as_422(tmp_p
         headers=multipart,
     )
 
-    assert (malformed.status_code, malformed.json()) == (400, {"detail": "There was an error parsing the body"})
+    assert (malformed.status_code, malformed.json()) == (400, {"detail": "Invalid multipart data."})
     assert (no_boundary.status_code, no_boundary.json()) == (400, {"detail": "Missing boundary in multipart."})
     assert no_files.status_code == 422
     assert no_files.json()["detail"][0]["loc"] == ["body", "files"]

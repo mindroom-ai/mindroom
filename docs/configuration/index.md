@@ -81,6 +81,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |
 | `slack` | How Slack workspace members map to Matrix users | [Slack](../tools/slack.md#slack-configuration) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
+| `email_invites` | Chat link, expiry, and approvers of invites to a room by email | [Email Invites](#email-invites) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](../deployment/egress-broker.md) |
 | `background_tool_jobs` | Background execution of tool calls, on by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
@@ -164,6 +165,21 @@ diff before.yaml after.yaml
 
 When the configuration uses include tags, structured saves from the dashboard and the self-config tools are rejected, so edit the source files instead; the raw config editor still edits the top-level file's text (see [Dashboard](../dashboard.md#configurations-split-with-include)).
 `MINDROOM_CONFIG_TEMPLATE` copies only the single template file, so a template that uses includes needs its included files shipped next to the config path.
+
+## Email Invites
+
+The optional root `email_invites` block configures the [`email_invite`](../email-invites.md) tool; the feature is on for an agent when `email_invite` is in its `tools`.
+
+```yaml
+email_invites:
+  chat_url: https://chat.mindroom.chat   # origin of the Chat web app the link opens; default shown
+  expiry_days: 7                         # 1 to 30
+  approvers: []                          # Matrix user IDs who may approve in any room
+```
+
+`chat_url` must be an `https` origin, or an `http` origin on a local address, with no path.
+The mail server comes from the environment: `MINDROOM_SMTP_URL` (`smtps://[user:password@]host[:port]` or `smtp://[user:password@]host[:port]`, kept out of workers like other secrets) and `MINDROOM_SMTP_FROM`, the sender, for example `MindRoom <invites@example.org>`.
+Without both, the tool returns the link for the approver to forward by hand.
 
 ## Built-In Prompt Overrides
 
@@ -269,7 +285,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
-| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](../deployment/egress-broker.md#environment-variables) egress broker; setting it turns Agent Keys on, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; off)_ |
+| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](../deployment/egress-broker.md#environment-variables) egress broker for workers; `off` turns Agent Keys off, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; a loopback broker for shell calls in the primary)_ |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway and Agent CLI routes | `false` |

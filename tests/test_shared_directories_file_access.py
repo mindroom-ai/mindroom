@@ -1,8 +1,7 @@
-"""Tests for reaching an agent's shared directories through the file and coding tools."""
+"""Tests for reaching an agent's shared directories through the filesystem tool."""
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +12,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.custom_tools.coding import CodingTools
+from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shared_directories import paths as shared_paths
 from mindroom.shared_directories.paths import shared_directory_roots
@@ -23,7 +22,6 @@ from mindroom.tool_system.authoring import toolkit_functions
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import resolve_worker_target, worker_dir_name
-from mindroom.tools.file import file_tools
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -48,8 +46,16 @@ def _root(path: Path, *, writable: bool) -> SharedDirectoryRoot:
     return SharedDirectoryRoot(path=path, writable=writable)
 
 
-def _file_tool(workspace: Path, *roots: SharedDirectoryRoot) -> object:
-    return file_tools()(base_dir=workspace, file_access="workspace", shared_directory_roots=lambda: roots)
+_SUMMARY = "1| hello\n2| shared world"
+
+
+def _file_tool(workspace: Path, *roots: SharedDirectoryRoot) -> FilesystemTools:
+    return FilesystemTools(
+        base_dir=workspace,
+        file_access="workspace",
+        enable_delete_file=True,
+        shared_directory_roots=lambda: roots,
+    )
 
 
 def test_file_tool_reads_a_member_share_and_refuses_writes(tmp_path: Path) -> None:
@@ -57,10 +63,10 @@ def test_file_tool_reads_a_member_share_and_refuses_writes(tmp_path: Path) -> No
     workspace, share, other = _layout(tmp_path)
     tool = _file_tool(workspace, _root(share, writable=False))
 
-    assert tool.read_file(str(share / "summary.md")) == "hello\nshared world\n"
-    assert tool.read_file_chunk(str(share / "summary.md"), 1, 1) == "shared world"
+    assert tool.read_file(str(share / "summary.md")) == _SUMMARY
+    assert tool.read_file(str(share / "summary.md"), offset=2, limit=1).startswith("2| shared world")
     assert (
-        tool.save_file("x", str(share / "new.md"))
+        tool.write_file(str(share / "new.md"), "x")
         == f"Error: {share / 'new.md'} is in a shared directory you can only read."
     )
     assert "only read" in tool.delete_file(str(share / "summary.md"))
@@ -69,30 +75,16 @@ def test_file_tool_reads_a_member_share_and_refuses_writes(tmp_path: Path) -> No
     assert tool.read_file(str(other / "secret.md")).startswith("Error")
 
 
-def test_listed_share_paths_read_back_the_shared_file(tmp_path: Path) -> None:
-    """Listings name share files by absolute path, so reading a listed name never picks up a workspace copy."""
-    workspace, share, _other = _layout(tmp_path)
-    (workspace / "summary.md").write_text("stale workspace copy\n", encoding="utf-8")
-    tool = _file_tool(workspace, _root(share, writable=False))
-
-    listed = json.loads(tool.list_files(str(share)))
-    found = json.loads(tool.search_files(f"{share}/*.md"))["files"]
-    matched = json.loads(tool.search_content("shared", str(share)))["files"][0]["file"]
-
-    assert listed == found == [str(share / "summary.md")]
-    assert matched == str(share / "summary.md")
-    assert tool.read_file(listed[0]) == "hello\nshared world\n"
-
-
 def test_file_tool_writes_an_owned_share(tmp_path: Path) -> None:
-    """The owner writes its own share through the file tool and is told the absolute path."""
+    """The owner writes its own share and is told the absolute path."""
     workspace, share, _other = _layout(tmp_path)
     tool = _file_tool(workspace, _root(share, writable=True))
 
-    written = tool.save_file("draft", str(share / "notes" / "draft.md"))
+    written = tool.write_file(str(share / "notes" / "draft.md"), "draft")
 
-    assert written == str(share / "notes" / "draft.md")
+    assert written == f"Wrote 5 bytes (1 lines) to {share / 'notes' / 'draft.md'}"
     assert (share / "notes" / "draft.md").read_text(encoding="utf-8") == "draft"
+    assert tool.delete_file(str(share / "notes" / "draft.md")) == f"Deleted {share / 'notes' / 'draft.md'}"
 
 
 def test_file_tool_resolves_relative_paths_that_lead_into_a_share(tmp_path: Path) -> None:
@@ -100,7 +92,7 @@ def test_file_tool_resolves_relative_paths_that_lead_into_a_share(tmp_path: Path
     workspace, share, _other = _layout(tmp_path)
     tool = _file_tool(workspace, _root(share, writable=False))
 
-    assert tool.read_file("../shared_directories/alice/report/summary.md") == "hello\nshared world\n"
+    assert tool.read_file("../shared_directories/alice/report/summary.md") == _SUMMARY
 
 
 def test_file_tool_refuses_links_out_of_a_share(tmp_path: Path) -> None:
@@ -117,18 +109,18 @@ def test_shares_created_after_the_toolkit_are_reachable(tmp_path: Path) -> None:
     """Share roots are looked up on each call, so a share created during a response is usable at once."""
     workspace, share, _other = _layout(tmp_path)
     roots: list[SharedDirectoryRoot] = []
-    tool = file_tools()(base_dir=workspace, file_access="workspace", shared_directory_roots=lambda: tuple(roots))
+    tool = FilesystemTools(base_dir=workspace, file_access="workspace", shared_directory_roots=lambda: tuple(roots))
     assert tool.read_file(str(share / "summary.md")).startswith("Error")
 
     roots.append(_root(share, writable=True))
 
-    assert tool.read_file(str(share / "summary.md")) == "hello\nshared world\n"
+    assert tool.read_file(str(share / "summary.md")) == _SUMMARY
 
 
-def test_coding_tool_reads_greps_and_lists_a_share(tmp_path: Path) -> None:
-    """The coding tool reads, searches, and lists a joined share by absolute path and refuses to edit it."""
+def test_filesystem_tool_reads_greps_and_lists_a_share(tmp_path: Path) -> None:
+    """The tool reads, searches, and lists a joined share by absolute path and refuses to edit it."""
     workspace, share, other = _layout(tmp_path)
-    tool = CodingTools(
+    tool = FilesystemTools(
         base_dir=str(workspace),
         file_access="workspace",
         shared_directory_roots=lambda: (_root(share, writable=False),),
@@ -162,12 +154,9 @@ def _run_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, share_bel
     return run, share
 
 
-def _toolkits_without_a_workspace(share: Path) -> dict[str, Any]:
+def _toolkit_without_a_workspace(share: Path) -> FilesystemTools:
     roots = (_root(share, writable=True),)
-    return {
-        "file": file_tools()(file_access="workspace", enable_delete_file=True, shared_directory_roots=lambda: roots),
-        "coding": CodingTools(file_access="workspace", shared_directory_roots=lambda: roots),
-    }
+    return FilesystemTools(file_access="workspace", enable_delete_file=True, shared_directory_roots=lambda: roots)
 
 
 @pytest.mark.parametrize("share_below", [True, False], ids=["share-below-working-directory", "share-beside-it"])
@@ -178,55 +167,42 @@ def test_tools_without_a_workspace_reach_their_shares(
     share_below: bool,
     absolute: bool,
 ) -> None:
-    """Without a workspace, file and coding reach a share by either spelling, even one below the working directory."""
+    """Without a workspace, the tool reaches a share by either spelling, even one below the working directory."""
     run, share = _run_directory(tmp_path, monkeypatch, share_below=share_below)
-    toolkits = _toolkits_without_a_workspace(share)
+    tool = _toolkit_without_a_workspace(share)
 
     def spell(path: Path) -> str:
         return str(path) if absolute else os.path.relpath(path, run)
 
-    assert toolkits["file"].read_file(spell(share / "summary.md")) == "hello\nshared world\n"
-    assert toolkits["file"].save_file("draft", spell(share / "draft.md")) == str(share / "draft.md")
-    assert not toolkits["file"].replace_file_chunk(spell(share / "summary.md"), 1, 1, "edited").startswith("Error")
-    assert "edited" in toolkits["coding"].read_file(spell(share / "summary.md"))
-    assert toolkits["coding"].write_file(spell(share / "new.md"), "x").startswith("Wrote")
-    assert toolkits["coding"].ls(spell(share)) == "\n".join(
-        str(share / name) for name in ("draft.md", "new.md", "summary.md")
-    )
+    assert tool.read_file(spell(share / "summary.md")) == _SUMMARY
+    assert tool.write_file(spell(share / "draft.md"), "draft").startswith("Wrote")
+    edits = [{"old_text": "shared world", "new_text": "edited"}]
+    assert not tool.edit_file(spell(share / "summary.md"), edits).startswith("Error")
+    assert "edited" in tool.read_file(spell(share / "summary.md"))
+    assert tool.write_file(spell(share / "new.md"), "x").startswith("Wrote")
+    assert tool.delete_file(spell(share / "new.md")).startswith("Deleted")
+    assert tool.ls(spell(share)) == "\n".join(str(share / name) for name in ("draft.md", "summary.md"))
     assert (share / "summary.md").read_text(encoding="utf-8") == "hello\nedited\n"
     assert (share / "draft.md").read_text(encoding="utf-8") == "draft"
 
 
 @dataclass(frozen=True, slots=True)
 class _PathCall:
-    """One path method of the file or coding toolkit, called on a file, a directory, or a glob pattern."""
+    """One path method of the filesystem toolkit, called on a file or a directory."""
 
-    toolkit: str
     method: str
-    target: Literal["file", "directory", "pattern"]
+    target: Literal["file", "directory"]
     call: Callable[[Any, str], str]
 
 
 _PATH_CALLS = (
-    _PathCall("file", "save_file", "file", lambda tool, path: tool.save_file("planted", path)),
-    _PathCall("file", "read_file", "file", lambda tool, path: tool.read_file(path)),
-    _PathCall("file", "read_file_chunk", "file", lambda tool, path: tool.read_file_chunk(path, 0, 0)),
-    _PathCall("file", "replace_file_chunk", "file", lambda tool, path: tool.replace_file_chunk(path, 0, 0, "planted")),
-    _PathCall("file", "delete_file", "file", lambda tool, path: tool.delete_file(path)),
-    _PathCall("file", "list_files", "directory", lambda tool, path: tool.list_files(path)),
-    _PathCall("file", "search_files", "pattern", lambda tool, path: tool.search_files(path)),
-    _PathCall("file", "search_content", "directory", lambda tool, path: tool.search_content("secret", path)),
-    _PathCall("coding", "read_file", "file", lambda tool, path: tool.read_file(path)),
-    _PathCall(
-        "coding",
-        "edit_file",
-        "file",
-        lambda tool, path: tool.edit_file(path, [{"old_text": "secret", "new_text": "planted"}]),
-    ),
-    _PathCall("coding", "write_file", "file", lambda tool, path: tool.write_file(path, "planted")),
-    _PathCall("coding", "grep", "directory", lambda tool, path: tool.grep("secret", path)),
-    _PathCall("coding", "find_files", "directory", lambda tool, path: tool.find_files("*.md", path)),
-    _PathCall("coding", "ls", "directory", lambda tool, path: tool.ls(path)),
+    _PathCall("read_file", "file", lambda tool, path: tool.read_file(path)),
+    _PathCall("edit_file", "file", lambda tool, path: tool.edit_file(path, [{"old_text": "secret", "new_text": "x"}])),
+    _PathCall("write_file", "file", lambda tool, path: tool.write_file(path, "planted")),
+    _PathCall("delete_file", "file", lambda tool, path: tool.delete_file(path)),
+    _PathCall("grep", "directory", lambda tool, path: tool.grep("secret", path)),
+    _PathCall("find_files", "directory", lambda tool, path: tool.find_files("*.md", path)),
+    _PathCall("ls", "directory", lambda tool, path: tool.ls(path)),
 )
 
 
@@ -236,27 +212,21 @@ def _tree(root: Path) -> dict[str, bytes | None]:
     }
 
 
-def test_path_calls_cover_every_file_and_coding_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every function the two toolkits give the model is a path method the refusal test below calls."""
+def test_path_calls_cover_every_filesystem_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every function the toolkit gives the model is a path method the refusal test below calls."""
     _run, share = _run_directory(tmp_path, monkeypatch, share_below=True)
-    toolkits = _toolkits_without_a_workspace(share)
+    registered = {function.__name__ for function in toolkit_functions(_toolkit_without_a_workspace(share)).values()}
 
-    registered = {
-        (name, function.__name__)
-        for name, toolkit in toolkits.items()
-        for function in toolkit_functions(toolkit).values()
-    }
-
-    assert {(call.toolkit, call.method) for call in _PATH_CALLS} == registered
+    assert {call.method for call in _PATH_CALLS} == registered
 
 
 _TARGETS = {
-    True: {"file": "secret.md", "directory": ".", "pattern": "*.md"},
-    False: {"file": "missing.md", "directory": "missing", "pattern": "missing/*.md"},
+    True: {"file": "secret.md", "directory": "."},
+    False: {"file": "missing.md", "directory": "missing"},
 }
 
 
-@pytest.mark.parametrize("path_call", _PATH_CALLS, ids=lambda call: f"{call.toolkit}.{call.method}")
+@pytest.mark.parametrize("path_call", _PATH_CALLS, ids=lambda call: call.method)
 @pytest.mark.parametrize("absolute", [False, True], ids=["relative", "absolute"])
 @pytest.mark.parametrize("existing", [True, False], ids=["existing", "missing"])
 def test_tools_without_a_workspace_refuse_the_working_directory(
@@ -268,7 +238,7 @@ def test_tools_without_a_workspace_refuse_the_working_directory(
 ) -> None:
     """Without a workspace, every path method refuses working directory paths alike, existing or not, unchanged."""
     run, share = _run_directory(tmp_path, monkeypatch, share_below=True)
-    toolkit = _toolkits_without_a_workspace(share)[path_call.toolkit]
+    toolkit = _toolkit_without_a_workspace(share)
     relative = _TARGETS[existing][path_call.target]
     before = _tree(run)
 
@@ -287,8 +257,8 @@ def test_refusal_says_shares_stay_reachable_only_when_the_agent_has_some(
 ) -> None:
     """Beside workers, or with no shares, primary-run tools reach no share, so the refusal does not offer one."""
     _run, share = _run_directory(tmp_path, monkeypatch, share_below=False)
-    with_share = _toolkits_without_a_workspace(share)["file"]
-    without_shares = file_tools()(file_access="workspace")
+    with_share = _toolkit_without_a_workspace(share)
+    without_shares = FilesystemTools(file_access="workspace")
 
     assert with_share.read_file("secret.md") == (
         "Error: Path 'secret.md' requires an agent workspace; file_access is 'workspace'. "
@@ -304,13 +274,13 @@ def test_refusal_says_shares_stay_reachable_only_when_the_agent_has_some(
 def test_unrestricted_tools_ignore_share_roots(tmp_path: Path) -> None:
     """Unrestricted file access already reaches shares by path, so writes are not narrowed."""
     workspace, share, _other = _layout(tmp_path)
-    tool = file_tools()(
+    tool = FilesystemTools(
         base_dir=workspace,
         file_access="unrestricted",
         shared_directory_roots=lambda: (_root(share, writable=False),),
     )
 
-    tool.save_file("x", str(share / "new.md"))
+    tool.write_file(str(share / "new.md"), "x")
 
     assert (share / "new.md").read_text(encoding="utf-8") == "x"
 
@@ -478,7 +448,7 @@ def test_worker_without_shared_directories_has_no_roots(tmp_path: Path) -> None:
     assert shared_directory_roots(None, runtime_paths, None) == ()
 
 
-def test_built_file_and_coding_tools_reach_the_calling_agents_shares(tmp_path: Path) -> None:
+def test_built_filesystem_tools_reach_the_calling_agents_shares(tmp_path: Path) -> None:
     """Toolkits built for an agent get its shared directories, so the owner writes and a member only reads."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = _ledger_config(runtime_paths)
@@ -498,7 +468,7 @@ def test_built_file_and_coding_tools_reach_the_calling_agents_shares(tmp_path: P
         )
 
     assert build("coding", "alice").write_file(str(share / "summary.md"), "shared\n").startswith("Wrote")
-    assert build("file", "bob").read_file(str(share / "summary.md")) == "shared\n"
-    assert "only read" in build("file", "bob").save_file("x", str(share / "summary.md"))
+    assert build("filesystem", "bob").read_file(str(share / "summary.md")) == "1| shared"
+    assert "only read" in build("file", "bob").write_file(str(share / "summary.md"), "x")
     assert "only read" in build("coding", "bob").write_file(str(share / "summary.md"), "x")
-    assert build("file", "dave").read_file(str(share / "summary.md")).startswith("Error")
+    assert build("filesystem", "dave").read_file(str(share / "summary.md")).startswith("Error")

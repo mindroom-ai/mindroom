@@ -399,9 +399,9 @@ def test_unsafe_raw_html_attributes_are_stripped() -> None:
     assert "<a>click</a>" in html
     assert 'href="javascript:alert(1)"' not in html
     assert "onclick=" not in html
-    assert "<img" in html
-    assert 'alt="safe"' in html
-    assert 'src="javascript:alert(1)"' not in html
+    assert "<img" not in html
+    assert "⚠️ Image not sent: safe (no uploaded file)" in html
+    assert "javascript:" not in html
     assert "onerror=" not in html
 
 
@@ -427,12 +427,12 @@ def test_app_links_keep_their_href(markdown: str, expected: str) -> None:
     ("markdown", "expected"),
     [
         ("[open](someapp://x)", "<p><a>open</a></p>\n"),
-        ("![x](readdlespark://bl=abc)", '<p><img alt="x"></p>\n'),
-        ('<img src="obsidian://open" alt="x">', '<img alt="x">'),
+        ("![x](readdlespark://bl=abc)", "<p>⚠️ Image not sent: x (no uploaded file)</p>\n"),
+        ('<img src="obsidian://open" alt="x">', "⚠️ Image not sent: x (no uploaded file)"),
     ],
 )
 def test_other_app_urls_are_dropped(markdown: str, expected: str) -> None:
-    """Unknown schemes lose their link, and app schemes never become image sources."""
+    """Unknown schemes lose their link, and an app-scheme image becomes a note."""
     assert markdown_to_html(markdown) == expected
 
 
@@ -448,8 +448,8 @@ def test_malformed_ipv6_url_attribute_is_dropped_without_crashing() -> None:
     html = markdown_to_html('<a href="http://[">x</a>\n<img src="http://[" alt="safe">')
     assert "<a>x</a>" in html
     assert 'href="http://["' not in html
-    assert 'alt="safe"' in html
-    assert 'src="http://["' not in html
+    assert "⚠️ Image not sent: safe (no uploaded file)" in html
+    assert "<img" not in html
 
 
 @pytest.mark.parametrize(

@@ -823,7 +823,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
     [
         (
             ["openclaw_compat"],
-            "attachments, browser, coding, duckduckgo, matrix_message, matrix_room, scheduler, shell, website",
+            "attachments, browser, duckduckgo, filesystem, matrix_message, matrix_room, scheduler, shell, website",
         ),
         (["shell", "matrix_message"], "attachments, matrix_message, matrix_room, shell"),
     ],

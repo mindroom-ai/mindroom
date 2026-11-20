@@ -15,13 +15,15 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno==3.0.9",
+  "agno==3.2.1",
   "aiohttp>=3.13.3",
-  # Claude SDK 2 moves requests to API version 2026-10-21, a migration of its own.
-  "anthropic>=1.17,<2",
+  "anthropic>=2.11,<3",
   "anyio>=4.10",
-  "authlib>=1.6",
+  # Authlib 1.8 moves its HTTPX client to httpx2, which our token transports and error handling do not use yet.
+  "authlib>=1.6,<1.8",
   "certifi>=2026.4.22",
+  # Click 8.5 drops `typer.Argument(help=...)` text from Typer 0.25's `--help`.
+  "click<8.5",
   "cron-descriptor>=1.4.5",
   "croniter>=6",
   "cryptography>=47",
@@ -29,7 +31,9 @@ dependencies = [
   "docstring-parser>=0.18",
   "fastapi>=0.136.3",
   "google-auth>=2.40.3",
-  "google-genai>=2",
+  # google-genai 3 moves the Gemini Developer API (not Vertex AI) to API v1, which lacks the -latest aliases, Live API,
+  # and caches, and makes httpx2 its default client; that transport change needs its own validation.
+  "google-genai>=2,<3",
   "h11>=0.16",
   "httpx>=0.27",
   # 2.15.1 stops a long-lived client's TLS handshakes from growing slower on Linux.
@@ -52,7 +56,8 @@ dependencies = [
   "pydantic>=2.12.5",
   "pydantic-settings>=2.10.1",
   "pygments>=2.20",
-  "pyjwt>=2.13",
+  # 2.14 adds the JWKS refresh cooldown that trusted-upstream auth turns off.
+  "pyjwt>=2.14",
   # Request sizing reads a PDF attachment's page count (token_counting/requests.py).
   "pypdf>=6.21.4",
   "python-dotenv>=1",
@@ -65,7 +70,9 @@ dependencies = [
   "starlette>=1.3.1",
   "structlog>=24.1",
   "tiktoken>=0.12",
-  "typer>=0.24",
+  # 0.26 vendors Click, which breaks retrying an invalid `click.Choice` prompt; later releases also rerender `--help`
+  # (`{arg}` usage from 0.27, `<bool>` beside every flag by 0.29), which changes our CLI docs.
+  "typer>=0.24,<0.26",
   "uvicorn>=0.35",
   "watchfiles>=1",
   "websockets>=14",
@@ -80,11 +87,12 @@ agentql = [
 ]
 airflow = []
 apify = [
-  "apify-client>=1.12.2; platform_machine!='aarch64'",
+  "apify-client>=1.12.2",
 ]
 approved_egress = []
 arxiv = [
-  "arxiv",
+  # Agno 3.2.1 ArxivTools calls Result.download_pdf, which arxiv 4 removed.
+  "arxiv<4",
 ]
 atlassian = []
 attachments = []
@@ -147,7 +155,8 @@ config_manager = [
   "pyyaml>=6",
 ]
 confluence = [
-  "atlassian-python-api",
+  # Agno 3.2.1 ConfluenceTools calls create_page and get_page_by_title, which atlassian-python-api 5 removed.
+  "atlassian-python-api<5",
 ]
 contacts = []
 crawl4ai = [
@@ -160,7 +169,7 @@ custom_api = [
   "requests",
 ]
 daytona = [
-  "daytona",
+  "daytona<1",
 ]
 delegate = []
 discord = [
@@ -186,6 +195,7 @@ eleven_labs = [
   "elevenlabs",
 ]
 email = []
+email_invite = []
 exa = [
   "exa-py",
 ]
@@ -198,6 +208,7 @@ file_generation = [
   "python-docx>=1.2",
   "reportlab",
 ]
+filesystem = []
 financial_datasets_api = [
   "requests",
 ]
@@ -248,6 +259,8 @@ google_maps = [
   "googlemaps",
 ]
 google_scholar = [
+  # scholarly imports bibtexparser.bibdatabase, which bibtexparser 2 removed.
+  "bibtexparser<2",
   "scholarly",
 ]
 google_sheets = [
@@ -300,8 +313,10 @@ lumalabs = [
 ]
 matrix_api = []
 matrix_calls = [
-  # 1.8.9 runs on OpenAI SDK 3 and pins the livekit 1.1.21 audio mixer the call tests cover.
-  "livekit-agents[openai]>=1.8.9",
+  # 1.8.9 runs on OpenAI SDK 3. Each release pins livekit exactly (1.8.9 to 1.8.10 on 1.1.21, 1.8.11 on 1.2.0), and the
+  # call tests cover the audio mixer of the locked one. 1.8.12 changes GPT Live delegation events and transcript
+  # delivery, which the call agent does not follow yet.
+  "livekit-agents[openai]>=1.8.9,<1.8.12",
 ]
 matrix-e2ee = []
 matrix_message = []
@@ -482,7 +497,8 @@ zendesk = [
   "requests",
 ]
 zep = [
-  "zep-cloud>=3.3",
+  # Agno 3.2.1 ZepTools calls user.add, which zep-cloud 4 removed.
+  "zep-cloud>=3.3,<4",
 ]
 zoom = [
   "requests",
@@ -522,7 +538,9 @@ dev = [
   "requests>=2.32.4",
   "ruff>=0.12.5",
   "tach>=0.34.1",
-  "ty>=0.0.17",
+  # Freezes main's ty 0.0.32. The latest (0.0.107) renames rules this config ignores and reports about 1,700 new
+  # errors; upgrade ty on its own.
+  "ty>=0.0.17,<0.0.33",
   "vulture>=2.16",
   "zensical",
 ]
@@ -556,11 +574,6 @@ version_scheme = "no-guess-dev"
 
 [tool.uv]
 override-dependencies = [
-  # crawl4ai 0.8.6 declares lxml~=5.3, which caps lxml below 6.
-  # The locked lxml 5.4.0 has no cp314 Linux wheels.
-  # On Python 3.14 it source-builds against libxml2/libxslt, so use lxml 6.1+ there.
-  "lxml>=5.3,<6; python_version < '3.14'",
-  "lxml>=6.1.0; python_version >= '3.14'",
   # composio-core 0.7.21 declares Pillow<11,>=10.2.0.
   # The locked Pillow 10.4.0 has no cp314 Linux wheels.
   # On Python 3.14 it source-builds against zlib, so use Pillow 11.x there.

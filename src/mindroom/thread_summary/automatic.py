@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from functools import partial
+from html import unescape
 from typing import TYPE_CHECKING
 
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -18,6 +19,7 @@ from mindroom.thread_summary.generation import (
     generate_summary,
     resolve_thread_summary_model_name,
     room_summary_instructions,
+    title_error,
 )
 from mindroom.thread_summary.notices import (
     ThreadSummaryWriteError,
@@ -26,7 +28,6 @@ from mindroom.thread_summary.notices import (
     summary_generated_at,
 )
 from mindroom.thread_summary.state import (
-    THREAD_SUMMARY_MAX_LENGTH,
     SummaryState,
     TruncatedThreadHistoryError,
     current_thread_summary,
@@ -67,15 +68,38 @@ _rooms_refusing_automatic_tags: set[str] = set()
 _FORKED_TITLE_SUFFIX = " (forked)"
 
 
-def _with_fork_marker(title: str, history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str:
-    """Return ``title`` marked once as a fork's when ``history`` roots a fork, so a fork of a fork stays "X (forked)"."""
-    if fork_parent_thread_id(history, thread_id) is None:
-        return title
-    base = normalize_thread_summary_text(title).removesuffix(_FORKED_TITLE_SUFFIX)
-    # Truncate here, not in the notice writer, so a long title keeps its marker.
-    if len(base) + len(_FORKED_TITLE_SUFFIX) > THREAD_SUMMARY_MAX_LENGTH:
-        base = base[: THREAD_SUMMARY_MAX_LENGTH - len(_FORKED_TITLE_SUFFIX) - 3].rstrip() + "..."
-    return f"{base}{_FORKED_TITLE_SUFFIX}"
+def _keepable_title(title: str | None, *, retitle: bool) -> str | None:
+    """Return the title a check may keep: one within the short-title rule, never for a retitle."""
+    base = (title or "").removesuffix(_FORKED_TITLE_SUFFIX)
+    return title if base and not retitle and title_error(base) is None else None
+
+
+def _title_key(title: str) -> str:
+    """Return a title without what a reader would not call a new title: case, spacing, emoji style, end, fork marker."""
+    key = " ".join(normalize_thread_summary_text(title).replace("\ufe0f", "").casefold().split())
+    return key.rstrip(".!?…。\uff01\uff1f ").removesuffix(_FORKED_TITLE_SUFFIX)
+
+
+def _title_to_deliver(
+    generated: GeneratedSummary,
+    current: str | None,
+    history: Sequence[ResolvedVisibleMessage],
+    thread_id: str,
+) -> str:
+    """Return ``current`` when the model kept it, by its answer or an echo escaped or not, else the new title."""
+    echoes = {_title_key(generated.summary), _title_key(unescape(generated.summary))}
+    if current is not None and (generated.keep_current or _title_key(current) in echoes):
+        return current
+    return _publishable_title(generated.summary, history, thread_id)
+
+
+def _publishable_title(title: str, history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str:
+    """Return a new title normalized, marked once as a fork's when it is one."""
+    base = normalize_thread_summary_text(title)
+    if not base or fork_parent_thread_id(history, thread_id) is None:
+        return base
+    # The marker is outside the limits, and a fork of a fork stays "X (forked)".
+    return f"{base.removesuffix(_FORKED_TITLE_SUFFIX)}{_FORKED_TITLE_SUFFIX}"
 
 
 async def _provisional_title(
@@ -89,10 +113,11 @@ async def _provisional_title(
     model_name: str,
     room_instructions: Callable[[], Awaitable[str | None]],
 ) -> str | None:
-    """Return a new thread's first title: a fork's parent's current title without a model, else its prompt's, if any."""
+    """Return a new thread's first title: a fork's parent's short title without a model, else its prompt's, if any."""
     parent_thread_id = fork_parent_thread_id(history, thread_id)
     parent_state = None if parent_thread_id is None else await parent_summary(parent_thread_id)
-    title = None if parent_state is None else parent_state.summary
+    # A parent title over the short-title limits, such as a long pin, is not copied: the fork titles its prompt.
+    title = None if parent_state is None else _keepable_title(parent_state.summary, retitle=False)
     if title is None:
         if prompt_message is None:
             return None
@@ -107,7 +132,7 @@ async def _provisional_title(
         if generated is None:
             return None
         title = generated.summary
-    return _with_fork_marker(title, history, thread_id)
+    return _publishable_title(title, history, thread_id) or None
 
 
 async def _thread_is_resolved(
@@ -543,7 +568,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
         logger.exception("Prompt thread summary failed", room_id=room_id, thread_id=thread_id)
 
 
-async def maybe_generate_thread_summary(  # noqa: PLR0911
+async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -627,6 +652,8 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             tag_vocabulary = refreshed_tag_vocabulary or format_tag_vocabulary_with_counts(
                 load_tag_vocabulary_snapshot(runtime_paths, room_id),
             )
+        # A long legacy title is rewritten once; a retitle asks for a new title outright.
+        current_title = _keepable_title(state.summary, retitle=retitle)
         try:
             model_name = resolve_thread_summary_model_name(
                 config,
@@ -641,6 +668,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
                 model_name=model_name,
                 tag_vocabulary=tag_vocabulary,
                 room_instructions=await room_summary_instructions(client, room_id),
+                current_title=current_title,
             )
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
@@ -654,7 +682,14 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             baselines.record(room_id, thread_id, message_count)
             return
 
-        normalized_summary = normalize_thread_summary_text(generated.summary)
+        # A kept title with tags to apply is posted again as it is, so the notice records the tags as done.
+        normalized_summary = _title_to_deliver(generated, current_title, thread_history, thread_id)
+        # The first reply's check posts a kept prompt title again, so its count schedules the tagging refresh.
+        if normalized_summary == current_title and not generated.tags and state.last_summary_count > 0:
+            # Only this process remembers the check, as after a failed generation; a restart checks once more.
+            logger.debug("Keeping the current thread title", room_id=room_id, thread_id=thread_id)
+            baselines.record(room_id, thread_id, message_count)
+            return
         if not normalized_summary:
             logger.warning(
                 "Thread summary generation returned no plain-text content",
@@ -663,7 +698,6 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             )
             baselines.record(room_id, thread_id, message_count)
             return
-        normalized_summary = _with_fork_marker(normalized_summary, thread_history, thread_id)
 
         await _deliver_generated_summary(
             client,

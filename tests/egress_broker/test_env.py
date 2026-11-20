@@ -209,13 +209,17 @@ def test_primary_callback_hosts(tmp_path: Path, process_env: dict[str, str], exp
 @pytest.mark.parametrize(
     ("process_env", "enabled"),
     [
-        pytest.param({}, False, id="unset"),
-        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "   "}, False, id="blank"),
+        # Unset or blank, the broker runs on a free loopback port for shell calls in the primary.
+        pytest.param({}, True, id="unset"),
+        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "   "}, True, id="blank"),
+        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "off"}, False, id="off"),
+        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": " OFF "}, False, id="off-upper"),
+        pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "0"}, False, id="zero"),
         pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "8768"}, True, id="set"),
         # An invalid port still counts, so startup refuses it instead of the feature silently disappearing.
         pytest.param({"MINDROOM_EGRESS_BROKER_PORT": "http"}, True, id="invalid"),
-        # The worker-facing URL alone does not start the broker.
-        pytest.param({"MINDROOM_EGRESS_BROKER_URL": "http://broker.local:8768"}, False, id="url-only"),
+        # The worker-facing URL alone does not turn the default broker off.
+        pytest.param({"MINDROOM_EGRESS_BROKER_URL": "http://broker.local:8768"}, True, id="url-only"),
     ],
 )
 def test_egress_broker_enabled_follows_the_port_setting(
@@ -224,7 +228,7 @@ def test_egress_broker_enabled_follows_the_port_setting(
     *,
     enabled: bool,
 ) -> None:
-    """The broker, and with it every Agent Keys surface, is enabled exactly when its port setting is set."""
+    """The broker, and with it every Agent Keys surface, is enabled unless its port setting turns it off."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
@@ -259,7 +263,7 @@ def test_personal_page_served_needs_a_sign_in(
         return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
 
     assert personal_page_served(paths({"MINDROOM_EGRESS_BROKER_PORT": "8768", **process_env})) is served
-    assert personal_page_served(paths(process_env)) is False
+    assert personal_page_served(paths({"MINDROOM_EGRESS_BROKER_PORT": "off", **process_env})) is False
 
 
 def _agent(*tools: str, **extra: object) -> dict[str, object]:
@@ -267,8 +271,13 @@ def _agent(*tools: str, **extra: object) -> dict[str, object]:
 
 
 # A sandbox runner, so shell and python calls run in a worker unless an agent's `worker_tools` keeps them local.
-_RUNNER_WITHOUT_BROKER = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}
+_RUNNER_WITHOUT_BROKER = {
+    "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+    "MINDROOM_EGRESS_BROKER_PORT": "off",
+}
 _RUNNER = {**_RUNNER_WITHOUT_BROKER, "MINDROOM_EGRESS_BROKER_PORT": "8768"}
+# A sandbox runner with the default broker, which has no worker-facing URL.
+_RUNNER_WITHOUT_PORT = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}
 # The broker without a worker backend, so every tool runs in the primary.
 _BROKER = {"MINDROOM_EGRESS_BROKER_PORT": "8768"}
 
@@ -383,18 +392,42 @@ def test_only_a_primary_shell_of_a_broker_agent_is_served_by_the_tool_call_polic
 
 
 @pytest.mark.parametrize(
-    ("agent", "unused"),
+    ("agent", "process_env", "unused"),
     [
-        pytest.param(_agent("python", "egress_credentials", worker_tools=[]), True, id="python-in-primary"),
-        pytest.param(_agent("shell", "python", "egress_credentials", worker_tools=[]), False, id="shell-in-primary"),
-        pytest.param(_agent("egress_credentials"), False, id="no-command-tool"),
-        pytest.param(_agent("python", "egress_credentials", worker_tools=["python"]), False, id="python-in-worker"),
-        pytest.param(_agent("python", worker_tools=[]), False, id="no-egress-tool"),
+        pytest.param(_agent("python", "egress_credentials", worker_tools=[]), _RUNNER, True, id="python-in-primary"),
+        pytest.param(
+            _agent("shell", "python", "egress_credentials", worker_tools=[]),
+            _RUNNER,
+            False,
+            id="shell-in-primary",
+        ),
+        pytest.param(_agent("egress_credentials"), _RUNNER, False, id="no-command-tool"),
+        pytest.param(
+            _agent("python", "egress_credentials", worker_tools=["python"]),
+            _RUNNER,
+            False,
+            id="python-in-worker",
+        ),
+        pytest.param(_agent("python", worker_tools=[]), _RUNNER, False, id="no-egress-tool"),
+        # The default broker serves no worker, but a worker-routed command is not a python in the primary.
+        pytest.param(
+            _agent("shell", "egress_credentials"),
+            _RUNNER_WITHOUT_PORT,
+            False,
+            id="default-broker-shell-in-worker",
+        ),
+        pytest.param(
+            _agent("python", "egress_credentials", worker_tools=[]),
+            _RUNNER_WITHOUT_PORT,
+            True,
+            id="default-broker-python-in-primary",
+        ),
     ],
 )
 def test_an_egress_tool_whose_only_command_tool_is_a_primary_python_is_reported(
     tmp_path: Path,
     agent: dict[str, object],
+    process_env: dict[str, str],
     *,
     unused: bool,
 ) -> None:
@@ -403,7 +436,7 @@ def test_an_egress_tool_whose_only_command_tool_is_a_primary_python_is_reported(
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env=_RUNNER,
+        process_env=process_env,
     )
 
     assert egress_tool_with_only_primary_python(config, "agent", runtime_paths) is unused
@@ -415,6 +448,9 @@ def test_an_egress_tool_whose_only_command_tool_is_a_primary_python_is_reported(
     [
         pytest.param(_RUNNER, "unscoped", id="broker-on"),
         pytest.param(_RUNNER_WITHOUT_BROKER, None, id="broker-off"),
+        # The default broker has no worker-facing URL, so a worker-routed shell gets nothing from it.
+        pytest.param({"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}, None, id="default-broker-worker"),
+        pytest.param({}, "unscoped", id="default-broker-primary"),
     ],
 )
 def test_an_agent_does_not_use_a_broker_that_is_off(

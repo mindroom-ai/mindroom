@@ -8,13 +8,14 @@ import sys
 import threading
 from contextlib import closing
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
-from mindroom.agent_loop.tools import PlannedCall
+from mindroom.agent_loop.tools import NO_OUTPUT_TEXT, PlannedCall
 from mindroom.constants import SUBAGENT_COST_RUN_METADATA_KEY
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, recover_interrupted_run
@@ -256,18 +257,31 @@ async def test_checkpoint_retains_only_the_current_provider_batch(tmp_path: Path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("media", "failed"),
-    [(False, False), (True, False), (True, True)],
-    ids=["text", "media", "failed"],
+    ("media", "failed", "text"),
+    [
+        (False, False, "real sibling result"),
+        (True, False, "real sibling result"),
+        (True, True, "real sibling result"),
+        (False, False, ""),
+    ],
+    ids=["text", "media", "failed", "empty"],
 )
-async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path, media: bool, failed: bool) -> None:
-    """A finished sibling's result is saved as the loop answers it: a failed one marked failed and without media."""
+async def test_approval_checkpoint_keeps_completed_sibling_result(
+    tmp_path: Path,
+    media: bool,
+    failed: bool,
+    text: str,
+) -> None:
+    """A finished sibling's result is saved as the loop answers it: a failed one marked failed and without media.
+
+    An empty success's message says it had no text output, while its call keeps the raw empty result.
+    """
     catalog = await _stored_catalog(tmp_path)
     checkpoint = BatchCheckpoint(catalog)
     await _capture(checkpoint, _record(), [_assistant("done", "waiting")])
     await checkpoint.persist("done")
     outcome = ToolOutcome(
-        content="real sibling result",
+        content=text,
         images=(Image(content=b"sibling-image", mime_type="image/png"),) if media else (),
         audios=(Audio(url="https://example.test/sibling.wav"),) if media else (),
         is_error=failed,
@@ -278,9 +292,9 @@ async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path
     saved = catalog.store.get_run("run")
     assert saved is not None
     assert saved.messages[-1].tool_call_id == "done"
-    assert (saved.messages[-1].content, saved.messages[-1].tool_call_error) == ("real sibling result", failed)
+    assert (saved.messages[-1].content, saved.messages[-1].tool_call_error) == (text or NO_OUTPUT_TEXT, failed)
     assert [(tool.tool_call_id, tool.result, tool.is_error) for tool in saved.tools or ()] == [
-        ("done", "real sibling result", failed),
+        ("done", text, failed),
         ("waiting", None, None),
     ]
     if media and not failed:
@@ -288,6 +302,36 @@ async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path
         assert saved.messages[-1].audio[0].url == "https://example.test/sibling.wav"
     else:
         assert (saved.messages[-1].images, saved.messages[-1].audio) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_call_id_an_earlier_batch_answered_is_pending_until_this_batch_finishes_it(tmp_path: Path) -> None:
+    """A provider may reuse a call id: the new call is saved unanswered, and the earlier one keeps its result."""
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    first = [Message(role="user", content="do work"), _assistant("c1")]
+    await _capture(checkpoint, _record(), first)
+    checkpoint.complete("c1", ToolOutcome(content=""))
+    answered = Message(role="tool", tool_call_id="c1", tool_name="bash", content=NO_OUTPUT_TEXT)
+    # The loop records each batch's calls before it runs them, so the record holds both calls under the id.
+    record = replace(
+        _record(),
+        tools=[
+            ToolExecution(tool_call_id="c1", tool_name="bash", result="", is_error=False),
+            ToolExecution(tool_call_id="c1", tool_name="bash"),
+        ],
+    )
+    await _capture(checkpoint, record, [*first, answered, _assistant("c1")])
+
+    await checkpoint.persist("c1")
+
+    assert catalog.store is not None
+    saved = catalog.store.get_run("run")
+    assert saved is not None
+    assert [(tool.tool_call_id, tool.result, tool.is_error) for tool in saved.tools or ()] == [
+        ("c1", "", False),
+        ("c1", None, None),
+    ]
 
 
 @pytest.mark.asyncio

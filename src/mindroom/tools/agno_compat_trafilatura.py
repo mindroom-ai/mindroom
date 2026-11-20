@@ -22,6 +22,7 @@ from mindroom.trafilatura_call_limit import CALL_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from configparser import ConfigParser
 
     from trafilatura.spider import CrawlParameters
 
@@ -95,14 +96,16 @@ def _fetch_response(url: str, *, decode: bool = False) -> Response | None:
     return fetched
 
 
-def _fetch_url(url: str) -> str | None:
-    """Return decoded HTML from a successful guarded download."""
+def _fetch_url(url: str, config: ConfigParser | None = None) -> str | None:
+    """Return decoded HTML from a successful guarded download; the spider's `config` is ignored, as the fetch sets its own limits."""
+    del config
     response = _fetch_response(url, decode=True)
     return None if response is None else response.html
 
 
-def _crawl_fetch_response(url: str, *, decode: bool = False) -> Response | None:
+def _crawl_fetch_response(url: str, *, decode: bool = False, config: ConfigParser | None = None) -> Response | None:
     """Download one crawled page; a refused start page fails the crawl, and a refused link after it is skipped."""
+    del config
     call = _call.get()
     start_page = call is None or not call.crawl_started
     if call is not None:
@@ -141,7 +144,7 @@ def _time_limit() -> Iterator[None]:
 
 
 # AGNO_COMPAT: TrafilaturaTools and Trafilatura's spider offer no way to bound one call's total time.
-# Reason: Agno 3.0.9 extract_batch downloads any number of URLs one after another, and crawl_website makes about
+# Reason: Agno 3.2.1 extract_batch downloads any number of URLs one after another, and crawl_website makes about
 # 21 downloads while Trafilatura's focused_crawler, through its module-level crawl_page and sleep, visits pages and
 # pauses after each one for as long as the site's robots.txt crawl delay asks; each download is bounded, but one call
 # could hold its thread for many minutes. MindRoom's limit therefore overrides both methods and replaces crawl_page
@@ -172,7 +175,7 @@ class TimeLimitedTrafilaturaTools(TrafilaturaTools):
 def install_server_fetch_guard() -> None:
     """Replace every downloader TrafilaturaTools reaches with the guarded fetchers, and the crawler's visits, pauses, and store."""
     # AGNO_COMPAT: TrafilaturaTools extraction downloads through a fixed module-level fetcher.
-    # Reason: Agno 3.0.9 extract_text, extract_metadata_only, extract_batch, and the
+    # Reason: Agno 3.2.1 extract_text, extract_metadata_only, extract_batch, and the
     # crawl_website content loop call the module-level trafilatura.fetch_url binding,
     # which follows redirects and dials any address, so model-chosen URLs reached
     # loopback, private, and metadata targets from the MindRoom process.
@@ -190,7 +193,7 @@ def install_server_fetch_guard() -> None:
     # tests/test_tools_metadata.py::test_local_url_fetch_tools_do_not_contact_loopback_targets.
     agno_trafilatura.fetch_url = _fetch_url  # ty: ignore[invalid-assignment]
     # AGNO_COMPAT: TrafilaturaTools crawling delegates to Trafilatura's spider without a fetch hook.
-    # Reason: Agno 3.0.9 crawl_website calls trafilatura.spider.focused_crawler, whose
+    # Reason: Agno 3.2.1 crawl_website calls trafilatura.spider.focused_crawler, whose
     # module-level fetch_url and fetch_response bindings download robots.txt, redirects,
     # meta-refresh targets, and discovered links without a destination policy.
     # Upstream issue: Tracking gap; no matching issue identified on September 24, 2026.

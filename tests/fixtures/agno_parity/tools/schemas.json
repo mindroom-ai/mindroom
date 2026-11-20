@@ -1037,7 +1037,7 @@
       },
       {
         "name": "inline_image",
-        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.",
+        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.\nIn an encrypted room, or when this refuses, send the file with ``matrix_message(attachments=[...])`` instead.\nNever link an image to a placeholder or made-up address.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4603,314 +4603,6 @@
       }
     ]
   },
-  "coding": {
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "read_file",
-        "description": "Read a file with line numbers. Large files are automatically truncated with pagination hints.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "description": "File path (relative to working directory or absolute)."
-            },
-            "offset": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Starting line number (1-based). Use this to paginate through large files."
-            },
-            "limit": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Maximum number of lines to return. Defaults to 2000."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "path"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "edit_file",
-        "description": "Replace exact text in one file. Read it first.\nCopy each old_text from the current file; edits match the original, not each other's results.\nWithout replace_all, old_text must match one place. Whitespace/quote differences are tolerated.\nEdits must not overlap, and a replace_all edit already covers every match; merge nearby ones.\nIf one fails, nothing is written.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "description": "File path, relative to working directory or absolute."
-            },
-            "edits": {
-              "type": "array",
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "old_text": {
-                    "description": "Text to replace, copied exactly from the file.",
-                    "type": "string"
-                  },
-                  "new_text": {
-                    "description": "Replacement text.",
-                    "type": "string"
-                  },
-                  "replace_all": {
-                    "default": false,
-                    "description": "Replace every match, not just one.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "old_text",
-                  "new_text"
-                ],
-                "type": "object"
-              },
-              "description": "Non-empty list of replacements."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "path"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "write_file",
-        "description": "Write content to a file, creating parent directories if needed.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "description": "File path (relative to working directory or absolute)."
-            },
-            "content": {
-              "type": "string",
-              "description": "The full file content to write."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "path",
-            "content"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "grep",
-        "description": "Search file contents for a pattern. Uses ripgrep if available, falls back to Python re.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "pattern": {
-              "type": "string",
-              "description": "Regex pattern (or literal string if literal=True) to search for."
-            },
-            "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Directory or file to search in. Defaults to working directory."
-            },
-            "glob": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "File glob pattern to filter (e.g., \"*.py\", \"*.ts\")."
-            },
-            "ignore_case": {
-              "type": "boolean",
-              "description": "Whether to ignore case in matching."
-            },
-            "literal": {
-              "type": "boolean",
-              "description": "Treat pattern as a literal string instead of regex."
-            },
-            "context": {
-              "type": "integer",
-              "description": "Number of context lines before and after each match."
-            },
-            "limit": {
-              "type": "integer",
-              "description": "Maximum number of matches to return. Defaults to 100."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "pattern"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "find_files",
-        "description": "Find files matching a glob pattern.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "pattern": {
-              "type": "string",
-              "description": "Glob pattern (e.g., \"*.py\", \"**/*.ts\", \"src/**/*.jsx\")."
-            },
-            "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Directory to search in. Defaults to working directory."
-            },
-            "limit": {
-              "type": "integer",
-              "description": "Maximum number of results. Defaults to 1000."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "pattern"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "ls",
-        "description": "List directory contents with directory indicators.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Directory to list. Defaults to working directory."
-            },
-            "limit": {
-              "type": "integer",
-              "description": "Maximum number of entries. Defaults to 500."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
   "compact_context": {
     "instructions": null,
     "guidance": null,
@@ -6322,6 +6014,10 @@
               ],
               "description": "Configured model name from models; omitted or null uses normal model selection."
             },
+            "title": {
+              "type": "string",
+              "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -6336,7 +6032,8 @@
             }
           },
           "required": [
-            "task"
+            "task",
+            "title"
           ],
           "additionalProperties": false
         },
@@ -9249,13 +8946,13 @@
       },
       {
         "name": "request_secret",
-        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nGive `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to\nhint at the key's form.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.",
+        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nGive `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to\nhint at the key's form.\nFor a service that does not exist yet, propose it with `new_service` instead of editing config.yaml; saving\nadds it with the key.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.\nAfter `saved`, test the key with one request; if it is refused, tell the user why (such as a token of the\nwrong owner or read-only access) and ask again.",
         "parameters": {
           "type": "object",
           "properties": {
             "service": {
               "type": "string",
-              "description": "The service's `name` from `list_egress_credentials`."
+              "description": "The service's `name` from `list_egress_credentials`, or the name of the service `new_service`\nproposes (lowercase letters, digits, `-` and `_`)."
             },
             "reason": {
               "type": "string",
@@ -9282,6 +8979,21 @@
                 }
               ],
               "description": "A hint the empty field shows, such as the key's form (`sk-…`). Never a real value."
+            },
+            "new_service": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A new service of the user's own that takes this key, with only these fields of a service in\nconfig.yaml: `display_name`, `description`, `preset`, `rules` (each with `host`, optional `path_prefix`\nand `port`, and `auth`: `type` `bearer`, `basic` with `username`, `header` or `query` with `name`, and\noptional `template` containing `{secret}`), `placeholder_env`, `restrict_to_rules`. Key only, never\nan account login."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9438,6 +9150,99 @@
           "required": [
             "subject",
             "body"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
+  "email_invite": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "invite_by_email",
+        "description": "Invite one email address to this room.\nIf the person asking may invite, a single-use link is mailed (or returned to forward by hand when no mail\nserver is configured). Otherwise the request waits until someone who may invite asks for the same address.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "email": {
+              "type": "string",
+              "description": "One plain email address, such as alice@example.com."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "email"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "list_email_invites",
+        "description": "List the open email invites of this room with their state, asker, approver and expiry.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "revoke_email_invite",
+        "description": "Revoke the open email invite for one address in this room.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "email": {
+              "type": "string",
+              "description": "The invited email address."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "email"
           ]
         },
         "strict": false,
@@ -9883,272 +9688,6 @@
       }
     ]
   },
-  "file": {
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "save_file",
-        "description": "Save content to a file, with clear blocked-path errors.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "contents": {
-              "type": "string"
-            },
-            "file_name": {
-              "type": "string"
-            },
-            "overwrite": {
-              "type": "boolean"
-            },
-            "encoding": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "contents",
-            "file_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "read_file",
-        "description": "Read a file with clear blocked-path errors.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_name": {
-              "type": "string"
-            },
-            "encoding": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "file_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_files",
-        "description": "List files in a directory, falling back to absolute paths outside base_dir.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "directory": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_files",
-        "description": "Search for files, allowing absolute patterns only when restriction is disabled.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "pattern": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "pattern"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "read_file_chunk",
-        "description": "Read a range of lines from a file.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_name": {
-              "type": "string"
-            },
-            "start_line": {
-              "type": "integer"
-            },
-            "end_line": {
-              "type": "integer"
-            },
-            "encoding": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "file_name",
-            "start_line",
-            "end_line"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "replace_file_chunk",
-        "description": "Replace a range of lines in a file.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_name": {
-              "type": "string"
-            },
-            "start_line": {
-              "type": "integer"
-            },
-            "end_line": {
-              "type": "integer"
-            },
-            "chunk": {
-              "type": "string"
-            },
-            "encoding": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "file_name",
-            "start_line",
-            "end_line",
-            "chunk"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_content",
-        "description": "Search file contents, reaching outside ``base_dir`` only with unrestricted file access.\nAgno's implementation relativizes every hit and every exclusion check\nagainst ``base_dir``, so an outside directory is searched by a copy\nrooted there and its hits are reported as absolute paths.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string"
-            },
-            "directory": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "limit": {
-              "type": "integer"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
   "file_generation": {
     "instructions": null,
     "guidance": null,
@@ -10456,6 +9995,314 @@
           "required": [
             "code"
           ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
+  "filesystem": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "read_file",
+        "description": "Read a file with line numbers. Large files are automatically truncated with pagination hints.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path (relative to working directory or absolute)."
+            },
+            "offset": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Starting line number (1-based). Use this to paginate through large files."
+            },
+            "limit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Maximum number of lines to return. Defaults to 2000."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "edit_file",
+        "description": "Replace exact text in one file. Read it first.\nCopy each old_text from the current file; edits match the original, not each other's results.\nWithout replace_all, old_text must match one place. Whitespace/quote differences are tolerated.\nEdits must not overlap, and a replace_all edit already covers every match; merge nearby ones.\nIf one fails, nothing is written.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path, relative to working directory or absolute."
+            },
+            "edits": {
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "old_text": {
+                    "description": "Text to replace, copied exactly from the file.",
+                    "type": "string"
+                  },
+                  "new_text": {
+                    "description": "Replacement text.",
+                    "type": "string"
+                  },
+                  "replace_all": {
+                    "default": false,
+                    "description": "Replace every match, not just one.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "old_text",
+                  "new_text"
+                ],
+                "type": "object"
+              },
+              "description": "Non-empty list of replacements."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "write_file",
+        "description": "Write content to a file, creating parent directories if needed.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path (relative to working directory or absolute)."
+            },
+            "content": {
+              "type": "string",
+              "description": "The full file content to write."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "grep",
+        "description": "Search file contents for a pattern.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Regex pattern (or literal string if literal=True) to search for."
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Directory or file to search in. Defaults to working directory."
+            },
+            "glob": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "File glob pattern to filter (e.g., \"*.py\", \"*.ts\")."
+            },
+            "ignore_case": {
+              "type": "boolean",
+              "description": "Whether to ignore case in matching."
+            },
+            "literal": {
+              "type": "boolean",
+              "description": "Treat pattern as a literal string instead of regex."
+            },
+            "context": {
+              "type": "integer",
+              "description": "Number of context lines before and after each match."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of matches to return. Defaults to 100."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "find_files",
+        "description": "Find files matching a glob pattern.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Glob pattern (e.g., \"*.py\", \"**/*.ts\", \"src/**/*.jsx\")."
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Directory to search in. Defaults to working directory."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of results. Defaults to 1000."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "ls",
+        "description": "List directory contents with directory indicators.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Directory to list. Defaults to working directory."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of entries. Defaults to 500."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": []
         },
         "strict": false,
         "gate": null,
@@ -11574,7 +11421,7 @@
             },
             "limit": {
               "type": "integer",
-              "description": "(int) The maximum number of pull requests to return. Defaults to 20."
+              "description": "(int) The maximum number of pull requests to return. Defaults to 50."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13552,7 +13399,8 @@
               "description": "Maximum number of threads to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string"
+              "type": "string",
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13613,7 +13461,8 @@
               "description": "Maximum number of drafts to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string"
+              "type": "string",
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13952,7 +13801,7 @@
       },
       {
         "name": "find_available_slots",
-        "description": "Find available time slots within a date range based on your calendar.\nChecks existing events against working hours to find free windows.",
+        "description": "Find available time slots within a date range based on your calendar.\nChecks existing events against working hours to find free windows.\nDates, working hours and the returned slots are in your Google Calendar timezone, or UTC if that\ntimezone cannot be loaded; the result's \"timezone\" field names the one used.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -25512,7 +25361,7 @@
     "functions": [
       {
         "name": "run_shell_command",
-        "description": "Runs a shell command and returns the output or error.\nThe last ``tail`` lines of stdout are returned; on non-zero exit, useful\nstdout is preserved together with stderr. A command still running after\n``timeout`` seconds is stopped with the processes it started, and its\noutput so far is returned. Without ``timeout``, a call that runs as part\nof a background job has no time limit; that includes every call that\naccepts ``background_after`` and, with background jobs on, a subagent's\ncalls for its delegated task, whether or not its caller waits for it. A\ncall that accepts ``background_after`` and leaves it unset returns a job\nhandle after 120 seconds while its command runs on. Any other command\nstops after 120 seconds. Set ``timeout`` on a command that might not\nend on its own, such as a watcher or a test run that can hang. Start a\nserver or anything else meant to keep running with\n``nohup cmd > out.log 2>&1 &``, which keeps running after the command\nends; in the foreground it would keep the call running until its job is\ncancelled.\n\nWith ``mindroom_output_path``, capture the complete supported output\nwithin the redirect byte limit instead of applying ``tail``; a stopped\ncommand saves no file.\n\nCommand strings use non-login Bash with the prepared execution environment.\nUse explicit ``[\"bash\", \"-lc\", command]`` only when login startup is needed.\n\nThe command runs in your agent workspace as its working directory (echoed as a `[cwd: ...]` first line in the result). Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` to the workspace, while local execution maps it to the host home.\n\nWorking method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead of printing everything, but compute results over the full input. Match filters against the extracted field value, not the whole line, and check them on a few sample records. When combining the lines or words of several text files, do not concatenate them raw: a file may lack its final newline, which merges its last word or record with the next file's first, so process each file separately or add a separator, and test with files that lack a trailing newline (joining split chunks of one file byte for byte is different). When only one value must change, replace just that span and keep every other byte, including comments and spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run available tests, and recheck suspicious results such as a zero count.",
+        "description": "Runs a shell command and returns the output or error.\nThe last ``tail`` lines of stdout, then of stderr, are returned; on\nnon-zero exit, all of stderr is kept. A command still running after\n``timeout`` seconds is stopped with the processes it started, and its\noutput so far is returned. Without ``timeout``, a call that runs as part\nof a background job has no time limit; that includes every call that\naccepts ``background_after`` and, with background jobs on, a subagent's\ncalls for its delegated task, whether or not its caller waits for it. A\ncall that accepts ``background_after`` and leaves it unset returns a job\nhandle after 120 seconds while its command runs on. Any other command\nstops after 120 seconds. Set ``timeout`` on a command that might not\nend on its own, such as a watcher or a test run that can hang. Start a\nserver or anything else meant to keep running with\n``nohup cmd > out.log 2>&1 &``, which keeps running after the command\nends; in the foreground it would keep the call running until its job is\ncancelled. Wait for something inside one command, such as\n``until <check>; do sleep 10; done`` with a ``timeout``, not with\nrepeated ``sleep`` calls: every call is a model turn.\n\nWith ``mindroom_output_path``, capture the complete supported output\nwithin the redirect byte limit instead of applying ``tail``; a stopped\ncommand saves no file.\n\nCommand strings use non-login Bash with the prepared execution environment.\nUse explicit ``[\"bash\", \"-lc\", command]`` only when login startup is needed.\n\nThe command runs in your agent workspace as its working directory. Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` to the workspace, while local execution maps it to the host home.\n\nWorking method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead of printing everything, but compute results over the full input. Match filters against the extracted field value, not the whole line, and check them on a few sample records. When combining the lines or words of several text files, do not concatenate them raw: a file may lack its final newline, which merges its last word or record with the next file's first, so process each file separately or add a separator, and test with files that lack a trailing newline (joining split chunks of one file byte for byte is different). When only one value must change, replace just that span and keep every other byte, including comments and spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run available tests, and recheck suspicious results such as a zero count.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -27463,7 +27312,7 @@
             },
             "limit": {
               "type": "integer",
-              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results."
+              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results.\nNon-positive values return no rows."
             },
             "mindroom_output_path": {
               "anyOf": [
