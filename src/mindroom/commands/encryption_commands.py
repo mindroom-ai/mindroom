@@ -84,7 +84,12 @@ async def handle_encrypt_command(
     if requested not in _CONFIRM_ARGUMENTS:
         return f"❌ Unknown argument `{args_text.strip()}`.\n\n{_ENCRYPT_USAGE}"
     return await _confirm_encrypt(
-        client, room_id, requester_user_id, sender_user_id, put_state, steward_may_write_state
+        client,
+        room_id,
+        requester_user_id,
+        sender_user_id,
+        put_state,
+        steward_may_write_state,
     )
 
 
