@@ -162,6 +162,9 @@ class _KubernetesMetadata(Protocol):
     @property
     def uid(self) -> str | None: ...
 
+    @property
+    def deletion_timestamp(self) -> object | None: ...
+
 
 class _KubernetesDeploymentSpec(Protocol):
     @property
@@ -196,6 +199,8 @@ class _DeploymentMetadataSnapshot:
     labels: dict[str, str]
     generation: int | None
     uid: str | None
+    # Set while the object is being deleted, as during a foreground deletion that waits for its pods.
+    deletion_timestamp: object | None = None
 
 
 @dataclass(slots=True)
@@ -548,6 +553,7 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
             labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels"),
             generation=_optional_int(metadata.get("generation"), field_name="metadata.generation"),
             uid=uid,
+            deletion_timestamp=metadata.get("deletionTimestamp"),
         ),
         spec=_DeploymentSpecSnapshot(
             replicas=_optional_int(spec.get("replicas"), field_name="spec.replicas"),

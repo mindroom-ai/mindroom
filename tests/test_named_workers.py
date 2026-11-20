@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -11,7 +12,7 @@ import httpx
 import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.message_target import MessageTarget
@@ -42,6 +43,7 @@ from mindroom.workers.named import (
 from mindroom.workers.runtime import idle_worker_cleanup_owner
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
+from tests.test_kubernetes_worker_backend import _FakeAppsApi, _named_backend
 from tests.test_response_turn import _collect_turn, _ctx
 from tests.test_sandbox_proxy import _offered_entrypoint, _recording_client_class, _static_worker_manager_lease
 
@@ -55,7 +57,7 @@ if TYPE_CHECKING:
     from mindroom.workers.models import WorkerStatus
 
 _TURN = "turn-1"
-_CONFIG = Config(agents={"code": AgentConfig(display_name="Code", named_workers=2)})
+_CONFIG = Config(agents={"code": AgentConfig(display_name="Code", named_workers=2, worker_scope="user_agent")})
 _ALICE = "v1:default:user_agent:@alice:example.org:code"
 _BOB = "v1:default:user_agent:@bob:example.org:code"
 
@@ -76,6 +78,8 @@ class _FakeBackend:
         # Set to hold every start until the test releases it; each held start first releases ``entered``.
         self.hold_starts: threading.Event | None = None
         self.entered = threading.Semaphore(0)
+        # Called once the next listing has read the workers, before it answers with what it read.
+        self.after_listing: Callable[[], None] | None = None
         self._lock = threading.Lock()
 
     def ensure_worker(
@@ -105,15 +109,21 @@ class _FakeBackend:
                     backend_name=self.backend_name,
                     last_used_at=0.0,
                     created_at=0.0,
-                    startup_count=1 if existing is None else existing.startup_count + 1,
+                    # A replacement is a new worker, which counts its starts from one and is told apart by what
+                    # the backend runs it as.
+                    startup_count=1,
+                    incarnation=f"uid-{len(self.specs)}",
                 )
                 self.workers[spec.worker_key] = existing
             return existing
 
-    def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[WorkerHandle]:
-        del include_idle, now
+    def named_worker_keys(self) -> frozenset[str]:
         with self._lock:
-            return list(self.workers.values())
+            listed = frozenset(self.workers)
+        after_listing, self.after_listing = self.after_listing, None
+        if after_listing is not None:
+            after_listing()
+        return listed
 
     def retire_worker(self, worker_key: str) -> None:
         with self._lock:
@@ -124,8 +134,17 @@ class _FakeBackend:
         del now
         return self.workers.get(worker_key)
 
-    def record_failure(self, worker_key: str, failure_reason: str, **_kwargs: object) -> WorkerHandle:
-        """Stop the worker and keep it as failed, as the Kubernetes backend does."""
+    def record_failure(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        incarnation: str | None = None,
+        **_kwargs: object,
+    ) -> WorkerHandle:
+        """Stop the worker and keep it as failed, unless the failure is from one it replaced, as Kubernetes does."""
+        if incarnation is not None and self.workers[worker_key].incarnation != incarnation:
+            return self.workers[worker_key]
         return self.set_status(worker_key, "failed", failure_reason=failure_reason)
 
     def set_status(self, worker_key: str, status: WorkerStatus, **changes: Any) -> WorkerHandle:  # noqa: ANN401
@@ -185,7 +204,7 @@ def _call(
     return call
 
 
-def _run(backend: _FakeBackend, call: NamedWorkerCall, normal_key: str = _ALICE) -> WorkerHandle:
+def _run(backend: object, call: NamedWorkerCall, normal_key: str = _ALICE) -> WorkerHandle:
     """Reach the worker ``call`` names beside ``normal_key``, as one routed shell call does."""
     spec = call.worker_spec(WorkerSpec(normal_key, private_agent_names=frozenset()))
     return ensure_named_worker(cast("WorkerBackend", backend), spec, call)
@@ -232,7 +251,45 @@ async def test_a_call_that_asks_for_another_size_of_a_running_worker_is_refused(
         _run(backend, _call(runtime_paths, "build", "small"))
 
         with pytest.raises(NamedWorkerError, match="was started with resource_profile small in this reply"):
-            _call(runtime_paths, "build", "large").worker_spec(WorkerSpec(_ALICE))
+            _run(backend, _call(runtime_paths, "build", "large"))
+        assert [spec.resource_profile for spec in backend.specs] == ["small"]
+
+
+async def _name_at_the_same_time(
+    backend: object,
+    runtime_paths: RuntimePaths,
+    profiles: tuple[str | None, ...],
+) -> list[WorkerHandle | BaseException]:
+    """Make one call per profile that names ``e2e-0``, none of which has started the worker when the others name it."""
+    named = threading.Barrier(len(profiles))
+
+    def run(profile: str | None) -> WorkerHandle:
+        call = _call(runtime_paths, "e2e-0", profile)
+        spec = call.worker_spec(WorkerSpec(_ALICE, private_agent_names=frozenset()))
+        named.wait(SETTLE_TIMEOUT_SECONDS)
+        return ensure_named_worker(cast("WorkerBackend", backend), spec, call)
+
+    async with reply_named_workers(_TURN):
+        return await asyncio.gather(*(asyncio.to_thread(run, profile) for profile in profiles), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profiles", [("small", "large"), ("large", None), (None, "small", "large", None)])
+async def test_calls_that_name_a_new_worker_at_the_same_time_start_it_with_one_size(
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+    profiles: tuple[str | None, ...],
+) -> None:
+    """The first call to be admitted sizes the worker: one that names no size takes it, and another size is refused."""
+    results = await _name_at_the_same_time(backend, runtime_paths, profiles)
+
+    [size] = {spec.resource_profile for spec in backend.specs}
+    refused = [result for result in results if isinstance(result, NamedWorkerError)]
+    started = [result for result in results if isinstance(result, WorkerHandle)]
+    assert len(refused) + len(started) == len(profiles)
+    assert len(refused) == sum(profile not in (None, size) for profile in profiles)
+    assert all("was started with" in str(error) for error in refused)
+    assert len(backend.workers) == 1
 
 
 @pytest.mark.asyncio
@@ -311,7 +368,7 @@ async def test_another_reply_and_a_later_reply_get_workers_of_their_own(
         assert len(pins) == 3
         # What the restart left behind still runs, so it counts against the agent's limit of two until cleanup
         # removes it.
-        with pytest.raises(NamedWorkerError, match="2 of the 2 named workers"):
+        with pytest.raises(NamedWorkerError, match="already has 2 of the 2 named workers"):
             _run(backend, _call(runtime_paths, "e2e-1"))
 
 
@@ -327,13 +384,16 @@ async def test_a_new_worker_past_the_agent_limit_is_refused_not_queued(
         # Another requester's workers of the same agent do not count against this one.
         _run(backend, _call(runtime_paths, "a"), normal_key=_BOB)
 
-        with pytest.raises(NamedWorkerError, match="Cannot start worker 'c': 2 of the 2 named workers"):
+        with pytest.raises(NamedWorkerError, match="Cannot start worker 'c': this agent already has 2 of the 2"):
             _run(backend, _call(runtime_paths, "c"))
         assert len(backend.workers) == 3
         assert _run(backend, _call(runtime_paths, "a")).worker_key == first.worker_key
 
-        # A worker cleanup stopped no longer counts.
+        # A stopped worker holds its place until it is removed.
         backend.set_status(first.worker_key, "idle")
+        with pytest.raises(NamedWorkerError, match="already has 2 of the 2"):
+            _run(backend, _call(runtime_paths, "c"))
+        backend.retire_worker(first.worker_key)
         _run(backend, _call(runtime_paths, "c"))
 
 
@@ -348,7 +408,7 @@ async def test_a_new_worker_past_the_deployment_limit_is_refused(
         _run(backend, _call(runtime_paths, "a"))
         _run(backend, _call(runtime_paths, "a"), normal_key=_BOB)
 
-        with pytest.raises(NamedWorkerError, match="this deployment runs its limit of 2 named workers"):
+        with pytest.raises(NamedWorkerError, match="this deployment already has its limit of 2 named workers"):
             _run(backend, _call(runtime_paths, "b"))
 
 
@@ -367,13 +427,44 @@ async def test_workers_that_are_starting_count_against_the_limit(
                 assert await asyncio.to_thread(backend.entered.acquire, timeout=SETTLE_TIMEOUT_SECONDS)
             assert backend.workers == {}
 
-            with pytest.raises(NamedWorkerError, match="2 of the 2 named workers"):
+            with pytest.raises(NamedWorkerError, match="already has 2 of the 2 named workers"):
                 await asyncio.to_thread(_run, backend, _call(runtime_paths, "c"))
         finally:
             backend.hold_starts.set()
             await asyncio.gather(*starting)
         assert len(backend.workers) == 2
         assert not named_module._starting
+
+
+@pytest.mark.asyncio
+async def test_a_start_that_finishes_while_the_workers_are_counted_still_counts(
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+) -> None:
+    """A worker whose start ends between the count of the workers that exist and of those starting counts once."""
+    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=1, worker_scope="user_agent")})
+    backend.hold_starts = threading.Event()
+    first_started = threading.Event()
+
+    def start_first() -> None:
+        _run(backend, _call(runtime_paths, "a", config=config))
+        first_started.set()
+
+    def finish_the_first_start() -> None:
+        # The listing has read no worker yet; the first worker now starts and leaves the starts in flight.
+        assert backend.hold_starts is not None
+        backend.hold_starts.set()
+        assert first_started.wait(SETTLE_TIMEOUT_SECONDS)
+
+    async with reply_named_workers(_TURN):
+        first = asyncio.create_task(asyncio.to_thread(start_first))
+        assert await asyncio.to_thread(backend.entered.acquire, timeout=SETTLE_TIMEOUT_SECONDS)
+        backend.after_listing = finish_the_first_start
+
+        with pytest.raises(NamedWorkerError, match="already has 1 of the 1 named workers"):
+            await asyncio.to_thread(_run, backend, _call(runtime_paths, "b", config=config))
+        await first
+        assert len(backend.workers) == 1
 
 
 @pytest.mark.asyncio
@@ -476,6 +567,23 @@ def test_a_call_that_names_no_worker_asks_for_none(runtime_paths: RuntimePaths) 
             True,
             "Named workers are off for this agent",
         ),
+        *(
+            (
+                "code",
+                Config(agents={"code": AgentConfig(display_name="Code", named_workers=2, **scope)}),
+                {},
+                True,
+                message,
+            )
+            for scope, message in (
+                # Only this scope's worker key names whose limit a named worker counts against.
+                ({}, "per requester and agent"),
+                ({"worker_scope": "shared"}, "per requester and agent"),
+                ({"worker_scope": "user"}, "per requester and agent"),
+                ({"private": AgentPrivateConfig(per="user")}, "per requester and agent"),
+                ({"private": AgentPrivateConfig(per="user_agent")}, None),
+            )
+        ),
         ("code", _CONFIG, {"MINDROOM_WORKER_BACKEND": "docker"}, True, "need the kubernetes worker backend"),
         ("code", _CONFIG, {"MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "0"}, True, "idle-worker cleanup"),
         ("code", _CONFIG, {}, False, "idle-worker cleanup"),
@@ -506,6 +614,23 @@ def test_named_workers_need_the_agent_setting_the_kubernetes_backend_and_cleanup
         result = refusal()
 
     assert (result is None) if message is None else (result is not None and message in result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "normal_key",
+    ["v1:default:shared:code", "v1:default:user:@alice:example.org", "v1:default:unscoped:code"],
+)
+async def test_a_worker_beside_a_normal_worker_that_is_not_per_requester_and_agent_is_refused(
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+    normal_key: str,
+) -> None:
+    """Whatever the config said when the call was read, the key the call is routed by decides whose limit applies."""
+    async with reply_named_workers(_TURN):
+        with pytest.raises(NamedWorkerError, match="per requester and agent"):
+            _run(backend, _call(runtime_paths, "a"), normal_key=normal_key)
+    assert backend.specs == []
 
 
 def test_a_backend_without_named_workers_refuses_them(runtime_paths: RuntimePaths) -> None:
@@ -713,7 +838,9 @@ def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
     named_workers: int,
 ) -> None:
     """The model sees ``worker`` and ``resource_profile``, and how to use them, only when its agent may name workers."""
-    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=named_workers)})
+    config = Config(
+        agents={"code": AgentConfig(display_name="Code", named_workers=named_workers, worker_scope="user_agent")},
+    )
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
     shell = get_tool_by_name(
         "shell",
@@ -829,3 +956,96 @@ async def test_a_job_a_response_turn_started_keeps_the_turn_s_named_workers(
     await jobs[0].release()
 
     assert await _retired(backend) == started
+
+
+# Against the Kubernetes backend, which a fake cluster API serves: what it applies, counts, and removes.
+
+
+def _annotate(apps_api: _FakeAppsApi, handle: WorkerHandle, **annotations: str) -> None:
+    apps_api.deployments[handle.worker_id].metadata.annotations.update(
+        {f"mindroom.ai/{name.replace('_', '-')}": value for name, value in annotations.items()},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profiles", [("small", "large"), ("large", None)])
+async def test_calls_that_name_a_new_worker_at_the_same_time_apply_one_pod_template(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    profiles: tuple[str | None, ...],
+) -> None:
+    """A second size never reaches the cluster, where it would replace the pod under the first call's command."""
+    kubernetes, apps_api, _core_api = _named_backend(tmp_path)
+
+    results = await _name_at_the_same_time(kubernetes, runtime_paths, profiles)
+
+    assert any(isinstance(result, WorkerHandle) for result in results)
+    assert len(apps_api.created_bodies) == 1
+    assert apps_api.deleted_names == []
+    [deployment] = apps_api.deployments.values()
+    assert deployment.metadata.annotations["mindroom.ai/startup-count"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_a_named_worker_counts_against_the_limit_until_it_is_removed(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A worker that runs unused, or that stopped, still holds its place; one being deleted does not."""
+    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=1, worker_scope="user_agent")})
+    kubernetes, apps_api, _core_api = _named_backend(tmp_path)
+
+    async with reply_named_workers(_TURN):
+        first = _run(kubernetes, _call(runtime_paths, "a", config=config))
+        # Unused for longer than the worker idle timeout, the worker still runs its pod.
+        _annotate(apps_api, first, last_used_at="0.0")
+        assert apps_api.deployments[first.worker_id].spec.replicas == 1
+        with pytest.raises(NamedWorkerError, match="already has 1 of the 1 named workers"):
+            _run(kubernetes, _call(runtime_paths, "b", config=config))
+
+        # Stopped after a failure, it stays until cleanup removes it or a call with its name replaces it.
+        kubernetes.record_failure(first.worker_key, "pod was evicted")
+        assert apps_api.deployments[first.worker_id].spec.replicas == 0
+        with pytest.raises(NamedWorkerError, match="already has 1 of the 1 named workers"):
+            _run(kubernetes, _call(runtime_paths, "b", config=config))
+        replacement = _run(kubernetes, _call(runtime_paths, "a", config=config))
+        assert replacement.worker_key == first.worker_key
+
+        # Its removal has begun and waits for the pod to stop.
+        apps_api.delete_read_lag_by_name[first.worker_id] = 1000
+        apps_api.delete_namespaced_deployment(first.worker_id, "chat", propagation_policy="Foreground")
+        assert first.worker_id in apps_api.deployments
+        second = _run(kubernetes, _call(runtime_paths, "b", config=config))
+
+    assert second.worker_key != first.worker_key
+
+
+@pytest.mark.asyncio
+async def test_named_workers_a_restart_left_behind_count_until_the_first_maintenance_pass_removes_them(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """No reply can reach a named worker an earlier process started, so the first pass removes it, whatever its age."""
+    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=1, worker_scope="user_agent")})
+    before_restart, apps_api, core_api = _named_backend(tmp_path)
+    async with reply_named_workers(_TURN):
+        left_behind = _run(before_restart, _call(runtime_paths, "a", config=config))
+    # Long unused, as after a primary that was down for a while.
+    _annotate(apps_api, left_behind, last_used_at="0.0")
+    left_behind_root = before_restart.storage_root / before_restart._state_subpath(left_behind.worker_key)
+    assert left_behind_root.is_dir()
+
+    restarted, _apps_api, _core_api = _named_backend(tmp_path, process_started_at=time.time())
+    restarted._resources.apps_api, restarted._resources.core_api = apps_api, core_api
+    async with reply_named_workers("turn-after-restart"):
+        with pytest.raises(NamedWorkerError, match="already has 1 of the 1 named workers"):
+            _run(restarted, _call(runtime_paths, "a", config=config, turn_id="turn-after-restart"))
+
+        restarted.maintain_workers()
+
+        assert left_behind.worker_id not in apps_api.deployments
+        assert left_behind_root.exists() is False
+        started = _run(restarted, _call(runtime_paths, "a", config=config, turn_id="turn-after-restart"))
+        # A worker this process started stays through its passes.
+        restarted.maintain_workers()
+        assert apps_api.deployments[started.worker_id].spec.replicas == 1

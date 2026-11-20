@@ -81,8 +81,12 @@ class WorkerBackend(Protocol):
         *,
         now: float | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
-        """Persist a worker failure; one from a start the backend has since replaced may be ignored."""
+        """Persist a worker failure; one from a start or incarnation the backend has since replaced may be ignored.
+
+        ``startup_count`` and ``incarnation`` are those of the handle the failed request used.
+        """
 
 
 @runtime_checkable

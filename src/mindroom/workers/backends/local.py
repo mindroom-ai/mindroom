@@ -342,9 +342,10 @@ class _LocalWorkerBackend:
         *,
         now: float | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist one local worker failure."""
-        del startup_count  # This backend never replaces a worker behind an in-flight request.
+        del startup_count, incarnation  # This backend never replaces a worker behind an in-flight request.
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
         with _worker_initialization_lock(paths), self._lock:

@@ -37,6 +37,7 @@ from mindroom.private_storage.private_instance_identity_store import ensure_priv
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
+from mindroom.tool_system.worker_proxy_client import record_proxy_response_failure_for_worker
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     named_worker_key,
@@ -205,6 +206,7 @@ class _FakeAppsApi:
         self.raw_list_count = 0
         self.delete_read_lag_by_name: dict[str, int] = {}
         self._active_delete_read_lag_by_name: dict[str, int] = {}
+        self._created_count = 0
 
     def read_namespaced_deployment(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -226,7 +228,9 @@ class _FakeAppsApi:
         self.created_bodies.append(body)
         deployment = _to_namespace(body)
         deployment.metadata.generation = 1
-        deployment.metadata.uid = f"{deployment.metadata.name}-uid"
+        # Every object the API server creates gets a UID of its own, also one that reuses a deleted object's name.
+        self._created_count += 1
+        deployment.metadata.uid = f"{deployment.metadata.name}-uid-{self._created_count}"
         deployment.status = SimpleNamespace(ready_replicas=body["spec"]["replicas"], observed_generation=1)
         self._active_delete_read_lag_by_name.pop(deployment.metadata.name, None)
         self.deployments[deployment.metadata.name] = deployment
@@ -313,6 +317,10 @@ class _FakeAppsApi:
                         "labels": deployment.metadata.labels,
                         "generation": deployment.metadata.generation,
                         "uid": deployment.metadata.uid,
+                        # Set from the delete request until the object is gone, as for a foreground deletion.
+                        "deletionTimestamp": "2026-01-01T00:00:00Z"
+                        if deployment.metadata.name in self._active_delete_read_lag_by_name
+                        else None,
                     },
                     "spec": {"replicas": deployment.spec.replicas},
                     "status": {
@@ -3967,14 +3975,22 @@ def test_kubernetes_cleanup_keeps_a_subagent_worker_inside_the_idle_timeout(tmp_
 
 def _named_backend(
     tmp_path: Path,
+    *,
+    process_started_at: float = 0.0,
     **settings: float,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
-    """Return a backend with its own storage whose named workers expire as ``settings`` say."""
+    """Return a backend, storing below ``tmp_path``, whose named workers expire as ``settings`` say.
+
+    Its process counts as started at ``process_started_at``, so the workers a test starts at small timestamps are its
+    own; a later backend on the same path is the next process.
+    """
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
     )
-    return _backend(runtime_paths=runtime_paths, idle_timeout_seconds=1800.0, **settings)
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=1800.0, **settings)
+    backend._process_started_at = process_started_at
+    return backend, apps_api, core_api
 
 
 def _named_spec(name_digit: str = "e") -> WorkerSpec:
@@ -4040,6 +4056,41 @@ def test_kubernetes_cleanup_removes_a_stopped_named_worker_before_it_expires(tmp
     assert (backend.storage_root / backend._state_subpath(named.worker_key)).exists() is False
     # A subagent's worker stays until the idle timeout, as a follow-up may restart it.
     assert subagent.worker_id in apps_api.deployments
+
+
+def test_a_failure_from_a_replaced_named_worker_does_not_stop_its_replacement(tmp_path: Path) -> None:
+    """A call that fails late on a pod the worker has since replaced leaves the replacement running."""
+    backend, apps_api, _core_api = _named_backend(tmp_path)
+    spec = _named_spec()
+    replaced = backend.ensure_worker(spec, now=0.0)
+    # Two calls ran on the pod when it died: the first to fail stops the worker.
+    record_proxy_response_failure_for_worker(
+        worker_handle=replaced,
+        worker_manager=backend,
+        error="connection reset",
+        failure_kind=None,
+    )
+    replacement = backend.ensure_worker(spec, now=10.0)
+    # The replacement is a new worker, whose starts count from one again.
+    assert (replacement.startup_count, replacement.worker_id) == (replaced.startup_count, replaced.worker_id)
+
+    record_proxy_response_failure_for_worker(
+        worker_handle=replaced,
+        worker_manager=backend,
+        error="connection reset",
+        failure_kind=None,
+    )
+
+    assert apps_api.deployments[replacement.worker_id].spec.replicas == 1
+    # A call that reaches the replacement through the ready cache fails it like any other.
+    cached = backend.ensure_worker(spec, now=11.0)
+    record_proxy_response_failure_for_worker(
+        worker_handle=cached,
+        worker_manager=backend,
+        error="connection reset",
+        failure_kind=None,
+    )
+    assert apps_api.deployments[replacement.worker_id].spec.replicas == 0
 
 
 def test_kubernetes_backend_replaces_a_stopped_named_worker_instead_of_restarting_it(tmp_path: Path) -> None:

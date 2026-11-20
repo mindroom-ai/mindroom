@@ -20,12 +20,13 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.background_tasks import create_background_task
+from mindroom.config.resolution import agent_policy
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.worker_routing import (
     named_worker_key,
-    pinned_worker_kind,
     pinned_worker_state_scope_key,
+    resolved_worker_key_scope,
     worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -53,16 +54,20 @@ __all__ = [
 logger = get_logger(__name__)
 
 _NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
-# The statuses of a named worker that runs a pod or is starting one.
-_LIVE_STATUSES = frozenset({"starting", "ready"})
+# Why an agent whose workers are not one per requester and agent runs no named workers: its normal worker's key
+# would not name whose limit a named worker counts against.
+_SCOPE_REFUSAL = (
+    "Named workers need an agent whose workers are per requester and agent: "
+    "worker_scope: user_agent, or private.per: user_agent."
+)
 
 # Guards the fleets and the starts below; never held across a backend call, so the event loop may take it.
 _lock = threading.Lock()
 # The fleet of each reply that has not ended, by its turn ID.
 _fleets: dict[str, _NamedWorkerFleet] = {}
-# Named workers being started, which the backend does not list yet, with how many calls start each.
+# Named workers being started, which the backend may not list yet, with how many calls start each.
 _starting: Counter[str] = Counter()
-# Serializes counting the running workers and admitting one more, across the backend calls that takes.
+# Serializes counting the workers that exist and admitting one more, across the backend call that takes.
 _admission_lock = threading.Lock()
 
 
@@ -73,6 +78,9 @@ class NamedWorkerError(RuntimeError):
 class _NamedWorkerBackend(Protocol):
     """What a backend whose ``named_workers_max`` is above 0 adds to run named workers."""
 
+    def named_worker_keys(self) -> frozenset[str]:
+        """Return the key of every named worker that exists, running or stopped, and is not being removed."""
+
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact worker and all backend-owned state."""
 
@@ -82,8 +90,8 @@ class _NamedWorker:
     """One worker a fleet started: the size it was started with and the start its last call ran in."""
 
     resource_profile: ScriptResourceProfileName | None
-    # When the worker the last call ran in was created, and how often it had started.
-    start: tuple[float, int] | None = None
+    # What the backend ran the worker as when the last call ran in it, and how often that had started.
+    start: tuple[str | None, int] | None = None
 
 
 @dataclass(eq=False, slots=True)
@@ -99,41 +107,36 @@ class _NamedWorkerFleet:
     # The runtime whose backend runs the fleet's workers, known once a call starts one.
     runtime_paths: RuntimePaths | None = None
 
-    def worker_spec(
-        self,
-        normal_spec: WorkerSpec,
-        name: str,
-        resource_profile: ScriptResourceProfileName | None,
-    ) -> WorkerSpec:
-        """Return the spec of the worker ``name`` beside the normal worker ``normal_spec`` describes.
-
-        The first call that names a worker sizes it. A later call takes that size, and one that asks for another is
-        refused, because resizing a worker restarts it under the commands that run in it.
-        """
+    def worker_key(self, normal_worker_key: str, name: str) -> str:
+        """Return the key of the worker ``name`` beside the normal worker ``normal_worker_key``."""
         pin_id = hashlib.sha256(f"{self.nonce}:{name}".encode()).hexdigest()[:32]
-        worker_key = named_worker_key(normal_spec.worker_key, pin_id)
-        with _lock:
-            started = self.workers.get(worker_key)
-        if started is not None:
-            if resource_profile not in (None, started.resource_profile):
-                size = (
-                    f"resource_profile {started.resource_profile}"
-                    if started.resource_profile
-                    else "no resource_profile"
-                )
-                msg = f"Worker '{name}' was started with {size} in this reply; omit resource_profile, or name another worker."
-                raise NamedWorkerError(msg)
-            resource_profile = started.resource_profile
-        return replace(
-            normal_spec,
-            worker_key=worker_key,
-            state_scope_worker_key=normal_spec.worker_key,
-            resource_profile=resource_profile,
-        )
+        return named_worker_key(normal_worker_key, pin_id)
+
+    def admit(self, call: NamedWorkerCall, worker_key: str) -> ScriptResourceProfileName | None:
+        """Record that ``call`` starts or reaches ``worker_key`` and return the size the worker has; ``_lock`` is held.
+
+        The first call admitted for a worker sizes it. A later call takes that size, and one that asks for another
+        is refused, because resizing a worker restarts it under the commands that run in it.
+        """
+        if self.holders < 1:
+            msg = f"Cannot run in worker '{call.name}': its reply and that reply's background jobs have ended."
+            raise NamedWorkerError(msg)
+        worker = self.workers.get(worker_key)
+        if worker is None:
+            worker = self.workers[worker_key] = _NamedWorker(call.resource_profile)
+        elif call.resource_profile not in (None, worker.resource_profile):
+            size = f"resource_profile {worker.resource_profile}" if worker.resource_profile else "no resource_profile"
+            msg = (
+                f"Worker '{call.name}' was started with {size} in this reply; "
+                "omit resource_profile, or name another worker."
+            )
+            raise NamedWorkerError(msg)
+        self.runtime_paths = call.runtime_paths
+        return worker.resource_profile
 
     def header(self, name: str, handle: WorkerHandle) -> str:
         """Return the line a call's result starts with: its worker, and whether this call ran in a new start of it."""
-        start = (handle.created_at, handle.startup_count)
+        start = (handle.incarnation, handle.startup_count)
         with _lock:
             worker = self.workers[handle.worker_key]
             started = worker.start != start
@@ -168,8 +171,16 @@ class NamedWorkerCall:
     _fleet: _NamedWorkerFleet
 
     def worker_spec(self, normal_spec: WorkerSpec) -> WorkerSpec:
-        """Return the spec of the named worker beside the normal worker ``normal_spec`` describes."""
-        return self._fleet.worker_spec(normal_spec, self.name, self.resource_profile)
+        """Return the spec of the named worker beside the normal worker ``normal_spec`` describes, as the call asks.
+
+        ``ensure_named_worker`` gives the worker the size its first admitted call asked for.
+        """
+        return replace(
+            normal_spec,
+            worker_key=self._fleet.worker_key(normal_spec.worker_key, self.name),
+            state_scope_worker_key=normal_spec.worker_key,
+            resource_profile=self.resource_profile,
+        )
 
     def header(self, handle: WorkerHandle) -> str:
         """Return the line the call's result starts with, which names its worker and says when it is a new start."""
@@ -205,8 +216,10 @@ def _agent_limit(agent_name: str | None, config: Config | None) -> int:
 
 def named_workers_refusal(agent_name: str | None, config: Config | None, runtime_paths: RuntimePaths) -> str | None:
     """Return why ``agent_name``'s calls cannot run in named workers, or None when they can."""
-    if _agent_limit(agent_name, config) < 1:
+    if config is None or agent_name is None or _agent_limit(agent_name, config) < 1:
         return "Named workers are off for this agent; named_workers in its config allows them."
+    if agent_policy(config, agent_name).effective_execution_scope != "user_agent":
+        return _SCOPE_REFUSAL
     if worker_backend_kind(runtime_paths) is not WorkerBackendKind.KUBERNETES or not idle_worker_cleanup_runs(
         runtime_paths,
     ):
@@ -269,48 +282,45 @@ def ensure_named_worker(
     *,
     progress_sink: ProgressSink | None = None,
 ) -> WorkerHandle:
-    """Start or reach the named worker ``spec`` describes, refusing to start one past the limits.
+    """Start or reach the named worker ``spec``, from ``call.worker_spec``, describes, refusing one past the limits.
 
-    A worker that already runs is reached without counting. Otherwise the workers the backend runs and those being
-    started count against the agent's limit for this requester and the backend's limit for everyone. The backend
-    replaces a stopped worker of this name with an empty one.
+    A worker that exists, or that another call is starting, is reached without counting. Otherwise every named
+    worker that exists, running or stopped, and every one being started counts against the agent's limit for this
+    requester and the backend's limit for everyone. The backend starts the worker with the size its first admitted
+    call asked for, whatever size this call names, and replaces a stopped worker of this name with an empty one.
     """
     if backend.named_workers_max < 1:
         msg = "Named workers need the kubernetes worker backend."
         raise NamedWorkerError(msg)
     worker_key = spec.worker_key
-    fleet = call._fleet
+    normal_worker_key = spec.state_scope_worker_key
+    # The key of an agent's normal worker names its tenant, requester, and agent only on this scope, so only there
+    # does it say whose limit the worker counts against.
+    if normal_worker_key is None or resolved_worker_key_scope(normal_worker_key) != "user_agent":
+        raise NamedWorkerError(_SCOPE_REFUSAL)
     with _admission_lock:
-        named = {
-            handle.worker_key: handle
-            for handle in backend.list_workers()
-            if pinned_worker_kind(handle.worker_key) == "named"
-        }
-        existing = named.get(worker_key)
-        if existing is None or existing.status not in _LIVE_STATUSES:
-            with _lock:
-                starting = set(_starting)
-            live = {key for key, handle in named.items() if handle.status in _LIVE_STATUSES} | starting
-            live.discard(worker_key)
-            mine = sum(pinned_worker_state_scope_key(key) == spec.state_scope_worker_key for key in live)
+        # Read before the workers that exist, so a start that ends in between is counted there, never nowhere.
+        with _lock:
+            starting = frozenset(_starting)
+        counted = cast("_NamedWorkerBackend", backend).named_worker_keys() | starting
+        if worker_key not in counted:
+            mine = sum(pinned_worker_state_scope_key(key) == normal_worker_key for key in counted)
             if mine >= call.agent_limit:
                 msg = (
-                    f"Cannot start worker '{call.name}': {mine} of the {call.agent_limit} named workers this agent "
-                    "may run for you are running. Name one of them, or wait until an idle one is removed."
+                    f"Cannot start worker '{call.name}': this agent already has {mine} of the {call.agent_limit} "
+                    "named workers it may have for you. Run the command in a worker this reply started, or wait: "
+                    "a named worker no command runs in is removed after a few minutes."
                 )
                 raise NamedWorkerError(msg)
-            if len(live) >= backend.named_workers_max:
+            if len(counted) >= backend.named_workers_max:
                 msg = (
-                    f"Cannot start worker '{call.name}': this deployment runs its limit of "
-                    f"{backend.named_workers_max} named workers. Name one you started, or try again later."
+                    f"Cannot start worker '{call.name}': this deployment already has its limit of "
+                    f"{backend.named_workers_max} named workers. Run the command in a worker this reply started, "
+                    "or try again later."
                 )
                 raise NamedWorkerError(msg)
         with _lock:
-            if fleet.holders < 1:
-                msg = f"Cannot run in worker '{call.name}': its reply and that reply's background jobs have ended."
-                raise NamedWorkerError(msg)
-            fleet.workers.setdefault(worker_key, _NamedWorker(spec.resource_profile))
-            fleet.runtime_paths = call.runtime_paths
+            spec = replace(spec, resource_profile=call._fleet.admit(call, worker_key))
             _starting[worker_key] += 1
     try:
         return backend.ensure_worker(spec, progress_sink=progress_sink)

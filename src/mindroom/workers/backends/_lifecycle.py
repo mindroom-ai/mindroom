@@ -39,6 +39,7 @@ def worker_handle(
     status: WorkerStatus,
     backend_name: str,
     debug_metadata: dict[str, str],
+    incarnation: str | None = None,
 ) -> WorkerHandle:
     """Build one worker's handle from its lifecycle state and the backend's effective status and endpoint."""
     return WorkerHandle(
@@ -55,6 +56,7 @@ def worker_handle(
         failure_count=lifecycle.failure_count,
         failure_reason=lifecycle.failure_reason,
         debug_metadata=debug_metadata,
+        incarnation=incarnation,
     )
 
 

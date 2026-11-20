@@ -175,9 +175,10 @@ class StaticSandboxRunnerBackend:
         *,
         now: float | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist one shared-runner worker failure."""
-        del startup_count  # This backend never replaces a worker behind an in-flight request.
+        del startup_count, incarnation  # This backend never replaces a worker behind an in-flight request.
         timestamp = time.time() if now is None else now
         with self._lock:
             # The runner may have been replaced by one from another release, so the next call asks again.

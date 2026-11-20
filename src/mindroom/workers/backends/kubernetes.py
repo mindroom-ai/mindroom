@@ -85,6 +85,9 @@ __all__ = [
 ]
 
 _READY_WORKER_REVALIDATE_SECONDS = 300.0
+# When this process started. No reply can reach a named worker an earlier process created, because its key holds a
+# digest only that process's memory could produce.
+_PROCESS_STARTED_AT = time.time()
 # How long a worker directory must have had no Deployment before it counts as left behind by a failed removal.
 _ORPHANED_STATE_GRACE_SECONDS = 300.0
 # Where a worker's startup manifest names the worker key its files belong to.
@@ -109,6 +112,8 @@ class _ReadyWorkerCacheEntry:
     # The applied launch the worker was provisioned from; another one means the worker must be re-applied.
     launch_digest: str
     worker_id: str
+    # The UID of the worker's Deployment, which a failure names so that it never stops the worker's replacement.
+    incarnation: str | None
     state_subpath: str
     # The worker's lifecycle when cached, so a cached touch returns its full handle without reading the Deployment.
     lifecycle: WorkerLifecycleState
@@ -234,6 +239,7 @@ class KubernetesWorkerBackend:
         self.storage_root = storage_root.expanduser().resolve()
         self.idle_timeout_seconds = config.idle_timeout_seconds
         self.named_workers_max = config.named_workers_max
+        self._process_started_at = _PROCESS_STARTED_AT
         self._resources = resources.KubernetesResourceManager(
             runtime_paths=runtime_paths,
             config=config,
@@ -398,6 +404,7 @@ class KubernetesWorkerBackend:
                 spec=spec,
                 launch_digest=launch.digest,
                 worker_id=worker_id,
+                incarnation=deployment.metadata.uid,
                 state_subpath=state_subpath,
                 lifecycle=lifecycle,
                 validated_at=timestamp,
@@ -453,6 +460,15 @@ class KubernetesWorkerBackend:
             self._handle_from_deployment(deployment, now=timestamp) for deployment in self._resources.list_deployments()
         ]
         return filter_and_sort_worker_handles(handles, include_idle)
+
+    def named_worker_keys(self) -> frozenset[str]:
+        """Return the key of every named worker that exists, running or stopped, and is not being removed."""
+        keys = (
+            (deployment.metadata.annotations or {}).get(resources.ANNOTATION_WORKER_KEY, "")
+            for deployment in self._resources.list_deployments()
+            if deployment.metadata.deletion_timestamp is None
+        )
+        return frozenset(key for key in keys if pinned_worker_kind(key) == "named")
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Scale idle workers to zero while retaining their state, and remove expired subagent workers with theirs."""
@@ -569,9 +585,12 @@ class KubernetesWorkerBackend:
         pod: the removal then returns at once, and a failed one leaves the Deployment for the next pass. A subagent's
         own worker expires with the idle timeout. A named worker expires once no call has run in it for its own,
         shorter idle timeout, or once it reaches its maximum age whatever runs in it, and a stopped one is always
-        removed, because its next start replaces it anyway.
+        removed, because its next start replaces it anyway. One an earlier process created is removed at once, pod
+        and all: no reply can reach it, and until it is gone it counts against the limits of those that start.
         """
         named = pinned_worker_kind(handle.worker_key) == "named"
+        if named and handle.created_at < self._process_started_at:
+            return "retire"
         expired = (
             now - handle.last_used_at >= self.config.named_worker_idle_timeout_seconds
             or now - handle.created_at >= self.config.named_worker_max_age_seconds
@@ -793,6 +812,7 @@ class KubernetesWorkerBackend:
         *,
         now: float | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
@@ -802,6 +822,7 @@ class KubernetesWorkerBackend:
                 failure_reason,
                 now=timestamp,
                 startup_count=startup_count,
+                incarnation=incarnation,
             )
 
     def _record_failure_locked(
@@ -812,6 +833,7 @@ class KubernetesWorkerBackend:
         now: float,
         annotations_override: dict[str, str] | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist failure state while holding the worker provisioning lock."""
         worker_id = self._worker_id(worker_key)
@@ -820,8 +842,11 @@ class KubernetesWorkerBackend:
             msg = f"Unknown worker '{worker_log_id(worker_key)}' for Kubernetes failure recording."
             raise WorkerBackendError(msg)
         current = self._handle_from_deployment(deployment, now=now)
-        if startup_count is not None and current.startup_count != startup_count:
-            # The request failed on a pod this worker has since replaced, such as for a new workspace mount.
+        if (startup_count is not None and current.startup_count != startup_count) or (
+            incarnation is not None and current.incarnation != incarnation
+        ):
+            # The request failed on a pod this worker has since replaced, such as for a new workspace mount, or on a
+            # named worker whose Deployment a new one replaced, which counts its starts from one again.
             return current
         self._invalidate_ready_worker(worker_key)
 
@@ -963,6 +988,7 @@ class KubernetesWorkerBackend:
             lifecycle,
             "ready",
             state_subpath=entry.state_subpath,
+            incarnation=entry.incarnation,
         )
 
     def _record_startup_failure_or_cleanup_secret(
@@ -1035,6 +1061,7 @@ class KubernetesWorkerBackend:
             lifecycle,
             self._effective_status(deployment, lifecycle, now=now, replicas_override=replicas_override),
             state_subpath=annotations.get(resources.ANNOTATION_STATE_SUBPATH, ""),
+            incarnation=metadata.uid,
         )
 
     def _handle(
@@ -1045,6 +1072,7 @@ class KubernetesWorkerBackend:
         status: WorkerStatus,
         *,
         state_subpath: str,
+        incarnation: str | None,
     ) -> WorkerHandle:
         endpoint_root = resources.service_host(worker_id, self.config.namespace, self.config.worker_port)
         return worker_handle(
@@ -1062,6 +1090,7 @@ class KubernetesWorkerBackend:
                 "state_subpath": state_subpath,
                 "api_root": f"{endpoint_root}{SANDBOX_RUNNER_API_ROOT}",
             },
+            incarnation=incarnation,
         )
 
     def _effective_status(
