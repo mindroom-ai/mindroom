@@ -123,15 +123,25 @@ _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
 )
 _EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
 _EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
-# Where the allowed keys can carry a Kubernetes quantity; "*" is every list item or mapping value.
+# Where the allowed keys can carry a Kubernetes quantity; "*" is every list item or mapping value,
+# and "a|b" names the wire and Python spellings the client accepts for one field.
 _EXTRA_CONTAINER_QUANTITY_PATHS = (
     ("resources", "requests", "*"),
     ("resources", "limits", "*"),
-    ("env", "*", "valueFrom", "resourceFieldRef", "divisor"),
+    ("env", "*", "valueFrom|value_from", "resourceFieldRef|resource_field_ref", "divisor"),
 )
 _EXTRA_VOLUME_QUANTITY_PATHS = (
-    ("emptyDir", "sizeLimit"),
-    ("projected", "sources", "*", "downwardAPI", "items", "*", "resourceFieldRef", "divisor"),
+    ("emptyDir", "sizeLimit|size_limit"),
+    (
+        "projected",
+        "sources",
+        "*",
+        "downwardAPI|downward_api",
+        "items",
+        "*",
+        "resourceFieldRef|resource_field_ref",
+        "divisor",
+    ),
 )
 _DNS_SUBDOMAIN_RE = re.compile(
     r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*",
@@ -318,8 +328,9 @@ def _with_string_quantity(value: object, path: tuple[str, ...], location: str) -
         return [_with_string_quantity(item, rest, f"{location}[{index}]") for index, item in enumerate(value)]
     if key == "*" and isinstance(value, dict):
         return {name: _with_string_quantity(item, rest, f"{location}.{name}") for name, item in value.items()}
-    if isinstance(value, dict) and key in value:
-        return {**value, key: _with_string_quantity(value[key], rest, f"{location}.{key}")}
+    for name in key.split("|"):
+        if isinstance(value, dict) and name in value:
+            value = {**value, name: _with_string_quantity(value[name], rest, f"{location}.{name}")}
     return value
 
 
@@ -335,9 +346,16 @@ def validated_kubernetes_object(model_name: str, value: dict[str, object], *, wh
     except pydantic.ValidationError as exc:
         errors = exc.errors(include_input=False, include_url=False)
     else:
-        return json.loads(model.to_json())
+        # Unlike the client's own serialization, this keeps explicit nulls, which clear fields in a patch.
+        return model.model_dump(mode="json", by_alias=True, exclude_unset=True)
     # Raised outside the handler, so no chained exception carries the rejected values into logs.
-    fields = "; ".join(f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in errors)
+    # An unknown key is not named either: it can be a credential pasted in the wrong place.
+    fields = "; ".join(
+        f"{'.'.join(map(str, error['loc'][:-1])) or 'top level'}: unknown field"
+        if error["type"] == "extra_forbidden"
+        else f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+        for error in errors
+    )
     msg = f"{what} is not a valid Kubernetes {model_name.removeprefix('V1')}: {fields}"
     raise WorkerBackendError(msg)
 

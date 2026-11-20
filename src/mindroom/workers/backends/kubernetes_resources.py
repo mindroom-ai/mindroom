@@ -714,12 +714,12 @@ class KubernetesResourceManager:
             )
             return
         manifest = self._auth_secret_manifest(worker_key=worker_key, worker_id=worker_id)
+        _validate_manifest(manifest)
         try:
             self._core.read_namespaced_secret(worker_id, self.config.namespace)
         except self.api_exception as exc:
             if exc.status != 404:
                 raise
-            _validate_manifest(manifest)
             try:
                 self._core.create_namespaced_secret(self.config.namespace, manifest)
             except self.api_exception as create_exc:

@@ -220,36 +220,29 @@ def test_kubernetes_config_rejects_invalid_trigger_sidecar_json(
 def test_kubernetes_config_keeps_sidecars_in_the_clients_wire_form(tmp_path: Path) -> None:
     """Numeric quantities and Python field names become the client's wire form, which also signs the config."""
 
-    def config_for(cpu: object, divisor: object, size_limit: object, read_only: str) -> KubernetesWorkerBackendConfig:
+    def config_for(cpu: object, divisor: object, size_limit: object, *, python: bool) -> KubernetesWorkerBackendConfig:
+        value_from, field_ref, size, downward, read_only = (
+            ("value_from", "resource_field_ref", "size_limit", "downward_api", "read_only")
+            if python
+            else ("valueFrom", "resourceFieldRef", "sizeLimit", "downwardAPI", "readOnly")
+        )
+        cpu_ref = {field_ref: {"resource": "limits.cpu", "divisor": divisor}}
         container = {
             "name": "trigger-listener",
             "image": "busybox",
             "volumeMounts": [{"name": "trigger-state", "mountPath": "/state", read_only: True}],
-            "env": [{"name": "CPU", "valueFrom": {"resourceFieldRef": {"resource": "limits.cpu", "divisor": divisor}}}],
+            "env": [{"name": "CPU", value_from: cpu_ref}],
             "resources": {"requests": {"cpu": cpu, "memory": "32Mi"}, "limits": {"cpu": cpu}},
         }
         volumes = [
-            {"name": "trigger-state", "emptyDir": {"sizeLimit": size_limit}},
-            {
-                "name": "pod-info",
-                "projected": {
-                    "sources": [
-                        {
-                            "downwardAPI": {
-                                "items": [
-                                    {"path": "cpu", "resourceFieldRef": {"resource": "limits.cpu", "divisor": divisor}},
-                                ],
-                            },
-                        },
-                    ],
-                },
-            },
+            {"name": "trigger-state", "emptyDir": {size: size_limit}},
+            {"name": "pod-info", "projected": {"sources": [{downward: {"items": [{"path": "cpu", **cpu_ref}]}}]}},
         ]
         env = _base_env(**{_EXTRA_CONTAINERS_ENV: json.dumps([container]), _EXTRA_VOLUMES_ENV: json.dumps(volumes)})
         return KubernetesWorkerBackendConfig.from_runtime(_runtime_paths(tmp_path, env))
 
-    numeric = config_for(0.5, 1, 1024, "read_only")
-    strings = config_for("0.5", "1", "1024", "readOnly")
+    numeric = config_for(0.5, 1, 1024, python=True)
+    strings = config_for("0.5", "1", "1024", python=False)
 
     assert numeric == strings
     container = numeric.extra_containers[0]
@@ -268,16 +261,42 @@ def test_kubernetes_config_keeps_sidecars_in_the_clients_wire_form(tmp_path: Pat
     ) == kubernetes_backend_config_signature(strings, runtime_paths, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path)
 
 
+def test_kubernetes_config_keeps_explicit_sidecar_nulls(tmp_path: Path) -> None:
+    """An explicit null clears a live field in a strategic merge patch, so it survives and signs unlike omission."""
+
+    def config_for(env_var: dict[str, object]) -> KubernetesWorkerBackendConfig:
+        container = {"name": "trigger-listener", "image": "busybox", "env": [env_var]}
+        env = _base_env(**{_EXTRA_CONTAINERS_ENV: json.dumps([container])})
+        return KubernetesWorkerBackendConfig.from_runtime(_runtime_paths(tmp_path, env))
+
+    cleared = config_for({"name": "MODE", "value": "listen", "valueFrom": None})
+    omitted = config_for({"name": "MODE", "value": "listen"})
+
+    assert cleared.extra_containers[0]["env"] == [{"name": "MODE", "value": "listen", "valueFrom": None}]
+    runtime_paths = _runtime_paths(tmp_path, {})
+    assert kubernetes_backend_config_signature(
+        cleared,
+        runtime_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    ) != kubernetes_backend_config_signature(omitted, runtime_paths, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path)
+
+
 def test_kubernetes_config_names_sidecar_fields_the_client_rejects_without_their_values(tmp_path: Path) -> None:
-    """A nested typo fails at config load with its location, and no chained error carries the rejected value."""
-    container = {"name": "trigger-listener", "image": "busybox", "env": [{"name": "TOKEN", "valeu": "hunter2-secret"}]}
+    """A nested typo fails at config load with its location; neither an unknown key nor a value is echoed."""
+    container = {
+        "name": "trigger-listener",
+        "image": "busybox",
+        "env": [{"name": "TOKEN", "valeu": "hunter2-secret"}],
+        "securityContext": {"hunter2-pasted-key": True},
+    }
     runtime_paths = _runtime_paths(tmp_path, _base_env(**{_EXTRA_CONTAINERS_ENV: json.dumps([container])}))
 
     with pytest.raises(WorkerBackendError) as raised:
         KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
 
     assert str(raised.value) == (
-        f"{_EXTRA_CONTAINERS_ENV}[0] is not a valid Kubernetes Container: env.0.valeu: Extra inputs are not permitted"
+        f"{_EXTRA_CONTAINERS_ENV}[0] is not a valid Kubernetes Container: env.0: unknown field; securityContext: unknown field"
     )
     assert raised.value.__context__ is None
 

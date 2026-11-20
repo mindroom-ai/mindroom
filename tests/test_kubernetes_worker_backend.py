@@ -1450,7 +1450,13 @@ def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every patch and delete of a worker's objects must reach the API server with its content type and body."""
-    backend, objects = _full_featured_backend(monkeypatch)
+    # An explicit null must reach the patch: omitting it would keep a valueFrom the live object gained since.
+    containers = deepcopy(_NUMERIC_QUANTITY_EXTRA_CONTAINERS)
+    containers[0]["env"].append({"name": "CLEARED", "value": "set", "valueFrom": None})
+    backend, objects = _full_featured_backend(
+        monkeypatch,
+        **_sidecars_from_config(containers, _NUMERIC_QUANTITY_EXTRA_VOLUMES),
+    )
     resources = backend._resources
     with _installed_kubernetes_client(backend, objects) as server:
         handle = backend.ensure_worker(_spec(_ALICE_USER_WORKER_KEY), now=10.0)
@@ -1488,7 +1494,8 @@ def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
         ("DELETE", deployment_path, None),
         ("PATCH", deployment_path, strategic),
     ]
-    assert [request.body for request in server.sent if request.method != "GET"] == [
+    bodies = [request.body for request in server.sent if request.method != "GET"]
+    assert bodies == [
         resources._service_manifest(worker_id),
         resources._auth_secret_patch(worker_key=_ALICE_USER_WORKER_KEY, worker_id=worker_id),
         resources._deployment_manifest(**deployment_args),
@@ -1500,11 +1507,16 @@ def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
         {"metadata": {"annotations": {"example.org/used": "later"}}},
     ]
     assert "propagationPolicy=Foreground" in server.sent[-3].query
+    assert bodies[2]["spec"]["template"]["spec"]["containers"][1]["env"][-1]["valueFrom"] is None
 
 
 def test_kubernetes_worker_manifest_the_client_rejects_keeps_the_running_deployment() -> None:
     """A replacement the client's models reject fails before the delete, naming the field but not its value."""
-    sidecar = {"name": "trigger-listener", "image": "busybox", "env": [{"name": "TOKEN", "valeu": "hunter2-secret"}]}
+    sidecar = {
+        "name": "trigger-listener",
+        "image": "busybox",
+        "env": [{"name": "TOKEN", "hunter2-key": "hunter2-value"}],
+    }
     backend, _apps_api, _core_api = _backend(extra_containers=(sidecar,))
     running = {"metadata": {"name": "mindroom-worker-a"}, "spec": {"replicas": 1, "selector": {}, "template": {}}}
     with (
@@ -1522,10 +1534,26 @@ def test_kubernetes_worker_manifest_the_client_rejects_keeps_the_running_deploym
         )
 
     assert [request.method for request in server.sent] == ["GET"]
-    assert "spec.template.spec.containers.1.env.0.valeu: Extra inputs are not permitted" in str(raised.value)
+    assert "spec.template.spec.containers.1.env.0: unknown field" in str(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
     assert "hunter2" not in str(raised.value)
+
+
+def test_kubernetes_auth_secret_the_client_rejects_fails_before_any_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Secret manifest is checked before its read, so no API error from that read is chained into the failure."""
+    backend, _apps_api, _core_api = _backend()
+    resources = backend._resources
+    manifest = resources._auth_secret_manifest(worker_key=_TEST_SCOPED_WORKER_KEY_A, worker_id="mindroom-worker-a")
+    monkeypatch.setattr(resources, "_auth_secret_manifest", lambda **_kwargs: {**manifest, "stringdata": {}})
+    with (
+        _installed_kubernetes_client(backend) as server,
+        pytest.raises(WorkerBackendError, match="top level: unknown field") as raised,
+    ):
+        resources.apply_auth_secret(worker_key=_TEST_SCOPED_WORKER_KEY_A, worker_id="mindroom-worker-a")
+
+    assert server.sent == []
+    assert raised.value.__context__ is None
 
 
 def test_kubernetes_deployment_read_before_its_status_is_not_ready() -> None:
