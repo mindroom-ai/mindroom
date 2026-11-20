@@ -1915,6 +1915,27 @@ def test_saving_a_preview_prunes_what_nobody_decided_in_time(tmp_path: Path) -> 
     assert set(_stored_pending_changes(runtime_paths)) == {"$decided", "$new"}
 
 
+def test_a_preview_whose_record_could_not_be_removed_keeps_its_withheld_value(tmp_path: Path) -> None:
+    """Forgetting a preview drops its in-memory change only once the store no longer holds its record."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    secret = replace(_pending_config_change(), new_value="sk-withheld", new_value_withheld=True)
+
+    with patch.object(config_confirmation, "_pending_changes", {}):
+        config_confirmation._save_pending_change(runtime_paths, "$preview", secret)
+        with (
+            patch.object(config_confirmation, "write_override_records", side_effect=OSError("disk full")),
+            pytest.raises(OSError, match="disk full"),
+        ):
+            config_confirmation._save_pending_change(runtime_paths, "$preview", None)
+
+        assert set(_stored_pending_changes(runtime_paths)) == {"$preview"}
+        assert config_confirmation._pending_changes == {"$preview": secret}
+        config_confirmation._save_pending_change(runtime_paths, "$preview", None)
+        assert config_confirmation._pending_changes == {}
+
+    assert _stored_pending_changes(runtime_paths) == {}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("command", "field_path"),

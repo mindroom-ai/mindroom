@@ -184,11 +184,13 @@ def _save_pending_change(
         del records[stale]
     if checkpoint is None:
         records.pop(preview_event_id, None)
-        _pending_changes.pop(preview_event_id, None)
     else:
         records[preview_event_id] = checkpoint.to_dict()
     write_override_records(path, records)
-    if checkpoint is not None:
+    # Memory follows the store: a write that fails leaves the change, and a value only memory holds, in place.
+    if checkpoint is None:
+        _pending_changes.pop(preview_event_id, None)
+    else:
         _pending_changes[preview_event_id] = checkpoint
 
 
