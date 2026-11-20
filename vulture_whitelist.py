@@ -477,7 +477,6 @@ _._validate_logins  # Pydantic field validator (src/mindroom/config/tailnet_ssh.
 _._validate_authorized_keys  # Pydantic field validator (src/mindroom/config/tailnet_ssh.py)
 _.authorized_keys  # Operator config field the tailnet SSH link service reads (src/mindroom/config/tailnet_ssh.py)
 link_ineligibility  # Eligibility rule the tailnet SSH link service and user API call (src/mindroom/tailnet_ssh/eligibility.py)
-ssh_eligible_launch  # Eligibility rule the dedicated worker backends call at launch (src/mindroom/tailnet_ssh/eligibility.py)
 HOSTNAME  # Hostname rule the tailnet SSH link service and user API check (src/mindroom/tailnet_ssh/store.py)
 _.host_public_key  # Link field the user API shows for known_hosts (src/mindroom/tailnet_ssh/store.py)
 _.enrolled_login  # Link field the link service sends to the gateway as allowed_login (src/mindroom/tailnet_ssh/store.py)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, replace
 
-from mindroom.workers.models import WorkerHandle, WorkerStatus
+from mindroom.workers.models import WorkerHandle, WorkerSshEndpoint, WorkerStatus
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 
@@ -39,6 +39,7 @@ def worker_handle(
     status: WorkerStatus,
     backend_name: str,
     debug_metadata: dict[str, str],
+    ssh_endpoint: WorkerSshEndpoint | None = None,
 ) -> WorkerHandle:
     """Build one worker's handle from its lifecycle state and the backend's effective status and endpoint."""
     return WorkerHandle(
@@ -55,6 +56,7 @@ def worker_handle(
         failure_count=lifecycle.failure_count,
         failure_reason=lifecycle.failure_reason,
         debug_metadata=debug_metadata,
+        ssh_endpoint=ssh_endpoint,
     )
 
 
