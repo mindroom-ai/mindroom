@@ -4474,6 +4474,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.email_invites.receiver"
 depends_on = [
+    "mindroom.constants",
     "mindroom.email_invites.policy",
     "mindroom.email_invites.store",
     "mindroom.matrix.client_delivery",
