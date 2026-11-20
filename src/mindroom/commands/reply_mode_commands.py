@@ -30,10 +30,6 @@ _MODE_EFFECTS: dict[RoomReplyMode, str] = {
 }
 
 
-def _write_failure(taken: bool | None) -> str:
-    return moderator_rights_message("change the reply mode") if taken is None else _WRITE_FAILED
-
-
 def _show_room_reply_mode(config: Config, runtime_paths: RuntimePaths, room_id: str, read: ReplyModeRead) -> str:
     mode = read.mode
     if mode is None:
@@ -74,17 +70,14 @@ async def handle_reply_mode_command(  # noqa: PLR0911 - one answer per outcome
     if await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id)) is None:
         return "❌ Room admin only."
 
-    if requested in _RESET_ARGUMENTS:
-        if read.ok and read.mode is None:
-            return "This room has no reply mode override."
-        if not (taken := await write_room_reply_mode(client, runtime_paths, room_id, None, put_state=put_state)):
-            return _write_failure(taken)
+    mode = None if requested in _RESET_ARGUMENTS else cast("RoomReplyMode", requested)
+    if mode is None and read.ok and read.mode is None:
+        return "This room has no reply mode override."
+    if not (taken := await write_room_reply_mode(client, runtime_paths, room_id, mode, put_state=put_state)):
+        return moderator_rights_message("change the reply mode") if taken is None else _WRITE_FAILED
+    if mode is None:
         configured = config.get_room_reply_mode(runtime_paths, room_id, ReplyModeRead(ok=True, mode=None))
         return f"✅ Room reply mode override removed. This room uses its configured `{configured}` reply mode again."
-
-    mode = cast("RoomReplyMode", requested)
-    if not (taken := await write_room_reply_mode(client, runtime_paths, room_id, mode, put_state=put_state)):
-        return _write_failure(taken)
     return (
         f"✅ This room now uses `{mode}` reply mode.\n\n{_MODE_EFFECTS[mode]}\n\n"
         "Use `/reply_mode reset` to restore the configured mode."
