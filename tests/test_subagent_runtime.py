@@ -9,6 +9,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
@@ -728,6 +729,48 @@ async def test_a_stopped_subagent_job_continues_only_for_a_synced_bot_and_a_prov
         else:
             await wait_for_status(runtime, job.job_id, "cancelled")
             assert prepared == []
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_subagent_job_that_cannot_continue_leaves_the_published_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job the last shutdown kept saved stays listed while it waits, and leaves the listing once it cannot continue."""
+    job = replace(completed_delegation_job(), status="running", result=None)
+    paths = test_runtime_paths(tmp_path)
+    bot = MagicMock(running=True, first_sync_complete=False, admit_job_follow_up=AsyncMock())
+    bot.client.rooms.__contains__.return_value = True
+    bot.client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse(event_id="$s", room_id="!room:test"))
+    unavailable = False
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: managed_team_config(tmp_path),
+        bot_provider=lambda _: bot,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
+        entity_unavailable=lambda _: unavailable,
+    )
+    monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
+    await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(job)))
+    coordinator._runtime = runtime = await tool_job_runtime(
+        tmp_path,
+        cancel=coordinator._interrupt,
+        continues=runtime_module._is_subagent_job,
+    )
+    try:
+        await runtime.recover()
+        # Its bot has not synced yet, so the job waits, listed.
+        await coordinator._reconcile()
+        assert [listed["job_id"] for listed in bot.client.room_put_state.await_args.kwargs["content"]["jobs"]] == [
+            job.job_id,
+        ]
+        unavailable = True
+        await coordinator._reconcile()
+        assert runtime._entries[job.job_id].job.status == "interrupted"
+        assert bot.client.room_put_state.await_args.kwargs["content"] == {"jobs": [], "total": 0}
     finally:
         await runtime.shutdown()
 

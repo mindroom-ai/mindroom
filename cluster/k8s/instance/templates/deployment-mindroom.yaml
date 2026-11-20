@@ -192,6 +192,10 @@ spec:
           value: "127.0.0.1"
         - name: MINDROOM_EGRESS_BROKER_URL
           value: "http://127.0.0.1:8768"
+        {{- else }}
+        # MindRoom runs a loopback broker unless told otherwise.
+        - name: MINDROOM_EGRESS_BROKER_PORT
+          value: "off"
         {{- end }}
         - name: MINDROOM_SANDBOX_PROXY_URL
           value: "http://localhost:8766"

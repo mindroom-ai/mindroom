@@ -44,12 +44,14 @@ _EGRESS_TOOL_NAME = "egress_credentials"
 
 
 def egress_broker_enabled(runtime_paths: RuntimePaths) -> bool:
-    """Return whether this deployment runs the egress broker, which its port setting decides.
+    """Return whether this deployment runs the egress broker: unless its port setting is `off` or `0`.
 
-    Every Agent Keys surface (its API routes, pages, catalog fields, and tool) follows this, so with the port unset
-    nothing of the feature shows or runs. A set but invalid port counts as enabled, so startup refuses it loudly.
+    Every Agent Keys surface (its API routes, pages, catalog fields, and tool) follows this, so with the broker off
+    nothing of the feature shows or runs. Unset, the broker serves the primary's shell calls on a loopback port. A set
+    but invalid port counts as enabled, so startup refuses it loudly.
     """
-    return runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]) is not None
+    port = (runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]) or "").strip().lower()
+    return port not in {"off", "0"}
 
 
 def personal_page_served(runtime_paths: RuntimePaths) -> bool:
@@ -107,10 +109,14 @@ def broker_serves_primary_shell(config: Config, agent_name: str, runtime_paths: 
     """
     if agent_name not in config.agents:
         return False
-    agent_tools = _agent_tools(config, agent_name, runtime_paths)
+    return _primary_shell_uses_broker(_agent_tools(config, agent_name, runtime_paths), runtime_paths)
+
+
+def _primary_shell_uses_broker(agent_tools: AgentTools, runtime_paths: RuntimePaths) -> bool:
+    tool_names = agent_tools.tool_names
     return (
-        _EGRESS_TOOL_NAME in agent_tools.tool_names
-        and "shell" in agent_tools.tool_names
+        _EGRESS_TOOL_NAME in tool_names
+        and "shell" in tool_names
         and not _runs_in_a_worker(agent_tools, ("shell",), runtime_paths)
     )
 
@@ -124,10 +130,13 @@ def egress_tool_with_only_primary_python(config: Config, agent_name: str, runtim
     if agent_name not in config.agents:
         return False
     agent_tools = _agent_tools(config, agent_name, runtime_paths)
+    command_tools = EXECUTION_ENV_TOOL_NAMES.intersection(agent_tools.tool_names)
     return (
         _EGRESS_TOOL_NAME in agent_tools.tool_names
-        and not EXECUTION_ENV_TOOL_NAMES.isdisjoint(agent_tools.tool_names)
+        and bool(command_tools)
         and not _uses_broker(agent_tools, runtime_paths)
+        # A worker-routed command misses only the default broker's worker-facing URL, not a python in the primary.
+        and not _runs_in_a_worker(agent_tools, command_tools, runtime_paths)
     )
 
 
@@ -140,8 +149,13 @@ def _agent_tools(config: Config, agent_name: str, runtime_paths: RuntimePaths) -
 
 
 def _uses_broker(agent_tools: AgentTools, runtime_paths: RuntimePaths) -> bool:
-    """Return whether the agent lists `egress_credentials` and a `shell`, or another command tool in a worker."""
+    """Return whether the agent lists `egress_credentials` and a `shell`, or another command tool in a worker.
+
+    The default broker, without a port, has no worker-facing URL, so only a `shell` in the primary uses it.
+    """
     tool_names = agent_tools.tool_names
+    if not runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"], default="").strip():
+        return _primary_shell_uses_broker(agent_tools, runtime_paths)
     return _EGRESS_TOOL_NAME in tool_names and (
         "shell" in tool_names
         or _runs_in_a_worker(agent_tools, EXECUTION_ENV_TOOL_NAMES.intersection(tool_names), runtime_paths)
