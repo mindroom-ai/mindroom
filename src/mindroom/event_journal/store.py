@@ -8,7 +8,7 @@ rather than something it is trusted not to do.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -102,6 +102,7 @@ class PrincipalStore(
     """
 
     _approval_signals: ApprovalSignals
+    _page_cache: reads.PageCache
 
     async def load_or_create_ingestion_consumer(self, *, new_generation: UUID) -> IngestionConsumer:  # noqa: D102
         return await self._write(_consumer, new_generation, None)
@@ -187,6 +188,8 @@ class EventJournalStore:
     backend: Backend
     # What this store's committed approval writes tell the process; its backend publishes them here.
     approval_signals: ApprovalSignals
+    # Content this store's conversation reads loaded, shared by its principals and bounded for all of them together.
+    page_cache: reads.PageCache = field(default_factory=reads.PageCache)
 
     @classmethod
     def open_sqlite(cls, database_path: Path) -> EventJournalStore:
@@ -213,6 +216,7 @@ class EventJournalStore:
             _backend=self.backend,
             _principal_id=principal_id,
             _approval_signals=self.approval_signals,
+            _page_cache=self.page_cache,
         )
 
     async def load_approval_signals(self) -> None:

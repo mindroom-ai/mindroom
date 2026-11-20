@@ -230,6 +230,9 @@ class ConversationReadView(_HydrationMarkerView):
 
     __slots__ = ()
 
+    # Held by `PrincipalStore`, the only class constructed with this view.
+    _page_cache: reads.PageCache
+
     async def read_conversation(
         self,
         *,
@@ -245,6 +248,7 @@ class ConversationReadView(_HydrationMarkerView):
             thread_id=thread_id,
             limit=limit,
             before=before,
+            cache=self._page_cache,
         )
 
     async def read_room_after(

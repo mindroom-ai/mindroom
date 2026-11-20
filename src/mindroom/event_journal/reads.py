@@ -8,7 +8,9 @@ thread's rows, but only their IDs and refresh tokens, never their content.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
@@ -30,10 +32,14 @@ _PAGE_COLUMNS = """
     logical_event_id, room_id, thread_id, sender, created_ts,
     revision_event_id, revision_ts, content_json, refresh_token, membership_epoch
 """
-# Order and stored size only, so a page is sized before any content is loaded.
+# Every column but the content, and its stored size, so a page is sized before
+# any content is loaded and only the content is ever taken from an earlier read.
 # Both backends read a text value's byte length without loading the value;
 # SQLite before 3.43 has no ``octet_length``, and the backend supplies one.
-_PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, octet_length(content_json) AS content_bytes"
+_PAGE_SIZE_COLUMNS = """
+    logical_event_id, room_id, thread_id, sender, created_ts, revision_event_id, revision_ts,
+    refresh_token, membership_epoch, octet_length(content_json) AS content_bytes
+"""
 
 # How much stored content one page loads, newest message first. A resolved
 # long-text sidecar can be megabytes, and anyone who can post can make every
@@ -74,6 +80,64 @@ _DECODED_BYTES_PER_ARRAY = 96
 _DECODED_BYTES_PER_OBJECT = 192
 _DECODED_BYTES_PER_SEPARATOR = 56
 
+# How much stored content one store keeps from earlier pages, for all its
+# principals together. A hundred threads of 500 messages of 2.5 KB, each read
+# by one agent, count for about 170 MiB.
+_PAGE_CACHE_BYTES = 256 * 1024 * 1024
+# What kept content counts for besides its stored size: its key and its place
+# in the order, measured at about 550 bytes with 43-character event IDs.
+_CACHED_ROW_OVERHEAD_BYTES = 1024
+
+# One principal's message at one revision: principal, room, logical event, visible revision, when it was made, and
+# the stored size of its content.
+type _ContentKey = tuple[str, str, str, str, int, int | None]
+# Stored content, or None for a row owing a refetch, and what it may decode to.
+type _Content = tuple[str | None, int]
+
+
+@dataclass(slots=True, eq=False)
+class PageCache:
+    """Stored content earlier conversation pages loaded, so reading a conversation again loads only what changed.
+
+    Content is kept under its principal, room, logical event, visible revision, revision time and stored size, and a
+    page asks for it with the values its own snapshot reports. Every other column of a row is read from that
+    snapshot each time, and a removed row is never asked for. An edit installs another revision, and a redaction or
+    an unresolved sidecar clears the body, which leaves it no stored size, so a row that changed finds nothing here
+    under its new values, whichever store or process changed it. A body is only ever stored as the content of the
+    event its revision names, which Matrix never changes, so a refetch that names an earlier revision again finds
+    that event's content.
+
+    Only what the database stored is kept. Each page decodes its own content, so no two readers share an object.
+
+    Holds at most ``budget_bytes``, counting each content's stored size and ``_CACHED_ROW_OVERHEAD_BYTES``. The
+    content read longest ago is dropped first.
+    """
+
+    budget_bytes: int = _PAGE_CACHE_BYTES
+    _contents: OrderedDict[_ContentKey, _Content] = field(default_factory=OrderedDict, init=False, repr=False)
+    _held_bytes: int = field(default=0, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def kept(self, keys: list[_ContentKey]) -> dict[_ContentKey, _Content]:
+        """Return the content kept under each of ``keys``, marking it read just now."""
+        with self._lock:
+            found = {key: self._contents[key] for key in keys if key in self._contents}
+            for key in found:
+                self._contents.move_to_end(key)
+            return found
+
+    def keep(self, loaded: dict[_ContentKey, _Content]) -> None:
+        """Keep content a page just loaded, dropping what was read longest ago once the budget is passed."""
+        with self._lock:
+            for key, content in loaded.items():
+                if key not in self._contents:
+                    self._held_bytes += (key[-1] or 0) + _CACHED_ROW_OVERHEAD_BYTES
+                self._contents[key] = content
+            while self._held_bytes > self.budget_bytes:
+                dropped, _ = self._contents.popitem(last=False)
+                self._held_bytes -= (dropped[-1] or 0) + _CACHED_ROW_OVERHEAD_BYTES
+
+
 # Everything older than one page's last row, spelled as a row value.
 #
 # The disjunction this replaces -- `created_ts < ? OR (created_ts = ? AND
@@ -112,6 +176,7 @@ def read_conversation(
     thread_id: str | None,
     limit: int,
     before: ConversationCursor | None = None,
+    cache: PageCache | None = None,
 ) -> ConversationPage:
     """Return one bounded page of a conversation, oldest first.
 
@@ -126,7 +191,8 @@ def read_conversation(
     sized first and only the ones that fit are loaded.
 
     Both queries read one snapshot, the read transaction's, so the content
-    loaded is exactly what the page was sized on.
+    loaded is exactly what the page was sized on. Content ``cache`` kept under
+    the revision that snapshot shows is not loaded again.
     """
     if limit <= 0:
         msg = "A conversation read requires a positive limit"
@@ -140,17 +206,17 @@ def read_conversation(
         before=before,
     )
     kept = _rows_within_content_budget(sizes)
-    rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
-    decoded = _rows_within_decoded_budget(rows)
-    trimmed = decoded < len(rows)
-    rows = rows[:decoded]
+    contents = _load_contents(transaction, principal_id, room_id=room_id, sized=sizes[:kept], cache=cache)
+    decoded = _rows_within_decoded_budget(contents)
+    trimmed = decoded < len(contents)
+    rows = sizes[:decoded]
     messages: list[VisibleMessage] = []
     refresh_pending: list[RefreshRequest] = []
-    for row in rows:
-        if row["content_json"] is None:
+    for row, (content_json, _) in zip(rows, contents, strict=False):
+        if content_json is None:
             refresh_pending.append(_refresh_request(row))
             continue
-        messages.append(_visible_message(row))
+        messages.append(_visible_message(row, content_json))
     next_cursor = (
         ConversationCursor(
             created_ts=int(rows[-1]["created_ts"]),
@@ -215,13 +281,17 @@ def read_room_after(
         ),
     )
     kept = _rows_within_content_budget(sizes[:limit])
-    rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
-    rows = rows[: _rows_within_decoded_budget(rows)]
-    pending = tuple(_refresh_request(row) for row in rows if row["content_json"] is None)
-    first_pending = next((index for index, row in enumerate(rows) if row["content_json"] is None), len(rows))
-    messages = tuple(_visible_message(row) for row in rows[:first_pending])
+    contents = _load_contents(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
+    rows = sizes[: _rows_within_decoded_budget(contents)]
+    pending = tuple(_refresh_request(row) for row in rows if row["content_bytes"] is None)
+    messages: list[VisibleMessage] = []
+    for row, (content_json, _) in zip(rows, contents, strict=False):
+        if content_json is None:
+            break
+        messages.append(_visible_message(row, content_json))
+    first_pending = len(messages)
     return RoomPage(
-        messages=messages,
+        messages=tuple(messages),
         refresh_pending=pending,
         more=len(rows) < len(sizes),
         last_cursor=(
@@ -334,7 +404,7 @@ def _thread_summaries(
     )
     return tuple(
         sorted(
-            (_visible_message(row) for row in rows),
+            (_visible_message(row, row["content_json"]) for row in rows),
             key=lambda message: (message.revision_ts, message.logical_event_id),
         ),
     )
@@ -406,7 +476,7 @@ def room_thread_activity(
     if not recent:
         return ()
     roots = {
-        row["logical_event_id"]: _visible_message(row)
+        row["logical_event_id"]: _visible_message(row, row["content_json"])
         for row in transaction.fetchall(
             _rows_by_id_sql(len(recent)),
             (principal_id, room_id, *recent, _ROOM_ACTIVITY_TITLE_BYTES),
@@ -474,28 +544,50 @@ def _page_rows(
     return tuple(rows)
 
 
-def _load_rows(
+def _load_contents(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
     sized: tuple[Row, ...],
-) -> tuple[Row, ...]:
-    """Return the full rows a page was sized on, in the same order, by primary key."""
-    if not sized:
-        return ()
-    placeholders = ", ".join("?" for _ in sized)
-    loaded = {
-        row["logical_event_id"]: row
-        for row in transaction.fetchall(
-            f"""
-            SELECT {_PAGE_COLUMNS} FROM visible_messages
-            WHERE principal_id = ? AND room_id = ? AND logical_event_id IN ({placeholders})
-            """,  # noqa: S608 - a fixed column list and generated placeholders, not input
-            (principal_id, room_id, *(row["logical_event_id"] for row in sized)),
+    cache: PageCache | None = None,
+) -> tuple[_Content, ...]:
+    """Return the stored content of the rows a page was sized on, in the same order.
+
+    A row owing a refetch has none. Content ``cache`` kept under a row's revision is taken from it, and the rest is
+    loaded by primary key and kept.
+    """
+    keys: dict[str, _ContentKey] = {
+        row["logical_event_id"]: (
+            principal_id,
+            room_id,
+            row["logical_event_id"],
+            row["revision_event_id"],
+            int(row["revision_ts"]),
+            row["content_bytes"],
         )
+        for row in sized
     }
-    return tuple(loaded[row["logical_event_id"]] for row in sized)
+    contents: dict[_ContentKey, _Content] = {key: (None, 0) for key in keys.values() if key[-1] is None}
+    if cache is not None:
+        contents.update(cache.kept(list(keys.values())))
+    missing = [logical_event_id for logical_event_id, key in keys.items() if key not in contents]
+    if missing:
+        placeholders = ", ".join("?" for _ in missing)
+        loaded: dict[_ContentKey, _Content] = {
+            keys[row["logical_event_id"]]: (row["content_json"], _decoded_bytes(row["content_json"]))
+            for row in transaction.fetchall(
+                f"""
+                SELECT logical_event_id, content_json FROM visible_messages
+                WHERE principal_id = ? AND room_id = ? AND logical_event_id IN ({placeholders})
+                """,  # noqa: S608 - generated placeholders, not input
+                (principal_id, room_id, *missing),
+            )
+        }
+        if cache is not None:
+            cache.keep(loaded)
+        contents.update(loaded)
+    return tuple(contents[key] for key in keys.values())
 
 
 def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:
@@ -512,23 +604,27 @@ def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:
     return len(rows)
 
 
-def _rows_within_decoded_budget(rows: tuple[Row, ...]) -> int:
+def _rows_within_decoded_budget(contents: tuple[_Content, ...]) -> int:
     """Return how many of one page's loaded rows fit what it may decode to, never fewer than one."""
     total = 0
-    for index, row in enumerate(rows):
-        content_json = row["content_json"] or ""
-        total += (
-            len(content_json)
-            # Stored content is compact JSON: a structural object opens with an unescaped quote or closes at
-            # once, and a structural separator is never followed by a space, so JSON text inside strings is free.
-            + _DECODED_BYTES_PER_ARRAY * (content_json.count("[") - content_json.count('[\\"'))
-            + _DECODED_BYTES_PER_OBJECT * (content_json.count('{"') + content_json.count("{}"))
-            + _DECODED_BYTES_PER_SEPARATOR
-            * (content_json.count(",") - content_json.count(", ") + content_json.count(":") - content_json.count(": "))
-        )
+    for index, (_, decoded_bytes) in enumerate(contents):
+        total += decoded_bytes
         if total > _PAGE_DECODED_BUDGET_BYTES:
             return max(index, 1)
-    return len(rows)
+    return len(contents)
+
+
+def _decoded_bytes(content_json: str) -> int:
+    """Return what one row's stored content may decode to."""
+    return (
+        len(content_json)
+        # Stored content is compact JSON: a structural object opens with an unescaped quote or closes at
+        # once, and a structural separator is never followed by a space, so JSON text inside strings is free.
+        + _DECODED_BYTES_PER_ARRAY * (content_json.count("[") - content_json.count('[\\"'))
+        + _DECODED_BYTES_PER_OBJECT * (content_json.count('{"') + content_json.count("{}"))
+        + _DECODED_BYTES_PER_SEPARATOR
+        * (content_json.count(",") - content_json.count(", ") + content_json.count(":") - content_json.count(": "))
+    )
 
 
 def later_message_exists(
@@ -900,7 +996,7 @@ def revoke_room_hydration(transaction: Transaction, principal_id: str, *, room_i
     )
 
 
-def _visible_message(row: Row) -> VisibleMessage:
+def _visible_message(row: Row, content_json: str) -> VisibleMessage:
     return VisibleMessage(
         logical_event_id=row["logical_event_id"],
         room_id=row["room_id"],
@@ -909,7 +1005,7 @@ def _visible_message(row: Row) -> VisibleMessage:
         created_ts=int(row["created_ts"]),
         revision_event_id=row["revision_event_id"],
         revision_ts=int(row["revision_ts"]),
-        content=decode_content(row["content_json"]),
+        content=decode_content(content_json),
     )
 
 
