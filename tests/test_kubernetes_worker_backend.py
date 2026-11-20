@@ -1283,6 +1283,29 @@ def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -
     assert core_api.secrets[auth_secret_name].data == expected_secret_data
 
 
+def test_kubernetes_auth_secret_patch_goes_through_the_installed_client() -> None:
+    """The Secret patch must match the installed client's API and send a merge patch whose nulls delete keys."""
+    from kubernetes import client as kubernetes_client  # noqa: PLC0415
+
+    backend, _apps_api, _core_api = _backend(auth_secret_name="auth")  # noqa: S106
+    api_client = kubernetes_client.ApiClient(kubernetes_client.Configuration(host="https://kubernetes.invalid"))
+    backend._resources.core_api = kubernetes_client.CoreV1Api(api_client)
+    sent = RuntimeError("request captured")
+    with (
+        patch.object(api_client.rest_client.pool_manager, "request", side_effect=sent) as request,
+        pytest.raises(RuntimeError) as raised,
+    ):
+        backend._resources.delete_secret("worker-a")
+
+    assert raised.value is sent
+    method, url = request.call_args.args
+    assert method == "PATCH"
+    assert url == f"https://kubernetes.invalid/api/v1/namespaces/{backend._resources.config.namespace}/secrets/auth"
+    assert request.call_args.kwargs["headers"]["Content-Type"] == "application/merge-patch+json"
+    data = json.loads(request.call_args.kwargs["body"])["data"]
+    assert data == {"worker-a": None, "worker-a.credentials-encryption-key": None}
+
+
 def test_kubernetes_backend_cleanup_removes_only_own_key_from_tenant_auth_secret(tmp_path: Path) -> None:
     """Cleaning up one idle worker should null out only its key in the shared tenant Secret."""
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
