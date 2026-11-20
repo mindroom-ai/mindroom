@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -690,9 +691,9 @@ async def test_transcript_retry_sends_the_same_matrix_transaction(mock_home_bot:
 
     with patch("mindroom.delivery_gateway.send_message_outcome", new=send):
         with pytest.raises(RuntimeError, match="could not be sent"):
-            await echo.publish("!test:server", "$voice", target, transcript)
-        await echo.publish("!test:server", "$voice", target, transcript)
-        await echo.publish("!test:server", "$other-voice", target, transcript)
+            await echo.publish(target, transcript)
+        await echo.publish(target, transcript)
+        await echo.publish(target, replace(transcript, event_id="$other-voice"))
 
     failed, retried, other = (call.kwargs["transaction_id"] for call in send.await_args_list)
     assert failed is not None

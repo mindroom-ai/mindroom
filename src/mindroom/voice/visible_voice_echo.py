@@ -49,14 +49,9 @@ class VisibleVoiceEchoLifecycle:
     # Holds the claim every bot shares, whose first writer posts the transcript, and each bot's receipt.
     journal: EventJournalStore
 
-    async def publish(
-        self,
-        room_id: str,
-        source_event_id: str,
-        target: MessageTarget,
-        transcript: PreparedIngress,
-    ) -> None:
+    async def publish(self, target: MessageTarget, transcript: PreparedIngress) -> None:
         """Return once the transcript is in the room, or when none is posted; raise when it could not be sent."""
+        room_id, source_event_id = target.room_id, transcript.event_id
         content = transcript.source["content"]
         # A contact room takes only the sends its message policy approved, and no transcript is one.
         unposted = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True or send_refused(room_id)
