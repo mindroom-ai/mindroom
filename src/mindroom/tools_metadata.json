@@ -12440,19 +12440,6 @@
         },
         {
           "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Subpages",
-          "name": "subpages",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "number",
-          "validation": null
-        },
-        {
-          "authored_override": true,
           "default": false,
           "description": null,
           "env": [],

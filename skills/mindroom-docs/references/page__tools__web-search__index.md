@@ -174,17 +174,16 @@ Search results include title, author, published date, URL, and page text truncat
 | `category` | `text` | `null` | Content category, such as `news`; replaces the per-call `category`. |
 | `include_domains` | `string[]` | `null` | Domain allowlist. |
 | `exclude_domains` | `string[]` | `null` | Domain denylist. |
-| `include_text` | `string[]` | `null` | Text every result must contain. |
-| `exclude_text` | `string[]` | `null` | Text no result may contain. |
-| `user_location` | `text` | `null` | Two-letter country code that localizes results. |
-| `moderation` | `boolean` | `null` | Filter unsafe content from results. |
+| `include_text` | `string[]` | `null` | Text every result must contain; Exa takes a list of one string of at most five words. |
+| `exclude_text` | `string[]` | `null` | Text no result may contain; Exa takes a list of one string of at most five words. |
+| `user_location` | `text` | `null` | Two-letter country code that localizes `search_exa()` results. |
+| `moderation` | `boolean` | `null` | Filter unsafe content from `search_exa()` results. |
 | `highlights` | `boolean` | `false` | Add the most relevant snippets of each page to results. |
-| `subpages` | `number` | `null` | Number of linked subpages to crawl and return with each result. |
 | `start_published_date` | `text` | `null` | Earliest publication date, ISO 8601. |
 | `end_published_date` | `text` | `null` | Latest publication date, ISO 8601. |
 | `start_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
 | `end_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
-| `livecrawl` | `text` | `null` | Live-crawl mode such as `always`, `fallback`, or `never`; unset leaves Exa's default. |
+| `livecrawl` | `text` | `null` | Live-crawl mode such as `always`, `fallback`, or `never`, deprecated by Exa. Unset sends none; a saved value, `always` included, now takes effect. |
 | `model` | `text` | `null` | Model for `exa_answer()` only: `exa` or `exa-pro`. |
 | `research_model` | `text` | `exa-research` | Model for `research()` only: `exa-research` or `exa-research-pro`. |
 | `timeout` | `number` | `30` | API timeout in seconds. |
