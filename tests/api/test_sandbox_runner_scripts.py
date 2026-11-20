@@ -1025,6 +1025,7 @@ def test_worker_script_launch_passes_the_entry_to_the_shim_launcher(
         entries.append(kwargs["entry"])
 
     monkeypatch.setattr(sandbox_runner_scripts_module, "launch_supervised_script", launch)
+    monkeypatch.setattr(sandbox_runner_scripts_module, "background_script_supervision_supported", lambda: True)
 
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
 

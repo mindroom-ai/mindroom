@@ -150,6 +150,7 @@ async def test_local_workflow_attempt_runs_the_shim_with_a_fixed_hash_seed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The launched command stays the shim; the entry and a fixed hash seed reach it through its environment."""
+    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
     manager, _backend, _client = _manager(tmp_path, mode="local")
     manager.grant_resolver = _workflow_grants
     launches: list[dict[str, object]] = []
@@ -172,6 +173,7 @@ async def test_local_workflow_attempt_runs_the_shim_with_a_fixed_hash_seed(
 @pytest.mark.asyncio
 async def test_plain_script_placement_and_launch_are_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The shell switch places no plain script on the host, and a plain script keeps its entry, seed and limit."""
+    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
     manager, _backend, _client = _manager(tmp_path, mode=None)
     manager.worker_backend = None
     context = _context(tmp_path, mode=None)
