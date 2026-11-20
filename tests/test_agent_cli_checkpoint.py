@@ -304,6 +304,25 @@ async def test_approval_checkpoint_keeps_completed_sibling_result(
 
 
 @pytest.mark.asyncio
+async def test_a_call_id_an_earlier_batch_answered_is_pending_until_this_batch_finishes_it(tmp_path: Path) -> None:
+    """A provider may reuse a call id: the new call is saved unanswered, not with the earlier call's result."""
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    first = [Message(role="user", content="do work"), _assistant("c1")]
+    await _capture(checkpoint, _record(), first)
+    checkpoint.complete("c1", ToolOutcome(content=""))
+    answered = Message(role="tool", tool_call_id="c1", tool_name="bash", content=NO_OUTPUT_TEXT)
+    await _capture(checkpoint, _record(), [*first, answered, _assistant("c1")])
+
+    await checkpoint.persist("c1")
+
+    assert catalog.store is not None
+    saved = catalog.store.get_run("run")
+    assert saved is not None
+    assert [(tool.tool_call_id, tool.result, tool.is_error) for tool in saved.tools or ()] == [("c1", None, None)]
+
+
+@pytest.mark.asyncio
 async def test_a_minimal_checkpoint_recovers_as_a_turn_with_every_bash_call_answered(tmp_path: Path) -> None:
     """A crash after the batch was saved recovers its messages as stored: a finished sibling's result stays its own."""
     catalog = await _stored_catalog(tmp_path)

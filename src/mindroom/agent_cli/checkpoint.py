@@ -114,20 +114,17 @@ class BatchCheckpoint:
             run = deepcopy(record)
             # The batch snapshot is already private; later results only append to it.
             run.messages = list(batch.messages)
-            results = {message.tool_call_id: message for message in batch.messages if message.role == "tool"}
-            observed: dict[str, ToolExecution] = {}
-            for observed_id, call in batch.calls.items():
-                if observed_id in batch.executions:
-                    observed[observed_id] = deepcopy(batch.executions[observed_id])
-                    continue
-                result = results.get(observed_id)
-                observed[observed_id] = ToolExecution(
+            # A call this batch has not finished is pending, even when an earlier batch reused its id.
+            observed = {
+                observed_id: deepcopy(batch.executions[observed_id])
+                if observed_id in batch.executions
+                else ToolExecution(
                     tool_call_id=observed_id,
                     tool_name=call.function.name,
                     tool_args=deepcopy(call.execution.tool_args),
-                    result=result.get_content_string() if result is not None else None,
-                    is_error=result.tool_call_error if result is not None else None,
                 )
+                for observed_id, call in batch.calls.items()
+            }
             # Each observed call takes its own entry's place, so the record keeps the batch's call order, refused
             # calls included; a call the record does not hold yet follows.
             recorded = {tool.tool_call_id for tool in run.tools or ()}
