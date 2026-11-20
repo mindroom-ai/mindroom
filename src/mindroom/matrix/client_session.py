@@ -108,11 +108,18 @@ class MindRoomAsyncClient(nio.AsyncClient):
         if self._process_shutdown_transport_fenced:
             raise _MatrixTransportShutdownError
         # nio retries connection errors while logging only "Timed out", so name the real cause here.
+        import time as _time  # noqa: PLC0415 - temporary timing log
+
+        _t = _time.monotonic()
         try:
             response = await super().send(*args, **kwargs)
         except (aiohttp.ClientConnectionError, TimeoutError) as exc:
             self._log_transport_failure(exc)
             raise
+        _path = str(args[1]) if len(args) > 1 else ""
+        if "/messages" in _path or "simplified_msc3575/sync" in _path or "/sync" in _path.split("?")[0][-6:]:
+            _kind = "messages" if "/messages" in _path else "sync"
+            logger.warning("rfs_http", user=self.user_id, kind=_kind, s=round(_time.monotonic() - _t, 3))
         self._transport_failure_logged = False
         return response
 
