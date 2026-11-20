@@ -42,6 +42,7 @@ from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
+from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -626,6 +627,67 @@ def test_worker_path_tool_does_not_list_or_search_a_workspace_replaced_by_link(
     assert "openai.json" not in result
     assert "SECRET" not in result
     assert "unrestricted" not in result
+
+
+@pytest.mark.parametrize(
+    ("search", "expected"),
+    [
+        ("ripgrep", {"notes.txt": "sk-workspace-value"}),
+        ("no-ripgrep", {"notes.txt": "sk-workspace-value", "alias.txt": "sk-workspace-value"}),
+        ("ripgrep-raced-through-a-link", {"notes.txt": "sk-workspace-value", "d/x.txt": "harmless"}),
+    ],
+)
+def test_grep_never_reads_a_planted_link_target(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    outside: Path,
+    search: str,
+    expected: dict[str, str],
+) -> None:
+    """Workspace grep reports only text it read through the capped no-follow reader, never a planted link's target.
+
+    Ripgrep opens files by path, so worker code swapping a directory under it can make it match a primary file.
+    """
+    secret = outside / "openai.json"
+    secret.write_text('{"api_key": "sk-SECRET-VALUE"}\n')
+    (workspace / "leak.json").symlink_to(secret)
+    (workspace / "d").mkdir()
+    (workspace / "d" / "x.txt").write_text("harmless\n")
+    (workspace / "d ").mkdir()
+    (workspace / "d " / "x.txt").symlink_to(secret)
+    (workspace / "notes.txt").write_text("sk-workspace-value\n")
+    (workspace / "alias.txt").symlink_to(workspace / "notes.txt")
+    with (workspace / "huge.txt").open("w") as huge:
+        huge.write("sk-huge\n")
+        huge.truncate(MAX_READ_BYTES + 1)
+    secret_stat = secret.stat()
+    opened_secret: list[object] = []
+    real_open = os.open
+
+    def recording_open(*args: object, **kwargs: object) -> int:
+        descriptor = real_open(*args, **kwargs)
+        if os.path.samestat(os.fstat(descriptor), secret_stat):
+            opened_secret.append(args[0])
+        return descriptor
+
+    def raced_ripgrep(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        events = [
+            {"path": {"text": str(workspace / name)}, "lines": {"text": "sk-SECRET-VALUE\n"}, "line_number": 1}
+            for name in ("leak.json", "d /x.txt", "d/x.txt", "notes.txt")
+        ]
+        stdout = "\n".join(json.dumps({"type": "match", "data": event}) for event in events)
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(os, "open", recording_open)
+    if search == "no-ripgrep":
+        monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: None)
+    elif search == "ripgrep-raced-through-a-link":
+        monkeypatch.setattr(filesystem_module.subprocess, "run", raced_ripgrep)
+    result = FilesystemTools(base_dir=str(workspace)).grep("sk-")
+
+    assert {line.rsplit(":", 2)[0]: line.rsplit(":", 1)[1] for line in result.splitlines()} == expected
+    assert "SECRET" not in result
+    assert opened_secret == []
 
 
 @pytest.mark.parametrize("swap", ["workspace-link", "ancestor-swapped-while-resolving"])

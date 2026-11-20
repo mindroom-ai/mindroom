@@ -942,29 +942,10 @@ class FilesystemTools(Toolkit):
         if validation_error:
             return validation_error
 
-        # Try ripgrep first
-        rg_result = _run_ripgrep(
-            pattern,
-            search_path,
-            self.base_dir,
-            effective_glob,
-            ignore_case,
-            literal,
-            context,
-            limit,
-        )
+        search = (pattern, search_path, self.base_dir, effective_glob, ignore_case, literal, context, limit)
+        rg_result = _run_ripgrep(*search, self.restrict_to_base_dir)
         if rg_result is None:
-            # Python fallback
-            return _python_grep_fallback(
-                pattern,
-                search_path,
-                self.base_dir,
-                effective_glob,
-                ignore_case,
-                literal,
-                context,
-                limit,
-            )
+            return _python_grep_fallback(*search, self.restrict_to_base_dir)
         return rg_result
 
     @shared_directory_aware("path", writes=False)
@@ -1096,6 +1077,7 @@ def _run_ripgrep(
     literal: bool,
     context: int,
     limit: int,
+    restrict_to_base_dir: bool,
 ) -> str | None:
     """Run ripgrep and return formatted results. Returns None if rg is not available."""
     rg_binary = shutil.which("rg")
@@ -1124,7 +1106,7 @@ def _run_ripgrep(
         stderr = result.stderr.strip()
         return f"Error running grep: {stderr}" if stderr else "Error running grep."
 
-    return _format_rg_output(result.stdout, limit, context, base_dir)
+    return _format_rg_output(result.stdout, limit, context, base_dir, restrict_to_base_dir)
 
 
 def _format_rg_line(event: _RgEvent, base_dir: Path) -> str:
@@ -1154,18 +1136,37 @@ def _append_trailing_context(
     pending_context.clear()
 
 
-def _format_rg_output(stdout: str, limit: int, context: int, base_dir: Path) -> str:
-    """Parse ripgrep JSON output and format as text lines."""
+def _confined_lines(base_dir: Path, path_text: str) -> list[str]:
+    """Read a file ripgrep reported through the capped no-follow reader; a file it refuses has no lines."""
+    try:
+        resolved = resolve_base_dir_path(base_dir, path_text)
+        return read_resolved_file(base_dir, resolved).decode("utf-8", errors="replace").split("\n")
+    except (OSError, ValueError):
+        return []
+
+
+def _format_rg_output(stdout: str, limit: int, context: int, base_dir: Path, restrict_to_base_dir: bool) -> str:
+    """Parse ripgrep JSON output and format as text lines.
+
+    Ripgrep opens files by path, so workspace access reports only text re-read through the confined reader.
+    """
     output_lines: list[str] = []
     pending_context: list[_RgEvent] = []
     match_count = 0
     was_limited = False
     last_match: _RgEvent | None = None
+    confined: dict[str, list[str]] = {}
 
     for raw_line in stdout.splitlines():
         event = _parse_rg_event(raw_line)
         if event is None:
             continue
+        if restrict_to_base_dir:
+            if event.path_text not in confined:
+                confined[event.path_text] = _confined_lines(base_dir, event.path_text)
+            if event.line_number > len(confined[event.path_text]):
+                continue
+            event.line_text = confined[event.path_text][event.line_number - 1]
 
         if event.event_type == "context":
             pending_context.append(event)
@@ -1234,11 +1235,13 @@ def _grep_file(
     limit: int,
     results: list[str],
     match_count: int,
+    restrict_to_base_dir: bool,
 ) -> int:
     """Search a single file for regex matches. Returns updated match_count."""
     try:
-        text = filepath.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeDecodeError):
+        resolved = resolve_base_dir_path(base_dir, str(filepath), restrict_to_base_dir)
+        text = read_resolved_file(base_dir, resolved).decode("utf-8")
+    except (OSError, ValueError):
         return match_count
 
     rel = format_path_for_output(filepath, base_dir)
@@ -1328,8 +1331,9 @@ def _python_grep_fallback(
     literal: bool,
     context: int,
     limit: int,
+    restrict_to_base_dir: bool,
 ) -> str:
-    """Pure Python grep fallback when ripgrep is not available."""
+    """Search in-process, for workspace access and when ripgrep is not available."""
     if literal:
         pattern = re.escape(pattern)
     flags = re.IGNORECASE if ignore_case else 0
@@ -1345,7 +1349,16 @@ def _python_grep_fallback(
     results: list[str] = []
     match_count = 0
     for filepath in files_or_error:
-        match_count = _grep_file(filepath, base_dir, regex, context, limit, results, match_count)
+        match_count = _grep_file(
+            filepath,
+            base_dir,
+            regex,
+            context,
+            limit,
+            results,
+            match_count,
+            restrict_to_base_dir,
+        )
         if match_count > limit:
             break
 

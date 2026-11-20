@@ -1278,6 +1278,7 @@ class TestGrep:
             literal=False,
             context=0,
             limit=2,
+            restrict_to_base_dir=False,
         )
 
         assert result is not None
@@ -1367,6 +1368,7 @@ class TestGrep:
             literal=False,
             context=1,
             limit=1,
+            restrict_to_base_dir=False,
         )
 
         assert result is not None
