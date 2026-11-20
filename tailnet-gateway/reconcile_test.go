@@ -25,6 +25,9 @@ type fakeNode struct {
 	logoutIn  time.Duration
 	logoutErr error
 	loginErr  error
+	// reloginHeld, when set, holds every Relogin until it is closed; reloginEntered tells of each one held.
+	reloginHeld    chan struct{}
+	reloginEntered chan struct{}
 }
 
 func (n *fakeNode) Listener() net.Listener { return n.listener }
@@ -41,9 +44,26 @@ func (n *fakeNode) Observed() NodeObserved {
 
 func (n *fakeNode) Relogin(context.Context) error {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	n.calls = append(n.calls, "Relogin")
-	return n.loginErr
+	held, err := n.reloginHeld, n.loginErr
+	n.mu.Unlock()
+	if held != nil {
+		n.reloginEntered <- struct{}{}
+		<-held
+	}
+	return err
+}
+
+// holdRelogin makes every Relogin of the node wait for the returned release, which the test's end calls too.
+func (n *fakeNode) holdRelogin(t *testing.T) (release func()) {
+	t.Helper()
+	held := make(chan struct{})
+	release = sync.OnceFunc(func() { close(held) })
+	t.Cleanup(release)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.reloginHeld, n.reloginEntered = held, make(chan struct{}, 16)
+	return release
 }
 
 func (n *fakeNode) Logout(ctx context.Context) error {
@@ -173,20 +193,27 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.sleepers = asleep
 }
 
-// settle waits until the gateway's loop sleeps, which is when its pass is over.
-func (c *fakeClock) settle(t *testing.T) {
+// asleep waits until so many sleepers wait for the clock.
+func (c *fakeClock) asleep(t *testing.T, sleepers int) {
 	t.Helper()
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
 		c.mu.Lock()
 		asleep := len(c.sleepers)
 		c.mu.Unlock()
-		if asleep > 0 {
+		if asleep >= sleepers {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the gateway's loop did not finish its pass")
+			t.Fatalf("%d of the gateway's loops sleep, want %d", asleep, sleepers)
 		}
 	}
+}
+
+// settle waits until the gateway's pass and every report are over: its passes sleep until the next one, which
+// they do once their report is over, and its reports until the next 5 s have passed.
+func (c *fakeClock) settle(t *testing.T) {
+	t.Helper()
+	c.asleep(t, 2)
 }
 
 // pass lets the loop's next pass come and waits for its end.
@@ -248,6 +275,64 @@ func (f *fixtures) run(t *testing.T) {
 	t.Helper()
 	f.start(t)
 	f.clock.settle(t)
+}
+
+// heldPosts holds every POST /status at the fake primary, and knows how many waited for an answer at once.
+type heldPosts struct {
+	// entered tells of each post that reached the primary.
+	entered chan struct{}
+	// release answers the held posts, and every later one at once.
+	release func()
+
+	mu             sync.Mutex
+	inFlight, most int
+}
+
+// holdPosts holds every POST /status from now on until the returned release, which the test's end calls too.
+func (f *fixtures) holdPosts(t *testing.T) *heldPosts {
+	t.Helper()
+	held := make(chan struct{})
+	posts := &heldPosts{entered: make(chan struct{}, 16), release: sync.OnceFunc(func() { close(held) })}
+	t.Cleanup(posts.release)
+	f.primary.holdStatus(func() {
+		posts.mu.Lock()
+		posts.inFlight++
+		posts.most = max(posts.most, posts.inFlight)
+		posts.mu.Unlock()
+		posts.entered <- struct{}{}
+		<-held
+		posts.mu.Lock()
+		posts.inFlight--
+		posts.mu.Unlock()
+	})
+	return posts
+}
+
+// atOnce returns the most posts that waited for an answer at the same time.
+func (p *heldPosts) atOnce() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.most
+}
+
+// await waits for what the gateway is to do next, and fails the test when it does not.
+func await(t *testing.T, happened <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-happened:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the gateway did not get to %s", what)
+	}
+}
+
+// quiet says that nothing more happened within a tenth of a second.
+func quiet(happened <-chan struct{}) bool {
+	select {
+	case <-happened:
+		return false
+	case <-time.After(100 * time.Millisecond):
+		return true
+	}
 }
 
 // posted returns the POST /status bodies the primary got, as JSON values.
@@ -528,6 +613,28 @@ func TestFailedOrEmptyLinksAnswerChangesNothing(t *testing.T) {
 	}
 }
 
+func TestNullLinksAnswerLeavesALiveNodeUntouched(t *testing.T) {
+	f := newFixtures(t, "login")
+	f.primary.list(t, on(idA))
+	f.reconcile(t)
+	node := f.nodes.node(t, 0)
+	theirs := f.connect(t, idA)
+
+	// JSON null is no list of links: read as an empty one it would stop every node.
+	f.primary.answer("GET /links", http.StatusOK, "null")
+	err := f.gateway.Reconcile(context.Background())
+
+	if err == nil {
+		t.Error("a pass whose links answer was null returned no error")
+	}
+	if len(node.calls) != 0 || f.gateway.Status()[idA].State != "needs_login" {
+		t.Errorf("after a null answer the node got %v and the status is %+v, want nothing changed", node.calls, f.gateway.Status())
+	}
+	if closed(t, theirs) {
+		t.Error("a null answer closed the link's connection")
+	}
+}
+
 func TestRemovingLogsOutDeletesDirAndReportsRemoved(t *testing.T) {
 	f := newFixtures(t, "login")
 	f.primary.list(t, on(idA))
@@ -790,62 +897,110 @@ func TestStatusThePrimaryDidNotTakeIsPostedOnTheNextPass(t *testing.T) {
 	}
 }
 
-func TestStatusIsPostedWhileTheLinksCannotBeRead(t *testing.T) {
+func TestNoStatusIsPostedBeforeTheLinksWereRead(t *testing.T) {
 	f := newFixtures(t, "login")
 	f.primary.answer("GET /links", http.StatusServiceUnavailable, `{"detail": "MindRoom's configuration is not loaded."}`)
 
+	// A report without the nodes the gateway has yet to start would tell the primary they are gone.
 	f.run(t)
+	for range 7 {
+		f.clock.pass(t)
+	}
+	unread := len(f.posted(t))
+	f.primary.list(t, on(idA))
+	f.clock.pass(t)
 
-	if got := len(f.posted(t)); got != 1 {
-		t.Errorf("%d status posts after a pass that read no links, want 1", got)
+	if read := len(f.posted(t)); unread != 0 || read != 1 {
+		t.Errorf("%d status posts in 35 s without the links and %d once they were read, want 0 and 1", unread, read)
+	}
+}
+
+func TestStatusIsPostedWhileTheLinksCannotBeReadAgain(t *testing.T) {
+	f := newFixtures(t, "login")
+	f.primary.list(t, on(idA))
+	f.run(t)
+	f.primary.answer("GET /links", http.StatusServiceUnavailable, `{"detail": "MindRoom's configuration is not loaded."}`)
+
+	for range 6 {
+		f.clock.pass(t)
+	}
+
+	posted := f.posted(t)
+	if len(posted) != 2 {
+		t.Fatalf("%d status posts in 30 s, want 2: the nodes it holds stay reported", len(posted))
+	}
+	if _, held := posted[1]["links"].(map[string]any)[idA]; !held {
+		t.Errorf("status body = %v, want the node the gateway still holds", posted[1])
+	}
+}
+
+func TestStatusIsPostedWhileAPassIsHeldUp(t *testing.T) {
+	f := newFixtures(t, "login")
+	link := on(idA)
+	f.primary.list(t, link)
+	f.run(t)
+	node := f.nodes.node(t, 0)
+	endPass := node.holdRelogin(t)
+	link.LoginAfter = 200
+	f.primary.list(t, link)
+	f.clock.advance(5 * time.Second)
+	await(t, node.reloginEntered, "the pass that asks the node for a new login")
+	// The loop that reports sleeps again; the passes do not, held up as they are.
+	f.clock.asleep(t, 1)
+	posts := f.holdPosts(t)
+
+	// The pass is 25 s old and not over when 30 s have passed since the last report.
+	f.clock.advance(25 * time.Second)
+	await(t, posts.entered, "a status post while its pass is held up")
+
+	// While that post has no answer the pass ends, with a changed status, and the next 30 s pass.
+	node.observe(NodeObserved{State: "running"})
+	endPass()
+	f.clock.advance(30 * time.Second)
+	if !quiet(posts.entered) {
+		t.Error("a second POST /status was sent while the first had no answer")
+	}
+	posts.release()
+	f.clock.settle(t)
+
+	posted := f.posted(t)
+	if len(posted) != 3 {
+		t.Fatalf("%d status posts, want 3: at the start, 30 s later, and after the pass that changed it", len(posted))
+	}
+	for i, state := range []string{"needs_login", "needs_login", "running"} {
+		if got := posted[i]["links"].(map[string]any)[idA].(map[string]any)["state"]; got != state {
+			t.Errorf("status post %d says %v, want %s", i+1, got, state)
+		}
+	}
+	if posts.atOnce() != 1 {
+		t.Errorf("%d POST /status were in flight at once, want 1", posts.atOnce())
 	}
 }
 
 func TestStatusPostsNeverOverlap(t *testing.T) {
 	f := newFixtures(t, "login")
 	f.primary.list(t, on(idA))
-	var mu sync.Mutex
-	inFlight, most := 0, 0
-	entered := make(chan struct{}, 16)
-	held := make(chan struct{})
-	release := sync.OnceFunc(func() { close(held) })
-	f.primary.holdStatus(func() {
-		mu.Lock()
-		inFlight++
-		most = max(most, inFlight)
-		mu.Unlock()
-		entered <- struct{}{}
-		<-held
-		mu.Lock()
-		inFlight--
-		mu.Unlock()
-	})
+	posts := f.holdPosts(t)
 	f.start(t)
-	// Registered after the loop's end, so it runs before it: a held answer would hold the loop and the fake primary.
-	t.Cleanup(release)
-	<-entered
+	await(t, posts.entered, "its first status post")
 
 	// While the first post waits for its answer the status changes, and both of the loop's periods pass, twice.
 	f.nodes.node(t, 0).observe(NodeObserved{State: "running"})
 	for range 12 {
 		f.clock.advance(5 * time.Second)
 	}
-	select {
-	case <-entered:
+	if !quiet(posts.entered) {
 		t.Error("a second POST /status was sent while the first had no answer")
-	case <-time.After(100 * time.Millisecond):
 	}
-	release()
+	posts.release()
 	f.clock.settle(t)
 	f.clock.pass(t)
 
 	if got := len(f.posted(t)); got != 2 {
-		t.Errorf("%d status posts, want 2: the first, and the changed status on the pass after it", got)
+		t.Errorf("%d status posts, want 2: the first, and the changed status once it had its answer", got)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if most != 1 {
-		t.Errorf("%d POST /status were in flight at once, want 1", most)
+	if posts.atOnce() != 1 {
+		t.Errorf("%d POST /status were in flight at once, want 1", posts.atOnce())
 	}
 }
 

@@ -106,32 +106,80 @@ func NewGateway(p Primary, f NodeFactory, stateDir, enrollment string) *Gateway 
 	}
 }
 
-// Run reconciles at once and every 5 s until ctx ends, and posts the status after a pass when it changed or 30 s
-// passed since the last post.
+// Run reconciles at once and every 5 s until ctx ends, and posts the status when it changed or 30 s passed since
+// the last post: after each pass, and every 5 s besides, so a pass that is held up holds no report up.
 //
-// This loop is the only caller of PostStatus, so no two reports are ever under way at once: the primary keeps each
-// report whole, and one that overtook a later one would undo it.
+// The passes run beside this loop, which is the only caller of PostStatus, so no two reports are ever under way at
+// once: the primary keeps each report whole, and one that overtook a later one would undo it.
 func (g *Gateway) Run(ctx context.Context) {
+	// Each pass is handed over with its error, and its report is over before the wait for the next begins.
+	passed := make(chan error)
+	reported := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			err := g.Reconcile(ctx)
+			select {
+			case passed <- err:
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case <-reported:
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case <-g.clock.After(reconcileEvery):
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	defer func() { <-stopped }()
+
+	// Until a pass read the links the gateway holds none of its nodes, and a report without them would tell the
+	// primary they are gone.
+	read := false
 	// What the primary last took, and when; nil while it has to be told again.
 	var posted map[string]LinkStatus
 	var postedAt time.Time
-	for {
-		if err := g.Reconcile(ctx); err != nil {
-			log.Printf("reconcile: %v", err)
+	report := func() {
+		if !read {
+			return
 		}
 		status := g.Status()
-		if posted == nil || !reflect.DeepEqual(status, posted) || g.clock.Now().Sub(postedAt) >= statusEvery {
-			if err := g.primary.PostStatus(ctx, g.enrollment, status); err != nil {
-				log.Printf("status: %v", err)
-				posted = nil
-			} else {
-				posted, postedAt = status, g.clock.Now()
-			}
+		if posted != nil && reflect.DeepEqual(status, posted) && g.clock.Now().Sub(postedAt) < statusEvery {
+			return
 		}
+		if err := g.primary.PostStatus(ctx, g.enrollment, status); err != nil {
+			log.Printf("status: %v", err)
+			posted = nil
+			return
+		}
+		posted, postedAt = status, g.clock.Now()
+	}
+	tick := g.clock.After(reconcileEvery)
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-g.clock.After(reconcileEvery):
+		case err := <-passed:
+			if err != nil {
+				log.Printf("reconcile: %v", err)
+			} else {
+				read = true
+			}
+			report()
+			select {
+			case reported <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+		case <-tick:
+			report()
+			tick = g.clock.After(reconcileEvery)
 		}
 	}
 }
@@ -281,7 +329,7 @@ func (g *Gateway) drop(id string) Node {
 }
 
 // Status returns what Run reports to the primary: every node the gateway holds as its tailnet sees it, and every
-// link whose removal is done as removed.
+// link whose removal is done as removed. It does not wait for a pass under way.
 func (g *Gateway) Status() map[string]LinkStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
