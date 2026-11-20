@@ -742,7 +742,8 @@ def resolve_tool_settings(
     #   not built and grants no workspace write until the operator deletes it; the dashboard reads and deletes it
     #   in the store read here.
     # Coverage:
-    #   tests/api/test_plugin_room_agents.py::test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant.
+    #   tests/api/test_plugin_room_agents.py::test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant;
+    #   tests/test_credentials.py::test_dashboard_deletes_old_name_settings_from_the_store_the_toolkit_build_reads.
     for alias, name in TOOL_ALIASES.items():
         if name == tool_name and any(not key.startswith("_") for key in stored(alias) or ()):
             msg = (

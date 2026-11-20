@@ -322,7 +322,7 @@ def validate_unique_tool_entries(
         if spellings == (name,):
             kept[name] = entry
         else:
-            kept[name] = (first or entry).model_copy(update={"name": name})
+            kept[name] = (entry if first is None else first).model_copy(update={"name": name})
             kept[name]._spellings = spellings
     return list(kept.values())
 

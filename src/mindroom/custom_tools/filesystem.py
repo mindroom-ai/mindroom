@@ -1338,7 +1338,7 @@ def _python_grep_fallback(
     limit: int,
     restrict_to_base_dir: bool,
 ) -> str:
-    """Search in-process, for workspace access and when ripgrep is not available."""
+    """Pure Python grep fallback when ripgrep is not available."""
     if literal:
         pattern = re.escape(pattern)
     flags = re.IGNORECASE if ignore_case else 0
