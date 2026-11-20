@@ -110,8 +110,8 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, ReadyRuntim
     bot = _agent_bot(tmp_path, agent_name="router")
     orchestrator = cast("ReadyRuntime", bot.orchestrator)
     membership_sync = orchestrator.agent_reply_membership_sync
-    membership_sync.invalidate_observer = MagicMock(  # type: ignore[method-assign]
-        wraps=membership_sync.invalidate_observer,
+    membership_sync._invalidate_observer = MagicMock(  # type: ignore[method-assign]
+        wraps=membership_sync._invalidate_observer,
     )
     orchestrator.refresh_agent_reply_memberships = AsyncMock()
     orchestrator.handle_bot_ready = AsyncMock()
@@ -127,7 +127,7 @@ def _open_observer(bot: AgentBot) -> None:
 
 def _invalidations(orchestrator: ReadyRuntime) -> MagicMock:
     """Return the observed invalidations of a bot's own rooms in a runtime from `_router_bot_with_orchestrator`."""
-    return cast("MagicMock", orchestrator.agent_reply_membership_sync.invalidate_observer)
+    return cast("MagicMock", orchestrator.agent_reply_membership_sync._invalidate_observer)
 
 
 async def _router_with_call_manager(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
