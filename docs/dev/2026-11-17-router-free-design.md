@@ -107,6 +107,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     Newer means strictly after the edit the route's prompt was made from, ordered by `origin_server_ts` and then event ID as the projection orders revisions: a message that takes an edit while it waits keeps that edit's time and ID under `io.mindroom.route_revision`, and its route carries them.
     A route without them was made from the original message, so any edit by the sender is newer.
     Only that waiting message's journal row is ever stamped: the key is dropped from every event but a route as it is admitted, so a pair its sender wrote names no edit.
+    Where a long-text file's content stands in for the message's, the key comes from the journal row alone: the row's is kept and the file's is dropped.
     An edit the responder could not read whole, whose long-text file or own later edit was unreadable, ends in the notice its read appended, and a body ending in either notice never stands in for the route's prompt.
     While it cannot read the file, and for a route without a `body`, it starts no turn and leaves the route pending.
     No model is ever sent a preview or a stand-in text.

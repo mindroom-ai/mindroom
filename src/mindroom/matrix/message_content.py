@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.constants import AGENT_AUTHORED_KEY
+from mindroom.constants import AGENT_AUTHORED_KEY, ROUTE_REVISION_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import decrypt_media_bytes, download_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
@@ -99,13 +99,13 @@ def _with_event_relation(
 
     So the event's relation is restored over whatever the payload named,
     including when the event has none. On the honest path the two already agree,
-    because a large message uploads its own outer content.
+    because a large message uploads its own outer content. Which edit a waiting
+    message took is its journal row's word in the same way, never its file's.
     """
-    relation = event_content.get("m.relates_to")
-    if relation is None:
-        resolved_content.pop("m.relates_to", None)
-    else:
-        resolved_content["m.relates_to"] = relation
+    for key in ("m.relates_to", ROUTE_REVISION_KEY):
+        resolved_content.pop(key, None)
+        if event_content.get(key) is not None:
+            resolved_content[key] = event_content[key]
     return resolved_content
 
 

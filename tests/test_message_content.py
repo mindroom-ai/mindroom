@@ -11,7 +11,13 @@ from nio import crypto
 import mindroom.matrix.message_content as message_content_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import AGENT_AUTHORED_KEY, STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
+from mindroom.constants import (
+    AGENT_AUTHORED_KEY,
+    ROUTE_REVISION_KEY,
+    STREAM_STATUS_KEY,
+    STREAM_WARMUP_SUFFIX_KEY,
+    RuntimePaths,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
@@ -527,6 +533,45 @@ class TestResolvedMessageExtraction:
         assert visible_content_from_content(resolved)["body"] == "Full text"
         assert resolved[AGENT_AUTHORED_KEY] == agent
         assert visible_content_from_content(resolved)[AGENT_AUTHORED_KEY] == agent
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("journaled", "filed"),
+        [
+            # A file its sender uploaded cannot say which edit the message is.
+            pytest.param(None, [9_007_199_254_740_991, "$future"], id="only-the-file-says"),
+            # The edit a waiting message took is on its journal row, and reading its file keeps it.
+            pytest.param([1_000_002, "$e2"], None, id="only-the-row-says"),
+            pytest.param([1_000_002, "$e2"], [9_007_199_254_740_991, "$future"], id="both-say"),
+        ],
+    )
+    async def test_hydration_takes_which_edit_a_message_is_from_the_event_alone(
+        self,
+        journaled: list[int | str] | None,
+        filed: list[int | str] | None,
+    ) -> None:
+        """Which edit a waiting message's text is, its journal row says: the file holds its text and no more."""
+        preview: dict[str, object] = {
+            "msgtype": "m.file",
+            "body": "Preview",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            "url": "mxc://server/long-text",
+        }
+        payload: dict[str, object] = {"msgtype": "m.text", "body": "Full text"}
+        if journaled is not None:
+            preview[ROUTE_REVISION_KEY] = journaled
+        if filed is not None:
+            payload[ROUTE_REVISION_KEY] = filed
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadResponse, body=json.dumps(payload).encode("utf-8")),
+        )
+
+        event_source = await resolve_event_source_content({"type": "m.room.message", "content": preview}, client)
+
+        resolved = event_source["content"]
+        assert resolved["body"] == "Full text"
+        assert resolved.get(ROUTE_REVISION_KEY) == journaled
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("edit", [False, True], ids=["message", "edit"])

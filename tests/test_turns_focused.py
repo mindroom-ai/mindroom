@@ -8814,9 +8814,73 @@ async def test_a_steward_routes_a_message_as_its_sender_edited_it_while_it_waite
 
 
 @pytest.mark.asyncio
+async def test_a_long_correction_read_after_a_restart_still_names_its_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A waiting message's journal row says which edit it took, and reading that edit's file later keeps it.
+
+    The correction's file could not be read when it arrived, so the row holds its preview and the process that
+    replays it reads the file: the route it sends still names the edit, or its responder would take an older one
+    of its own for a newer text.
+    """
+    config = _two_agent_config(tmp_path)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+    original = _text_event("June.", event_id="$question:localhost", thread_id=_THREAD_ROOT)
+    corrected = "July, not June. " + "Details. " * 8_000
+    preview, file = await _route_with_file({"msgtype": "m.text", "body": corrected})
+    edit = _text_event("* July, not June.", event_id="$correction:localhost", origin_server_ts=1_000_001)
+    edit.source["content"]["m.new_content"] = preview
+    edit.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": original.event_id}
+    key = CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER))
+
+    def process(name: str, download: object) -> tuple[_Harness, JournalDispatcher]:
+        harness = _build_harness(config, tmp_path / name, agent_name=ROUTER_AGENT_NAME)
+        dispatcher = _obligation_runner(
+            harness,
+            tracking_path=tmp_path / "journal",
+            matrix_user_id=_entity_user_id(config, ROUTER_AGENT_NAME),
+            entity_name=ROUTER_AGENT_NAME,
+            room=room,
+        )
+        _replace_harness_deps(harness, interactive_questions=dispatcher.store)
+        harness.runtime.client.download = AsyncMock(return_value=download)
+        return harness, dispatcher
+
+    crashed, journal = process("crashed", nio.DownloadError("The file is not there yet"))
+    with patch.object(crashed.ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
+        await admit_dispatch_event(journal, room, original, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await journal.drain_once()
+
+        async def queued() -> None:
+            while not crashed.gate.queued_pending_events(key):  # noqa: ASYNC110
+                await asyncio.sleep(0.001)
+
+        await asyncio.wait_for(queued(), timeout=5)
+        await admit_dispatch_event(journal, room, edit, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await journal.drain_once()
+        assert await journal.store.unsettled_event_ids() == {original.event_id}
+
+        restarted, replay = process("restarted", MagicMock(spec=nio.DownloadResponse, body=file))
+        await replay.drain_once()
+        await restarted.gate.drain_all()
+
+        [route] = restarted.gateway.routes
+        assert route["body"] == corrected
+        assert route[constants.ROUTE_REVISION_KEY] == [1_000_001, edit.event_id]
+        await crashed.gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filed", [False, True], ids=["text", "long-text file"])
 async def test_a_sender_cannot_say_which_edit_its_own_message_is(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    filed: bool,
 ) -> None:
     """A pair its sender wrote into a message names no edit to its route, so the genuine edit still outranks it.
 
@@ -8838,15 +8902,23 @@ async def test_a_sender_cannot_say_which_edit_its_own_message_is(
         room=room,
     )
     _replace_harness_deps(steward, interactive_questions=journal.store)
-    forged = _text_event("June.", event_id="$question:localhost", thread_id=_THREAD_ROOT)
+    forged: nio.Event = _text_event("June.", event_id="$question:localhost", thread_id=_THREAD_ROOT)
     forged.source["content"][constants.ROUTE_REVISION_KEY] = [9_007_199_254_740_991, "$future"]
+    body, kind = "June.", EventKind.MESSAGE
+    if filed:
+        # A long text's file holds everything its sender wrote, the pair too, and stands in for the event's content.
+        body, kind = "June. " + "Details. " * 8_000, EventKind.MEDIA
+        content, file = await _route_with_file({**forged.source["content"], "body": body})
+        assert constants.ROUTE_REVISION_KEY.encode() in file
+        forged = nio.Event.parse_event({**forged.source, "content": content})
+        steward.runtime.client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadResponse, body=file))
 
-    await admit_dispatch_event(journal, room, forged, EventKind.MESSAGE, EventClass.ACTIONABLE)
+    await admit_dispatch_event(journal, room, forged, kind, EventClass.ACTIONABLE)
     await journal.drain_once()
     await steward.gate.drain_all()
 
     [route] = steward.gateway.routes
-    assert route["body"] == "June."
+    assert route["body"] == body
     assert constants.ROUTE_REVISION_KEY not in route
     responder = _build_harness(config, tmp_path / "responder")
     await responder.deliver(room, _route_as_delivered(config, route, steward=ROUTER_AGENT_NAME))
