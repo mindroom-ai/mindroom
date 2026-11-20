@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.script_runs.models import ScriptCallRecord, ScriptRunRecord
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _APPEND = tool_args("counter", "append", line="a")
 _CALL = "call-1"
@@ -464,7 +465,10 @@ async def test_workflow_attempt_cannot_use_the_plain_call_routes(stack: Workflow
     authorization = f"Bearer {stack.token}"
     assert await stack.result("@0", "tool", _APPEND) == "appended"
     plain = ScriptToolCallRequest(
-        stack.attempt.run_id, "call-plain", ScriptToolGrant("counter", "append"), {"line": "b"}
+        stack.attempt.run_id,
+        "call-plain",
+        ScriptToolGrant("counter", "append"),
+        {"line": "b"},
     )
 
     with pytest.raises(ScriptBrokerAuthenticationError):
@@ -551,6 +555,95 @@ async def test_interrupted_attempt_interrupts_the_run_with_its_reason(stack: Wor
     ]
     assert nodes[1].error is not None
     assert nodes[1].error["kind"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_launch_is_idempotent_and_never_starts_an_ended_run(stack: WorkflowStack) -> None:
+    """A reserved run gets one attempt from one launch: a repeated launch, or one after a cancel, starts no process."""
+    again = await asyncio.gather(*(stack.engine.launch(stack.run_id, stack.context) for _ in range(2)))
+
+    assert [(run.attempt, run.script_run_id) for run in again] == [(1, stack.attempt.run_id)] * 2
+    await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
+    late = await stack.engine.launch(stack.run_id, stack.context)
+
+    assert (late.state, late.attempt, len(stack.scripts.launched)) == (WorkflowRunState.CANCELLED, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_launch_that_finds_its_run_ended_stops_the_attempt_it_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel accepted while the process starts wins on the run row: the run never names the new attempt."""
+    with workflow_stack(tmp_path) as stack:
+        start = stack.scripts.run
+
+        async def cancelled_meanwhile(context: ToolRuntimeContext, **options: Any) -> ScriptRunRecord:  # noqa: ANN401
+            attempt = await start(context, **options)
+            stack.store.update_run(options["workflow_run_id"], state=WorkflowRunState.CANCELLED, error="Stopped.")
+            return attempt
+
+        monkeypatch.setattr(stack.scripts, "run", cancelled_meanwhile)
+
+        run = await stack.start()
+
+        started = stack.script_store.get_run(stack.scripts.launched[0].run_id)
+        await stack.engine.close()
+    assert (run.state, run.error, run.script_run_id) == (WorkflowRunState.CANCELLED, "Stopped.", None)
+    assert started.state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("maintenance_first", [False, True])
+async def test_accepted_cancel_wins_over_a_stored_report(stack: WorkflowStack, maintenance_first: bool) -> None:
+    """Cancel and the maintenance pass use one rule, so a report stored just before the cancel cannot complete the run."""
+    await stack.engine.finish(stack.attempt, result="done", error=None)
+    if maintenance_first:
+        await stack.scripts.revoke(stack.attempt.run_id, reason="Stopped by the user.")
+        await stack.scripts.reconcile_durable(run_id=stack.attempt.run_id)
+        await stack.engine.reconcile()
+
+    cancelled, _ = await asyncio.gather(
+        stack.engine.cancel(stack.run_id, reason="Stopped by the user."),
+        stack.engine.reconcile(),
+    )
+
+    run = await stack.engine.wait(stack.run_id)
+    assert (run.state, run.error) == (WorkflowRunState.CANCELLED, "Stopped by the user.")
+    assert cancelled == run
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_the_script_ended_keeps_what_the_script_reported(stack: WorkflowStack) -> None:
+    """A cancel that arrives after the process ended was never accepted, so the run ends as its report says."""
+    await stack.engine.finish(stack.attempt, result="done", error=None)
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
+
+    run = await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
+
+    assert (run.state, run.result, run.error) == (WorkflowRunState.COMPLETED, "done", None)
+
+
+@pytest.mark.asyncio
+async def test_failed_exit_after_a_success_report_fails_the_run(stack: WorkflowStack) -> None:
+    """A process that died after reporting success did not end well, and the run says how it died."""
+    await stack.engine.finish(stack.attempt, result="done", error=None)
+
+    await stack.end_attempt(ScriptRunState.FAILED, output="Segmentation fault")
+
+    run = await stack.engine.wait(stack.run_id)
+    assert (run.state, run.error) == (WorkflowRunState.FAILED, "Segmentation fault")
+
+
+@pytest.mark.asyncio
+async def test_report_after_the_run_ended_is_not_stored(stack: WorkflowStack) -> None:
+    """A report reaches the run only while it runs, so a leftover process cannot rewrite an ended run."""
+    attempt = stack.attempt
+    cancelled = await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
+
+    await stack.engine.finish(attempt, result="done", error=None)
+
+    assert stack.store.get_run(stack.run_id) == cancelled
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,7 @@ from mindroom.workflow_runs.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Callable, Collection, Iterable, Iterator
     from pathlib import Path
 
 _BUSY_TIMEOUT_SECONDS = 10
@@ -119,14 +119,21 @@ class WorkflowRunStore:
         with self._connection() as connection:
             return _select_run(connection, run_id)
 
-    def update_run(self, run_id: str, **changes: object) -> WorkflowRun:
-        """Write the named fields of one run and return the stored run."""
+    def update_run(self, run_id: str, *, when: Collection[WorkflowRunState] = (), **changes: object) -> WorkflowRun:
+        """Write the named fields of one run and return the stored run.
+
+        With *when*, nothing is written unless the run is in one of those states, so of two writers that each move
+        the run on from the same state, the first wins and the second gets what it stored.
+        """
         unknown = changes.keys() - _RUN_UPDATE_FIELDS
         if unknown:
             msg = f"Workflow runs have no field to update named {', '.join(sorted(unknown))}."
             raise WorkflowRunStoreError(msg)
         with self._write_transaction() as connection:
-            run = replace(_select_run(connection, run_id), **changes)
+            run = _select_run(connection, run_id)
+            if when and run.state not in when:
+                return run
+            run = replace(run, **changes)
             values = _row_values(run, _RUN_JSON_FIELDS)
             columns = [_column(name, _RUN_JSON_FIELDS) for name in changes]
             if columns:

@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _UNSETTLED_NODE_STATES = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING})
+_LIVE_RUN_STATES = frozenset(WorkflowRunState) - TERMINAL_RUN_STATES
 _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
 _MAX_LABEL_CHARS = 80
 _ERROR_TAIL_BYTES = 4096
@@ -94,6 +95,9 @@ class WorkflowEngine:
         # Held until the run names the attempt, so the new process's first request waits instead of being refused.
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
+            if run.state is not WorkflowRunState.STARTING:
+                # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none.
+                return run
             attempt = await self.scripts.run(
                 context,
                 source=run.source,
@@ -104,12 +108,18 @@ class WorkflowEngine:
                     max_tool_calls_per_minute=limits.max_tool_calls_per_minute,
                 ),
             )
-            return self.store.update_run(
+            launched = self.store.update_run(
                 run_id,
+                when={WorkflowRunState.STARTING},
                 state=WorkflowRunState.RUNNING,
                 attempt=run.attempt + 1,
                 script_run_id=attempt.run_id,
             )
+            if launched.script_run_id != attempt.run_id:
+                # The run ended while its process started, so nothing names this attempt: stop it.
+                await self.scripts.revoke(attempt.run_id, reason=launched.error or launched.state.value)
+                await self.scripts.reconcile_durable(run_id=attempt.run_id)
+            return launched
 
     async def cancel(self, run_id: str, *, reason: str) -> WorkflowRun:
         """Revoke the run's attempt, end its process and end the run cancelled; completed nodes stay saved."""
@@ -117,10 +127,14 @@ class WorkflowEngine:
             run = self.store.get_run(run_id)
         if run.state in TERMINAL_RUN_STATES:
             return run
+        outcome: tuple[WorkflowRunState, str | None] = (WorkflowRunState.CANCELLED, reason)
         if run.script_run_id is not None:
             await self.scripts.revoke(run.script_run_id, reason=reason)
-            await self.scripts.reconcile_durable(run_id=run.script_run_id)
-        return await self._end_run(run, WorkflowRunState.CANCELLED, reason)
+            attempt = await self.scripts.reconcile_durable(run_id=run.script_run_id)
+            if attempt.state in TERMINAL_SCRIPT_RUN_STATES:
+                # The same rule as the maintenance pass: an attempt that ended before the cancel ends as it did.
+                outcome = _run_outcome(self.store.get_run(run_id), attempt)
+        return await self._end_run(run, *outcome)
 
     async def wait(self, run_id: str) -> WorkflowRun:
         """Return the run once it has ended."""
@@ -226,7 +240,13 @@ class WorkflowEngine:
     async def finish(self, attempt: ScriptRunRecord, *, result: object, error: str | None) -> None:
         """Store what the script's `main` returned or raised; the run ends when the attempt's process has."""
         run = await self._current_run(attempt)
-        self.store.update_run(run.run_id, result=result, error=error, finished_at=utc_timestamp())
+        self.store.update_run(
+            run.run_id,
+            when={WorkflowRunState.RUNNING},
+            result=result,
+            error=error,
+            finished_at=utc_timestamp(),
+        )
         self._spawn(run.run_id, self._observe_exit(attempt.run_id))
 
     def settle_from_handle(self, node: WorkflowNode) -> WorkflowNodeState:
@@ -327,6 +347,7 @@ class WorkflowEngine:
                 await asyncio.to_thread(self.settle_from_handle, node)
         ended = self.store.update_run(
             run.run_id,
+            when=_LIVE_RUN_STATES,
             state=state,
             error=error,
             finished_at=current.finished_at or utc_timestamp(),
@@ -380,13 +401,15 @@ def _call_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
 
 
 def _run_outcome(run: WorkflowRun, attempt: ScriptRunRecord) -> tuple[WorkflowRunState, str | None]:
-    """Return the state and error of a run whose attempt ended."""
+    """Return how a run whose attempt ended ends: an accepted cancel first, then a failed exit, then the report."""
+    if attempt.state is ScriptRunState.CANCELLED:
+        return WorkflowRunState.CANCELLED, attempt.cancellation_reason
+    if attempt.state is ScriptRunState.FAILED:
+        tail = (attempt.error or attempt.output).encode()[-_ERROR_TAIL_BYTES:]
+        return WorkflowRunState.FAILED, run.error or tail.decode(errors="ignore")
     if run.finished_at is not None:
-        # The script reported before its process ended, so the report decides.
+        # The script reported and its process then ended cleanly or with the primary, so the report decides.
         return (WorkflowRunState.COMPLETED if run.error is None else WorkflowRunState.FAILED), run.error
-    if attempt.state in {ScriptRunState.CANCELLED, ScriptRunState.INTERRUPTED}:
-        return WorkflowRunState(attempt.state.value), attempt.cancellation_reason
     if attempt.state is ScriptRunState.EXITED:
         return WorkflowRunState.FAILED, _NO_RETURN
-    tail = (attempt.error or attempt.output).encode()[-_ERROR_TAIL_BYTES:]
-    return WorkflowRunState.FAILED, tail.decode(errors="ignore")
+    return WorkflowRunState.INTERRUPTED, attempt.cancellation_reason
