@@ -199,7 +199,7 @@ def _render_truncation_notice(entrypoint: MemoryEntrypointContext, config: Confi
         return ""
     return render_prompt_template(
         config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
-        included_lines=len(entrypoint.included),
+        included_lines=entrypoint.included_lines,
         total_lines=entrypoint.total_lines,
         max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
         max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
@@ -224,8 +224,6 @@ async def _entrypoint_preamble(
         config,
         execution_identity=execution_identity,
     )
-    # Asked before capping, so an encoder that loads meanwhile only makes the turn store nothing.
-    cold = counter.estimate("") is None
     entrypoint = await asyncio.to_thread(cap_entrypoint, entrypoint, config, counter)
     body = (
         _render_entrypoint_body(entrypoint, config, kept_copy=conversation is not None)
@@ -235,18 +233,14 @@ async def _entrypoint_preamble(
     preamble = "\n".join(part for part in (body, _render_truncation_notice(entrypoint, config)) if part)
     if conversation is None or entrypoint.source_path is None:
         return preamble
-    framing = ("HEADER_TEMPLATE", "KEPT_COPY_NOTICE", "TRUNCATION_TEMPLATE")
-    caps = (config.memory.file.max_entrypoint_lines, config.memory.file.max_entrypoint_tokens)
     return await asyncio.to_thread(
         stable_entrypoint_preamble,
         conversation,
         entrypoint.source_path,
+        body,
         preamble,
-        frame=[*(config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{name}") for name in framing), *caps, conversation.model],
-        shown=entrypoint.included,
-        file_lines=entrypoint.lines,
-        # A cold encoder's byte counts may withhold lines the model's own count keeps.
-        store=not (cold and len(entrypoint.included) < len(entrypoint.lines)),
+        frame=[config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{key}") for key in ("HEADER_TEMPLATE", "KEPT_COPY_NOTICE")],
+        lines=None if entrypoint.omitted_lines else entrypoint.lines,
         now=time.time(),
     )
 
@@ -289,8 +283,9 @@ async def build_memory_prompt_parts(
 ) -> MemoryPromptParts:
     """Split stable entrypoint context from turn-local searched memories.
 
-    A turn in ``conversation`` keeps the entrypoint that conversation last sent while the file still holds every line
-    of it in order and its prompt cache may be warm. ``counter`` counts tokens for the model the turn runs on.
+    A turn in ``conversation`` keeps the entrypoint that conversation last sent while its inlined copy only gains lines,
+    anywhere in a file within its preload caps, and its prompt cache may be warm. ``counter`` counts tokens for the
+    model the turn runs on.
     """
     logger.debug("Building enhanced prompt", agent=agent_name)
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:

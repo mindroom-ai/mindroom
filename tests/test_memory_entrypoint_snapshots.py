@@ -31,20 +31,20 @@ def _preamble(
     path: Path = MEMORY,
     now: float = 0.0,
     root: str = "agent",
-    whole: str | None = None,
     frame: tuple[str, ...] = ("header",),
+    capped: bool = False,
 ) -> str:
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text.
 
-    ``whole`` is the text of the whole file when a preload cap cut ``text`` from it.
+    Its body is ``text`` under the ``frame`` prompts, and a ``capped`` file withheld lines to fit its preload caps.
     """
     return snapshots.stable_entrypoint_preamble(
         ConversationRef((summary, None), _snapshot(session, root)),
         path,
-        f"preamble of {text!r}" if text else "",
-        frame=frame,
-        shown=text.splitlines(),
-        file_lines=(text if whole is None else whole).splitlines(),
+        "\n".join((*frame, text)) if text else "",
+        f"preamble of {text!r}",
+        frame=list(frame),
+        lines=None if capped else tuple(text.splitlines()),
         now=now,
     )
 
@@ -85,24 +85,21 @@ def test_a_deleted_or_moved_line_loads_the_file_again() -> None:
     assert _preamble("c\na\nnew") == "preamble of 'c\\na\\nnew'"
 
 
-def test_lines_a_cap_withholds_keep_the_preamble() -> None:
-    """A capped file drops its oldest kept entry for each new one, but the whole file still holds every kept line."""
-    _preamble("head\nb\nc", whole="head\na\nb\nc")
-    assert _preamble("head\nc\nd", whole="head\na\nb\nc\nd") == "preamble of 'head\\nb\\nc'"
-    # A kept line deleted from the whole file still loads it again.
-    assert _preamble("head\nd\ne", whole="head\na\nb\nd\ne") == "preamble of 'head\\nd\\ne'"
+def test_a_capped_copy_keeps_only_lines_added_at_its_end() -> None:
+    """A capped copy cannot tell a line the cap withholds from a deleted one, so only appended lines keep it."""
+    _preamble("head\nb\nc", capped=True)
+    assert _preamble("head\nb\nc\nd", capped=True) == "preamble of 'head\\nb\\nc'"
+    assert _preamble("head\nb\nx\nc\nd", capped=True) == "preamble of 'head\\nb\\nx\\nc\\nd'"
+    # A whole copy whose file now exceeds a cap keeps only appended lines too.
+    _preamble("a\nb", session="whole")
+    assert _preamble("x\na\nb", session="whole", capped=True) == "preamble of 'x\\na\\nb'"
 
 
 def test_a_changed_frame_loads_the_file_again() -> None:
-    """A prompt override that only adds a header line still changes what frames the copy."""
-    _preamble("a", frame=("header",))
-    assert _preamble("a\nb", frame=("header\nadded",)) == "preamble of 'a\\nb'"
-
-
-def test_a_line_moved_between_framing_prompts_loads_the_file_again() -> None:
-    """Moving an instruction from the notice into the truncation marker removes it from a copy shown whole."""
-    _preamble("a", frame=("header", "notice\nrule", "marker"))
-    assert _preamble("a\nb", frame=("header", "notice", "rule\nmarker")) == "preamble of 'a\\nb'"
+    """A prompt override that only adds a line to the header or the kept-copy notice still changes the copy's frame."""
+    _preamble("a", frame=("header", "notice"))
+    assert _preamble("x\na", frame=("header\nadded", "notice")) == "preamble of 'x\\na'"
+    assert _preamble("x\na\ny", frame=("header\nadded", "notice\nadded")) == "preamble of 'x\\na\\ny'"
 
 
 def test_empty_copy_loads_the_file_once_it_gains_lines() -> None:

@@ -706,7 +706,7 @@ def cap_entrypoint(
 ) -> MemoryEntrypointContext:
     """Cut the preload to both caps, as the model the preload goes to counts it."""
     kept = _lines_within_caps(entrypoint.lines, config, counter)
-    return replace(entrypoint, text=_entrypoint_text(kept), included=tuple(kept))
+    return replace(entrypoint, text=_entrypoint_text(kept), included_lines=len(kept))
 
 
 def entrypoint_tokens(text: str, counter: TokenCounter) -> int:

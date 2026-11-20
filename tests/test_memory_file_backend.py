@@ -1895,11 +1895,7 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
     assert (await preamble(thread)).startswith("Edited header")
 
 
-async def _conversation_preamble(
-    config: Config,
-    conversation: ConversationRef | None,
-    counter: TokenCounter | None = None,
-) -> str:
+async def _conversation_preamble(config: Config, conversation: ConversationRef | None) -> str:
     prompt_parts = await public_build_memory_prompt_parts(
         "What should I remember?",
         "general",
@@ -1907,47 +1903,57 @@ async def _conversation_preamble(
         runtime_paths_for(config),
         current_execution_identity(),
         conversation=conversation,
-        counter=counter or fake_token_counter(),
+        counter=fake_token_counter(),
     )
     return prompt_parts.session_preamble
 
 
-def _capped_memory_file(storage_path: Path, config: Config) -> Path:
-    """Write a MEMORY.md whose three entries a three-line cap preloads as its head and two newest entries."""
-    config.memory.file.max_entrypoint_lines = 3
+def _memory_file(storage_path: Path, text: str) -> Path:
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     memory_path = workspace / "MEMORY.md"
-    memory_path.write_text(
-        "# Memory\n- [id=m1] Fact one.\n- [id=m2] Fact two.\n- [id=m3] Fact three.\n",
-        encoding="utf-8",
-    )
+    memory_path.write_text(text, encoding="utf-8")
     return memory_path
 
 
+_ENTRIES = "# Memory\n- [id=m1] Fact one.\n- [id=m2] Fact two.\n- [id=m3] Fact three.\n"
+
+
 @pytest.mark.asyncio
-async def test_file_backend_conversation_keeps_its_capped_entrypoint_after_a_memory_is_added(
+async def test_file_backend_conversation_keeps_its_entrypoint_after_lines_are_inserted(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A new entry pushes the oldest kept one out of a capped preload, which must leave the conversation's copy."""
-    memory_path = _capped_memory_file(storage_path, config)
+    """Curating MEMORY.md inserts lines at its top or mid-file, which must leave an uncapped copy as sent."""
+    memory_path = _memory_file(storage_path, _ENTRIES)
     thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
     first = await _conversation_preamble(config, thread)
-    await add_agent_memory("Fact four.", "general", config)
 
-    assert await _conversation_preamble(config, thread) == first
-    fresh = await _conversation_preamble(config, None)
-    assert "Fact four." in fresh
-    assert "Fact two." in first
-    assert "Fact two." not in fresh
-
-    # Deleting a line the copy shows loads the file again.
     memory_path.write_text(
-        memory_path.read_text(encoding="utf-8").replace("- [id=m3] Fact three.\n", ""),
+        _ENTRIES.replace("# Memory\n", "# Memory\nNewest note.\n").replace("Fact two.\n", "Fact two.\nMid note.\n"),
         encoding="utf-8",
     )
+    assert await _conversation_preamble(config, thread) == first
+    assert "Mid note." in await _conversation_preamble(config, None)
+
+    # Deleting a line the copy shows loads the file again.
+    memory_path.write_text(memory_path.read_text(encoding="utf-8").replace("- [id=m3] Fact three.\n", ""), "utf-8")
     assert "Fact three." not in await _conversation_preamble(config, thread)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_capped_conversation_reloads_its_entrypoint_after_a_line_is_inserted(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A capped copy keeps main's rule, only lines added at its end, so a line inserted mid-file loads it again."""
+    config.memory.file.max_entrypoint_lines = 3
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "truncated" in await _conversation_preamble(config, thread)
+
+    memory_path.write_text(_ENTRIES.replace("Fact two.\n", "Fact two.\nInserted.\n"), encoding="utf-8")
+    assert "Inserted." in await _conversation_preamble(config, thread)
 
 
 @pytest.mark.asyncio
@@ -1955,92 +1961,15 @@ async def test_file_backend_conversation_reloads_its_entrypoint_when_its_framing
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A header override that only adds a line, or an edited truncation marker, must reach the conversation."""
-    _capped_memory_file(storage_path, config)
+    """A header or kept-copy notice override that only adds a line must reach the conversation."""
+    memory_path = _memory_file(storage_path, _ENTRIES)
     thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
     await _conversation_preamble(config, thread)
 
-    header = PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"]
-    config.prompts["FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"] = f"{header}\nAdded header line."
-    assert "Added header line." in await _conversation_preamble(config, thread)
-    config.prompts["FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"] = (
-        "Withheld: {included_lines}/{total_lines} {max_entrypoint_lines} {max_entrypoint_tokens} {memory_path}"
-    )
-    assert "Withheld: 3/4" in await _conversation_preamble(config, thread)
-
-
-@pytest.mark.asyncio
-async def test_file_backend_conversation_reloads_its_entrypoint_when_a_cap_changes(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A raised or lowered line or token cap must reach a conversation's copy, whose marker states the caps."""
-    _capped_memory_file(storage_path, config)
-    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
-    assert "Fact one." not in await _conversation_preamble(config, thread)
-
-    config.memory.file.max_entrypoint_lines = 50
-    raised = await _conversation_preamble(config, thread)
-    assert "Fact one." in raised
-    assert "truncated" not in raised
-    config.memory.file.max_entrypoint_lines = 3
-    assert "Fact one." not in await _conversation_preamble(config, thread)
-    config.memory.file.max_entrypoint_tokens = 10
-    assert "Fact two." not in await _conversation_preamble(config, thread)
-    config.memory.file.max_entrypoint_tokens = 50000
-    assert "Fact two." in await _conversation_preamble(config, thread)
-
-
-@pytest.mark.asyncio
-async def test_file_backend_conversation_reloads_its_entrypoint_when_its_model_changes(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """Another model's tokenizer sizes the token cap differently, and its turn starts a fresh provider cache anyway."""
-    _capped_memory_file(storage_path, config)
-    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json", "openai:gpt-4.1")
-    first = await _conversation_preamble(config, thread)
-    await add_agent_memory("Fact four.", "general", config)
-
-    assert await _conversation_preamble(config, thread) == first
-    assert "Fact four." in await _conversation_preamble(config, replace(thread, model="openai:gpt-4-turbo"))
-
-
-@pytest.mark.asyncio
-async def test_file_backend_cold_token_encoder_does_not_cut_a_warm_copy(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """Before its encoder loads, a counter takes UTF-8 bytes, which must not truncate a copy a warm counter sized."""
-    _capped_memory_file(storage_path, config)
-    config.memory.file.max_entrypoint_lines = 50
-    config.memory.file.max_entrypoint_tokens = 30
-    cold = TokenCounter(estimate=lambda _text: None)
-    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
-    first = await _conversation_preamble(config, thread)
-    assert "Fact one." in first
-
-    assert await _conversation_preamble(config, thread, cold) == first
-    assert "Fact one." not in await _conversation_preamble(config, None, cold)
-
-
-@pytest.mark.asyncio
-async def test_file_backend_cold_token_encoder_does_not_store_a_copy_it_truncated(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A first load before the encoder loads may withhold lines, so the next warm turn must load the whole file."""
-    _capped_memory_file(storage_path, config)
-    config.memory.file.max_entrypoint_lines = 50
-    config.memory.file.max_entrypoint_tokens = 30
-    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
-    assert "Fact one." not in await _conversation_preamble(config, thread, TokenCounter(estimate=lambda _text: None))
-    assert not thread.snapshot.exists()
-
-    warm = await _conversation_preamble(config, thread)
-    assert "Fact one." in warm
-    assert "truncated" not in warm
-    assert await _conversation_preamble(config, thread) == warm
+    for name in ("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE", "FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"):
+        memory_path.write_text(f"# Memory\nNote above {name}.\n" + _ENTRIES.removeprefix("# Memory\n"), "utf-8")
+        config.prompts[name] = f"{PROMPT_DEFAULTS[name]}\nAdded to {name}."
+        assert f"Added to {name}." in await _conversation_preamble(config, thread)
 
 
 @pytest.mark.asyncio
@@ -2050,34 +1979,26 @@ async def test_file_backend_conversation_clears_its_entrypoint_once_memory_is_em
 ) -> None:
     """A copy whose token cap showed no line keeps only a header and marker, which an emptied file must clear."""
     config.memory.file.max_entrypoint_tokens = 1
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text("A fact longer than the token cap.\n", encoding="utf-8")
+    memory_path = _memory_file(storage_path, "A fact longer than the token cap.\n")
     thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
     assert "showing 0 of 1 lines" in await _conversation_preamble(config, thread)
 
-    (workspace / "MEMORY.md").write_text("", encoding="utf-8")
+    memory_path.write_text("", encoding="utf-8")
     assert await _conversation_preamble(config, thread) == ""
 
 
 @pytest.mark.asyncio
-async def test_file_backend_conversation_keeps_a_headless_capped_window_whose_first_line_is_indented(
+async def test_file_backend_conversation_keeps_its_entrypoint_whose_first_line_is_indented(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """The preload trims its first line, which must not read as an edit of that line in the file."""
-    config.memory.file.max_entrypoint_tokens = 250
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    lines = [f"  - [id=m{index}] fact {index} " + "x" * 384 for index in range(3)]
-    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    """The preload trims the file's first line, which must not read as an edit once a line is inserted above it."""
+    memory_path = _memory_file(storage_path, "  - [id=m1] Indented fact.\nSecond fact.\n")
     thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
     first = await _conversation_preamble(config, thread)
-    assert lines[0].strip() not in first
-    assert f"\n{lines[1].strip()}" in first
+    assert "\n- [id=m1] Indented fact." in first
 
-    await add_agent_memory("Fact four.", "general", config)
-    assert "Fact four." in await _conversation_preamble(config, None)
+    memory_path.write_text("Newest note.\n" + memory_path.read_text(encoding="utf-8"), encoding="utf-8")
     assert await _conversation_preamble(config, thread) == first
 
 
