@@ -1185,7 +1185,7 @@ def test_recovery_signature_of_a_fixed_authority_is_stable_across_releases() -> 
         resource_profile="standard",
     )
 
-    assert signature == "v2:e49d194be56580e7756299b4e49bd7aa5f2a297ebd8ea18106c4302ffff25677"
+    assert signature == "v2:e623e91def532ed4b84fcc39ab9ef0512597e7d2d8a7bb393a4ad37dd5b17e23"
 
 
 def test_recovery_requires_a_persisted_signature(tmp_path: Path) -> None:

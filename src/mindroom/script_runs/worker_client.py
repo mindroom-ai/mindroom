@@ -55,6 +55,7 @@ class ScriptWorkerClient:
 
         ``config_snapshot`` holds the live config fields runners resolve; workers mount no config and resolve agents only from it.
         """
+        fields: dict[str, object] = {"entry": entry} if entry == "workflow" else {}
         request = _parsed(
             SandboxScriptRunRequest,
             {
@@ -65,9 +66,11 @@ class ScriptWorkerClient:
                 "source_digest": source_digest,
                 "gateway_url": gateway_url,
                 "max_runtime_seconds": max_runtime_seconds,
-                "entry": entry,
                 "private_agent_names": private_agent_names,
                 "config_snapshot": config_snapshot,
+                # Only a workflow attempt names its entry: a worker from before workflows refuses the field it does
+                # not know, and a plain script's request stays the one that worker accepts.
+                **fields,
             },
         )
         await self._post(
@@ -75,7 +78,7 @@ class ScriptWorkerClient:
             worker_api_endpoint(worker, "script-run"),
             request,
             SandboxScriptRunResponse,
-            # A worker from before workflows knows neither this protocol version nor the entry field.
+            # A worker from before workflows refuses the entry field.
             unprocessable=_WORKER_TOO_OLD if entry == "workflow" else None,
         )
 
@@ -130,7 +133,9 @@ class ScriptWorkerClient:
         try:
             async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS, transport=self.transport) as client:
                 # The body carries the worker key, which names the requester, because access logs record URLs.
-                response = await client.post(url, headers={_TOKEN_HEADER: token}, json=request.model_dump(mode="json"))
+                # Fields the caller did not set stay off the wire.
+                body = request.model_dump(mode="json", exclude_unset=True)
+                response = await client.post(url, headers={_TOKEN_HEADER: token}, json=body)
         except httpx.HTTPError as exc:
             message = f"Worker script request failed: {exc}"
             raise ScriptWorkerError(message) from exc

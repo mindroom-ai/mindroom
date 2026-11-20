@@ -892,7 +892,7 @@ The removal gives back about 3,000 source lines.
 - `script_runs` gains the nullable column `workflow_run_id` through the store's explicit column migration, with its `LEGACY_COMPAT` entry and test; `CREATE TABLE IF NOT EXISTS` alone would not add it.
 - Delegation snapshots written before this change lack the new fields; they read as `None`.
 - The workflow store migrates by schema version; a test opens a database of each earlier version.
-- The launch description's `entry` field raises the worker protocol version; a test launches a workflow on a real Docker worker and checks the snapshot digest, the import path and the token cleanup.
+- The launch description's `entry` field is sent only for a workflow attempt and the worker protocol version stays as it is (corrected in the B2a review: raising it would stop a plain script on a Kubernetes worker from being adopted across the upgrade); a worker from before workflows refuses the unknown field; a test launches a workflow on a real Docker worker and checks the snapshot digest, the import path and the token cleanup.
 - A test imports `mindroom.workflow` in the worker image's environment, and another calls the new routes through the gateway-only listener.
 - New files a toolkit needs: `tools/__init__.py` registration, `tools_metadata.json`, the per-tool extra in `pyproject.toml`, toolkit construction in `agents.py`, the usage kind in `usage/storage.py`, `vulture_whitelist.py`, and the generated docs skill references.
 

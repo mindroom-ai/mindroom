@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from mindroom.http_error_detail import validation_error_detail
 from mindroom.script_runs.wire import (
@@ -93,13 +93,46 @@ async def test_script_worker_client_sends_a_narrow_derived_launch_request() -> N
         "private_agent_names": ["private-agent"],
         "config_snapshot": {"agents": {"private-agent": {"display_name": "Private"}}},
         "protocol_version": SCRIPT_PROTOCOL_VERSION,
-        "entry": "script",
     }
+
+
+class _WorkerBeforeWorkflows(BaseModel):
+    """The launch request a worker image from before workflows validates: protocol 2, no `entry`, unknown fields refused."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    protocol_version: Literal[2]
+    run_id: str
+    worker_key: str
+    state_scope_worker_key: str | None = None
+    source_digest: str
+    gateway_url: str
+    max_runtime_seconds: int
+    private_agent_names: list[str] | None = None
+    config_snapshot: dict[str, Any] | None = None
+
+
+def _old_worker(request: httpx.Request) -> httpx.Response:
+    """Answer a launch as that worker's route does: 422 with the validation errors, else a launch receipt."""
+    try:
+        _WorkerBeforeWorkflows.model_validate_json(request.read())
+    except ValidationError as exc:
+        return httpx.Response(422, json={"detail": exc.errors(include_url=False, include_input=False)})
+    return httpx.Response(200, json={"ok": True})
+
+
+@pytest.mark.asyncio
+async def test_a_plain_script_still_launches_on_a_worker_from_before_workflows() -> None:
+    """A primary upgrade must not strand plain scripts on workers that have not been updated yet."""
+    assert SCRIPT_PROTOCOL_VERSION == 2
+
+    assert await _launch(_client(_old_worker)) is None
+    assert await _launch(_client(_old_worker), private_agent_names=("private-agent",), config_snapshot={}) is None
 
 
 @pytest.mark.asyncio
 async def test_workflow_entry_crosses_the_worker_wire() -> None:
-    """The worker is told which entry the validated shim runs, as part of the trusted launch description."""
+    """Only a workflow attempt names its entry, as part of the trusted launch description."""
     payloads: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -107,33 +140,21 @@ async def test_workflow_entry_crosses_the_worker_wire() -> None:
         return httpx.Response(200, json={"ok": True})
 
     await _launch(_client(handler), entry="workflow")
+    await _launch(_client(handler))
 
-    assert [(payload["entry"], payload["protocol_version"]) for payload in payloads] == [("workflow", 3)]
+    assert [payload.get("entry") for payload in payloads] == ["workflow", None]
+    assert SandboxScriptRunRequest.model_validate(payloads[1]).entry == "script"
 
 
 @pytest.mark.asyncio
-async def test_older_protocol_worker_refuses_a_workflow_launch() -> None:
-    """A worker image from before workflows rejects the request, and the launch says what to do."""
-    request = {
-        "protocol_version": SCRIPT_PROTOCOL_VERSION,
-        "run_id": _RUN_ID,
-        "worker_key": "v1:test:shared:scripts",
-        "source_digest": "a" * 64,
-        "gateway_url": "http://primary.test/api/script-gateway",
-        "max_runtime_seconds": 3600,
-    }
-    assert SandboxScriptRunRequest.model_validate(request).entry == "script"
-    with pytest.raises(ValidationError, match="protocol_version"):
-        SandboxScriptRunRequest.model_validate({**request, "protocol_version": SCRIPT_PROTOCOL_VERSION - 1})
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        SandboxScriptRunRequest.model_validate({**request, "a_field_of_a_newer_primary": "workflow"})
+async def test_a_worker_from_before_workflows_refuses_a_workflow_launch() -> None:
+    """An old worker rejects the field it does not know, never running a workflow as a script."""
+    with pytest.raises(ScriptWorkerError) as refused:
+        await _launch(_client(_old_worker), entry="workflow")
+    assert str(refused.value) == "This worker image is too old to run workflows. Update it."
 
     def refuse(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(422, json={"detail": [{"loc": ["body", "protocol_version"], "msg": "Input should be 2"}]})
-
-    with pytest.raises(ScriptWorkerError) as refused:
-        await _launch(_client(refuse), entry="workflow")
-    assert str(refused.value) == "This worker image is too old to run workflows. Update it."
+        return httpx.Response(422, json={"detail": [{"loc": ["body", "gateway_url"], "msg": "Field required"}]})
 
     with pytest.raises(ScriptWorkerError) as plain:
         await _launch(_client(refuse))
