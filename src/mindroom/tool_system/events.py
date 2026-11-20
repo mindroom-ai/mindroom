@@ -678,60 +678,63 @@ def _marker_texts(index: int, event: Mapping[str, Any]) -> tuple[str, str]:
     return f"{_TOOL_REF_ICON} `{name}`{suffix}", f"<p>{_TOOL_REF_ICON} <code>{code}</code>{suffix}</p>"
 
 
-def _layer_with_markers(layer: Mapping[str, Any]) -> dict[str, Any] | None:
+def _body_with_markers(body: str, placed: list[tuple[int, dict[str, Any]]]) -> str | None:
+    """Return ``body`` with each call's marker before its ``body_line``; None unless each is a line, in their order."""
+    lines = body.split("\n") if body else []
+    marked: list[str] = []
+    line = 0
+    for index, event in placed:
+        next_line = event.get("body_line")
+        if type(next_line) is not int or not line <= next_line <= len(lines):
+            return None
+        marker = _marker_texts(index, event)[0]
+        marked += lines[line:next_line]
+        marked += [marker, ""] if next_line < len(lines) else [*([""] if marked else []), marker]
+        line = next_line
+    return "\n".join(marked + lines[line:])
+
+
+def _layer_with_markers(layer: Mapping[str, Any], fallback: str | None = None) -> tuple[dict[str, Any], str] | None:
     """Return a layer with a version-3 trace as version 2, its markers back in its text; None for any other layer.
 
     A marker goes before body line ``body_line`` with a blank line after it, or at the end after one, and before
     top-level HTML block ``at``. A call without the two keys has no marker. A layer whose positions are not whole
     numbers, in the calls' order, up to the end of the text is another layer, and so is one without any.
+    With it comes ``fallback``, an edit's text of the same layer, with its markers at the same lines.
     """
     calls = _trace_calls(layer, _TOOL_TRACE_VERSION)
     body, html = layer.get("body"), layer.get("formatted_body")
     placed = [(index, event) for index, event in (calls or {}).items() if "body_line" in event or "at" in event]
     if not placed or not isinstance(body, str) or not isinstance(html, str):
         return None
-    lines = body.split("\n") if body else []
+    marked_body = _body_with_markers(body, placed)
+    marked_fallback = "" if fallback is None else _body_with_markers(fallback, placed)
+    if marked_body is None or marked_fallback is None:
+        return None
     starts = [start for start, _end in _html_block_spans(html)]
-    marked_lines: list[str] = []
     marked_html = ""
-    line = block = offset = 0
+    block = offset = 0
     for index, event in placed:
-        next_line, next_block = event.get("body_line"), event.get("at")
-        if type(next_line) is not int or type(next_block) is not int:
+        next_block = event.get("at")
+        if type(next_block) is not int or not block <= next_block <= len(starts):
             return None
-        if not (line <= next_line <= len(lines) and block <= next_block <= len(starts)):
-            return None
-        marker_line, marker_block = _marker_texts(index, event)
-        marked_lines += lines[line:next_line]
-        marked_lines += [marker_line, ""] if next_line < len(lines) else [*([""] if marked_lines else []), marker_line]
         next_offset = starts[next_block] if next_block < len(starts) else len(html)
-        marked_html += f"{html[offset:next_offset]}{marker_block}\n"
-        line, block, offset = next_line, next_block, next_offset
+        marked_html += f"{html[offset:next_offset]}{_marker_texts(index, event)[1]}\n"
+        block, offset = next_block, next_offset
     payload = layer[_TOOL_TRACE_KEY]
     events = [
         {key: value for key, value in event.items() if key not in ("at", "body_line")} for event in payload["events"]
     ]
     return {
         **layer,
-        "body": "\n".join(marked_lines + lines[line:]),
+        "body": marked_body,
         "formatted_body": marked_html + html[offset:],
         _TOOL_TRACE_KEY: {**payload, "version": _MARKED_TEXT_VERSION, "events": events},
-    }
+    }, marked_fallback
 
 
-def _layer_without_markers(layer: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return a layer with a version-2 trace as version 3, its calls' markers out of its text; None when in doubt.
-
-    A marker goes when it is a line of the body and a top-level block of the HTML, once each and in one order.
-    """
-    calls = _trace_calls(layer, _MARKED_TEXT_VERSION)
-    body, html = layer.get("body"), layer.get("formatted_body")
-    # A warm-up frame's canonical body keeps its markers, so the frame does too.
-    if calls is None or not isinstance(body, str) or not isinstance(html, str) or STREAM_VISIBLE_BODY_KEY in layer:
-        return None
-    markers = {index: _marker_texts(index, event) for index, event in calls.items()}
-    index_of_line = {marker_line: index for index, (marker_line, _block) in markers.items()}
-    index_of_block = {marker_block: index for index, (_line, marker_block) in markers.items()}
+def _body_without_markers(body: str, index_of_line: Mapping[str, int]) -> tuple[list[str], list[tuple[int, int]]]:
+    """Return the lines of ``body`` that are no call's marker, and each marker's call with the lines kept before it."""
     kept: list[str] = []
     body_lines: list[tuple[int, int]] = []
     index = None
@@ -745,6 +748,25 @@ def _layer_without_markers(layer: Mapping[str, Any]) -> dict[str, Any] | None:
     if body_lines and body_lines[-1][1] == len(kept) and kept and not kept[-1]:
         kept.pop()
         body_lines = [(index, min(place, len(kept))) for index, place in body_lines]
+    return kept, body_lines
+
+
+def _layer_without_markers(layer: Mapping[str, Any], fallback: str | None = None) -> tuple[dict[str, Any], str] | None:
+    """Return a layer with a version-2 trace as version 3, its calls' markers out of its text; None when in doubt.
+
+    A marker goes when it is a line of the body and a top-level block of the HTML, once each and in one order.
+    With it comes ``fallback``, an edit's text of the same layer, whose markers must stand at the same lines.
+    """
+    calls = _trace_calls(layer, _MARKED_TEXT_VERSION)
+    body, html = layer.get("body"), layer.get("formatted_body")
+    # A warm-up frame's canonical body keeps its markers, so the frame does too.
+    if calls is None or not isinstance(body, str) or not isinstance(html, str) or STREAM_VISIBLE_BODY_KEY in layer:
+        return None
+    markers = {index: _marker_texts(index, event) for index, event in calls.items()}
+    index_of_line = {marker_line: index for index, (marker_line, _block) in markers.items()}
+    index_of_block = {marker_block: index for index, (_line, marker_block) in markers.items()}
+    kept, body_lines = _body_without_markers(body, index_of_line)
+    other, other_lines = ([], body_lines) if fallback is None else _body_without_markers(fallback, index_of_line)
     pieces: list[str] = []
     blocks: list[tuple[int, int]] = []
     cursor = other_blocks = 0
@@ -759,7 +781,7 @@ def _layer_without_markers(layer: Mapping[str, Any]) -> dict[str, Any] | None:
     # A marker line that is no block of the HTML is text, like a fenced example of one, and so is one left behind.
     if not order or len(set(order)) != len(order) or order != [index for index, _line in body_lines]:
         return None
-    if any(is_visible_tool_marker_line(line) for line in kept):
+    if other_lines != body_lines or any(is_visible_tool_marker_line(line) for line in (*kept, *other)):
         return None
     places = {index: {"body_line": line, "at": block} for (index, line), (_index, block) in zip(body_lines, blocks)}
     payload = layer[_TOOL_TRACE_KEY]
@@ -769,29 +791,28 @@ def _layer_without_markers(layer: Mapping[str, Any]) -> dict[str, Any] | None:
         "body": "\n".join(kept),
         "formatted_body": "".join(pieces) + html[cursor:],
         _TOOL_TRACE_KEY: {**payload, "version": _TOOL_TRACE_VERSION, "events": events},
-    }
+    }, "\n".join(other)
 
 
 def _each_layer[C: Mapping[str, Any]](
     content: C,
-    convert: Callable[[Mapping[str, Any]], dict[str, Any] | None],
+    convert: Callable[[Mapping[str, Any], str | None], tuple[dict[str, Any], str] | None],
 ) -> C | dict[str, Any]:
     """Return ``content`` with its text converted: its own, or an edit's replacement and its fallback alike."""
     replacement = content.get("m.new_content")
     if not isinstance(replacement, dict):
-        return convert(content) or content
-    converted, body = convert(replacement), content.get("body")
-    if converted is None or not isinstance(body, str) or not body.startswith("* "):
-        return content
-    # A fallback repeats its replacement after "* ", so it converts as the replacement with the fallback's text does.
-    # One that shows other HTML or other calls, or whose calls stand elsewhere, is someone's own and stays as it is.
-    fallback = convert({**replacement, "body": body[2:]})
+        converted = convert(content, None)
+        return converted[0] if converted else content
+    body = content.get("body")
     keys = ("formatted_body", _TOOL_TRACE_KEY) if _TOOL_TRACE_KEY in content else ("formatted_body",)
-    if fallback is None or fallback[_TOOL_TRACE_KEY] != converted[_TOOL_TRACE_KEY]:
+    # A fallback repeats its replacement after "* ": the same HTML and calls, converted once for both, and its own
+    # text. One that shows other HTML or other calls, or whose calls stand elsewhere, is someone's own and stays.
+    shared = all(content.get(key) == replacement.get(key) for key in keys)
+    converted = convert(replacement, body[2:]) if isinstance(body, str) and body.startswith("* ") and shared else None
+    if converted is None:
         return content
-    if any(content.get(key) != replacement[key] for key in keys):
-        return content
-    return {**content, "m.new_content": converted, "body": f"* {fallback['body']}", **{k: converted[k] for k in keys}}
+    layer, fallback = converted
+    return {**content, "m.new_content": layer, "body": f"* {fallback}", **{key: layer[key] for key in keys}}
 
 
 def tool_markers_out_of_text(content: dict[str, Any]) -> dict[str, Any]:

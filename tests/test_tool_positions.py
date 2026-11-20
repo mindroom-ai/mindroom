@@ -59,6 +59,7 @@ from mindroom.matrix.room_history_reads import (
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
 from mindroom.requester_identity import mindroom_user_id
+from mindroom.tool_system import events
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     _html_block_spans,
@@ -695,6 +696,26 @@ def test_reading_html_that_never_closes_a_tag_takes_time_in_proportion_to_its_si
     with cpu_budget(0.5):
         read = tool_markers_in_text(content)
     assert (read is content) == ("at" not in call)
+
+
+def test_an_edit_has_its_html_read_once_on_its_way_out_and_once_on_its_way_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An edit's fallback shows its replacement's HTML, so that HTML is read once for both of them.
+
+    A send reads it a second time, without its markers, to check that the content reads back exactly.
+    """
+    sent = _sent(_case(_BETWEEN))
+    edit = build_edit_event_content(event_id="$reply", new_content=sent, new_text=sent["body"])
+    read: list[str] = []
+    block_spans = events._html_block_spans
+    monkeypatch.setattr(events, "_html_block_spans", lambda html: read.append(html) or block_spans(html))
+
+    wire = tool_markers_out_of_text(edit)
+
+    assert wire is not edit
+    assert read == [sent["formatted_body"], wire["formatted_body"]]
+    read.clear()
+    assert tool_markers_in_text(wire) == edit
+    assert read == [wire["formatted_body"]]
 
 
 def test_top_level_blocks() -> None:
