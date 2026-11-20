@@ -3,6 +3,7 @@
 
 import React, { createElement, lazy, Suspense } from "react";
 import {
+  FaSlack,
   FaCog,
   FaCode,
   FaAws,
@@ -31,9 +32,7 @@ import {
 import { FiShield } from "react-icons/fi";
 import {
   SiDiscord,
-  SiSlack,
   SiTelegram,
-  SiTwilio,
   SiWebex,
   SiWhatsapp,
   SiBitbucket,
@@ -49,7 +48,6 @@ import {
   SiJira,
   SiLinear,
   SiNeo4J,
-  SiOpenai,
   SiPostgresql,
   SiPython,
   SiTrello,
@@ -78,7 +76,9 @@ import {
 } from "react-icons/si";
 import {
   TbBrandTeams,
+  TbBrandTwilio,
   TbBrain,
+  TbBrandOpenai,
   TbBrandOnedrive,
 } from "react-icons/tb";
 import { WiDaySunny } from "react-icons/wi";
@@ -136,6 +136,7 @@ export const iconMap: Record<
   string,
   React.ComponentType<{ className?: string }>
 > = {
+  FaSlack,
   FaCog,
   FaCode,
   FaAws,
@@ -162,9 +163,7 @@ export const iconMap: Record<
   FaFileAlt,
   FiShield,
   SiDiscord,
-  SiSlack,
   SiTelegram,
-  SiTwilio,
   SiWebex,
   SiWhatsapp,
   SiBitbucket,
@@ -180,7 +179,6 @@ export const iconMap: Record<
   SiJira,
   SiLinear,
   SiNeo4J,
-  SiOpenai,
   SiPostgresql,
   SiPython,
   SiTrello,
@@ -207,7 +205,9 @@ export const iconMap: Record<
   SiX,
   SiZoom,
   TbBrandTeams,
+  TbBrandTwilio,
   TbBrain,
+  TbBrandOpenai,
   TbBrandOnedrive,
   WiDaySunny,
   AwsRedshift,

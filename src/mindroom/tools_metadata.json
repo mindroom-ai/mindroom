@@ -632,7 +632,7 @@
         "slack_watch"
       ],
       "helper_text": "Each user connects their own Slack account through the MindRoom Slack app. Store the app's client ID and secret in the slack_oauth_client credential service, and its bot token, signing secret and, for watches, app-level token in slack_app.",
-      "icon": "SiSlack",
+      "icon": "FaSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
       "requires_conversation": false,
@@ -1250,7 +1250,7 @@
         "send_sms"
       ],
       "helper_text": null,
-      "icon": "SiTwilio",
+      "icon": "TbBrandTwilio",
       "icon_color": "text-red-600",
       "name": "twilio",
       "requires_conversation": false,
@@ -5782,7 +5782,7 @@
         "transcribe_audio"
       ],
       "helper_text": null,
-      "icon": "SiOpenai",
+      "icon": "TbBrandOpenai",
       "icon_color": "text-green-600",
       "name": "openai",
       "requires_conversation": false,
