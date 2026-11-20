@@ -159,8 +159,8 @@ def test_loadable_image_is_kept(markdown: str) -> None:
     [
         ('<img src="mxc://[2001:db8::1]:8448/id" alt="a">', '<img src="mxc://[2001:db8::1]:8448/id" alt="a">'),
         ('<img src="https://[2001:db8::1]/x.png" alt="a">', '<img src="https://[2001:db8::1]/x.png" alt="a">'),
-        ("![a](mxc://[2001:db8::1]:8448/id)", "<p>⚠️ Image not sent: a (no uploaded file)</p>\n"),
-        ("![a](https://[2001:db8::1]/x.png)", "<p>⚠️ Image not sent: a (no uploaded file)</p>\n"),
+        ("![a](mxc://[2001:db8::1]:8448/id)", '<p><img src="mxc://[2001:db8::1]:8448/id" alt="a"></p>\n'),
+        ("![a](https://[2001:db8::1]/x.png)", '<p><img src="https://[2001:db8::1]/x.png" alt="a"></p>\n'),
         ('<img src="https://a b/x" alt="a">', "⚠️ Image not sent: a (no uploaded file)"),
         ('<img src="mxc://server/a b" alt="a">', "⚠️ Image not sent: a (no uploaded file)"),
         (
@@ -182,7 +182,7 @@ def test_loadable_image_is_kept(markdown: str) -> None:
     ],
 )
 def test_the_checked_src_is_the_emitted_src(markdown: str, expected: str) -> None:
-    """Raw bracketed IPv6 loads and is kept as written; markdown-it's ``%5B…%5D`` spelling and whitespace cannot load."""
+    """The checked src is the emitted src: bracketed IPv6 is kept as written; whitespace in a host or an mxc id cannot load."""
     assert markdown_to_html(markdown) == expected
 
 
@@ -213,7 +213,7 @@ def test_image_syntax_in_code_stays_code() -> None:
     ("markdown", "note"),
     [
         ("![![x](mxc://placeholder)](bad)", "⚠️ Image not sent: x (no uploaded file)"),
-        ("![<b>x</b>](bad)", "⚠️ Image not sent: x (no uploaded file)"),
+        ("![<b>x</b>](bad)", "⚠️ Image not sent: &lt;b&gt;x&lt;/b&gt; (no uploaded file)"),
         ('<img src="bad" alt="<b>x</b>">', "⚠️ Image not sent: &lt;b&gt;x&lt;/b&gt; (no uploaded file)"),
     ],
 )
