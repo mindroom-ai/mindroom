@@ -1338,7 +1338,7 @@ def _upload_name(mime_type: str, data: bytes) -> str:
 
 
 def _uploaded(name: str, mime_type: str) -> dict[str, Any]:
-    return {"fileData": {"fileUri": f"{_GEMINI_API}v1beta/{name}", "mimeType": mime_type}}
+    return {"fileData": {"file_uri": f"{_GEMINI_API}v1beta/{name}", "mime_type": mime_type}}
 
 
 async def _stream_media(
@@ -1384,9 +1384,9 @@ async def test_gemini_inlines_local_media_and_uploads_what_is_too_large(
     assert server.uploads == [name]
     assert _user_parts(server) == [
         {"text": "Look"},
-        {"inlineData": {"data": base64.urlsafe_b64encode(PNG).decode(), "mimeType": "image/png"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(PNG).decode(), "mime_type": "image/png"}},
         _uploaded(name, "application/pdf"),
-        {"fileData": {"fileUri": "gs://bucket/notes.pdf", "mimeType": "application/pdf"}},
+        {"fileData": {"file_uri": "gs://bucket/notes.pdf", "mime_type": "application/pdf"}},
     ]
 
 
@@ -1410,8 +1410,8 @@ async def test_gemini_inlines_small_local_audio_and_video(tmp_path: Path, monkey
     assert server.uploads == []
     assert _user_parts(server) == [
         {"text": "Summarize"},
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"OggS-voice").decode(), "mimeType": "audio/ogg"}},
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"mp4-clip").decode(), "mimeType": "video/mp4"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"OggS-voice").decode(), "mime_type": "audio/ogg"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"mp4-clip").decode(), "mime_type": "video/mp4"}},
     ]
 
 
@@ -1684,7 +1684,7 @@ async def test_gemini_references_an_https_file_of_known_type(tmp_path: Path, mon
     assert server.requests == server.model_requests()
     assert _user_parts(server) == [
         {"text": "Read this"},
-        {"fileData": {"fileUri": url, "mimeType": "application/pdf"}},
+        {"fileData": {"file_uri": url, "mime_type": "application/pdf"}},
     ]
 
 
@@ -1766,7 +1766,7 @@ async def test_gemini_places_the_text_first_and_each_kind_of_media_in_the_order_
         "inlineData",
         "inlineData",
     ]
-    assert [part["inlineData"]["mimeType"] for part in parts if "inlineData" in part] == [
+    assert [part["inlineData"]["mime_type"] for part in parts if "inlineData" in part] == [
         "image/png",
         "audio/wav",
         "video/webm",

@@ -22,6 +22,7 @@ from mindroom.trafilatura_call_limit import CALL_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from configparser import ConfigParser
 
     from trafilatura.spider import CrawlParameters
 
@@ -95,14 +96,16 @@ def _fetch_response(url: str, *, decode: bool = False) -> Response | None:
     return fetched
 
 
-def _fetch_url(url: str) -> str | None:
-    """Return decoded HTML from a successful guarded download."""
+def _fetch_url(url: str, config: ConfigParser | None = None) -> str | None:
+    """Return decoded HTML from a successful guarded download; the spider's `config` is ignored, as the fetch sets its own limits."""
+    del config
     response = _fetch_response(url, decode=True)
     return None if response is None else response.html
 
 
-def _crawl_fetch_response(url: str, *, decode: bool = False) -> Response | None:
+def _crawl_fetch_response(url: str, *, decode: bool = False, config: ConfigParser | None = None) -> Response | None:
     """Download one crawled page; a refused start page fails the crawl, and a refused link after it is skipped."""
+    del config
     call = _call.get()
     start_page = call is None or not call.crawl_started
     if call is not None:
