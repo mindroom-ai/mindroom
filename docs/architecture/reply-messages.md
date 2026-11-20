@@ -102,7 +102,8 @@ Tool calls:
 
 Routing:
 
-- A burst of a person's messages that the steward's coalescing queue splits into two turns is routed twice, and each route is answered, by one agent or by two; each message is still answered once.
+- A burst of a person's messages that the steward's coalescing queue splits into two turns is routed twice, and each route is answered, by one agent or by two; the two turns hold different messages, so each message is still answered once.
+- A bot answers by its own rules when any message of its turn names it, is a follow-up to its running reply, or continues its thread, while the steward, whose queue batched the same messages differently, can route one of them to another agent; that message is then answered twice.
 - Two bots that both pass the steward check in the same moment, as when the room's power levels change while a message is routed, both route the turn, which can then get two answers.
 - An edit of one of several messages a route names regenerates nothing, as an edit of one of several relayed messages did.
 - At the upgrade from a release with a router, a message the router admitted but had not relayed is not answered, and one whose relay the router sent but had not recorded can be answered twice.
