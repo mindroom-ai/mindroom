@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from mindroom.script_runs.models import utc_timestamp
 from mindroom.workflow_runs.engine import WorkflowEngine
 from mindroom.workflow_runs.store import WorkflowRunStore
 
@@ -20,8 +23,14 @@ class WorkflowRuntimeLifecycle:
     script_runtime: ScriptRuntimeLifecycle
 
     async def start(self) -> None:
-        """End runs from each pass of the script runtime, which records the attempts that ended."""
-        self.script_runtime.after_reconcile = self.engine.reconcile
+        """Follow each pass of the script runtime, which records the attempts that ended."""
+        self.script_runtime.after_reconcile = self._maintain
+
+    async def _maintain(self) -> None:
+        """End the runs whose attempts ended, then delete the runs that ended before the script runtime's retention."""
+        await self.engine.reconcile()
+        cutoff = datetime.now(UTC) - timedelta(seconds=self.script_runtime.retention_seconds)
+        await asyncio.to_thread(self.engine.store.prune, utc_timestamp(cutoff))
 
     async def shutdown(self) -> None:
         """Stop following the script runtime and stop the engine's tasks; saved handles keep what was in flight."""

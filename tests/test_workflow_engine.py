@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -15,6 +16,7 @@ import pytest_asyncio
 
 from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
+from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
 from mindroom.script_runs.broker import ScriptBrokerAuthenticationError, ScriptToolCallRequest
 from mindroom.script_runs.launch_contract import digest_arguments
 from mindroom.script_runs.manager import ScriptRunLimits
@@ -644,6 +646,50 @@ async def test_report_after_the_run_ended_is_not_stored(stack: WorkflowStack) ->
     await stack.engine.finish(attempt, result="done", error=None)
 
     assert stack.store.get_run(stack.run_id) == cancelled
+
+
+@pytest.mark.asyncio
+async def test_maintenance_pass_ends_every_run_it_can_and_prunes_expired_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run whose attempt record is gone ends interrupted, and neither it nor a failing run stops the pass."""
+    with workflow_stack(tmp_path) as stack:
+        script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0)
+        lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
+        await lifecycle.start()
+        orphan = await stack.start()
+        unsettled = _dispatched_node(stack)
+        await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
+        assert stack.script_store.prune_terminal_run(stack.attempt.run_id, finished_before="9999-01-01T00:00:00Z")
+        broken = await stack.start()
+        read_attempt = stack.script_store.get_run
+
+        def locked(run_id: str) -> ScriptRunRecord:
+            if run_id == broken.script_run_id:
+                msg = "database is locked"
+                raise sqlite3.OperationalError(msg)
+            return read_attempt(run_id)
+
+        monkeypatch.setattr(stack.script_store, "get_run", locked)
+        reported = await stack.start()
+        await stack.engine.finish(stack.attempt, result="done", error=None)
+        await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
+
+        await script_runtime.after_reconcile()
+
+        states = {run.run_id: (run.state, run.error) for run in stack.store.list_runs()}
+        node = stack.store.get_node(orphan.run_id, unsettled.key)
+        script_runtime.retention_seconds = 0.0
+        await script_runtime.after_reconcile()
+        left = [run.run_id for run in stack.store.list_runs()]
+        await lifecycle.shutdown()
+    assert states[orphan.run_id] == (WorkflowRunState.INTERRUPTED, "The record of the run's attempt is gone.")
+    assert states[reported.run_id] == (WorkflowRunState.COMPLETED, None)
+    assert states[broken.run_id] == (WorkflowRunState.RUNNING, None)
+    assert node is not None
+    assert node.state is WorkflowNodeState.INDETERMINATE
+    assert left == [broken.run_id]
 
 
 @pytest.mark.asyncio

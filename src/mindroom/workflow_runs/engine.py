@@ -52,6 +52,7 @@ _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
 _MAX_LABEL_CHARS = 80
 _ERROR_TAIL_BYTES = 4096
 _NO_RETURN = "The script ended without returning from main(args)."
+_ATTEMPT_GONE = "The record of the run's attempt is gone."
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
 # How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
@@ -149,13 +150,19 @@ class WorkflowEngine:
         return self.store.get_run(run_id), self.store.nodes(run_id)
 
     async def reconcile(self) -> None:
-        """End each run whose attempt has ended, with the state that attempt and the script's report give it."""
-        for run in self.store.list_runs(include_finished=False):
+        """End each run whose attempt has ended, as that attempt and the script's report say; one run's error stops no other."""
+        for run in await asyncio.to_thread(self.store.list_runs, include_finished=False):
             if run.script_run_id is None:
                 continue
-            attempt = await asyncio.to_thread(self.scripts.store.get_run, run.script_run_id)
-            if attempt.state in TERMINAL_SCRIPT_RUN_STATES:
-                await self._end_run(run, *_run_outcome(self.store.get_run(run.run_id), attempt))
+            try:
+                try:
+                    attempt = await asyncio.to_thread(self.scripts.store.get_run, run.script_run_id)
+                except ScriptRunNotFoundError:
+                    attempt = None
+                if attempt is None or attempt.state in TERMINAL_SCRIPT_RUN_STATES:
+                    await self._end_run(run, *_run_outcome(self.store.get_run(run.run_id), attempt))
+            except Exception:
+                logger.exception("workflow_run_reconcile_failed", run_id=run.run_id)
 
     async def close(self) -> None:
         """Stop the engine's own tasks; unsettled nodes keep their handles for the next start to read."""
@@ -400,16 +407,21 @@ def _call_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
     return _indeterminate(node)
 
 
-def _run_outcome(run: WorkflowRun, attempt: ScriptRunRecord) -> tuple[WorkflowRunState, str | None]:
-    """Return how a run whose attempt ended ends: an accepted cancel first, then a failed exit, then the report."""
-    if attempt.state is ScriptRunState.CANCELLED:
-        return WorkflowRunState.CANCELLED, attempt.cancellation_reason
-    if attempt.state is ScriptRunState.FAILED:
+def _run_outcome(run: WorkflowRun, attempt: ScriptRunRecord | None) -> tuple[WorkflowRunState, str | None]:
+    """Return how a run whose attempt ended ends: an accepted cancel first, then a failed exit, then the report.
+
+    An attempt whose record is gone ended with the primary, for all that is known.
+    """
+    state = ScriptRunState.INTERRUPTED if attempt is None else attempt.state
+    reason = _ATTEMPT_GONE if attempt is None else attempt.cancellation_reason
+    if state is ScriptRunState.CANCELLED:
+        return WorkflowRunState.CANCELLED, reason
+    if attempt is not None and state is ScriptRunState.FAILED:
         tail = (attempt.error or attempt.output).encode()[-_ERROR_TAIL_BYTES:]
         return WorkflowRunState.FAILED, run.error or tail.decode(errors="ignore")
     if run.finished_at is not None:
         # The script reported and its process then ended cleanly or with the primary, so the report decides.
         return (WorkflowRunState.COMPLETED if run.error is None else WorkflowRunState.FAILED), run.error
-    if attempt.state is ScriptRunState.EXITED:
+    if state is ScriptRunState.EXITED:
         return WorkflowRunState.FAILED, _NO_RETURN
-    return WorkflowRunState.INTERRUPTED, attempt.cancellation_reason
+    return WorkflowRunState.INTERRUPTED, reason
