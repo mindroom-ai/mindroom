@@ -569,12 +569,11 @@ version_scheme = "no-guess-dev"
 
 [tool.uv]
 override-dependencies = [
-  # composio-agno 0.7.20, the last Agno integration of Composio, needs the legacy composio-core 0.7, which caps
-  # Pillow<11 and rich<14, although it uses Pillow only for a local clipboard action and rich for CLI output.
-  # These overrides replace every package's requirement, so each keeps the other packages' bounds:
-  # moviepy 2.2.1 caps Pillow<12, and openbb-cli 2.0.1 caps rich<15.
-  "pillow>=11.3,<12",
-  "rich>=14,<15",
+  # composio-core 0.7.21 declares Pillow<11,>=10.2.0.
+  # The locked Pillow 10.4.0 has no cp314 Linux wheels.
+  # On Python 3.14 it source-builds against zlib, so use Pillow 11.x there.
+  "pillow>=10.2,<11; python_version < '3.14'",
+  "pillow>=11,<12; python_version >= '3.14'",
 ]
 # Exact version pins for everything uv installs into isolated build environments, so release, desktop-helper,
 # and image builds install only the build package versions this revision names.
