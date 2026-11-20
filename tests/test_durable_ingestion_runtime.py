@@ -205,7 +205,7 @@ async def test_first_sync_frame_line_is_logged_once_in_every_sync_loop(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("slow_side_effect", ["bot_ready_hook", "room_state_reconcile"])
-async def test_slow_first_frame_side_effect_does_not_delay_router_dispatch(
+async def test_slow_first_frame_side_effect_does_not_delay_router_dispatch(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     slow_side_effect: str,

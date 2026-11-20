@@ -250,6 +250,7 @@ class AgentBot:
     _last_sync_monotonic: float | None
     _first_sync_done: bool
     _ingestion_stats: IngestionStats
+    _bot_ready_hooks_task: asyncio.Task[None] | None = None
     _sync_shutdown_budget: ShutdownBudget | None
     _deferred_stop_required: bool
     _deferred_stop_phase: DeferredStopPhase | None
@@ -1393,7 +1394,7 @@ class AgentBot:
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
             # Observer hooks may each run until their timeout.
-            create_background_task(
+            self._bot_ready_hooks_task = create_background_task(
                 self._emit_agent_lifecycle_event(EVENT_BOT_READY),
                 name=f"bot_ready_hooks_{self.agent_name}",
                 owner=self._runtime_view,
@@ -1982,6 +1983,9 @@ class AgentBot:
             self._sync_shutdown_budget = shutdown_budget
         if self._router is not None:
             self._router.stopping()
+        if self._bot_ready_hooks_task is not None:
+            # Waiting for an observer hook would spend the budget the replies drained below need to finish.
+            self._bot_ready_hooks_task.cancel()
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),

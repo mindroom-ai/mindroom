@@ -43,7 +43,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, ShutdownBudget
 from mindroom.tool_system.plugins import config_plugins
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
@@ -327,6 +327,40 @@ async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
         await _complete_frame_and_ready_hooks(bot)
 
     assert fired_events == ["bot:ready"]
+
+
+@pytest.mark.asyncio
+async def test_running_bot_ready_hook_leaves_the_shutdown_budget_to_reply_cleanup(tmp_path: Path) -> None:
+    """Stopping cancels a bot:ready hook still running at once, so the replies drained after it keep their time."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @hook(EVENT_BOT_READY)
+    async def on_ready(_ctx: AgentLifecycleContext) -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    drain = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot._response_runner.inbox, "drain_inbox_responses", drain),
+    ):
+        await _complete_frame(bot)
+        await asyncio.wait_for(entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        bot._sync_shutdown_budget = ShutdownBudget.start(1.0)
+        await bot.prepare_for_sync_shutdown()
+
+    assert cancelled.is_set()
+    # The drain gets half of what is left of the 1 s budget; a hook waited for would have left it nothing.
+    assert drain.await_args.kwargs["cancel_after_seconds"] > 0.25
 
 
 @pytest.mark.asyncio
