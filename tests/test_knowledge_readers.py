@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
@@ -40,7 +39,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.embeddings.batching import RefreshEmbedder
-from mindroom.knowledge.chunking import LegacyDocumentChunking, SafeFixedSizeChunking
+from mindroom.knowledge.chunking import LegacyDocumentChunking, LegacyFixedSizeChunking, SafeFixedSizeChunking
 from mindroom.knowledge.file_indexer import FileIndexer, _InMemoryTextReader, _MalformedJSONSourceError
 from mindroom.knowledge.readers import Document
 from mindroom.knowledge.vector_store import KnowledgeCollection
@@ -160,6 +159,31 @@ def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(indexer: F
 
 
 @pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ({"value": "A\u00a0B\u2028C\u3000D"}, ['{"value": "A B C D"}']),
+        # Agno 3.2's whitespace would split this into chunks of 5, 5000, and 1005 characters.
+        ({"v": ("A\u00a0\u00a0" * 2000) + "B"}, ['{"v": "' + "A " * 2000 + 'B"}']),
+    ],
+    ids=["unicode-whitespace", "long"],
+)
+def test_json_files_chunk_as_agno_3_0_did(
+    value: dict[str, str],
+    expected: list[str],
+    tmp_path: Path,
+    indexer: FileIndexer,
+) -> None:
+    """JSON keeps Agno's 5000/0 fixed-size split, and its chunks collapse Unicode whitespace as 3.0.9's did."""
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+    documents = indexer._build_reader(source).read(source, name=source.name)
+
+    # What Agno 3.0.9's JSON reader returned for this file.
+    assert [document.content for document in documents] == expected
+
+
+@pytest.mark.parametrize(
     "suffix",
     [
         ".pdf",
@@ -251,8 +275,9 @@ def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
     """
     reader = indexer._build_reader(Path("source.json"))
 
-    assert type(reader.chunking_strategy) is FixedSizeChunking
-    assert reader.chunking_strategy.chunk_size == 5000
+    # Agno's fixed-size split at its 5000/0, with the legacy whitespace (``test_json_files_chunk_as_agno_3_0_did``).
+    assert type(reader.chunking_strategy) is LegacyFixedSizeChunking
+    assert (reader.chunking_strategy.chunk_size, reader.chunking_strategy.overlap) == (5000, 0)
 
     # The broken key is indented so line and column differ; equal values would
     # make the assertion below blind to the two being swapped.

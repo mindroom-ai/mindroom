@@ -86,6 +86,14 @@ class SafeFixedSizeChunking(FixedSizeChunking):
         return chunked_documents
 
 
+class LegacyFixedSizeChunking(FixedSizeChunking):
+    """Agno's fixed-size chunking for JSON files, cleaning text as every indexed chunk has been."""
+
+    def clean_text(self, text: str) -> str:
+        """Clean the document with ``_legacy_clean_text``."""
+        return _legacy_clean_text(text)
+
+
 class LegacyDocumentChunking(DocumentChunking):
     """Agno's paragraph chunking for PDF, DOCX, and PPTX files, cleaning paragraphs as every indexed chunk has been."""
 
