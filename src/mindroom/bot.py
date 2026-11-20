@@ -1379,19 +1379,30 @@ class AgentBot:
         *,
         first_sync_response: bool,
     ) -> None:
-        """Run side effects that do not own raw sync checkpoint safety."""
+        """Run side effects that do not own raw sync checkpoint safety.
+
+        Only the grant refresh runs before the first frame releases dispatch, because released sources must find reply
+        grants rebuilt or failed closed, and it waits at most 10 s. Nothing else here decides what a source may do.
+        """
         if self._router is not None:
             await self._router.refresh_memberships_if_needed()
-            await self._router.publish_joined_room_state()
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
-            await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
+            # Observer hooks may each run until their timeout, so they hold neither dispatch nor the next frame.
+            create_background_task(
+                self._emit_agent_lifecycle_event(EVENT_BOT_READY),
+                name=f"bot_ready_hooks_{self.agent_name}",
+                owner=self._runtime_view,
+            )
         self._personal_room_lifecycle.schedule_reconciliation()
 
         if self._first_sync_done and not self._orchestrator_ready_handled:
             await self.orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
+        if self._router is not None:
+            # Published room state gates no source, and each room's reconcile bounds its own wait.
+            await self._router.publish_joined_room_state()
 
     def _before_ingestion_admission(
         self,
