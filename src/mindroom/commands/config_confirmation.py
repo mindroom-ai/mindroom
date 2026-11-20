@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.message_target import MessageTarget
@@ -58,11 +57,6 @@ class ConfigConfirmationContext:
             msg = "Matrix client is not ready for config confirmation"
             raise RuntimeError(msg)
         return client
-
-    @property
-    def authorization(self) -> AuthorizationConfig:
-        """Return authorization from the current runtime config."""
-        return self.runtime.config.authorization
 
 
 @dataclass
@@ -370,16 +364,15 @@ async def ensure_pending_change(
         )
 
 
-async def _ensure_decision_checkpoint(
+def _ensure_decision_checkpoint(
     context: ConfigConfirmationContext,
     event: nio.ReactionEvent,
     pending_change: _PendingConfigChange,
 ) -> _PendingConfigChange | None:
     """Freeze the winning reaction and its authorization before mutation."""
     if pending_change.decision_event_id is not None:
-        return pending_change if pending_change.decision_event_id == event.event_id else None
+        return pending_change  # The caller ignored every other reaction.
 
-    authorization = context.authorization
     resolved_sender = resolve_human_requester_alias(
         event.sender,
         context.runtime.config,
@@ -399,7 +392,7 @@ async def _ensure_decision_checkpoint(
     response_text = None
     if event.key == "❌":
         response_text = "❌ Configuration change cancelled."
-    elif not authorization.config_command_enabled:
+    elif not context.runtime.config.authorization.config_command_enabled:
         response_text = "❌ Config command disabled."
     elif not is_platform_administrator(resolved_sender, context.runtime.config, context.runtime_paths):
         response_text = "❌ Admin only."
@@ -477,7 +470,7 @@ async def handle_confirmation_reaction(
             _save_pending_change(context.runtime_paths, preview_event_id, None)
             return
 
-        pending_change = await _ensure_decision_checkpoint(context, event, pending_change)
+        pending_change = _ensure_decision_checkpoint(context, event, pending_change)
         if pending_change is None:
             return
         pending_change, response_text = await _response_for_checkpointed_decision(
