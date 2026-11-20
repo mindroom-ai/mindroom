@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tailnet_ssh.projection import authorized_key_lines, write_projection
+from mindroom.tailnet_ssh.projection import authorized_key_lines, clear_authorized_keys, write_projection
 from mindroom.tailnet_ssh.store import LinkBook, new_link, set_keys
 
 if TYPE_CHECKING:
@@ -157,3 +157,23 @@ def test_no_keys_writes_empty_authorized_keys(tmp_path: Path) -> None:
     write_projection(projection, _link(), [])
 
     assert (projection / "authorized_keys").read_bytes() == b""
+
+
+def test_clear_empties_authorized_keys_only(tmp_path: Path) -> None:
+    """A removed link's worker admits nobody; its sshd still has its config and host key, so a restart would not fail."""
+    projection = tmp_path / "ssh"
+    link = _link()
+    write_projection(projection, link, [f"restrict,pty {_public_key()}"])
+    config = (projection / "sshd_config").read_bytes()
+
+    clear_authorized_keys(projection)
+
+    assert (projection / "authorized_keys").read_bytes() == b""
+    assert stat.S_IMODE((projection / "authorized_keys").stat().st_mode) == 0o644
+    assert (projection / "ssh_host_ed25519_key").read_bytes() == link.host_key.encode()
+    assert (projection / "sshd_config").read_bytes() == config
+    assert sorted(path.name for path in projection.iterdir()) == [
+        "authorized_keys",
+        "ssh_host_ed25519_key",
+        "sshd_config",
+    ]

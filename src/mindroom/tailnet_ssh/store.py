@@ -53,6 +53,8 @@ class LinkBook(BaseModel):
     so after a primary restart an operator key's links admit their login and are parked on disconnect at once.
     ``seen_keys`` holds, for each person with a link, the identities of every key they could sign in with at the last
     reconcile, so a key the operator removes from the config closes their sessions, also when a restart came with it.
+    ``revoked_workers`` holds the worker of each removed link until its ``authorized_keys`` is known to admit nobody,
+    so a removal whose worker could not be listed, or whose file could not be written, is cleared at a later try.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -61,6 +63,7 @@ class LinkBook(BaseModel):
     keys: dict[str, list[str]] = Field(default_factory=dict)
     enrollment: Literal["login", "auth_key"] | None = None
     seen_keys: dict[str, list[str]] = Field(default_factory=dict)
+    revoked_workers: list[str] = Field(default_factory=list)
 
     def link(self, requester_id: str, agent_name: str) -> Link | None:
         """Return the person's link to the agent, of which there is at most one."""
@@ -152,16 +155,19 @@ def close_sessions_of_gone_keys(book: LinkBook, current: Mapping[str, Collection
 
 
 def remove_links(book: LinkBook, where: Callable[[Link], bool], *, now: float, park: bool = False) -> list[Link]:
-    """Mark the matching links ``removing`` and close their sessions, and return them; the only path to ``removing``.
+    """Mark the matching links ``removing``, close their sessions, and return them; the only path to ``removing``.
 
-    A link already being removed is left as it is, so a condition checked on every reconcile changes nothing twice.
-    With ``park``, ``finish_removal`` keeps the link as ``off`` instead of dropping it.
+    Each one's worker joins ``revoked_workers``, whose keys the link service clears. A link already being removed is
+    left as it is, so a condition checked on every reconcile changes nothing twice. With ``park``, ``finish_removal``
+    keeps the link as ``off`` instead of dropping it.
     """
     removed = [link for link in book.links if link.desired != "removing" and where(link)]
     for link in removed:
         link.desired = "removing"
         link.closed_before = now
         link.park_when_removed = park
+        if link.worker_key not in book.revoked_workers:
+            book.revoked_workers.append(link.worker_key)
     return removed
 
 

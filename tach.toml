@@ -3843,7 +3843,6 @@ depends_on = [
     "mindroom.tailnet_ssh.projection",
     "mindroom.tailnet_ssh.store",
     "mindroom.tool_system.sandbox_proxy",
-    "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -6175,7 +6174,6 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.plugin_worker_services",
     "mindroom.plugin_worker_relay",
-    "mindroom.tailnet_ssh.links",
 ]
 
 [[modules]]
@@ -7950,6 +7948,7 @@ expose = [
     "worker_call",
     "worker_proxy_client_config",
     "worker_route",
+    "worker_runner_address",
 ]
 from = ["mindroom.tool_system.sandbox_proxy"]
 

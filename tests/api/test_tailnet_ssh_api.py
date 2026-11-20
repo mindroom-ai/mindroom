@@ -668,18 +668,22 @@ def test_disconnect_sets_removing_and_parks_in_operator_mode(portal: _Portal) ->
 
 
 @pytest.fixture
-def sshd_stops(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
-    """Record each link and worker whose runner is asked to stop sshd.
+def sshd_stops(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record each worker whose runner is to be asked, apart from the response, to stop sshd.
 
-    The portal resolves every host to a public address, so no local runner is reachable here; the link service's
-    tests serve one.
+    The portal resolves every host to a public address, so no local runner is reachable here, and each request's
+    event loop ends with it; the link service's tests serve a runner and wait for the stops.
     """
-    stops: list[tuple[str, str]] = []
-    monkeypatch.setattr(links, "_stop_sshd", lambda _paths, link_id, handle: stops.append((link_id, handle.worker_key)))
+    stops: list[str] = []
+
+    def record(_paths: RuntimePaths, handles: list[WorkerHandle]) -> None:
+        stops.extend(handle.worker_key for handle in handles)
+
+    monkeypatch.setattr(links, "_stop_in_background", record)
     return stops
 
 
-def test_disconnect_clears_authorized_keys_and_stops_sshd(portal: _Portal, sshd_stops: list[tuple[str, str]]) -> None:
+def test_disconnect_clears_authorized_keys_and_stops_sshd(portal: _Portal, sshd_stops: list[str]) -> None:
     """A disconnected link's worker admits nobody and its sshd is stopped; another person's worker keeps its own."""
     alices, bobs = _connected(portal), _connected(portal, "team_mind", "team-mind", user="bob")
     for link in (alices, bobs):
@@ -695,10 +699,10 @@ def test_disconnect_clears_authorized_keys_and_stops_sshd(portal: _Portal, sshd_
     assert portal.link(ALICE, "mind").desired == "removing"
     assert (portal.tmp_path / alices.id / "authorized_keys").read_text() == ""
     assert (portal.tmp_path / bobs.id / "authorized_keys").read_text() == bobs_keys
-    assert sshd_stops == [(alices.id, alices.worker_key)]
+    assert sshd_stops == [alices.worker_key]
 
 
-def test_operator_park_clears_keys(portal: _Portal, sshd_stops: list[tuple[str, str]]) -> None:
+def test_operator_park_clears_keys(portal: _Portal, sshd_stops: list[str]) -> None:
     """A link an operator key enrolled is parked on disconnect, and its worker's sshd admits nobody all the same."""
     link = _connected(portal, "team_mind", "team-mind")
     portal.report(link.id, enrollment="auth_key")
@@ -710,7 +714,7 @@ def test_operator_park_clears_keys(portal: _Portal, sshd_stops: list[tuple[str, 
 
     assert portal.link(ALICE, "team_mind").park_when_removed
     assert (ssh_dir / "authorized_keys").read_text() == ""
-    assert sshd_stops == [(link.id, link.worker_key)]
+    assert sshd_stops == [link.worker_key]
 
 
 def test_a_disconnect_right_after_a_restart_stays_disconnected(portal: _Portal, tmp_path: Path) -> None:

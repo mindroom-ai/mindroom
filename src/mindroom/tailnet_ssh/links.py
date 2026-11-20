@@ -17,7 +17,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 import aiohttp
-import httpx
 from pydantic import BaseModel
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION, unbound_agent_cli_shell_env
@@ -26,7 +25,12 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.shared_directories.store import load_shared_directories
 from mindroom.tailnet_ssh.eligibility import link_ineligibility
-from mindroom.tailnet_ssh.projection import authorized_key_lines, signin_keys, write_projection
+from mindroom.tailnet_ssh.projection import (
+    authorized_key_lines,
+    clear_authorized_keys,
+    signin_keys,
+    write_projection,
+)
 from mindroom.tailnet_ssh.store import (
     close_sessions_of_gone_keys,
     default_hostname,
@@ -37,16 +41,16 @@ from mindroom.tailnet_ssh.store import (
     update_links,
 )
 from mindroom.terminal.resolution import agent_terminals
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, worker_call, worker_proxy_client_config
-from mindroom.tool_system.worker_proxy_client import worker_request_headers
+from mindroom.tool_system.sandbox_proxy import worker_call, worker_runner_address
 from mindroom.tool_system.worker_routing import (
     build_requester_execution_identity,
     normalize_worker_key_part,
     user_agent_worker_key_requester,
     worker_key_agent_name,
+    worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.models import WorkerSpec, worker_api_root
+from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
@@ -81,6 +85,8 @@ _MEMBERSHIP_PENDING = "Whether you may use this agent is not known yet; try agai
 # threads of their own, so a few sleeping or failing workers cannot fill the default pool the rest of the primary
 # shares; a connect beyond this many waits for a free connect thread.
 _CONNECT_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="mindroom-tailnet-ssh-connect")
+# The sshd stops under way, which run apart from any response; the event loop holds only weak references to tasks.
+_STOPPING: set[asyncio.Task[None]] = set()
 
 
 class LinkReport(BaseModel):
@@ -216,8 +222,8 @@ def _desired(
     return "on" if ineligible is None else "suspended"
 
 
-def listed_workers(runtime_paths: RuntimePaths) -> list[WorkerHandle]:
-    """Return the backend's workers, or none while it has no dedicated backend or the backend fails. Blocking."""
+def _list_workers(runtime_paths: RuntimePaths) -> list[WorkerHandle] | None:
+    """Return the backend's workers, none while it has no dedicated backend, or None when the backend fails. Blocking."""
     try:
         lease = lease_configured_primary_worker_manager(runtime_paths)
         if lease is None:
@@ -226,7 +232,12 @@ def listed_workers(runtime_paths: RuntimePaths) -> list[WorkerHandle]:
             return manager.list_workers()
     except WorkerBackendError as error:
         logger.warning("tailnet_ssh_workers_not_listed", error=str(error))
-        return []
+        return None
+
+
+def listed_workers(runtime_paths: RuntimePaths) -> list[WorkerHandle]:
+    """Return the backend's workers, or none while it has no dedicated backend or the backend fails. Blocking."""
+    return _list_workers(runtime_paths) or []
 
 
 def desired_links(
@@ -244,8 +255,8 @@ def desired_links(
     link would be removed at once; one that is not eligible now is added and suspended. Only a report of this primary
     session tells an operator key: the stored mode may be one the gateway left while the primary restarted. A link its person parked as
     ``off`` is a link, so it is not added again. A key gone from a person's keys, as when the operator removes one
-    from the config, closes their open sessions. A link it removes leaves its worker's sshd admitting nobody, and
-    stopped, once the store is updated (``close_removed_links``).
+    from the config, closes their open sessions. A link it removes leaves its worker to ``revoke_removed_workers``,
+    which the caller runs next.
     """
     workers: list[WorkerHandle] = []
     # The backend and the shared directories are read outside the store's lock, which connects and the portal wait for.
@@ -275,7 +286,7 @@ def desired_links(
             directories=directories,
         )
 
-    def reconcile(book: LinkBook) -> tuple[list[dict[str, object]], list[Link]]:
+    def reconcile(book: LinkBook) -> list[dict[str, object]]:
         for handle in workers if book.enrollment == "auth_key" else []:
             requester_id = user_agent_worker_key_requester(handle.worker_key)
             agent_name = agent_names.get(worker_key_agent_name(handle.worker_key) or "")
@@ -292,8 +303,8 @@ def desired_links(
             now=now,
         )
         verdicts = {link.id: desired(link) for link in book.links if link.desired == "on"}
-        removed = remove_links(book, lambda link: verdicts.get(link.id) == "removing", now=now)
-        rows = [
+        remove_links(book, lambda link: verdicts.get(link.id) == "removing", now=now)
+        return [
             {
                 "id": link.id,
                 "hostname": link.hostname,
@@ -305,11 +316,8 @@ def desired_links(
             for link in book.links
             if link.desired != "off"
         ]
-        return rows, removed
 
-    rows, removed = update_links(runtime_paths, reconcile)
-    close_removed_links(runtime_paths, removed)
-    return rows
+    return update_links(runtime_paths, reconcile)
 
 
 def record_status(
@@ -490,22 +498,31 @@ def _refusal_detail(answer: bytes) -> str:
     return detail if isinstance(detail, str) else "The worker's SSH server did not start."
 
 
+async def _post_ssh(
+    api_root: str,
+    headers: Mapping[str, str],
+    operation: Literal["start", "stop"],
+    body: object,
+    *,
+    seconds: float,
+) -> tuple[int, bytes]:
+    """POST to the worker runner's SSH route ``operation`` within ``seconds``; return the answer's status and body."""
+    async with (
+        aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=seconds)) as client,
+        client.post(f"{api_root}/ssh/{operation}", headers=headers, json=body, allow_redirects=False) as response,
+    ):
+        answer = await collect_bounded_bytes(response.content.iter_chunked(65536), max_bytes=_MAX_ANSWER_BYTES)
+    return response.status, answer
+
+
 async def _start_sshd(call: WorkerCall) -> None:
     """Have the worker's runner start sshd for sessions of the shell ``call`` describes, unless it runs."""
+    body = {"request": call.request.model_dump(mode="json")}
     try:
-        async with (
-            aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=_START_TIMEOUT_SECONDS)) as client,
-            client.post(
-                f"{call.api_root}/ssh/start",
-                headers=call.headers,
-                json={"request": call.request.model_dump(mode="json")},
-                allow_redirects=False,
-            ) as response,
-        ):
-            answer = await collect_bounded_bytes(response.content.iter_chunked(65536), max_bytes=_MAX_ANSWER_BYTES)
+        status, answer = await _post_ssh(call.api_root, call.headers, "start", body, seconds=_START_TIMEOUT_SECONDS)
     except (aiohttp.ClientError, TimeoutError, ByteLimitExceededError) as error:
         raise ConnectRefused(503, f"The worker's SSH server is unreachable: {type(error).__name__}") from None
-    if response.status != 200:
+    if status != 200:
         raise ConnectRefused(503, _refusal_detail(answer))
 
 
@@ -559,55 +576,78 @@ def refresh_projections(config: Config, runtime_paths: RuntimePaths, requester_i
     _projected(runtime_paths, project)
 
 
-def _stop_sshd(runtime_paths: RuntimePaths, link_id: str, handle: WorkerHandle) -> None:
-    """Have the worker's runner stop sshd, as a shell call reaches it. Blocking; a failure is logged, never raised."""
-    try:
-        config = worker_proxy_client_config(sandbox_proxy_config(runtime_paths), runtime_paths)
-        response = httpx.post(
-            f"{worker_api_root(handle)}/ssh/stop",
-            headers=worker_request_headers(handle, config=config),
-            timeout=_STOP_TIMEOUT_SECONDS,
-            follow_redirects=False,
-            # A worker is reached directly, never through the primary's egress proxy.
-            trust_env=False,
-        )
-    except (httpx.HTTPError, RuntimeError) as error:
-        # The error's words name the worker's address.
-        logger.warning("tailnet_ssh_sshd_not_stopped", link_id=link_id, error_type=type(error).__name__)
-        return
-    if response.status_code != 204:
-        logger.warning("tailnet_ssh_sshd_not_stopped", link_id=link_id, status_code=response.status_code)
+def _clear_revoked_workers(runtime_paths: RuntimePaths) -> list[WorkerHandle]:
+    """Empty the ``authorized_keys`` of each worker in ``revoked_workers``; return the ones emptied. Blocking.
 
-
-def close_removed_links(runtime_paths: RuntimePaths, removed: Sequence[Link]) -> None:
-    """Leave the worker of each link ``remove_links`` returned admitting nobody, then have its runner stop sshd. Blocking.
-
-    Call it once the removal is stored, never under the store's lock. The empty ``authorized_keys`` is written under
-    that lock, so no connect or key change writes keys after it; the stop is best effort, as the empty file already
-    admits nobody. A worker that is not listed with an SSH port is left alone: its sshd does not run, and only a connect
-    of a link that is on starts it again, which writes the keys first. A worker a link that is on serves by now keeps
-    its keys and sshd.
+    A worker is taken off the list once its file is empty, once it is not listed with an SSH port, or once a link that
+    is on serves it again, whose connects write their keys. While the backend cannot list its workers, or a file cannot
+    be written, the worker stays on the list.
     """
-    if not removed:
-        return
-    handles = {handle.worker_key: handle for handle in listed_workers(runtime_paths)}
+    if not read_links(runtime_paths).revoked_workers:
+        return []
+    listed = _list_workers(runtime_paths)
+    if listed is None:
+        return []
+    handles = {handle.worker_key: handle for handle in listed}
 
-    def clear(book: LinkBook) -> list[tuple[str, WorkerHandle]]:
+    def clear(book: LinkBook) -> list[WorkerHandle]:
         served = {link.worker_key for link in book.links if link.desired == "on"}
-        cleared: list[tuple[str, WorkerHandle]] = []
-        for link in removed:
-            handle = handles.get(link.worker_key)
-            if handle is None or handle.ssh_endpoint is None or link.worker_key in served:
-                continue
-            try:
-                write_projection(handle.ssh_endpoint.projection_dir, link, ())
-            except OSError as error:
-                logger.warning("tailnet_ssh_keys_not_cleared", link_id=link.id, error=str(error))
-            cleared.append((link.id, handle))
+        cleared: list[WorkerHandle] = []
+        for worker_key in list(book.revoked_workers):
+            handle = handles.get(worker_key)
+            if worker_key not in served and handle is not None and handle.ssh_endpoint is not None:
+                try:
+                    clear_authorized_keys(handle.ssh_endpoint.projection_dir)
+                except OSError as error:
+                    logger.warning("tailnet_ssh_keys_not_cleared", worker=worker_log_id(worker_key), error=str(error))
+                    continue
+                cleared.append(handle)
+            book.revoked_workers.remove(worker_key)
         return cleared
 
-    for link_id, handle in _projected(runtime_paths, clear):
-        _stop_sshd(runtime_paths, link_id, handle)
+    return _projected(runtime_paths, clear)
+
+
+async def _stop_sshd(runtime_paths: RuntimePaths, handle: WorkerHandle) -> None:
+    """Have the worker's runner stop sshd, which it does only while the worker's keys admit nobody; never raises."""
+    worker = worker_log_id(handle.worker_key)
+    try:
+        api_root, headers = worker_runner_address(runtime_paths, handle)
+        status, _answer = await _post_ssh(api_root, headers, "stop", None, seconds=_STOP_TIMEOUT_SECONDS)
+    except (aiohttp.ClientError, TimeoutError, ByteLimitExceededError, RuntimeError) as error:
+        # The error's words name the worker's address.
+        logger.warning("tailnet_ssh_sshd_not_stopped", worker=worker, error_type=type(error).__name__)
+        return
+    if status != 204:
+        logger.warning("tailnet_ssh_sshd_not_stopped", worker=worker, status_code=status)
+
+
+async def _stop_all(runtime_paths: RuntimePaths, handles: Sequence[WorkerHandle]) -> None:
+    await asyncio.gather(*(_stop_sshd(runtime_paths, handle) for handle in handles))
+
+
+def _stop_in_background(runtime_paths: RuntimePaths, handles: Sequence[WorkerHandle]) -> asyncio.Task[None] | None:
+    """Stop the workers' sshd at once, apart from the caller, and return the task that does it."""
+    if not handles:
+        return None
+    task = asyncio.get_running_loop().create_task(_stop_all(runtime_paths, handles))
+    _STOPPING.add(task)
+    task.add_done_callback(_STOPPING.discard)
+    return task
+
+
+async def revoke_removed_workers(runtime_paths: RuntimePaths) -> asyncio.Task[None] | None:
+    """Leave each worker a removal queued admitting nobody, then stop its sshd apart from the caller.
+
+    Every caller of ``remove_links`` runs this once the removal is stored, and so does every reconcile, which retries a
+    worker that could not be listed or written. The empty ``authorized_keys`` is written under the store's lock, so no
+    connect or key change writes keys after it. A worker that is not listed with an SSH port is left alone: its sshd
+    does not run, and only a connect of a link that is on starts it again, which writes the keys first. The stops are
+    best effort and not awaited, so neither the gateway's rows nor a disconnect waits for a runner; the returned task
+    is for whoever would.
+    """
+    handles = await asyncio.to_thread(_clear_revoked_workers, runtime_paths)
+    return _stop_in_background(runtime_paths, handles)
 
 
 def _is_fresh(report: _GatewayReport, *, monotonic: float) -> bool:

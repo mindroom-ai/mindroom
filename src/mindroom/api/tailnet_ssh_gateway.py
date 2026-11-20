@@ -29,6 +29,7 @@ from mindroom.tailnet_ssh.links import (
     connect,
     desired_links,
     record_status,
+    revoke_removed_workers,
 )
 
 if TYPE_CHECKING:
@@ -144,7 +145,7 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
     @app.get("/links")
     async def links() -> list[dict[str, object]]:
         config, runtime_paths, memberships, status = _link_service(api_app)
-        return await asyncio.to_thread(
+        rows = await asyncio.to_thread(
             desired_links,
             config,
             runtime_paths,
@@ -153,6 +154,8 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
             now=time.time(),
             monotonic=time.monotonic(),
         )
+        await revoke_removed_workers(runtime_paths)
+        return rows
 
     @app.post("/status", status_code=204)
     async def post_status(request: Request) -> None:

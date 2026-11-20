@@ -47,6 +47,7 @@ from mindroom.runtime_env_policy import (
     sandbox_runner_startup_process_env,
     worker_extra_env,
 )
+from mindroom.tailnet_ssh import links as link_service
 from mindroom.tailnet_ssh.links import ConnectRefused, GatewayStatus, LinkStatus, _GatewayReport, _resolve_target
 from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
 from mindroom.worker_computer.sessions import ComputerSessionStore
@@ -222,6 +223,38 @@ def test_get_links_returns_desired_rows(
             "login_after": link.login_after,
         },
     ]
+
+
+def test_get_links_clears_the_keys_of_a_removed_links_worker(
+    api_app: FastAPI,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calls_on_event_loop: Callable[[object, str], list[bool]],
+) -> None:
+    """A link the reconcile removes is answered as ``removing``, its worker's keys emptied off the event loop first.
+
+    Its sshd's stop is left to run apart from the answer.
+    """
+    _config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    moved = new_link(ALICE, "mine", "v1:elsewhere:user_agent:~@alice:example.org:mine", "mine", now=time.time())
+    update_links(paths, lambda book: book.links.append(moved))
+    ssh_dir = tmp_path / "ssh"
+    link_service.write_projection(ssh_dir, moved, ["restrict,pty ssh-ed25519 AAAA alice@laptop"])
+    handle = SimpleNamespace(worker_key=moved.worker_key, ssh_endpoint=SimpleNamespace(projection_dir=ssh_dir))
+    manager = MagicMock(list_workers=MagicMock(return_value=[handle]))
+    manager.__enter__.return_value = manager
+    monkeypatch.setattr(link_service, "lease_configured_primary_worker_manager", lambda _paths: manager)
+    stops: list[object] = []
+    monkeypatch.setattr(link_service, "_stop_in_background", lambda _paths, handles: stops.extend(handles))
+    on_event_loop = calls_on_event_loop(link_service, "_clear_revoked_workers")
+
+    response = client.get("/links", headers=AUTH)
+
+    assert [(row["id"], row["desired"]) for row in response.json()] == [(moved.id, "removing")]
+    assert (ssh_dir / "authorized_keys").read_text() == ""
+    assert on_event_loop == [False]
+    assert stops == [handle]
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")

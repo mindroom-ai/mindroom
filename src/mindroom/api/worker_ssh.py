@@ -6,7 +6,8 @@ environment and workspace where ``mindroom.tailnet_ssh.session``, which sshd run
 it starts sshd unless one runs, on the files the primary wrote into ``<worker root>/.runtime/ssh``.
 
 sshd never starts at boot, so a worker has no SSH server until the primary has passed a connect for it. The primary
-calls ``/stop`` when it removes the worker's link, after it has emptied ``authorized_keys``.
+calls ``/stop`` when it removes the worker's link, after it has emptied ``authorized_keys``; sshd ends only while that
+file still admits nobody, so a stop that arrives after a newer connect wrote keys and started sshd leaves it running.
 """
 
 from __future__ import annotations
@@ -87,6 +88,19 @@ def _worker_ssh(app: FastAPI) -> _WorkerSsh:
     except AttributeError:
         state = app.state.worker_ssh = _WorkerSsh()
         return state
+
+
+def _projection_dir(app: FastAPI) -> Path:
+    """Return where this worker mounts the files the primary writes for its sshd."""
+    return sandbox_startup_manifest_path(runner_dedicated_worker_root(app_runtime_paths(app))).parent / "ssh"
+
+
+def _admits_nobody(projection_dir: Path) -> bool:
+    """Return whether ``authorized_keys`` holds no key, or is not there. Blocking."""
+    try:
+        return not (projection_dir / "authorized_keys").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return True
 
 
 def _sshd_argv(projection_dir: Path) -> list[str]:
@@ -198,9 +212,8 @@ async def _ensure_sshd(app: FastAPI, state: _WorkerSsh) -> None:
         if sshd is not None:
             # An sshd that died: its sessions may run on, and nothing reads its stderr once it is replaced.
             await _end(sshd)
-        root = runner_dedicated_worker_root(app_runtime_paths(app))
         try:
-            sshd = state.sshd = await _run(_sshd_argv(sandbox_startup_manifest_path(root).parent / "ssh"))
+            sshd = state.sshd = await _run(_sshd_argv(_projection_dir(app)))
         except FileNotFoundError:
             raise HTTPException(503, "The worker image has no SSH server.") from None
     if await _accepts(sshd):
@@ -213,13 +226,18 @@ async def _ensure_sshd(app: FastAPI, state: _WorkerSsh) -> None:
     raise HTTPException(503, f"{detail}: {reason}" if reason else f"{detail}.")
 
 
+async def _stop(state: _WorkerSsh) -> None:
+    """End sshd if it runs; its open sessions are not waited for. The caller holds the lock."""
+    if state.sshd is not None:
+        await _end(state.sshd)
+        state.sshd = None
+
+
 async def stop_worker_ssh(app: FastAPI) -> None:
-    """End this runner's sshd, as the runner stops or its link is removed; its open sessions are not waited for."""
+    """End this runner's sshd as the runner stops."""
     state = _worker_ssh(app)
     async with state.lock:
-        if state.sshd is not None:
-            await _end(state.sshd)
-            state.sshd = None
+        await _stop(state)
 
 
 @router.post("/start", dependencies=[Depends(validate_runner_token)])
@@ -237,5 +255,12 @@ async def start(request: Request, payload: _Start) -> dict[str, int]:
 
 @router.post("/stop", status_code=204, dependencies=[Depends(validate_runner_token)])
 async def stop(request: Request) -> None:
-    """End sshd if it runs; the gateway has closed the removed link's sessions already."""
-    await stop_worker_ssh(request.app)
+    """End sshd if it runs and its ``authorized_keys`` admits nobody, as the primary leaves it for a removed link.
+
+    Starts take the same lock, and every start follows the keys its connect wrote, so a stop sent before a newer
+    connect never ends that connect's sshd. The gateway has closed the removed link's sessions already.
+    """
+    state = _worker_ssh(request.app)
+    async with state.lock:
+        if await asyncio.to_thread(_admits_nobody, _projection_dir(request.app)):
+            await _stop(state)

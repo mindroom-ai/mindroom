@@ -63,6 +63,22 @@ def _text(lines: Sequence[str]) -> bytes:
     return "".join(f"{line}\n" for line in lines).encode()
 
 
+def _write_files(projection_dir: Path, files: Sequence[tuple[str, bytes, int]]) -> None:
+    """Replace each named file of ``projection_dir`` atomically, so sshd never reads half a file."""
+    create_directory_durable(projection_dir, mode=0o755)
+    directory_fd = os.open(projection_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for name, content, mode in files:
+            atomic_write_bytes_at(directory_fd, name, content, file_mode=mode, temp_prefix=f".{name}.")
+    finally:
+        os.close(directory_fd)
+
+
+def clear_authorized_keys(projection_dir: Path) -> None:
+    """Replace ``authorized_keys`` with an empty file, which admits nobody, and leave the other files as they are."""
+    _write_files(projection_dir, [("authorized_keys", b"", 0o644)])
+
+
 def write_projection(projection_dir: Path, link: Link, key_lines: Sequence[str]) -> None:
     """Replace ``sshd_config``, ``authorized_keys`` and the link's host key, each atomically, so sshd never reads half a file.
 
@@ -70,14 +86,11 @@ def write_projection(projection_dir: Path, link: Link, key_lines: Sequence[str])
     says, which governs the ``authorized_keys`` file and its directories. The primary's uid is the worker's, so sshd
     owns and reads it.
     """
-    create_directory_durable(projection_dir, mode=0o755)
-    directory_fd = os.open(projection_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        for name, content, mode in (
+    _write_files(
+        projection_dir,
+        [
             ("ssh_host_ed25519_key", link.host_key.encode(), 0o600),
             ("authorized_keys", _text(key_lines), 0o644),
             ("sshd_config", _text(_SSHD_CONFIG), 0o644),
-        ):
-            atomic_write_bytes_at(directory_fd, name, content, file_mode=mode, temp_prefix=f".{name}.")
-    finally:
-        os.close(directory_fd)
+        ],
+    )

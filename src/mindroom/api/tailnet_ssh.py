@@ -42,11 +42,11 @@ from mindroom.oauth.github import github_oauth_provider
 from mindroom.shared_directories.store import is_shareable_agent, load_shared_directories, shared_directory_access
 from mindroom.tailnet_ssh.eligibility import link_ineligibility
 from mindroom.tailnet_ssh.links import (
-    close_removed_links,
     fresh_link_statuses,
     link_state,
     listed_workers,
     refresh_projections,
+    revoke_removed_workers,
 )
 from mindroom.tailnet_ssh.projection import authorized_key_lines
 from mindroom.tailnet_ssh.store import (
@@ -417,10 +417,10 @@ async def disconnect_agent(agent_name: str, person: _Changing) -> None:
     so a disconnect right after a primary restart parks too.
     """
 
-    def disconnect(book: LinkBook) -> list[Link]:
+    def disconnect(book: LinkBook) -> None:
         link = _own_link(book, person.requester_id, agent_name)
         park = book.enrollment == "auth_key"
-        return remove_links(book, lambda candidate: candidate is link, now=time.time(), park=park)
+        remove_links(book, lambda candidate: candidate is link, now=time.time(), park=park)
 
-    removed = await asyncio.to_thread(update_links, person.user.runtime_paths, disconnect)
-    await asyncio.to_thread(close_removed_links, person.user.runtime_paths, removed)
+    await asyncio.to_thread(update_links, person.user.runtime_paths, disconnect)
+    await revoke_removed_workers(person.user.runtime_paths)

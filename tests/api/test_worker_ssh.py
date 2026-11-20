@@ -482,6 +482,32 @@ async def test_stop_route_kills_sshd_and_is_idempotent(client: httpx.AsyncClient
 
 
 @pytest.mark.asyncio
+async def test_a_stop_sent_before_a_newer_connect_leaves_that_connects_sshd(
+    client: httpx.AsyncClient,
+    fake_sshd: _FakeSshd,
+    tmp_path: Path,
+) -> None:
+    """The primary cleared the keys and sent a stop; a connect wrote keys and started sshd before the stop arrived.
+
+    The stop then finds keys that admit someone, so the newer connect's sshd runs on. Once the keys are empty again,
+    as the next removal leaves them, a stop ends it.
+    """
+    projection = tmp_path / "worker" / ".runtime" / "ssh"
+    projection.mkdir(parents=True)
+    keys = projection / "authorized_keys"
+    keys.write_text("restrict,pty ssh-ed25519 AAAA alice@laptop\n", encoding="utf-8")
+    await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
+
+    response = await client.post("/api/sandbox-runner/ssh/stop")
+
+    assert response.status_code == 204
+    assert fake_sshd.processes[0].returncode is None
+    keys.write_text("", encoding="utf-8")
+    assert (await client.post("/api/sandbox-runner/ssh/stop")).status_code == 204
+    assert fake_sshd.processes[0].returncode == -signal.SIGKILL
+
+
+@pytest.mark.asyncio
 async def test_stop_route_requires_runner_token(client: httpx.AsyncClient, fake_sshd: _FakeSshd) -> None:
     """Only the primary, which holds the runner token, stops sshd."""
     await client.post("/api/sandbox-runner/ssh/start", json=_BODY)

@@ -7,11 +7,11 @@ import json
 import threading
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
 
 import pytest
+import pytest_asyncio
 from aiohttp import web
 from structlog.testing import capture_logs
 
@@ -37,7 +37,7 @@ from mindroom.tailnet_ssh.links import (
 )
 from mindroom.tailnet_ssh.store import Link, LinkBook, new_link, read_links, set_keys, update_links
 from mindroom.tool_system.sandbox_proxy import WorkerCall
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_log_id
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerSshEndpoint
 from mindroom.workers.protocol import ExecuteRequest
@@ -45,7 +45,7 @@ from tests.access_schema_support import membership_index
 from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import AsyncIterator, Callable
     from contextlib import AbstractContextManager
     from pathlib import Path
 
@@ -294,43 +294,46 @@ def _wire_connect(
 
 
 class FakeRunner:
-    """A worker's sandbox runner that records each ``POST`` it gets, with its runner token, and answers ``status``."""
+    """A worker's sandbox runner that records each ``POST`` it gets, with its runner token, and answers ``status``.
 
-    def __init__(self, url: str) -> None:
-        self.url = url
+    It answers once ``release`` is set, which it is unless a test holds the answers back.
+    """
+
+    def __init__(self) -> None:
+        self.url = ""
         self.status = 204
         self.posts: list[tuple[str, str | None]] = []
+        self.release = asyncio.Event()
+        self.release.set()
 
     def handle(self, worker_key: str, ssh_dir: Path | None, *, token: str = "runner-token") -> WorkerHandle:  # noqa: S107
         """Return a listed worker whose runner this is."""
         endpoint = f"{self.url}/api/sandbox-runner/execute"
         return replace(_handle(worker_key, ssh_dir), endpoint=endpoint, auth_token=token)
 
+    async def answer(self, request: web.Request) -> web.Response:
+        """Record a post, and answer it once released."""
+        self.posts.append((request.path, request.headers.get("x-mindroom-sandbox-token")))
+        await self.release.wait()
+        return web.Response(status=self.status)
 
-@pytest.fixture
-def fake_runner() -> Iterator[FakeRunner]:
-    """Serve a ``FakeRunner`` on a local port, on a thread of its own, as the blocking link service calls it."""
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            runner.posts.append((self.path, self.headers.get("x-mindroom-sandbox-token")))
-            self.send_response(runner.status)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-
-        def log_message(self, *_args: object) -> None:
-            return None
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    runner = FakeRunner(f"http://127.0.0.1:{server.server_port}")
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
-    thread.start()
+@pytest_asyncio.fixture
+async def fake_runner() -> AsyncIterator[FakeRunner]:
+    """Serve a ``FakeRunner`` on a local port."""
+    runner = FakeRunner()
+    app = web.Application()
+    app.router.add_post("/api/sandbox-runner/ssh/stop", runner.answer)
+    served = web.AppRunner(app, access_log=None)
+    await served.setup()
     try:
+        site = web.TCPSite(served, "127.0.0.1", 0)
+        await site.start()
+        runner.url = f"http://127.0.0.1:{served.addresses[0][1]}"
         yield runner
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
+        runner.release.set()
+        await served.cleanup()
 
 
 _STOP = ("/api/sandbox-runner/ssh/stop", "runner-token")
@@ -499,8 +502,16 @@ def test_removal_triggers_set_removing(config: Config, paths: RuntimePaths, trig
     assert _stored(paths, link) == removed
 
 
+async def _revoke(paths: RuntimePaths) -> None:
+    """Run what follows a removal, and wait for the sshd stops it leaves running."""
+    task = await links.revoke_removed_workers(paths)
+    if task is not None:
+        await task
+
+
 @pytest.mark.parametrize("trigger", ["not_authorized", "worker_key_changed"])
-def test_reconcile_removal_clears_keys_of_listed_worker(
+@pytest.mark.asyncio
+async def test_reconcile_removal_clears_keys_of_listed_worker(
     config: Config,
     paths: RuntimePaths,
     tmp_path: Path,
@@ -524,19 +535,23 @@ def test_reconcile_removal_clears_keys_of_listed_worker(
     )
 
     rows = _rows(config, paths)
+    await _revoke(paths)
 
     assert [(row["id"], row["desired"]) for row in rows] == [(removed.id, "removing"), (kept.id, "on")]
     assert (tmp_path / "removed" / "authorized_keys").read_text() == ""
     assert (tmp_path / "removed" / "ssh_host_ed25519_key").read_text() == removed.host_key
     assert (tmp_path / "kept" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
     assert fake_runner.posts == [_STOP]
+    assert read_links(paths).revoked_workers == []
 
     # A removal under way is not started again, so its worker is not called again.
     _rows(config, paths, now=NOW + 5)
+    await _revoke(paths)
     assert fake_runner.posts == [_STOP]
 
 
-def test_removal_of_unlisted_worker_makes_no_runner_call(
+@pytest.mark.asyncio
+async def test_removal_of_unlisted_worker_makes_no_runner_call(
     config: Config,
     paths: RuntimePaths,
     tmp_path: Path,
@@ -549,15 +564,65 @@ def test_removal_of_unlisted_worker_makes_no_runner_call(
     manager = _manager(monkeypatch, fake_runner.handle(portless.worker_key, None))
 
     rows = _rows(config, paths)
+    await _revoke(paths)
 
     assert [row["desired"] for row in rows] == ["removing", "removing"]
     assert manager.calls == ["list_workers"]
     assert fake_runner.posts == []
     assert sorted(path.name for path in tmp_path.iterdir()) == ["config.yaml", "mindroom_data"]
+    # Neither sshd runs, and only a connect of a link that is on starts one, so nothing is left to clear.
+    assert read_links(paths).revoked_workers == []
+    await _revoke(paths)
+    assert manager.calls == ["list_workers"]
+
+
+@pytest.mark.asyncio
+async def test_a_worker_that_cannot_be_listed_or_written_is_cleared_at_a_later_reconcile(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
+) -> None:
+    """A failed listing is not an empty one, and a failed write is not a cleared file: the worker stays to be cleared."""
+    removed = _enrolled(BOB)
+    _store(paths, removed)
+    _projected_keys(tmp_path / "ssh", removed)
+    manager = _manager(monkeypatch, fake_runner.handle(removed.worker_key, tmp_path / "ssh"))
+    listed = manager.list_workers
+
+    def unlisted() -> list[WorkerHandle]:
+        raise WorkerBackendError("docker is down")  # noqa: EM101, TRY003
+
+    def unwritable(_projection_dir: Path) -> None:
+        raise PermissionError(13, "Permission denied", "/primary/path/to/worker")
+
+    manager.list_workers = unlisted  # type: ignore[method-assign]
+    _rows(config, paths)
+    await _revoke(paths)
+    manager.list_workers = listed  # type: ignore[method-assign]
+    clear = links.clear_authorized_keys
+    monkeypatch.setattr(links, "clear_authorized_keys", unwritable)
+    with capture_logs() as logs:
+        await _revoke(paths)
+
+    assert (tmp_path / "ssh" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
+    assert fake_runner.posts == []
+    assert read_links(paths).revoked_workers == [removed.worker_key]
+    assert [entry["event"] for entry in logs] == ["tailnet_ssh_keys_not_cleared"]
+
+    monkeypatch.setattr(links, "clear_authorized_keys", clear)
+    _rows(config, paths, now=NOW + 5)
+    await _revoke(paths)
+
+    assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""
+    assert fake_runner.posts == [_STOP]
+    assert read_links(paths).revoked_workers == []
 
 
 @pytest.mark.parametrize("failure", ["refused", "unreachable"])
-def test_stop_failure_does_not_fail_removal(
+@pytest.mark.asyncio
+async def test_stop_failure_does_not_fail_removal(
     config: Config,
     paths: RuntimePaths,
     tmp_path: Path,
@@ -578,17 +643,46 @@ def test_stop_failure_does_not_fail_removal(
 
     with capture_logs() as logs:
         rows = _rows(config, paths)
+        await _revoke(paths)
 
     assert [(row["id"], row["desired"]) for row in rows] == [(removed.id, "removing")]
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""
     [logged] = [entry for entry in logs if entry["event"] == "tailnet_ssh_sshd_not_stopped"]
-    assert logged["link_id"] == removed.id
+    assert logged["worker"] == worker_log_id(removed.worker_key)
     text = repr(logs)
-    for secret in (PUBLIC_KEY.split()[1], "runner-token", "127.0.0.1", str(tmp_path)):
+    for secret in (PUBLIC_KEY.split()[1], "runner-token", "127.0.0.1", str(tmp_path), BOB):
         assert secret not in text
 
 
-def test_a_cleared_worker_another_link_serves_keeps_its_keys(
+@pytest.mark.asyncio
+async def test_stops_run_together_and_apart_from_the_caller(
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
+) -> None:
+    """The caller has the keys cleared and goes on; slow runners are asked to stop at once, not one after another."""
+    removed = [_enrolled(BOB), _enrolled(BOB, "mind")]
+    _store(paths, *removed)
+    update_links(paths, lambda book: store.remove_links(book, lambda _link: True, now=NOW))
+    _manager(monkeypatch, *(fake_runner.handle(link.worker_key, tmp_path / link.agent_name) for link in removed))
+    fake_runner.release.clear()
+
+    task = await links.revoke_removed_workers(paths)
+
+    assert task is not None
+    assert [(tmp_path / link.agent_name / "authorized_keys").read_text() for link in removed] == ["", ""]
+    async with asyncio.timeout(10):
+        while len(fake_runner.posts) < 2:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+    assert not task.done()
+    fake_runner.release.set()
+    await task
+    assert fake_runner.posts == [_STOP, _STOP]
+
+
+@pytest.mark.asyncio
+async def test_a_worker_a_link_serves_again_keeps_its_keys(
     paths: RuntimePaths,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -597,13 +691,15 @@ def test_a_cleared_worker_another_link_serves_keeps_its_keys(
     """A link back on for the worker by the time its old removal is cleared keeps the keys and sshd its connect set up."""
     back_on = _enrolled()
     _store(paths, back_on)
+    update_links(paths, lambda book: book.revoked_workers.append(back_on.worker_key))
     _projected_keys(tmp_path / "ssh", back_on)
     _manager(monkeypatch, fake_runner.handle(back_on.worker_key, tmp_path / "ssh"))
 
-    links.close_removed_links(paths, [back_on.model_copy(update={"desired": "removing"})])
+    await _revoke(paths)
 
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
     assert fake_runner.posts == []
+    assert read_links(paths).revoked_workers == []
 
 
 def test_a_node_waiting_for_approval_is_not_dropped_at_a_day(config: Config, paths: RuntimePaths) -> None:

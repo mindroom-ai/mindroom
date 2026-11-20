@@ -1022,6 +1022,24 @@ class WorkerCall:
     headers: dict[str, str] = field(repr=False)
 
 
+def worker_runner_address(
+    runtime_paths: RuntimePaths,
+    worker_handle: WorkerHandle | None,
+) -> tuple[str, dict[str, str]]:
+    """Return the sandbox runner API root and the headers that reach a worker, or the shared runner without one.
+
+    The shared runner's URL is the caller's to have required, as a call's route does.
+    """
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    api_root = (
+        worker_api_root(worker_handle)
+        if worker_handle is not None
+        else normalize_sandbox_runner_api_root(proxy_config.proxy_url or "")
+    )
+    headers = worker_request_headers(worker_handle, config=worker_proxy_client_config(proxy_config, runtime_paths))
+    return api_root, headers
+
+
 def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = True) -> WorkerCall | None:
     """Build the call of ``function_name`` that ``stand_ins`` would send, without sending it.
 
@@ -1043,19 +1061,9 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
         )
     if worker_backend_kind(runtime_paths).dedicated and (worker_handle is None or worker_handle.status != "ready"):
         return None
-    return WorkerCall(
-        request=request,
-        # Without a worker of its own, the call goes to the shared runner, whose URL its route has already required.
-        api_root=(
-            worker_api_root(worker_handle)
-            if worker_handle is not None
-            else normalize_sandbox_runner_api_root(proxy_config.proxy_url or "")
-        ),
-        headers=worker_request_headers(
-            worker_handle,
-            config=worker_proxy_client_config(proxy_config, runtime_paths),
-        ),
-    )
+    # Without a worker of its own, the call goes to the shared runner, whose URL its route has already required.
+    api_root, headers = worker_runner_address(runtime_paths, worker_handle)
+    return WorkerCall(request=request, api_root=api_root, headers=headers)
 
 
 __all__ = [
@@ -1077,5 +1085,6 @@ __all__ = [
     "worker_call",
     "worker_proxy_client_config",
     "worker_route",
+    "worker_runner_address",
     "worker_stand_ins",
 ]

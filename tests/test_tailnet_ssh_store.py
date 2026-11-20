@@ -117,7 +117,7 @@ def test_default_hostname() -> None:
 
 
 def test_remove_links_then_finish_drops_or_parks() -> None:
-    """Removal marks links removing and closes sessions; finishing drops them, or parks them off when asked."""
+    """Removal marks links removing, closes sessions, and queues their worker; finishing drops or parks them."""
     dropped = new_link(ALICE, "mind_alice", ALICE_KEY, "mind-alice", now=1.0)
     parked = new_link(ALICE, "mind_other", ALICE_KEY, "mind-other", now=1.0)
     kept = new_link(BOB, "mind_bob", "v1:default:user_agent:~@bob:example.org:mind_bob", "mind-bob", now=1.0)
@@ -131,6 +131,8 @@ def test_remove_links_then_finish_drops_or_parks() -> None:
     assert (parked.desired, parked.closed_before, parked.park_when_removed) == ("removing", 6.0, True)
     assert remove_links(book, lambda link: link.requester_id == ALICE, now=8.0) == []
     assert dropped.closed_before == 5.0
+    # The worker whose keys the link service is to clear, once however many of its links are removed.
+    assert book.revoked_workers == [ALICE_KEY]
     assert kept.desired == "on"
 
     finish_removal(book, dropped.id)
