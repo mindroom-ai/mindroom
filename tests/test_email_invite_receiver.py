@@ -17,6 +17,8 @@ from mindroom.email_invites import receiver as receiver_module
 from mindroom.email_invites import store
 from mindroom.email_invites.receiver import _CLAIM_EVENT_TYPE, _RESULT_EVENT_TYPE, register_email_invite_receiver
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix import client_delivery
+from mindroom.matrix.client_delivery import send_message_result
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -53,6 +55,7 @@ class Harness:
         self.events: list[str] = []
         self.client = AsyncMock()
         self.client.user_id, self.client.device_id = self.router_id, "ROUTERDEV"
+        self.client.rooms = {}
         self.client.room_invite = AsyncMock(return_value=nio.RoomInviteResponse())
         self.notices: list[dict[str, Any]] = []
         self.notice_error = False
@@ -448,6 +451,46 @@ async def test_crash_while_sending_revokes_the_link_at_restart(harness: Harness)
     harness.client.room_invite.assert_not_awaited()
     await harness.start()
     assert len(harness.notices) == 1
+
+
+@pytest.mark.asyncio
+async def test_notice_in_an_encrypted_room_survives_the_claimants_join(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The join right after the result makes nio's member read refuse once; the notice is still sent, encrypted."""
+    _invite, code = harness.sent_invite()
+    delivered: list[object] = []
+
+    async def recorded_send(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> object:
+        delivered.append(await send_message_result(client, room_id, content))
+        return delivered[-1]
+
+    monkeypatch.setattr(receiver_module, "send_message_result", recorded_send)
+    monkeypatch.setattr(client_delivery.crypto, "ENCRYPTION_ENABLED", True)
+    harness.client.olm = MagicMock()
+    harness.client.rooms = {ROOM: MagicMock(encrypted=True)}
+    members: list[str] = []
+    refusals = [nio.LocalProtocolError("room membership changed during lookup")]
+
+    async def joined_members(room_id: str) -> nio.JoinedMembersResponse:
+        if refusals:
+            raise refusals.pop()
+        members.append(room_id)
+        return nio.JoinedMembersResponse([], room_id)
+
+    async def room_send(room_id: str, **_kwargs: object) -> nio.RoomSendResponse:
+        # As nio's encrypted send: it reads the members first unless they are already known.
+        if room_id not in members:
+            await harness.client.joined_members(room_id)
+        return nio.RoomSendResponse("$notice", room_id)
+
+    harness.client.joined_members = AsyncMock(side_effect=joined_members)
+    harness.client.room_send = AsyncMock(side_effect=room_send)
+    assert (await harness.claim(ALICE, code) or {})["status"] == "invited"
+    (notice,) = delivered
+    assert notice is not None
+    assert harness.client.room_send.await_args.kwargs["content"]["msgtype"] == "m.notice"
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ from mindroom.email_invites.policy import may_invite, refused_room_kind
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
+from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.mcp_gateway.admission import OnboardingRateLimiter
 from mindroom.requester_identity import is_human_requester_id
@@ -139,8 +140,11 @@ class _Receiver:
             extra_content=notice,
         )
         try:
+            if (room := self.client.rooms.get(invite.room_id)) is not None and room.encrypted:
+                # The claimant joins just after the result; this read outlasts that member change.
+                await read_joined_members(self.client, invite.room_id)
             delivered = await send_message_result(self.client, invite.room_id, content)
-        except (aiohttp.ClientError, TimeoutError):
+        except (aiohttp.ClientError, TimeoutError, nio.LocalProtocolError):
             delivered = None
         if delivered is None:
             logger.warning("email_invite_notice_failed", invite_id=invite.id)
