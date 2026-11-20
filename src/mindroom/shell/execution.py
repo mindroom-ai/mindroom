@@ -478,14 +478,11 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
 
 
 def _success_message(stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer, tail: int) -> str:
-    """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out.
-
-    A success that printed nothing says so: an empty tool result can reach the model as a placeholder like ``...``.
-    """
+    """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
     output_notice, output = stdout_buf.render_parts(tail=tail)
     errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr")
     completion = format_shell_completion(output, errors if stderr_buf else None, return_code=0)
-    return "\n".join(part for part in (output_notice, errors_notice, completion) if part) or "(no output)"
+    return "\n".join(part for part in (output_notice, errors_notice, completion) if part)
 
 
 async def _stop_timed_out_process(
