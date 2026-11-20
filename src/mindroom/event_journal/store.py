@@ -207,6 +207,7 @@ class EventJournalStore:
 
         signals, page_cache = ApprovalSignals(), reads.PageCache()
         backend = SqliteBackend.open(database_path, publish=partial(_publish, signals, page_cache))
+        backend.committing = page_cache.committing
         return cls(backend=backend, approval_signals=signals, page_cache=page_cache)
 
     @classmethod
@@ -216,6 +217,7 @@ class EventJournalStore:
 
         signals, page_cache = ApprovalSignals(), reads.PageCache()
         backend = PostgresBackend.open(database_url, publish=partial(_publish, signals, page_cache))
+        backend.committing = page_cache.committing
         return cls(backend=backend, approval_signals=signals, page_cache=page_cache)
 
     def principal(self, principal_id: str) -> PrincipalStore:

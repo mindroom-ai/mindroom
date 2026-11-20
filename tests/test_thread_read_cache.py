@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -12,8 +13,9 @@ import pytest_asyncio
 from mindroom.event_journal import DepartureSource, EventJournalStore, EventKind, reads
 from mindroom.matrix.conversation_hydration import ConversationReadError
 from mindroom.matrix.conversation_reads import ConversationReader
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.journal_membership_helpers import admit_room_membership
-from tests.test_event_journal_store import ALICE, ROOM, admit, edit, projection, sidecar, text
+from tests.test_event_journal_store import ALICE, ROOM, _PausingTransaction, admit, edit, projection, sidecar, text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -343,6 +345,95 @@ async def test_a_store_that_read_before_reads_what_a_store_reading_first_does(
         for thread_id, limit in ((ROOT, WINDOW), (ROOT, rng.randint(1, 8)), (None, WINDOW)):
             read = {"room_id": ROOM, "thread_id": thread_id, "limit": limit}
             assert await warm.read_conversation(**read) == await cold.principal("agent@alice").read_conversation(**read)
+
+
+async def _owe_a_refetch(store: PrincipalStore, uncached: PrincipalStore) -> RefreshRequest:
+    """Edit reply 7 and redact the edit, with no read through a cache in between, and return the refetch owed."""
+    await admit(store, "$edit", ts=6_000, content=edit("$reply-007", "secret"))
+    await admit(store, "$redaction", ts=7_000, redacts="$edit", kind=EventKind.REDACTION)
+    return (await uncached.read_conversation(room_id=ROOM, thread_id=ROOT, limit=WINDOW)).refresh_pending[0]
+
+
+async def _refetch_another_body(store: PrincipalStore, request: RefreshRequest) -> None:
+    """Answer a refetch with the original revision of reply 7 under another body of the same size."""
+    assert await store.install_refetched_revision(
+        request,
+        revision_event_id="$reply-007",
+        revision_ts=1_007,
+        revision_sender=ALICE,
+        content=text("REPLY 7"),
+    )
+
+
+class TestReadsRacingAWrite:
+    """A read that overlaps a write storing another body under a read revision neither takes nor keeps the old one."""
+
+    async def test_a_read_between_a_commit_and_its_publish_reads_the_stored_body(
+        self,
+        thread: _Thread,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A room left and delivered again stores other bodies under read revisions, and the read's snapshot holds them."""
+        writes = thread.backend.inner._writes  # type: ignore[attr-defined]
+        apply, loop = writes.apply, asyncio.get_running_loop()
+        read_before_publish: list[ConversationPage] = []
+
+        def apply_then_read(operations: list[Operation[Any]]) -> object:
+            outcomes = apply(operations)
+            page, _ = asyncio.run_coroutine_threadsafe(thread.read(), loop).result(SETTLE_TIMEOUT_SECONDS)
+            read_before_publish.append(page)
+            return outcomes
+
+        await admit_room_membership(thread.store, ROOM, "leave", source=DepartureSource.LOCAL)
+        epoch = await admit_room_membership(thread.store, ROOM, "join")
+        monkeypatch.setattr(writes, "apply", apply_then_read)
+        assert await thread.store.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=ROOT,
+            events=(
+                projection(ROOT, ts=1_000, content=text("ROOT")),
+                projection("$reply-001", ts=1_001, thread_id=ROOT, content=text("REPLY 1")),
+            ),
+            complete=True,
+            expected_membership_epoch=epoch,
+        )
+
+        bodies = [[message.content["body"] for message in page.messages] for page in read_before_publish]
+        assert bodies[-1] == ["ROOT", "REPLY 1"]
+        assert not {"root", "reply 1"}.intersection(body for page in bodies for body in page)
+        assert await thread.bodies() == ["ROOT", "REPLY 1"]
+
+    async def test_a_read_that_outlives_a_commit_does_not_keep_the_body_it_replaced(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """A page sized before the write and loaded after it returns its own snapshot and leaves nothing behind."""
+        journal = journal_database()
+        alice = journal.principal("agent@alice")
+        uncached = EventJournalStore(backend=journal.backend, approval_signals=journal.approval_signals)
+        await _seed(alice)
+        loop = asyncio.get_running_loop()
+
+        def land() -> None:
+            async def rewrite() -> None:
+                await _refetch_another_body(alice, await _owe_a_refetch(alice, uncached.principal("agent@alice")))
+
+            asyncio.run_coroutine_threadsafe(rewrite(), loop).result(SETTLE_TIMEOUT_SECONDS)
+
+        outlived = await journal.backend.read(
+            lambda transaction: reads.read_conversation(
+                _PausingTransaction(transaction, land, lambda sql: reads._PAGE_SIZE_COLUMNS in sql),
+                "agent@alice",
+                room_id=ROOM,
+                thread_id=ROOT,
+                limit=WINDOW,
+                cache=journal.page_cache,
+            ),
+        )
+
+        assert outlived.messages[7].content["body"] == "reply 7"
+        page = await alice.read_conversation(room_id=ROOM, thread_id=ROOT, limit=WINDOW)
+        assert page.messages[7].content["body"] == "REPLY 7"
 
 
 class TestWhoseRows:

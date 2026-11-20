@@ -127,6 +127,8 @@ class PostgresBackend:
     # The session whose advisory lock claims this journal for one runtime;
     # the server releases the lock when the session ends.
     _hold: psycopg.Connection[tuple[Any, ...]] | None = field(default=None, init=False, repr=False)
+    # Told, on the writer's thread, what a batch of writes signalled just before it commits.
+    committing: PublishSignals | None = field(default=None, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
     _recovery_offload: ThreadOffload = field(
         default_factory=lambda: ThreadOffload.serial(
@@ -195,6 +197,8 @@ class PostgresBackend:
         try:
             with self._writer.cursor(row_factory=dict_row) as cursor:
                 outcomes = [self._apply_one(cursor, operation) for operation in operations]
+            if self.committing is not None:
+                self.committing([signal for outcome in outcomes for signal in outcome.signals])
         except BaseException:
             self._writer.rollback()
             raise

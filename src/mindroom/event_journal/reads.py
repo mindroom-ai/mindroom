@@ -9,8 +9,9 @@ thread's rows, but only their IDs and refresh tokens, never their content.
 from __future__ import annotations
 
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import TYPE_CHECKING
 
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
@@ -107,8 +108,9 @@ class PageCache:
     an unresolved sidecar clears the body, which leaves it no stored size, so a row that changed finds nothing here
     under its new values, whichever store or process changed it. A refetch, or a row removed and delivered again,
     can store another body under values a page already read, so every write that stores a body signals
-    ``StoredBody``, and the store's one writer has the row forgotten once the write commits, before its caller
-    resumes. Only a store that publishes those signals here may read through a cache.
+    ``StoredBody``. The store's one writer marks the row before the write commits, and a marked row is neither
+    read from here nor kept; once the commit is published the row is forgotten, and a page that began before then
+    does not keep it. Only a store whose backend reports both moments here may read through a cache.
 
     Only what the database stored is kept. Each page decodes its own content, so no two readers share an object.
 
@@ -125,21 +127,38 @@ class PageCache:
     )
     _held_bytes: int = field(default=0, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    # The rows a batch of writes about to commit stored a body for, until that batch is published.
+    _committing: set[tuple[str, ...]] = field(default_factory=set, init=False, repr=False)
+    # The rows each of the latest published batches stored a body for, and how many batches were ever published.
+    _published: deque[Sequence[StoredBody]] = field(default_factory=lambda: deque(maxlen=1024), init=False, repr=False)
+    generation: int = field(default=0, init=False)
+
+    def committing(self, signals: Sequence[object]) -> None:
+        """Mark every row a batch of writes stored a body for, on the writer's thread just before it commits."""
+        with self._lock:
+            self._committing.update(signal for signal in signals if isinstance(signal, StoredBody))
 
     def kept(self, keys: list[_ContentKey]) -> dict[_ContentKey, _Content]:
         """Return the content kept under each of ``keys``, marking it read just now."""
         with self._lock:
             found: dict[_ContentKey, _Content] = {}
             for key in keys:
-                if (entry := self._contents.get(key[:3])) is not None and entry[0] == key:
+                entry = None if key[:3] in self._committing else self._contents.get(key[:3])
+                if entry is not None and entry[0] == key:
                     self._contents.move_to_end(key[:3])
                     found[key] = entry[1]
             return found
 
-    def keep(self, loaded: dict[_ContentKey, _Content]) -> None:
-        """Keep content a page just loaded, dropping what was read longest ago once the budget is passed."""
+    def keep(self, loaded: dict[_ContentKey, _Content], since: int) -> None:
+        """Keep what a page that read ``generation`` as ``since`` before its first query loaded, less rows stored since."""
         with self._lock:
+            published = self.generation - since
+            if published > len(self._published):
+                return
+            stored = self._committing.union(*islice(reversed(self._published), published))
             for key, content in loaded.items():
+                if key[:3] in stored:
+                    continue
                 self._forget(key[:3])
                 self._contents[key[:3]] = (key, content)
                 self._held_bytes += (key[-1] or 0) + _CACHED_ROW_OVERHEAD_BYTES
@@ -147,10 +166,14 @@ class PageCache:
                 self._forget(next(iter(self._contents)))
 
     def forget(self, stored: Sequence[StoredBody]) -> None:
-        """Drop every row a committed batch of writes stored a body for."""
+        """Drop every row a committed batch of writes stored a body for, on the writer's loop, and unmark them."""
         with self._lock:
             for row in stored:
                 self._forget(row)
+            # Writes commit one batch at a time, so every mark is this batch's or a failed commit's.
+            self._committing.clear()
+            self._published.append(stored)
+            self.generation += 1
 
     def _forget(self, row: tuple[str, ...]) -> None:
         if (entry := self._contents.pop(row, None)) is not None:
@@ -216,6 +239,7 @@ def read_conversation(
     if limit <= 0:
         msg = "A conversation read requires a positive limit"
         raise ValueError(msg)
+    since = 0 if cache is None else cache.generation
     sizes = _page_rows(
         transaction,
         principal_id,
@@ -225,7 +249,7 @@ def read_conversation(
         before=before,
     )
     kept = _rows_within_content_budget(sizes)
-    contents = _load_contents(transaction, principal_id, room_id=room_id, sized=sizes[:kept], cache=cache)
+    contents = _load_contents(transaction, principal_id, room_id=room_id, sized=sizes[:kept], cache=cache, since=since)
     decoded = _rows_within_decoded_budget(contents)
     trimmed = decoded < len(contents)
     rows = sizes[:decoded]
@@ -570,6 +594,7 @@ def _load_contents(
     room_id: str,
     sized: tuple[Row, ...],
     cache: PageCache | None = None,
+    since: int = 0,
 ) -> tuple[_Content, ...]:
     """Return the stored content of the rows a page was sized on, in the same order.
 
@@ -604,7 +629,7 @@ def _load_contents(
             )
         }
         if cache is not None:
-            cache.keep(loaded)
+            cache.keep(loaded, since)
         contents.update(loaded)
     return tuple(contents[key] for key in keys.values())
 

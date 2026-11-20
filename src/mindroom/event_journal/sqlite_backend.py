@@ -164,6 +164,8 @@ class SqliteBackend:
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     # The claim of one runtime on this database file, held by an open descriptor.
     _hold: TextIO | None = field(default=None, init=False, repr=False)
+    # Told, on the writer's thread, what a batch of writes signalled just before it commits.
+    committing: PublishSignals | None = field(default=None, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
     _recovery_offload: ThreadOffload = field(
@@ -245,6 +247,8 @@ class SqliteBackend:
         self._writer.execute("BEGIN IMMEDIATE")
         try:
             outcomes = [self._apply_one(operation) for operation in operations]
+            if self.committing is not None:
+                self.committing([signal for outcome in outcomes for signal in outcome.signals])
             self._writer.execute("COMMIT")
         except BaseException:
             # SQLite rolls the whole transaction back itself on some errors.
