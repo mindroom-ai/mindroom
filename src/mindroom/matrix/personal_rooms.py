@@ -376,7 +376,7 @@ class PersonalRoomService:
             # A homeserver that accepts invites itself may join the owner just after this attempt's invite.
             invited_now = initial_owner_membership is None
             if failure is not None and not (invited_now and await self._owner_joins_within_wait(record)):
-                msg = f"Personal-room initial join failed: the router's admin join {failure}"
+                msg = f"Personal-room initial join failed: the admin join {failure}"
                 raise RuntimeError(msg)
             human_joined = True
         else:
@@ -822,6 +822,7 @@ class PersonalRoomService:
             await run_blocking_until_complete(write_personal_room, path, record)
         if self._current_settings(record.user_id, record.source_room_id) is None:
             return
+        # LEGACY_COMPAT: A record written before confirmation_user_id existed froze only the posting account's device.
         frozen = (record.confirmation_user_id or source_client.user_id, record.confirmation_device_id)
         if not source_client.device_id or frozen != (source_client.user_id, source_client.device_id):
             msg = "Personal-room pending confirmation belongs to a different Matrix account or device"

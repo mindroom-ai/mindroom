@@ -1067,8 +1067,8 @@ async def test_a_guest_the_agent_cannot_remove_settles_the_lobby_join_with_a_war
 @pytest.mark.parametrize(
     ("access_token", "error"),
     [
-        (None, "Personal-room initial join failed: the router's admin join had no access token"),
-        (TEST_PASSWORD, "Personal-room initial join failed: the router's admin join answered HTTP 403 M_FORBIDDEN"),
+        (None, "Personal-room initial join failed: the admin join had no access token"),
+        (TEST_PASSWORD, "Personal-room initial join failed: the admin join answered HTTP 403 M_FORBIDDEN"),
     ],
 )
 async def test_a_refused_initial_join_says_why_in_the_reconciliation_warning(
@@ -1077,7 +1077,7 @@ async def test_a_refused_initial_join_says_why_in_the_reconciliation_warning(
     access_token: str | None,
     error: str,
 ) -> None:
-    """The retried failure names the admin join's HTTP status and errcode, or the router's missing token, and no more."""
+    """The retried failure names the admin join's HTTP status and errcode, or its missing token, and no more."""
     server = MatrixServer()
     owner = service(tmp_path, server, monkeypatch, auto_join_requester=True, welcome="", backfill=True)
     refused = Mock(status=403)
@@ -3274,7 +3274,7 @@ async def test_a_refused_initial_join_without_the_owners_join_still_fails(
         AsyncMock(return_value="answered HTTP 403 M_FORBIDDEN"),
     )
 
-    with pytest.raises(RuntimeError, match="the router's admin join answered HTTP 403 M_FORBIDDEN"):
+    with pytest.raises(RuntimeError, match="the admin join answered HTTP 403 M_FORBIDDEN"):
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
 
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
@@ -3354,7 +3354,7 @@ async def test_a_slow_membership_read_still_ends_the_wait_on_time(
 
     server.room_get_state_event = slow_owner_read
 
-    with pytest.raises(RuntimeError, match="the router's admin join answered HTTP 403 M_FORBIDDEN"):
+    with pytest.raises(RuntimeError, match="the admin join answered HTTP 403 M_FORBIDDEN"):
         await asyncio.wait_for(owner.ensure("@alice:localhost", "!lobby:localhost", server), timeout=5)
 
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
