@@ -300,7 +300,7 @@ knowledge_graph = [
   "psutil",
 ]
 kubernetes = [
-  "kubernetes>=28.1",
+  "kubernetes>=37",
 ]
 linear = [
   "requests",

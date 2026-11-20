@@ -15,6 +15,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
 from functools import cache
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
@@ -180,6 +181,7 @@ class _FakeApiError(Exception):
 
 
 _MAPPING_KEYS = {"annotations", "labels", "matchLabels", "selector", "stringData", "data"}
+_MERGE_PATCH = "application/merge-patch+json"
 
 
 def _encoded_secret_data(values: dict[str, str]) -> dict[str, str]:
@@ -388,7 +390,6 @@ class _FakeCoreApi:
         self.created_secret_bodies: list[dict[str, object]] = []
         self.patched_secret_bodies: list[tuple[str, object]] = []
         self.deleted_secret_names: list[str] = []
-        self.api_client = _FakeApiClient(self)
 
     def list_namespaced_pod(self, namespace: str, **kwargs: object) -> _FakeRawResponse:
         return _absence_inventory(self.pods, namespace, **kwargs)
@@ -406,17 +407,18 @@ class _FakeCoreApi:
         self.created_bodies.append(body)
         return self._store_service(body["metadata"]["name"], deepcopy(body))
 
-    def patch_namespaced_service(self, name: str, namespace: str, body: dict[str, Any]) -> object:
-        """Patch as the generated client does for a mapping body: a strategic merge patch.
-
-        The backend sends a merge patch instead; this is what a Service would keep if it used the client's method.
-        """
+    def patch_namespaced_service(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, Any],
+        *,
+        _content_type: str | None = None,
+    ) -> object:
+        """Patch as the client does: a mapping is a strategic merge patch unless the caller names a merge patch."""
         _ = namespace
-        return self._store_service(name, _strategic_merge_service(self._service_bodies[name], body))
-
-    def merge_patch_namespaced_service(self, name: str, namespace: str, body: object) -> object:
-        _ = namespace
-        return self._store_service(name, cast("dict[str, Any]", _json_merge_patch(self._service_bodies[name], body)))
+        merge = _json_merge_patch if _content_type == _MERGE_PATCH else _strategic_merge_service
+        return self._store_service(name, cast("dict[str, Any]", merge(self._service_bodies[name], body)))
 
     def _store_service(self, name: str, body: dict[str, Any]) -> object:
         self._service_bodies[name] = body
@@ -450,7 +452,9 @@ class _FakeCoreApi:
         return secret
 
     def patch_namespaced_secret(self, name: str, namespace: str, body: dict[str, object], **kwargs: object) -> object:
-        del namespace, kwargs
+        del namespace
+        # A strategic merge patch would merge ownerReferences by uid instead of replacing them.
+        assert kwargs == {"_content_type": "application/merge-patch+json"}
         self.patched_secret_bodies.append((name, body))
         secret = self.secrets.get(name)
         if secret is None:
@@ -483,33 +487,6 @@ class _FakeCoreApi:
         if pod is None:
             raise _FakeApiError(404)
         return pod
-
-
-class _FakeApiClient:
-    def __init__(self, core_api: _FakeCoreApi) -> None:
-        self._core_api = core_api
-
-    def select_header_accept(self, _content_types: list[str]) -> str:
-        return "application/json"
-
-    def call_api(
-        self,
-        resource_path: str,
-        _method: str,
-        path_params: dict[str, str],
-        _query_params: list[object],
-        header_params: dict[str, str],
-        *,
-        body: object,
-        **_kwargs: object,
-    ) -> object:
-        assert header_params["Content-Type"] == "application/merge-patch+json"
-        name = path_params["name"]
-        namespace = path_params["namespace"]
-        if resource_path == "/api/v1/namespaces/{namespace}/services/{name}":
-            return self._core_api.merge_patch_namespaced_service(name, namespace, body)
-        assert resource_path == "/api/v1/namespaces/{namespace}/secrets/{name}"
-        return self._core_api.patch_namespaced_secret(name, namespace, body)
 
 
 def test_kubernetes_deployment_snapshot_tolerates_missing_status() -> None:
@@ -6254,6 +6231,52 @@ def test_kubernetes_service_ports_follow_the_mark_in_both_directions(tmp_path: P
     assert applied_ports() == ["api"]
     backend._resources.apply_service("worker", ssh=True)
     assert applied_ports() == ["api", "ssh"]
+
+
+def test_installed_client_sends_secret_and_service_patches_as_merge_patches(tmp_path: Path) -> None:
+    """The installed Kubernetes client sends both patches as JSON merge patches, with a Secret's null entry kept.
+
+    The fakes stand in for the client everywhere else. A release of the client can change how a patch is sent, as 36
+    and 37 did, so here the client itself talks to a local HTTP server that records what arrives.
+    """
+    kubernetes_client = pytest.importorskip("kubernetes.client")
+    patches: list[tuple[str, str | None, dict[str, Any]]] = []
+
+    class ApiServer(BaseHTTPRequestHandler):
+        def _answer(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def do_GET(self) -> None:
+            self._answer()
+
+        def do_PATCH(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            patches.append((self.path, self.headers["Content-Type"], body))
+            self._answer()
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            del format, args
+
+    backend, _apps_api, _core_api, _runtime_paths = _ssh_backend(tmp_path)
+    with ThreadingHTTPServer(("127.0.0.1", 0), ApiServer) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        configuration = kubernetes_client.Configuration(host=f"http://127.0.0.1:{server.server_port}")
+        backend._resources.core_api = kubernetes_client.CoreV1Api(kubernetes_client.ApiClient(configuration))
+        try:
+            backend._resources.apply_auth_secret(worker_key=_SSH_WORKER_KEY, worker_id="worker")
+            backend._resources.apply_service("worker", ssh=True)
+        finally:
+            server.shutdown()
+
+    (secret_path, secret_type, secret), (service_path, service_type, service) = patches
+    assert (secret_path, secret_type) == ("/api/v1/namespaces/chat/secrets/worker", _MERGE_PATCH)
+    assert secret["data"][CREDENTIALS_ENCRYPTION_KEY_ENV] is None
+    assert (service_path, service_type) == ("/api/v1/namespaces/chat/services/worker", _MERGE_PATCH)
+    assert service["spec"]["ports"] == [_API_PORT, _SSH_PORT]
 
 
 def test_kubernetes_service_follows_the_mark_the_pod_was_rendered_with(tmp_path: Path) -> None:

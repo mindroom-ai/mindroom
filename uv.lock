@@ -4554,7 +4554,7 @@ requires-dist = [
     { name = "jira", marker = "extra == 'jira'", specifier = ">=3.10.5" },
     { name = "json5", specifier = ">=0.13" },
     { name = "jsonschema", specifier = ">=4.26" },
-    { name = "kubernetes", marker = "extra == 'kubernetes'", specifier = ">=28.1" },
+    { name = "kubernetes", marker = "extra == 'kubernetes'", specifier = ">=37" },
     { name = "linkup-sdk", marker = "extra == 'linkup'", specifier = ">=0.2.8" },
     { name = "livekit-agents", extras = ["openai"], marker = "extra == 'matrix-calls'", specifier = ">=1.8.9,<1.8.12" },
     { name = "lumaai", marker = "extra == 'lumalabs'" },

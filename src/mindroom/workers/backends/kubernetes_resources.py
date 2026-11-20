@@ -24,7 +24,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
 
@@ -273,41 +273,34 @@ class _AppsApiProtocol(Protocol):
     def list_namespaced_replica_set(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
 
-class _KubernetesApiClientProtocol(Protocol):
-    def select_header_accept(self, content_types: list[str]) -> str: ...
-
-    def call_api(
-        self,
-        resource_path: str,
-        method: str,
-        path_params: dict[str, str],
-        query_params: list[object],
-        header_params: dict[str, str],
-        *,
-        body: object,
-        post_params: list[object],
-        files: dict[str, object],
-        response_type: str,
-        auth_settings: list[str],
-        _return_http_data_only: bool,
-        _preload_content: bool,
-        _request_timeout: object | None,
-        collection_formats: dict[str, str],
-    ) -> object: ...
-
-
 class _CoreApiProtocol(Protocol):
-    api_client: _KubernetesApiClientProtocol
-
     def read_namespaced_service(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
+
+    def patch_namespaced_service(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, object],
+        *,
+        _content_type: str,
+    ) -> object: ...
 
     def delete_namespaced_service(self, name: str, namespace: str) -> None: ...
 
     def read_namespaced_secret(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object: ...
+
+    def patch_namespaced_secret(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, object],
+        *,
+        _content_type: str,
+    ) -> object: ...
 
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
 
@@ -726,7 +719,12 @@ class KubernetesResourceManager:
         self._apply_object(
             read_fn=self._core.read_namespaced_service,
             create_fn=self._core.create_namespaced_service,
-            patch_fn=lambda name, _namespace, body: self._merge_patch("services", name, body),
+            patch_fn=lambda name, namespace, body: self._core.patch_namespaced_service(
+                name,
+                namespace,
+                body,
+                _content_type="application/merge-patch+json",
+            ),
             resource_name=worker_id,
             manifest=self._service_manifest(worker_id, ssh=ssh),
         )
@@ -932,31 +930,13 @@ class KubernetesResourceManager:
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
-        self._merge_patch("secrets", secret_name, body)
-
-    def _merge_patch(self, resource: Literal["secrets", "services"], name: str, body: dict[str, object]) -> None:
-        """Send one JSON merge patch (RFC 7386), under which a list in ``body`` replaces the stored one."""
-        api_client = self._core.api_client
-        api_client.call_api(
-            f"/api/v1/namespaces/{{namespace}}/{resource}/{{name}}",
-            "PATCH",
-            {"name": name, "namespace": self.config.namespace},
-            [],
-            {
-                "Accept": api_client.select_header_accept(
-                    ["application/json", "application/yaml", "application/vnd.kubernetes.protobuf", "application/cbor"],
-                ),
-                "Content-Type": "application/merge-patch+json",
-            },
-            body=body,
-            post_params=[],
-            files={},
-            response_type={"secrets": "V1Secret", "services": "V1Service"}[resource],
-            auth_settings=["BearerToken"],
-            _return_http_data_only=True,
-            _preload_content=True,
-            _request_timeout=None,
-            collection_formats={},
+        # A merge patch replaces the ownerReferences list and its nulls delete data keys;
+        # the client's default strategic merge patch would merge ownerReferences by uid instead.
+        self._core.patch_namespaced_secret(
+            secret_name,
+            self.config.namespace,
+            body,
+            _content_type="application/merge-patch+json",
         )
 
     def _recreate_deployment(
