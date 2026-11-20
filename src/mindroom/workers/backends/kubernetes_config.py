@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
+
+import pydantic
 
 from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
@@ -320,17 +323,39 @@ def _with_string_quantity(value: object, path: tuple[str, ...], location: str) -
     return value
 
 
-def _with_string_quantities(
+def validated_kubernetes_object(model_name: str, value: dict[str, object], *, what: str) -> dict[str, object]:
+    """Return ``value`` in the wire form the installed client sends, naming each field it rejects but no values."""
+    try:
+        kubernetes_client = importlib.import_module("kubernetes.client")
+    except ModuleNotFoundError as exc:
+        msg = "The Kubernetes worker backend needs the 'kubernetes' package: install mindroom[kubernetes]."
+        raise WorkerBackendError(msg) from exc
+    try:
+        model = getattr(kubernetes_client, model_name).model_validate(value)
+    except pydantic.ValidationError as exc:
+        errors = exc.errors(include_input=False, include_url=False)
+    else:
+        return json.loads(model.to_json())
+    # Raised outside the handler, so no chained exception carries the rejected values into logs.
+    fields = "; ".join(f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in errors)
+    msg = f"{what} is not a valid Kubernetes {model_name.removeprefix('V1')}: {fields}"
+    raise WorkerBackendError(msg)
+
+
+def _canonical_manifests(
     items: tuple[dict[str, object], ...],
-    paths: tuple[tuple[str, ...], ...],
+    quantity_paths: tuple[tuple[str, ...], ...],
+    model_name: str,
     env_name: str,
 ) -> tuple[dict[str, object], ...]:
-    normalized: list[dict[str, object]] = []
+    """Return ``items`` as the client's wire form, so typed creates and untyped patches send the same manifest."""
+    canonical: list[dict[str, object]] = []
     for index, item in enumerate(items):
-        for path in paths:
-            item = cast("dict[str, object]", _with_string_quantity(item, path, f"{env_name}[{index}]"))  # noqa: PLW2901
-        normalized.append(item)
-    return tuple(normalized)
+        location = f"{env_name}[{index}]"
+        for path in quantity_paths:
+            item = cast("dict[str, object]", _with_string_quantity(item, path, location))  # noqa: PLW2901
+        canonical.append(validated_kubernetes_object(model_name, item, what=location))
+    return tuple(canonical)
 
 
 def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
@@ -344,7 +369,7 @@ def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "name")
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "image")
     _validate_unique_names(containers, _EXTRA_CONTAINERS_JSON_ENV, RESERVED_EXTRA_CONTAINER_NAMES)
-    return _with_string_quantities(containers, _EXTRA_CONTAINER_QUANTITY_PATHS, _EXTRA_CONTAINERS_JSON_ENV)
+    return _canonical_manifests(containers, _EXTRA_CONTAINER_QUANTITY_PATHS, "V1Container", _EXTRA_CONTAINERS_JSON_ENV)
 
 
 def _read_image_pull_secrets_env(env: Mapping[str, str]) -> tuple[str, ...]:
@@ -373,7 +398,7 @@ def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], 
             msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] must set exactly one of secret, configMap, emptyDir, projected."
             raise WorkerBackendError(msg)
     _validate_unique_names(volumes, _EXTRA_VOLUMES_JSON_ENV, RESERVED_EXTRA_VOLUME_NAMES)
-    return _with_string_quantities(volumes, _EXTRA_VOLUME_QUANTITY_PATHS, _EXTRA_VOLUMES_JSON_ENV)
+    return _canonical_manifests(volumes, _EXTRA_VOLUME_QUANTITY_PATHS, "V1Volume", _EXTRA_VOLUMES_JSON_ENV)
 
 
 @dataclass(frozen=True, slots=True)

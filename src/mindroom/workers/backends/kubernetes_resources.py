@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
-import pydantic
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, config_relative_path, runtime_paths_with_storage_root
@@ -64,7 +63,7 @@ from mindroom.workers.backends.dedicated_launch import (
     dedicated_worker_startup_runtime_paths,
     write_dedicated_worker_startup_manifest,
 )
-from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths
+from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths, validated_kubernetes_object
 from mindroom.workers.backends.kubernetes_pod_names import (
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_STORAGE_VOLUME_NAME,
@@ -291,6 +290,12 @@ class _CoreApiProtocol(Protocol):
     def list_namespaced_pod(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
     def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
+
+
+def _validate_manifest(manifest: dict[str, object]) -> None:
+    """Fail before any request when the installed client's models reject one worker manifest."""
+    kind = cast("str", manifest["kind"])
+    validated_kubernetes_object(f"V1{kind}", manifest, what=f"The worker {kind} manifest")
 
 
 def service_host(service_name: str, namespace: str, port: int) -> str:
@@ -714,8 +719,9 @@ class KubernetesResourceManager:
         except self.api_exception as exc:
             if exc.status != 404:
                 raise
+            _validate_manifest(manifest)
             try:
-                self._create(self._core.create_namespaced_secret, manifest)
+                self._core.create_namespaced_secret(self.config.namespace, manifest)
             except self.api_exception as create_exc:
                 if create_exc.status != 409:
                     raise
@@ -915,11 +921,13 @@ class KubernetesResourceManager:
         timeout_seconds: float,
     ) -> None:
         """Delete one Deployment, wait until it and its pods are gone, and create it again from the manifest."""
+        # Checked first: a manifest the client rejects must not cost the worker its running Deployment.
+        _validate_manifest(manifest)
         self.delete_deployment(deployment_name, timeout_seconds=timeout_seconds)
         deadline = time.time() + timeout_seconds
         while True:
             try:
-                self._create(self._apps.create_namespaced_deployment, manifest)
+                self._apps.create_namespaced_deployment(self.config.namespace, manifest)
             except self.api_exception as exc:
                 if exc.status != 409:
                     raise
@@ -998,27 +1006,20 @@ class KubernetesResourceManager:
         resource_name: str,
         manifest: dict[str, object],
     ) -> None:
+        _validate_manifest(manifest)
         try:
             read_fn(resource_name, self.config.namespace)
         except self.api_exception as exc:
             if exc.status != 404:
                 raise
             try:
-                self._create(create_fn, manifest)
+                create_fn(self.config.namespace, manifest)
             except self.api_exception as create_exc:
                 if create_exc.status != 409:
                     raise
                 patch_fn(resource_name, self.config.namespace, manifest)
             return
         patch_fn(resource_name, self.config.namespace, manifest)
-
-    def _create(self, create_fn: Callable[[str, dict[str, object]], object], manifest: dict[str, object]) -> None:
-        # The client validates create bodies against its models before sending them.
-        try:
-            create_fn(self.config.namespace, manifest)
-        except pydantic.ValidationError as exc:
-            msg = f"The Kubernetes client rejected the worker {manifest['kind']} manifest: {exc}"
-            raise WorkerBackendError(msg) from exc
 
     def _delete_object(self, delete_fn: Callable[[str, str], None], resource_name: str) -> None:
         try:

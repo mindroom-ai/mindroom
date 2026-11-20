@@ -217,13 +217,14 @@ def test_kubernetes_config_rejects_invalid_trigger_sidecar_json(
         KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
 
 
-def test_kubernetes_config_writes_numeric_sidecar_quantities_as_strings(tmp_path: Path) -> None:
-    """JSON-number quantities become the strings the client's models require, and sign the config like strings."""
+def test_kubernetes_config_keeps_sidecars_in_the_clients_wire_form(tmp_path: Path) -> None:
+    """Numeric quantities and Python field names become the client's wire form, which also signs the config."""
 
-    def config_for(cpu: object, divisor: object, size_limit: object) -> KubernetesWorkerBackendConfig:
+    def config_for(cpu: object, divisor: object, size_limit: object, read_only: str) -> KubernetesWorkerBackendConfig:
         container = {
             "name": "trigger-listener",
             "image": "busybox",
+            "volumeMounts": [{"name": "trigger-state", "mountPath": "/state", read_only: True}],
             "env": [{"name": "CPU", "valueFrom": {"resourceFieldRef": {"resource": "limits.cpu", "divisor": divisor}}}],
             "resources": {"requests": {"cpu": cpu, "memory": "32Mi"}, "limits": {"cpu": cpu}},
         }
@@ -247,13 +248,14 @@ def test_kubernetes_config_writes_numeric_sidecar_quantities_as_strings(tmp_path
         env = _base_env(**{_EXTRA_CONTAINERS_ENV: json.dumps([container]), _EXTRA_VOLUMES_ENV: json.dumps(volumes)})
         return KubernetesWorkerBackendConfig.from_runtime(_runtime_paths(tmp_path, env))
 
-    numeric = config_for(0.5, 1, 1024)
-    strings = config_for("0.5", "1", "1024")
+    numeric = config_for(0.5, 1, 1024, "read_only")
+    strings = config_for("0.5", "1", "1024", "readOnly")
 
     assert numeric == strings
     container = numeric.extra_containers[0]
     assert container["resources"] == {"requests": {"cpu": "0.5", "memory": "32Mi"}, "limits": {"cpu": "0.5"}}
     assert container["env"][0]["valueFrom"]["resourceFieldRef"]["divisor"] == "1"
+    assert container["volumeMounts"] == [{"name": "trigger-state", "mountPath": "/state", "readOnly": True}]
     assert numeric.extra_volumes[0]["emptyDir"] == {"sizeLimit": "1024"}
     projected = numeric.extra_volumes[1]["projected"]["sources"][0]["downwardAPI"]["items"][0]
     assert projected["resourceFieldRef"]["divisor"] == "1"
@@ -264,6 +266,20 @@ def test_kubernetes_config_writes_numeric_sidecar_quantities_as_strings(tmp_path
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
     ) == kubernetes_backend_config_signature(strings, runtime_paths, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path)
+
+
+def test_kubernetes_config_names_sidecar_fields_the_client_rejects_without_their_values(tmp_path: Path) -> None:
+    """A nested typo fails at config load with its location, and no chained error carries the rejected value."""
+    container = {"name": "trigger-listener", "image": "busybox", "env": [{"name": "TOKEN", "valeu": "hunter2-secret"}]}
+    runtime_paths = _runtime_paths(tmp_path, _base_env(**{_EXTRA_CONTAINERS_ENV: json.dumps([container])}))
+
+    with pytest.raises(WorkerBackendError) as raised:
+        KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert str(raised.value) == (
+        f"{_EXTRA_CONTAINERS_ENV}[0] is not a valid Kubernetes Container: env.0.valeu: Extra inputs are not permitted"
+    )
+    assert raised.value.__context__ is None
 
 
 def test_worker_pod_template_appends_trigger_sidecar_and_volume_without_main_mount(tmp_path: Path) -> None:

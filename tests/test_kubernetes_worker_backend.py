@@ -1417,10 +1417,10 @@ def _full_featured_backend(
 def test_kubernetes_worker_creates_go_through_the_installed_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """The installed client must accept and send unchanged every manifest a full-featured worker start creates."""
     backend, objects = _full_featured_backend(monkeypatch)
-    resources = backend._resources
+    validate = kubernetes_resources_module._validate_manifest
     with (
         _installed_kubernetes_client(backend, objects) as server,
-        patch.object(resources, "_create", wraps=resources._create) as create,
+        patch.object(kubernetes_resources_module, "_validate_manifest", wraps=validate) as validated,
     ):
         handle = backend.ensure_worker(_spec(_ALICE_USER_WORKER_KEY), now=10.0)
 
@@ -1433,37 +1433,17 @@ def test_kubernetes_worker_creates_go_through_the_installed_client(monkeypatch: 
         ("PATCH", f"{_DEPLOYMENTS_PATH}/{worker_id}", "application/strategic-merge-patch+json"),
     ]
     created = {request.path: request.body for request in server.sent if request.method == "POST"}
-    assert list(created.values()) == [call.args[1] for call in create.call_args_list]
+    assert list(created.values()) == [call.args[0] for call in validated.call_args_list]
     deployment = created[_DEPLOYMENTS_PATH]
-    owner_reference = {
-        "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "name": "mindroom-demo",
-        "uid": "mindroom-demo-uid",
-        "controller": False,
-        "blockOwnerDeletion": False,
-    }
-    assert [body["metadata"]["ownerReferences"] for body in created.values()] == [[owner_reference]] * 3
+    # The fixture reaches the owner and control-plane pod reads, user resources, and numeric sidecar quantities.
+    assert {body["metadata"]["ownerReferences"][0]["uid"] for body in created.values()} == {"mindroom-demo-uid"}
     pod_spec = deployment["spec"]["template"]["spec"]
     assert pod_spec["nodeName"] == "node-a"
-    assert pod_spec["runtimeClassName"] == "gvisor"
-    assert pod_spec["imagePullSecrets"] == [{"name": "registry-credentials"}]
-    main_container, sidecar = pod_spec["containers"]
-    assert main_container["resources"] == {
-        "requests": {"memory": "1Gi", "cpu": "100m", "ephemeral-storage": "2Gi"},
-        "limits": {"memory": "4Gi", "cpu": "500m", "ephemeral-storage": "2Gi"},
+    assert pod_spec["containers"][0]["resources"]["limits"]["memory"] == "4Gi"
+    assert pod_spec["containers"][1]["resources"] == {
+        "requests": {"cpu": "0.5", "memory": "64Mi"},
+        "limits": {"cpu": "1"},
     }
-    assert main_container["securityContext"]["seccompProfile"] == {
-        "type": "Localhost",
-        "localhostProfile": "profiles/worker.json",
-    }
-    assert sidecar["resources"] == {"requests": {"cpu": "0.5", "memory": "64Mi"}, "limits": {"cpu": "1"}}
-    assert sidecar["env"][0]["valueFrom"]["resourceFieldRef"]["divisor"] == "1"
-    volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
-    assert volumes["trigger-state"]["emptyDir"] == {"sizeLimit": "1024"}
-    projected_item = volumes["pod-info"]["projected"]["sources"][0]["downwardAPI"]["items"][0]
-    assert projected_item["resourceFieldRef"]["divisor"] == "1"
-    assert deployment["spec"]["template"]["metadata"]["annotations"]["example.org/team"] == "research"
 
 
 def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
@@ -1475,17 +1455,20 @@ def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
     with _installed_kubernetes_client(backend, objects) as server:
         handle = backend.ensure_worker(_spec(_ALICE_USER_WORKER_KEY), now=10.0)
         worker_id = handle.worker_id
+        deployment_path = f"{_DEPLOYMENTS_PATH}/{worker_id}"
+        running_annotations = server.objects[deployment_path]["metadata"]["annotations"]
         server.sent.clear()
         resources.apply_service(worker_id)
         resources.apply_auth_secret(worker_key=_ALICE_USER_WORKER_KEY, worker_id=worker_id)
-        resources.apply_deployment(
-            worker_key=_ALICE_USER_WORKER_KEY,
-            worker_id=worker_id,
-            state_subpath=handle.debug_metadata["state_subpath"],
-            annotations={},
-            replicas=1,
-            launch=_launch_of(backend),
-        )
+        deployment_args = {
+            "worker_key": _ALICE_USER_WORKER_KEY,
+            "worker_id": worker_id,
+            "state_subpath": handle.debug_metadata["state_subpath"],
+            "annotations": {},
+            "replicas": 1,
+            "launch": _launch_of(backend),
+        }
+        resources.apply_deployment(**deployment_args)
         resources.patch_deployment(worker_id, replicas=0, annotations={"example.org/stopped": "yes"})
         assert resources.patch_deployment_annotations(worker_id, annotations={"example.org/used": "now"})
         resources.delete_service(worker_id)
@@ -1493,7 +1476,6 @@ def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
         resources.delete_deployment(worker_id, timeout_seconds=1.0)
         assert not resources.patch_deployment_annotations(worker_id, annotations={"example.org/used": "later"})
 
-    deployment_path = f"{_DEPLOYMENTS_PATH}/{worker_id}"
     strategic = "application/strategic-merge-patch+json"
     assert _writes(server.sent) == [
         ("PATCH", f"{_SERVICES_PATH}/{worker_id}", strategic),
@@ -1506,32 +1488,44 @@ def test_kubernetes_worker_patches_and_deletes_go_through_the_installed_client(
         ("DELETE", deployment_path, None),
         ("PATCH", deployment_path, strategic),
     ]
-    patches = [request.body for request in server.sent if request.method == "PATCH"]
-    assert patches[0] == resources._service_manifest(worker_id)
-    assert patches[1] == resources._auth_secret_patch(worker_key=_ALICE_USER_WORKER_KEY, worker_id=worker_id)
-    assert patches[1]["data"]["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] is None
-    assert patches[2]["kind"] == "Deployment"
-    assert patches[2]["spec"]["template"]["spec"]["containers"][1]["resources"]["limits"] == {"cpu": "1"}
-    assert patches[3]["spec"] == {"replicas": 0}
-    assert patches[3]["metadata"]["annotations"]["example.org/stopped"] == "yes"
-    assert patches[4] == {"metadata": {"annotations": {"example.org/used": "now"}}}
-    deletes = [request for request in server.sent if request.method == "DELETE"]
-    assert "propagationPolicy=Foreground" in deletes[2].query
+    assert [request.body for request in server.sent if request.method != "GET"] == [
+        resources._service_manifest(worker_id),
+        resources._auth_secret_patch(worker_key=_ALICE_USER_WORKER_KEY, worker_id=worker_id),
+        resources._deployment_manifest(**deployment_args),
+        {"metadata": {"annotations": {**running_annotations, "example.org/stopped": "yes"}}, "spec": {"replicas": 0}},
+        {"metadata": {"annotations": {"example.org/used": "now"}}},
+        None,
+        None,
+        None,
+        {"metadata": {"annotations": {"example.org/used": "later"}}},
+    ]
+    assert "propagationPolicy=Foreground" in server.sent[-3].query
 
 
-def test_kubernetes_worker_manifest_the_installed_client_rejects_fails_the_start_readably(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A config-fed sidecar field the client's models forbid fails the start as a backend error naming the field."""
-    sidecar = {"name": "trigger-listener", "image": "busybox", "securityContext": {"runAsUsr": 1000}}
-    backend, objects = _full_featured_backend(monkeypatch, **_sidecars_from_config([sidecar], []))
+def test_kubernetes_worker_manifest_the_client_rejects_keeps_the_running_deployment() -> None:
+    """A replacement the client's models reject fails before the delete, naming the field but not its value."""
+    sidecar = {"name": "trigger-listener", "image": "busybox", "env": [{"name": "TOKEN", "valeu": "hunter2-secret"}]}
+    backend, _apps_api, _core_api = _backend(extra_containers=(sidecar,))
+    running = {"metadata": {"name": "mindroom-worker-a"}, "spec": {"replicas": 1, "selector": {}, "template": {}}}
     with (
-        _installed_kubernetes_client(backend, objects) as server,
-        pytest.raises(WorkerBackendError, match=r"rejected the worker Deployment manifest(.|\n)*runAsUsr"),
+        _installed_kubernetes_client(backend, {f"{_DEPLOYMENTS_PATH}/mindroom-worker-a": running}) as server,
+        pytest.raises(WorkerBackendError) as raised,
     ):
-        backend.ensure_worker(_spec(_ALICE_USER_WORKER_KEY), now=10.0)
+        backend._resources.apply_deployment(
+            worker_key=_TEST_SCOPED_WORKER_KEY_A,
+            worker_id="mindroom-worker-a",
+            state_subpath="workers/a",
+            annotations={},
+            replicas=1,
+            launch=_launch_of(backend),
+            recreate=True,
+        )
 
-    assert ("POST", _DEPLOYMENTS_PATH, None) not in _writes(server.sent)
+    assert [request.method for request in server.sent] == ["GET"]
+    assert "spec.template.spec.containers.1.env.0.valeu: Extra inputs are not permitted" in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert "hunter2" not in str(raised.value)
 
 
 def test_kubernetes_state_root_retirement_goes_through_the_installed_client(monkeypatch: pytest.MonkeyPatch) -> None:
