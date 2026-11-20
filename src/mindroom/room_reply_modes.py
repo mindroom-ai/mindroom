@@ -118,7 +118,7 @@ async def refresh_room_reply_mode(
     room_id: str,
     *,
     force: bool = False,
-    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]] | None = None,
+    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]],
 ) -> ReplyModeRead:
     """Read the room's reply mode setting unless a read confirmed the copy recently, and return what it found.
 
@@ -196,7 +196,7 @@ async def write_room_reply_mode(
         _take(key, mode, next(_order), confirmed=False)
     else:
         _known[key] = known._replace(order=next(_order), confirmed_at=_UNCONFIRMED)
-        await refresh_room_reply_mode(client, runtime_paths, room_id, force=True, put_state=put_state)
+        await refresh_room_reply_mode(client, runtime_paths, room_id, force=True, put_state=write)
     return True
 
 

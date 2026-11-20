@@ -94,6 +94,17 @@ class _CommandEvent:
     source: dict[str, dict[str, str]]
 
 
+def _refresh(
+    client: AsyncMock,
+    runtime_paths: RuntimePaths,
+    room_id: str,
+    *,
+    force: bool = False,
+) -> Awaitable[ReplyModeRead]:
+    """Read the room's reply mode as its steward, whose own client writes what the read moves into the room."""
+    return refresh_room_reply_mode(client, runtime_paths, room_id, force=force, put_state=client.room_put_state)
+
+
 def _config(tmp_path: Path, *, reply_mode: RoomReplyMode | None = None, room_key: str = ROOM_ID) -> Config:
     rooms = {} if reply_mode is None else {room_key: RoomConfig(reply_mode=reply_mode)}
     return bind_runtime_paths(
@@ -200,29 +211,29 @@ async def test_the_override_is_the_rooms_reply_mode_setting(tmp_path: Path) -> N
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) is None
 
     homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "mentions"}
-    assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).ok
+    assert (await _refresh(client, runtime_paths, ROOM_ID)).ok
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
     assert resolve_room_reply_mode_override(runtime_paths, "!other:localhost") is None
     reads = client.room_get_state_event.await_count
-    assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).ok
+    assert (await _refresh(client, runtime_paths, ROOM_ID)).ok
     assert client.room_get_state_event.await_count == reads
 
     for content, expected in (({"value": "auto"}, "auto"), ({}, None), ({"value": "paused"}, None)):
         homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = content
         observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event(content))
-        assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).ok
+        assert (await _refresh(client, runtime_paths, ROOM_ID)).ok
         assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == expected
     reads = client.room_get_state_event.await_count
     observe_room_settings_event(runtime_paths, ROOM_ID, {**_setting_event({"value": "auto"}), "state_key": "other"})
-    assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).ok
+    assert (await _refresh(client, runtime_paths, ROOM_ID)).ok
     assert client.room_get_state_event.await_count == reads
 
     homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "mentions"}
-    assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID, force=True)).ok
+    assert (await _refresh(client, runtime_paths, ROOM_ID, force=True)).ok
     client.room_get_state_event.side_effect = None
     client.room_get_state_event.return_value = nio.RoomGetStateEventError("unavailable", "M_UNKNOWN")
     with patch("mindroom.room_reply_modes.time.monotonic", return_value=time.monotonic() + 3600):
-        assert not (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).ok
+        assert not (await _refresh(client, runtime_paths, ROOM_ID)).ok
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
 
 
@@ -244,7 +255,7 @@ async def test_a_live_change_applies_at_once_and_a_read_of_the_room_decides(tmp_
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
     assert observe_room_settings_event(runtime_paths, ROOM_ID, older)
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "auto"
-    assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).ok
+    assert (await _refresh(client, runtime_paths, ROOM_ID)).ok
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
 
 
@@ -349,7 +360,7 @@ async def test_a_read_that_started_before_a_write_took_effect_confirms_nothing(t
     write = await _started(write_room_reply_mode(client, runtime_paths, ROOM_ID, "mentions"))
     homeserver.set("auto")  # The write has not taken effect yet.
     observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "auto"}))
-    read = await _started(refresh_room_reply_mode(client, runtime_paths, ROOM_ID, force=True))
+    read = await _started(_refresh(client, runtime_paths, ROOM_ID, force=True))
     homeserver.set("mentions")  # Now it has.
     homeserver.gates[0].set()
     await _release_when_sent(homeserver, 2)  # The read the acknowledgement starts, since the event came in meanwhile.
@@ -358,7 +369,7 @@ async def test_a_read_that_started_before_a_write_took_effect_confirms_nothing(t
 
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
     reads = client.room_get_state_event.await_count
-    assert await refresh_room_reply_mode(client, runtime_paths, ROOM_ID) == ReplyModeRead(ok=True, mode="mentions")
+    assert await _refresh(client, runtime_paths, ROOM_ID) == ReplyModeRead(ok=True, mode="mentions")
     assert client.room_get_state_event.await_count == reads
 
 
@@ -372,7 +383,7 @@ async def test_a_late_acknowledgement_does_not_undo_a_change_read_since(tmp_path
     write = await _started(write_room_reply_mode(client, runtime_paths, ROOM_ID, "auto"))
     homeserver.set("mentions")  # An admin's newer change, after the write took effect.
     observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "mentions"}))
-    read = await _started(refresh_room_reply_mode(client, runtime_paths, ROOM_ID, force=True))
+    read = await _started(_refresh(client, runtime_paths, ROOM_ID, force=True))
     assert (await _released(homeserver, 1, read)).mode == "mentions"
 
     homeserver.gates[0].set()
@@ -380,7 +391,7 @@ async def test_a_late_acknowledgement_does_not_undo_a_change_read_since(tmp_path
     assert await write
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
     reads = client.room_get_state_event.await_count
-    assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).mode == "mentions"
+    assert (await _refresh(client, runtime_paths, ROOM_ID)).mode == "mentions"
     assert client.room_get_state_event.await_count == reads
 
 
@@ -392,15 +403,15 @@ async def test_an_older_read_that_ends_last_does_not_displace_a_newer_one(tmp_pa
     client = homeserver.client()
     homeserver.set("auto")
 
-    first = await _started(refresh_room_reply_mode(client, runtime_paths, ROOM_ID, force=True))
+    first = await _started(_refresh(client, runtime_paths, ROOM_ID, force=True))
     homeserver.set("mentions")
-    second = await _started(refresh_room_reply_mode(client, runtime_paths, ROOM_ID, force=True))
+    second = await _started(_refresh(client, runtime_paths, ROOM_ID, force=True))
     assert (await _released(homeserver, 1, second)).mode == "mentions"
     assert (await _released(homeserver, 0, first)).mode == "auto"
 
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
     reads = client.room_get_state_event.await_count
-    assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).mode == "mentions"
+    assert (await _refresh(client, runtime_paths, ROOM_ID)).mode == "mentions"
     assert client.room_get_state_event.await_count == reads
 
 
@@ -413,7 +424,7 @@ async def test_a_turn_decides_by_its_own_read_whatever_arrives_meanwhile(tmp_pat
     client = homeserver.client()
     homeserver.set("mentions")
 
-    turn_read = await _started(refresh_room_reply_mode(client, runtime_paths, ROOM_ID))
+    turn_read = await _started(_refresh(client, runtime_paths, ROOM_ID))
     observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "auto"}))
     read = await _released(homeserver, 0, turn_read)
 
@@ -421,7 +432,7 @@ async def test_a_turn_decides_by_its_own_read_whatever_arrives_meanwhile(tmp_pat
     assert config.get_room_reply_mode(runtime_paths, ROOM_ID, read) == "mentions"
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "auto"
     homeserver.gates.clear()
-    reread = await _started(refresh_room_reply_mode(client, runtime_paths, ROOM_ID))
+    reread = await _started(_refresh(client, runtime_paths, ROOM_ID))
     assert (await _released(homeserver, 0, reread)).mode == "mentions"
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
 
@@ -440,10 +451,10 @@ async def test_bots_reading_the_room_at_once_all_settle_the_copy(tmp_path: Path)
         return await read(*args, **kwargs)
 
     client.room_get_state_event.side_effect = slow_read
-    reads = await asyncio.gather(*(refresh_room_reply_mode(client, runtime_paths, ROOM_ID) for _ in range(3)))
+    reads = await asyncio.gather(*(_refresh(client, runtime_paths, ROOM_ID) for _ in range(3)))
     assert reads == [ReplyModeRead(ok=True, mode="mentions")] * 3
     count = client.room_get_state_event.await_count
-    assert (await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)).ok
+    assert (await _refresh(client, runtime_paths, ROOM_ID)).ok
     assert client.room_get_state_event.await_count == count
 
 
@@ -471,7 +482,7 @@ async def test_an_override_an_older_runtime_stored_moves_into_the_room(tmp_path:
         client.room_put_state.side_effect = None
         client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
 
-    await refresh_room_reply_mode(client, runtime_paths, ROOM_ID)
+    await _refresh(client, runtime_paths, ROOM_ID)
 
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
     stored = json.loads(legacy.read_text())
@@ -551,7 +562,7 @@ async def test_a_stalled_move_keeps_the_older_override_and_the_turn_moving(tmp_p
     client.room_put_state.side_effect = stall
 
     with patch("mindroom.room_reply_modes._REQUEST_TIMEOUT_SECONDS", 0.05):
-        await asyncio.wait_for(refresh_room_reply_mode(client, runtime_paths, ROOM_ID), timeout=2)
+        await asyncio.wait_for(_refresh(client, runtime_paths, ROOM_ID), timeout=2)
 
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
     assert ROOM_ID in json.loads(legacy.read_text())
@@ -578,8 +589,8 @@ async def test_two_rooms_moving_at_once_both_leave_the_file(tmp_path: Path) -> N
         client.room_put_state.side_effect = slow_write
 
     await asyncio.gather(
-        refresh_room_reply_mode(clients[0], runtime_paths, ROOM_ID),
-        refresh_room_reply_mode(clients[1], runtime_paths, other_room),
+        _refresh(clients[0], runtime_paths, ROOM_ID),
+        _refresh(clients[1], runtime_paths, other_room),
     )
 
     assert json.loads(legacy.read_text()) == {}
@@ -658,7 +669,7 @@ async def test_reply_mode_command_shows_sets_and_resets_the_override(tmp_path: P
     homeserver.events[setting] = {"value": "mentions"}
     assert "`mentions` reply mode override" in await _run_reply_mode_command(context, SENDER, "show")
     homeserver.events[setting] = {"value": "auto"}
-    assert (await refresh_room_reply_mode(context.client, runtime_paths, ROOM_ID)).ok
+    assert (await _refresh(context.client, runtime_paths, ROOM_ID)).ok
     homeserver.events[setting] = {"value": "mentions"}
     assert "override removed" in await _run_reply_mode_command(context, ADMIN, "reset")
     assert homeserver.events[setting] == {}

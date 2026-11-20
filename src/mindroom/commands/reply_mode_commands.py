@@ -57,7 +57,7 @@ async def handle_reply_mode_command(  # noqa: PLR0911 - one answer per outcome
     room_id: str,
     requester_user_id: str,
     sender_user_id: str,
-    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]] | None = None,
+    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]],
 ) -> str:
     """Show, set, or clear the room's `reply_mode` setting, written through ``put_state``, the room steward's."""
     requested = args_text.strip().lower()
