@@ -3378,11 +3378,7 @@ def _changes_for(deps: "DataclassInstance", changes: Mapping[str, object]) -> di
     return {name: value for name, value in changes.items() if name in deps.__dataclass_fields__}
 
 
-_VOICE_READINESS_CHANGES = {
-    "normalizer": "normalizer",
-    "turn_store": "turn_store",
-    "logger": "logger",
-}
+_VOICE_READINESS_FIELDS = frozenset({"normalizer", "turn_store", "logger"})
 
 
 def _turn_owners(bot: RuntimeBot) -> tuple[TurnIngress, TurnDispatcher, InteractiveSelections, VoiceIngress]:
@@ -3408,13 +3404,13 @@ def update_turn_owner_deps(bot: RuntimeBot, **changes: object) -> None:
     In place, because the gate and the reaction dispatcher keep the owners they were built with.
     """
     owners = _turn_owners(bot)
-    known = set(_VOICE_READINESS_CHANGES) | _turn_owner_field_names(bot)
+    known = _VOICE_READINESS_FIELDS | _turn_owner_field_names(bot)
     unknown = set(changes) - known
     assert not unknown, f"not a turn owner collaborator: {sorted(unknown)}"
     for owner in owners:
         if owner_changes := _changes_for(owner.deps, changes):
             owner.deps = replace(owner.deps, **owner_changes)
-    readiness_changes = {field: changes[name] for name, field in _VOICE_READINESS_CHANGES.items() if name in changes}
+    readiness_changes = {name: changes[name] for name in _VOICE_READINESS_FIELDS if name in changes}
     if readiness_changes:
         voice = bot._voice_ingress
         voice.deps = replace(voice.deps, readiness=replace(voice.deps.readiness, **readiness_changes))
