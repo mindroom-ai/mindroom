@@ -149,7 +149,9 @@ def test_the_earlier_names_of_filesystem_stay_empty_extras() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     extras = pyproject["project"]["optional-dependencies"]
     assert (extras["coding"], extras["file"], extras["filesystem"]) == ([], [], [])
-    locked = next(line for line in Path("uv.lock").read_text(encoding="utf-8").splitlines() if "provides-extras" in line)
+    locked = next(
+        line for line in Path("uv.lock").read_text(encoding="utf-8").splitlines() if "provides-extras" in line
+    )
     assert all(f'"{extra}"' in locked for extra in ("coding", "file", "filesystem"))
 
 

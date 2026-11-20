@@ -89,11 +89,13 @@ def _available_choices(
         if previous is not None:
             # A newly chosen name may be a toolkit's other name; one echoed from the saved selection stays as saved.
             saved = previous.get(name) or ()
-            tools = tuple(tool if tool in saved else canonical_tool_name(tool) for tool in tools)
+            chosen = tuple(tool if tool in saved else canonical_tool_name(tool) for tool in tools)
+        else:
+            chosen = tools
         previous_tools = previous.get(name, ()) if previous is not None else None
-        if previous_tools is not None and set(tools) - available - set(previous_tools):
+        if previous_tools is not None and set(chosen) - available - set(previous_tools):
             raise HTTPException(400, "Tool is not available for MCP")
-        selected = tuple(tool for tool in tools if tool in available)
+        selected = tuple(tool for tool in chosen if tool in available)
         if selected:
             result[name] = selected
     return result

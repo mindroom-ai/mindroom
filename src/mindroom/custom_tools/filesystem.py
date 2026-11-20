@@ -1145,18 +1145,12 @@ def _confined_lines(base_dir: Path, path_text: str) -> list[str]:
         return []
 
 
-def _format_rg_output(stdout: str, limit: int, context: int, base_dir: Path, restrict_to_base_dir: bool) -> str:
-    """Parse ripgrep JSON output and format as text lines.
+def _rg_events(stdout: str, base_dir: Path, restrict_to_base_dir: bool) -> Iterator[_RgEvent]:
+    """Yield ripgrep's match and context events.
 
     Ripgrep opens files by path, so workspace access reports only text re-read through the confined reader.
     """
-    output_lines: list[str] = []
-    pending_context: list[_RgEvent] = []
-    match_count = 0
-    was_limited = False
-    last_match: _RgEvent | None = None
     confined: dict[str, list[str]] = {}
-
     for raw_line in stdout.splitlines():
         event = _parse_rg_event(raw_line)
         if event is None:
@@ -1167,7 +1161,18 @@ def _format_rg_output(stdout: str, limit: int, context: int, base_dir: Path, res
             if event.line_number > len(confined[event.path_text]):
                 continue
             event.line_text = confined[event.path_text][event.line_number - 1]
+        yield event
 
+
+def _format_rg_output(stdout: str, limit: int, context: int, base_dir: Path, restrict_to_base_dir: bool) -> str:
+    """Parse ripgrep JSON output and format as text lines."""
+    output_lines: list[str] = []
+    pending_context: list[_RgEvent] = []
+    match_count = 0
+    was_limited = False
+    last_match: _RgEvent | None = None
+
+    for event in _rg_events(stdout, base_dir, restrict_to_base_dir):
         if event.event_type == "context":
             pending_context.append(event)
             continue
