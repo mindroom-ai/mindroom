@@ -136,8 +136,11 @@ class ApprovalRecovery:
                 current,
             )
         manager = self.manager
-        # The bot of an owner the config no longer lists had its chance to edit its cards before it stopped.
-        removed = self.entity_configured is not None and not self.entity_configured(current.entity_name)
+        # The bot of an owner the config no longer lists had its chance to edit its cards before it stopped; one that
+        # can never start has no bot to edit them.
+        removed = (self.entity_configured is not None and not self.entity_configured(current.entity_name)) or (
+            self.entity_permanently_unavailable is not None and self.entity_permanently_unavailable(current.entity_name)
+        )
         current = await prepare_approval_failure(
             current,
             ApprovalFailure(ApprovalFailureKind.ERROR, reason),

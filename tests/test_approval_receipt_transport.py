@@ -25,6 +25,7 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     MatrixDelivery,
+    PrincipalStore,
 )
 from mindroom.matrix.large_messages import content_fits_normal_event
 from tests.approval_continuation_helpers import approval_continuation
@@ -396,6 +397,48 @@ async def test_recovery_without_the_senders_client_leaves_a_fresh_card_unattempt
         await manager.shutdown()
 
 
+async def _pause_with_card(owner: PrincipalStore, manager: ApprovalManager) -> None:
+    """Pause code's reply on one gated call and publish the call's card."""
+    await owner.admit(
+        InboundEvent(
+            event_id="$source",
+            room_id=_ROOM,
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@alice:example.org",
+            origin_server_ts=1_000,
+            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
+        ),
+    )
+    call = ApprovalCall(tool_call_id="call-1", tool_name="shell", invoking_agent="code", expires_at_ns=9 * 10**18)
+    paused = approval_continuation(
+        approval_id="approval-1",
+        entity_name="code",
+        room_id=_ROOM,
+        thread_id=None,
+        calls=(call,),
+        state="waiting",
+        runtime_generation="runtime-a",
+    )
+    await paused_for_approval(owner, paused)
+    card = replace(
+        _reservation(),
+        payload={
+            "approval_id": "card-1",
+            "continuation_id": "approval-1",
+            "continuation_generation": 0,
+            "tool_call_id": "call-1",
+        },
+    )
+    assert await manager.reserve_and_publish(
+        continuation_principal_id=_CODE,
+        continuation_id="approval-1",
+        continuation_generation=0,
+        cards=(card,),
+    )
+
+
 @pytest.mark.asyncio
 async def test_removed_owner_ends_once_after_its_card_edit_failed_before_the_removal(
     tmp_path: Path,
@@ -425,45 +468,8 @@ async def test_removed_owner_ends_once_after_its_card_edit_failed_before_the_rem
         entity_configured=lambda name: name in configured,
     )
     recovery.bind(manager)
-    await owner.admit(
-        InboundEvent(
-            event_id="$source",
-            room_id=_ROOM,
-            thread_id=None,
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@alice:example.org",
-            origin_server_ts=1_000,
-            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
-        ),
-    )
-    call = ApprovalCall(tool_call_id="call-1", tool_name="shell", invoking_agent="code", expires_at_ns=9 * 10**18)
-    paused = approval_continuation(
-        approval_id="approval-1",
-        entity_name="code",
-        room_id=_ROOM,
-        thread_id=None,
-        calls=(call,),
-        state="waiting",
-        runtime_generation="runtime-a",
-    )
-    await paused_for_approval(owner, paused)
     try:
-        card = replace(
-            _reservation(),
-            payload={
-                "approval_id": "card-1",
-                "continuation_id": "approval-1",
-                "continuation_generation": 0,
-                "tool_call_id": "call-1",
-            },
-        )
-        assert await manager.reserve_and_publish(
-            continuation_principal_id=_CODE,
-            continuation_id="approval-1",
-            continuation_generation=0,
-            cards=(card,),
-        )
+        await _pause_with_card(owner, manager)
         # The agent still runs when its removal first settles it, and Matrix refuses the edit for now.
         assert await recovery.reconcile_removed_entities({"code"}) == {"code"}
 
@@ -476,6 +482,48 @@ async def test_removed_owner_ends_once_after_its_card_edit_failed_before_the_rem
 
         assert await owner.approvals.approval_continuation("approval-1") is None
         assert [(client, content["msgtype"]) for client, content in sent[1:]] == [(bots["other"].client, "m.notice")]
+    finally:
+        await recovery.close()
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_configured_owner_that_cannot_start_ends_its_paused_turn_with_a_notice(
+    tmp_path: Path,
+    journal: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent the config still lists but that can never start leaves its card unedited and ends its paused turn."""
+    owner = journal.principal(_CODE)
+    bots = {"code": _bot("code"), "other": _bot("other")}
+    bots["other"].journal_principal.return_value = journal.principal("other@@mindroom_other:example.org")
+    sent: list[tuple[nio.AsyncClient, dict]] = []
+
+    async def send(client: nio.AsyncClient, room_id: str, _type: str, content: dict, **_options: object) -> object:
+        sent.append((client, content))
+        return nio.RoomSendResponse(f"$event-{len(sent)}", room_id)
+
+    monkeypatch.setattr("mindroom.approval.transport.send_room_event_result", send)
+    monkeypatch.setattr("mindroom.approval.transport.can_send_to_encrypted_room", lambda *_args, **_options: True)
+    manager = _manager(tmp_path, bots, journal.principal(_BOOKS))
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=manager.transport.deliver_unavailable_notice,
+        journal_provider=lambda: journal,
+        entity_configured=lambda _name: True,
+        entity_permanently_unavailable=lambda name: name == "code",
+    )
+    recovery.bind(manager)
+    try:
+        await _pause_with_card(owner, manager)
+        # The agent's bot fails to start after a restart.
+        del bots["code"]
+
+        await recovery.reconcile_unavailable_entities({"code"})
+
+        assert await owner.approvals.approval_continuation("approval-1") is None
+        assert [(client, content["body"]) for client, content in sent[1:]] == [
+            (bots["other"].client, "Requesting agent 'code' could not start and is unavailable."),
+        ]
     finally:
         await recovery.close()
         await manager.shutdown()
