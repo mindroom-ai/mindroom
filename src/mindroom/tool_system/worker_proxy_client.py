@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
@@ -481,7 +481,7 @@ def execute_worker_proxy_request(
                 if worker_handle is not None
                 else nullcontext()
             )
-            # Once sent, only the worker's own word says how the call ended: a refusal, or its final answer.
+            # Once sent, only the worker's own well-formed word says the call never started or how it ended.
             report_tool_metadata(unanswered=True)
             with (
                 in_flight,
@@ -490,9 +490,12 @@ def execute_worker_proxy_request(
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
-                    report_tool_metadata(unanswered=False)
                     response.read()
-                    raise _WorkerHttpError(exc.response) from exc
+                    refusal = _WorkerHttpError(exc.response)
+                    # Whatever sits between the primary and the worker may answer an error for a call that ran.
+                    if refusal.failure is not None and refusal.failure.failure_kind == "tool":
+                        report_tool_metadata(unanswered=False)
+                    raise refusal from exc
                 data = _read_execute_stream(response, deadline=deadline, cancellation=cancellation)
     except Exception as exc:
         _record_proxy_exception_for_worker(
@@ -502,8 +505,10 @@ def execute_worker_proxy_request(
         )
         raise
 
-    if isinstance(data, dict) and (data.get("ok") is True or data.get("failure_kind") == "tool"):
-        report_tool_metadata(unanswered=False)
+    with suppress(ValidationError):
+        final = ExecuteResponse.model_validate(data)
+        if final.ok or final.failure_kind == "tool":
+            report_tool_metadata(unanswered=False)
     answer = _checked_worker_answer(
         data,
         ExecuteResponse,

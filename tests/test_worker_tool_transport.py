@@ -55,6 +55,7 @@ from tests.turn_model_helpers import turn_model
 from tests.workflow_helpers import NodeFailed, tool_args, workflow_stack
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
@@ -225,34 +226,68 @@ async def test_workflow_shell_node_on_a_worker_carries_the_real_exit_status(
     assert "Exit code 7" in str(result["output"])
 
 
+def _lost(_answer: httpx.Response) -> httpx.Response:
+    msg = "The connection dropped before the answer."
+    raise ConnectionError(msg)
+
+
+def _answered(status: int, body: dict[str, object] | str) -> Callable[[httpx.Response], httpx.Response]:
+    """Return a stand-in for whatever sits between the primary and its worker: it swaps the worker's answer."""
+    if isinstance(body, str):
+        return lambda _answer: httpx.Response(status, text=body)
+    return lambda _answer: httpx.Response(status, json=body)
+
+
+def _between_primary_and_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    reply: Callable[[httpx.Response], httpx.Response],
+    *,
+    reaches_worker: bool = True,
+) -> None:
+    """Answer each execute request of the `worker_requests` runner with *reply*, after or without the worker's run."""
+
+    class Between(httpx.MockTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/execute"):
+                return super().handle_request(request)
+            return reply(super().handle_request(request) if reaches_worker else httpx.Response(200))
+
+    monkeypatch.setattr(httpx, "MockTransport", Between)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("answer", "kind"),
+    ("reply", "kind"),
     [
-        (None, "indeterminate"),
-        (sandbox_runner.ExecuteResponse(ok=False, error="The tool gave up.", failure_kind="tool"), "failed"),
-        (sandbox_runner.ExecuteResponse(ok=False, error="The worker gave up.", failure_kind="worker"), "indeterminate"),
+        (_lost, "indeterminate"),
+        (_answered(200, {"ok": False, "error": "The tool gave up.", "failure_kind": "tool"}), "failed"),
+        (_answered(200, {"ok": False, "error": "The worker gave up.", "failure_kind": "worker"}), "indeterminate"),
+        (_answered(200, {"ok": True, "result": "done", "served_by": "cache"}), "indeterminate"),
+        (_answered(200, {"ok": False, "failure_kind": "tool", "error": ["not", "text"]}), "indeterminate"),
+        (_answered(200, "<html>It works!</html>"), "indeterminate"),
+        (_answered(502, "<html>Bad Gateway</html>"), "indeterminate"),
+        (_answered(504, {"detail": "Gateway Timeout"}), "indeterminate"),
     ],
-    ids=["answer-lost", "tool-ended-failed", "worker-failed"],
+    ids=[
+        "answer-lost",
+        "tool-ended-failed",
+        "worker-failed",
+        "malformed-success",
+        "malformed-tool-failure",
+        "not-json",
+        "intermediary-502",
+        "intermediary-504",
+    ],
 )
 async def test_workflow_call_on_a_worker_fails_as_safe_to_rerun_only_when_the_tool_said_it_ended(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     worker_requests: list[dict[str, object]],
-    answer: sandbox_runner.ExecuteResponse | None,
+    reply: Callable[[httpx.Response], httpx.Response],
     kind: str,
 ) -> None:
-    """The worker ran the command; without the tool's own word on how it ended, the call is never run again."""
-    execute = sandbox_runner._execute_request_inprocess
-
-    async def answered(call: sandbox_runner._ExecuteCall) -> sandbox_runner.ExecuteResponse:
-        await execute(call)
-        if answer is None:
-            msg = "The connection dropped before the answer."
-            raise ConnectionError(msg)
-        return answer
-
-    monkeypatch.setattr(sandbox_runner, "_execute_request_inprocess", answered)
+    """The worker ran the command; only its own well-formed answer that the tool ended lets the call run again."""
+    _between_primary_and_worker(monkeypatch, reply)
     effect = tmp_path / "effect.txt"
     with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
         await stack.start()
@@ -263,6 +298,38 @@ async def test_workflow_call_on_a_worker_fails_as_safe_to_rerun_only_when_the_to
 
         await stack.engine.close()
     assert (ended.value.kind, effect.read_text(), len(worker_requests)) == (kind, "ran\n", 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reply", "kind"),
+    [
+        (
+            _answered(422, {"ok": False, "error": "Invalid request: structured_result", "failure_kind": "tool"}),
+            "failed",
+        ),
+        (_answered(401, {"detail": "Unauthorized sandbox runner request"}), "indeterminate"),
+        (_answered(503, "<html>Service Unavailable</html>"), "indeterminate"),
+    ],
+    ids=["worker-refused", "untyped-refusal", "intermediary-503"],
+)
+async def test_workflow_call_is_known_not_to_have_started_only_by_the_worker_s_own_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+    reply: Callable[[httpx.Response], httpx.Response],
+    kind: str,
+) -> None:
+    """A worker from before workflows refuses the call in its own words; any other error may hide a call that ran."""
+    _between_primary_and_worker(monkeypatch, reply, reaches_worker=False)
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args="true", timeout=30))
+
+        await stack.engine.close()
+    assert (ended.value.kind, worker_requests) == (kind, [])
 
 
 @pytest.mark.asyncio
