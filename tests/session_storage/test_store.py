@@ -554,6 +554,28 @@ def test_a_save_rewrites_only_the_message_rows_that_changed(store: ConversationS
     assert [(row[0], row[1]) for row in _message_rows(store, "r1")] == [("m0", 0), ("m2", 1)]
 
 
+def test_a_checkpoint_writes_only_its_new_rows_and_its_copy_reads_as_stored(store: ConversationStore) -> None:
+    """A checkpoint sends only what changed since its run's previous save, yet the session holds the run as read.
+
+    A run another writer deleted since then is written whole again.
+    """
+    session, messages, tools = _session(), [Message(role="user", content="go", id="m0", created_at=1)], []
+    for index in range(1, 4):
+        messages.append(Message(role="tool", content=f"out{index}", id=f"m{index}", created_at=1))
+        tools.append(_tool(f"c{index}", f"out{index}"))
+        if index == 3:
+            messages[1].content = tools[0].result = "edited"
+        _save(store, _run("r1", RunStatus.cancelled, messages=copy.deepcopy(messages), tools=tools), session=session)
+        assert session.runs == store.list_runs("s1")
+    assert session.runs[0].messages == messages
+    delete_runs(store, ["r1"], session_id="s1")
+
+    _save(store, _run("r1", RunStatus.cancelled, messages=messages, tools=tools), session=session)
+
+    assert [message.id for message in store.list_runs("s1")[0].messages] == ["m0", "m1", "m2", "m3"]
+    assert session.runs == store.list_runs("s1")
+
+
 def _tool(call_id: str, result: str) -> ToolExecution:
     return ToolExecution(tool_call_id=call_id, tool_name="shell", tool_args={"command": call_id}, result=result)
 
@@ -992,7 +1014,8 @@ def test_saves_and_loads_read_messages_and_tools_in_order_without_a_sort(
     _save(store, _run("r1"))
     _loaded(store)
 
-    assert len(reads) == 2
+    # A save reads back only its message rows' fold flags, and no tool rows.
+    assert len(reads) == (2 if table.endswith("messages") else 1)
     for read in reads:
         plan = [step for *_, step in _query(store, f"EXPLAIN QUERY PLAN {read}")]
         assert [step for step in plan if "TEMP B-TREE" in step] == [], plan
