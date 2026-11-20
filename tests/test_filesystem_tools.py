@@ -8,13 +8,16 @@ import json
 import multiprocessing
 import os
 import re
+import shutil
 import subprocess
 import threading
+import tracemalloc
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
+import mindroom.path_safety as path_safety_module
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools import filesystem as filesystem_module
 from mindroom.custom_tools.filesystem import (
@@ -1083,6 +1086,14 @@ class TestWriteFile:
         assert (tmp_base / "hello.py").read_text() == "overwritten\n"
 
 
+def _use_ripgrep(monkeypatch: pytest.MonkeyPatch, ripgrep: bool) -> None:
+    """Search with the installed ripgrep, skipping where there is none, or as if none were installed."""
+    if not ripgrep:
+        monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: None)
+    elif shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+
+
 class TestGrep:
     """Tests for FilesystemTools.grep."""
 
@@ -1103,7 +1114,7 @@ class TestGrep:
 
     def test_grep_with_glob_python_fallback(self, tools: FilesystemTools, monkeypatch: pytest.MonkeyPatch) -> None:
         """Python fallback should treat bare '*.ext' as recursive like ripgrep."""
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.grep("content", glob="*.txt")
         assert "nested" in result
 
@@ -1113,7 +1124,7 @@ class TestGrep:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Invalid absolute glob patterns should return an error, not raise."""
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.grep("content", glob="/absolute/path/*.txt")
         assert "Error: Invalid glob pattern" in result
 
@@ -1133,7 +1144,7 @@ class TestGrep:
         (tmp_path / ".hidden" / "inside.txt").write_text("match me\n")
 
         tools = FilesystemTools(base_dir=str(tmp_path))
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.grep("match")
 
         assert "visible.txt:1:match me" in result
@@ -1158,7 +1169,7 @@ class TestGrep:
         (workspace / ".gitignore").write_text("ignored.txt\n")
         (workspace / "visible.txt").write_text("match me\n")
         (workspace / "ignored.txt").write_text("match me\n")
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
 
         result = FilesystemTools(base_dir=str(workspace)).grep("match")
 
@@ -1179,7 +1190,7 @@ class TestGrep:
         (tmp_path / "ignored.txt").write_text("needle\n")
 
         tools = FilesystemTools(base_dir=str(tmp_path))
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
 
         run_calls = 0
         original_run = subprocess.run
@@ -1212,10 +1223,60 @@ class TestGrep:
             pytest.skip("Symlinks not supported on this platform")
 
         tools = FilesystemTools(base_dir=str(tmp_path))
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.grep("needle", glob="link/*.txt")
         assert "secret.txt" not in result
         assert "No matches found." in result
+
+    @pytest.mark.parametrize("ripgrep", [True, False], ids=["ripgrep", "no-ripgrep"])
+    def test_workspace_grep_reads_matching_files_one_at_a_time_until_the_limit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ripgrep: bool,
+    ) -> None:
+        """One result from many large matching files holds one file at a time and reads only up to the limit."""
+        _use_ripgrep(monkeypatch, ripgrep)
+        size = 512 * 1024
+        for index in range(16):
+            (tmp_path / f"big{index:02}.txt").write_text("needle " + "x" * size)
+        reads: list[str] = []
+        real_read = path_safety_module.read_regular_file_within_root
+
+        def counting_read(root: Path, relative: Path, **kwargs: Any) -> bytes:  # noqa: ANN401
+            reads.append(str(relative))
+            return real_read(root, relative, **kwargs)
+
+        monkeypatch.setattr(path_safety_module, "read_regular_file_within_root", counting_read)
+        tools = FilesystemTools(base_dir=str(tmp_path))
+        tracemalloc.start()
+        try:
+            result = tools.grep("needle", limit=1)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+        assert result.count("needle") == 1
+        assert "[Results limited to 1 matches.]" in result
+        # The reported file, and the next one, whose match shows there are more.
+        assert len(reads) == 2
+        assert peak < 6 * size
+
+    @pytest.mark.parametrize("ripgrep", [True, False], ids=["ripgrep", "no-ripgrep"])
+    def test_workspace_grep_decodes_by_the_byte_order_mark(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ripgrep: bool,
+    ) -> None:
+        """A UTF-16 file matches as text with its own line numbers, and a UTF-8 mark is not part of the first line."""
+        _use_ripgrep(monkeypatch, ripgrep)
+        (tmp_path / "wide.txt").write_bytes("first\nneedle café\n".encode("utf-16"))
+        (tmp_path / "marked.txt").write_bytes("needle first\n".encode("utf-8-sig"))
+
+        result = FilesystemTools(base_dir=str(tmp_path)).grep("^needle")
+
+        assert sorted(result.splitlines()) == ["marked.txt:1:needle first", "wide.txt:2:needle café"]
 
     def test_run_ripgrep_enforces_global_match_limit(
         self,
@@ -1278,7 +1339,6 @@ class TestGrep:
             literal=False,
             context=0,
             limit=2,
-            restrict_to_base_dir=False,
         )
 
         assert result is not None
@@ -1368,7 +1428,6 @@ class TestGrep:
             literal=False,
             context=1,
             limit=1,
-            restrict_to_base_dir=False,
         )
 
         assert result is not None
@@ -1387,12 +1446,37 @@ class TestGrep:
     ) -> None:
         """Nearby matches with overlapping context should not duplicate shared lines."""
         (tmp_base / "overlap.txt").write_text("a\nmatch1\nb\nmatch2\nc\n")
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.grep("match", path="overlap.txt", context=1)
         lines = result.strip().splitlines()
         # Line "b" (line 3) is shared context — must appear exactly once.
         b_lines = [line for line in lines if "-3-b" in line or ":3:b" in line]
         assert len(b_lines) == 1
+
+    @pytest.mark.parametrize("ripgrep", [True, False], ids=["ripgrep", "no-ripgrep"])
+    def test_workspace_grep_marks_a_match_inside_another_matchs_context_as_a_match(
+        self,
+        tools: FilesystemTools,
+        tmp_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ripgrep: bool,
+    ) -> None:
+        """Matches on neighbouring lines are each reported as a match, as ripgrep reports them, with shared context once."""
+        _use_ripgrep(monkeypatch, ripgrep)
+        (tmp_base / "near.txt").write_text("a\nmatch1\nmatch2\nb\nc\nd\nmatch3\n")
+
+        result = tools.grep("match", path="near.txt", context=1)
+
+        assert result.splitlines() == [
+            "near.txt-1-a",
+            "near.txt:2:match1",
+            "near.txt:3:match2",
+            "near.txt-4-b",
+            "near.txt-6-d",
+            "near.txt:7:match3",
+        ]
+        unrestricted = FilesystemTools(base_dir=str(tmp_base), file_access="unrestricted")
+        assert unrestricted.grep("match", path="near.txt", context=1) == result
 
     def test_grep_context_no_separator_lines(
         self,
@@ -1402,7 +1486,7 @@ class TestGrep:
     ) -> None:
         """Python fallback context output should not contain '--' separator lines."""
         (tmp_base / "ctx.txt").write_text("a\nb\nmatch\nc\nd\n")
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.grep("match", path="ctx.txt", context=1)
         assert "match" in result
         assert "\n--\n" not in result
@@ -1423,6 +1507,19 @@ class TestGrep:
         result = tools.grep("[invalid")
         assert isinstance(result, str)
 
+    def test_workspace_grep_returns_ripgreps_refusal_of_a_pattern(
+        self,
+        tools: FilesystemTools,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pattern Python accepts and ripgrep refuses is an error, as under unrestricted access, not an empty result."""
+        _use_ripgrep(monkeypatch, ripgrep=True)
+
+        result = tools.grep("hello(?=world)")
+
+        assert result.startswith("Error running grep: ")
+        assert "look-around" in result
+
     def test_grep_missing_path(self, tools: FilesystemTools) -> None:
         """Returns error for missing paths."""
         result = tools.grep("hello", path="nonexistent_dir")
@@ -1442,7 +1539,7 @@ class TestGrep:
     ) -> None:
         """Python fallback should not emit the (limit+1)th match while detecting truncation."""
         (tmp_base / "limit.txt").write_text("match1\nmatch2\nmatch3\n")
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.grep("match", path="limit.txt", limit=2)
 
         match_lines = [line for line in result.splitlines() if line.startswith("limit.txt:")]
@@ -1458,7 +1555,7 @@ class TestGrep:
     ) -> None:
         """Limit banner should not appear when total matches exactly equal the limit."""
         (tmp_base / "exact.txt").write_text("match\nmatch\nmatch\n")
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.grep("match", path="exact.txt", limit=3)
         assert "match" in result
         assert "limited" not in result.lower()
@@ -1491,7 +1588,7 @@ class TestGrep:
     ) -> None:
         """Python fallback should show the filename, not '.', when path points to a single file."""
         (tmp_base / "a.txt").write_text("needle\n")
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.grep("needle", path="a.txt")
         assert "a.txt:1:" in result
         assert ".:1:" not in result
@@ -1503,7 +1600,7 @@ class TestGrep:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Python fallback should enforce the same global output truncation limits."""
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         (tmp_base / "huge.txt").write_text("\n".join(f"match line {i}" for i in range(7000)))
         result = tools.grep("match", path="huge.txt", limit=7000)
         assert "[Output truncated." in result
@@ -1547,7 +1644,10 @@ class TestGrep:
                 stderr="",
             ),
         )
-        rg_result = tools.grep("needle", path="parity.txt")
+        rg_result = FilesystemTools(base_dir=str(tmp_base), file_access="unrestricted").grep(
+            "needle",
+            path="parity.txt",
+        )
 
         # Capture fallback output
         monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
@@ -1583,7 +1683,7 @@ class TestGrep:
                 stderr="",
             ),
         )
-        rg_result = tools.grep("nested", path="sub")
+        rg_result = FilesystemTools(base_dir=str(tmp_base), file_access="unrestricted").grep("nested", path="sub")
 
         monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         fallback_result = tools.grep("nested", path="sub")
@@ -1619,7 +1719,10 @@ class TestGrep:
                 stderr="",
             ),
         )
-        rg_result = tools.grep("nested", path="sub/nested.txt")
+        rg_result = FilesystemTools(base_dir=str(tmp_base), file_access="unrestricted").grep(
+            "nested",
+            path="sub/nested.txt",
+        )
 
         monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         fallback_result = tools.grep("nested", path="sub/nested.txt")
@@ -2006,7 +2109,7 @@ class TestFilesystemToolsFileAccess:
         outside_file.write_text("needle\n")
 
         tools = FilesystemTools(base_dir=str(base_dir), file_access="unrestricted")
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
 
         find_result = tools.find_files("*.txt", path=str(outside_dir))
         grep_result = tools.grep("needle", path=str(outside_dir), glob="*.txt")
@@ -2028,7 +2131,7 @@ class TestFilesystemToolsFileAccess:
         outside_file.write_text("needle\n")
 
         tools = FilesystemTools(base_dir=str(base_dir), file_access="unrestricted")
-        monkeypatch.setattr("mindroom.custom_tools.filesystem._run_ripgrep", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
 
         find_result = tools.find_files("../outside/*.txt")
         grep_result = tools.grep("needle", glob="../outside/*.txt")

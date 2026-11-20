@@ -10753,6 +10753,7 @@ In the primary, `edit_file()`, `write_file()`, and `delete_file()` calls on the 
 In a worker, calls serialize only when they lock the same stable, readable directory; one that waits too long for that lock returns a busy error without changing the file, and a directory the agent may enter but not read cannot hold the lock, so calls there run unlocked.
 Primary and worker calls do not serialize with each other, with another primary, or with other writers such as shell commands.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
+Under `file_access: workspace`, `grep()` skips a file over 64 MiB, which `read_file()` refuses to read, and its pattern must be a valid Python regular expression that ripgrep, where installed, also accepts.
 `delete_file()` removes a file or an empty directory.
 Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): `workspace` (the default) rejects paths outside the workspace and the agent's [shared directories](#shared_directories), and `unrestricted` allows any path the tool's process can reach.
 `write_file()`, `edit_file()`, and `delete_file()` refuse paths inside a `.git` directory.

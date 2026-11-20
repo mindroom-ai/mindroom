@@ -7,12 +7,14 @@ A tool declared ``ToolFileAccess.AGENT`` must appear here, so a new path tool ca
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, Self
 
 import httpx
 import pytest
@@ -629,12 +631,31 @@ def test_worker_path_tool_does_not_list_or_search_a_workspace_replaced_by_link(
     assert "unrestricted" not in result
 
 
+class _NominatingRipgrep:
+    """A ripgrep process that names these files as matching, whatever they hold when read."""
+
+    def __init__(self, names: list[Path]) -> None:
+        self.stdout = io.BytesIO(b"".join(os.fsencode(name) + b"\0" for name in names))
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def wait(self) -> int:
+        return 0
+
+    def kill(self) -> None:
+        return None
+
+
 @pytest.mark.parametrize(
     ("search", "expected"),
     [
-        ("ripgrep", {"notes.txt": "sk-workspace-value"}),
-        ("no-ripgrep", {"notes.txt": "sk-workspace-value", "alias.txt": "sk-workspace-value"}),
-        ("ripgrep-raced-through-a-link", {"notes.txt": "sk-workspace-value", "d/x.txt": "harmless"}),
+        ("ripgrep", ["notes.txt:1:sk-workspace-value"]),
+        ("no-ripgrep", ["alias.txt:1:sk-workspace-value", "notes.txt:1:sk-workspace-value"]),
+        ("ripgrep-raced-through-a-link", ["notes.txt:1:sk-workspace-value"]),
     ],
 )
 def test_grep_never_reads_a_planted_link_target(
@@ -642,17 +663,18 @@ def test_grep_never_reads_a_planted_link_target(
     workspace: Path,
     outside: Path,
     search: str,
-    expected: dict[str, str],
+    expected: list[str],
 ) -> None:
-    """Workspace grep reports only text it read through the capped no-follow reader, never a planted link's target.
+    """Workspace grep decides and reports matches only from bytes it read through the capped no-follow reader.
 
-    Ripgrep opens files by path, so worker code swapping a directory under it can make it match a primary file.
+    Ripgrep opens files by path, so worker code swapping a directory under it can make it match a primary file:
+    what ripgrep says of a file is only a nomination, and a file that does not match as read gives no line or context.
     """
     secret = outside / "openai.json"
     secret.write_text('{"api_key": "sk-SECRET-VALUE"}\n')
     (workspace / "leak.json").symlink_to(secret)
     (workspace / "d").mkdir()
-    (workspace / "d" / "x.txt").write_text("harmless\n")
+    (workspace / "d" / "x.txt").write_text("above\nharmless\nbelow\n")
     (workspace / "d ").mkdir()
     (workspace / "d " / "x.txt").symlink_to(secret)
     (workspace / "notes.txt").write_text("sk-workspace-value\n")
@@ -670,22 +692,18 @@ def test_grep_never_reads_a_planted_link_target(
             opened_secret.append(args[0])
         return descriptor
 
-    def raced_ripgrep(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        events = [
-            {"path": {"text": str(workspace / name)}, "lines": {"text": "sk-SECRET-VALUE\n"}, "line_number": 1}
-            for name in ("leak.json", "d /x.txt", "d/x.txt", "notes.txt")
-        ]
-        stdout = "\n".join(json.dumps({"type": "match", "data": event}) for event in events)
-        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
-
     monkeypatch.setattr(os, "open", recording_open)
     if search == "no-ripgrep":
         monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: None)
     elif search == "ripgrep-raced-through-a-link":
-        monkeypatch.setattr(filesystem_module.subprocess, "run", raced_ripgrep)
-    result = FilesystemTools(base_dir=str(workspace)).grep("sk-")
+        monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: "rg")
+        names = [workspace / name for name in ("leak.json", "d /x.txt", "d/x.txt", "gone.txt", "notes.txt")]
+        monkeypatch.setattr(filesystem_module.subprocess, "Popen", lambda *_args, **_kwargs: _NominatingRipgrep(names))
+    elif shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    result = FilesystemTools(base_dir=str(workspace)).grep("sk-", context=1)
 
-    assert {line.rsplit(":", 2)[0]: line.rsplit(":", 1)[1] for line in result.splitlines()} == expected
+    assert sorted(result.splitlines()) == expected
     assert "SECRET" not in result
     assert opened_secret == []
 
