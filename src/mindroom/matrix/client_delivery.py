@@ -968,6 +968,7 @@ __all__ = [
     "send_message_outcome",
     "send_message_result",
     "send_room_event_result",
+    "says_encryption_is_disabled",
     "send_runtime_encrypted_media_message",
     "upload_media_bytes_as_mxc",
 ]
