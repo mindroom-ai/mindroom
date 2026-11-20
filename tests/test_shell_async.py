@@ -473,8 +473,8 @@ def test_a_notice_counts_blank_lines_and_a_missing_final_newline_alike(newline: 
     unterminated.append(f"a{newline}b")
 
     # The one line shown is the blank one, which holds a carriage return when the command ended lines with CRLF.
-    assert buffer.render(tail=1) == (
-        f"[Showing the last 1 of 3 lines. Pass a larger tail, or narrow the command.]\n{newline[:-1]}"
+    assert buffer.render(tail=1) == "[Showing the last 1 of 3 lines. Pass a larger tail, or narrow the command.]" + (
+        "\n\r" if newline == "\r\n" else ""
     )
     assert len(buffer) == 3
     assert buffer.render() == f"a{newline}b{newline}{newline}".rstrip("\n")

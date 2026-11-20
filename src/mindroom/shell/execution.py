@@ -100,8 +100,7 @@ class _OutputBuffer:
 
     def render(self, *, tail: int | None = None) -> str:
         """Return the last ``tail`` retained lines, after one notice of what was left out."""
-        notice, shown = self.render_parts(tail=tail)
-        return f"{notice}\n{shown}" if notice else shown
+        return "\n".join(part for part in self.render_parts(tail=tail) if part)
 
     def render_parts(self, *, tail: int | None = None, stream: str = "") -> tuple[str, str]:
         """Return the notice of what was left out, empty when nothing was, and the last ``tail`` retained lines."""
