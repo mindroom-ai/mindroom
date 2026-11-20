@@ -4067,7 +4067,7 @@ agentql = [
     { name = "playwright" },
 ]
 apify = [
-    { name = "apify-client", marker = "platform_machine != 'aarch64'" },
+    { name = "apify-client" },
 ]
 arxiv = [
     { name = "arxiv" },
@@ -4467,7 +4467,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "anthropic", specifier = ">=1.17,<2" },
     { name = "anyio", specifier = ">=4.10" },
-    { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2" },
+    { name = "apify-client", marker = "extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'", specifier = "<4" },
     { name = "atlassian-python-api", marker = "extra == 'confluence'", specifier = "<5" },
     { name = "authlib", specifier = ">=1.6,<1.8" },

@@ -43,10 +43,8 @@ SKIP_CONFIG_FIELD_VALIDATION = {
     "openclaw_compat",
 }
 # Tools whose backing package may legitimately be absent, so a missing import is
-# not a contract failure. `apify` is here because `pyproject.toml` declares
-# `apify-client` for `platform_machine != 'aarch64'`, which means every arm64
-# host runs this suite without it.
-OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
+# not a contract failure.
+OPTIONAL_TOOL_IMPORTS = frozenset({"scrapegraph"})
 IGNORED_AGNO_PARAMS = {
     # Mappings, sessions, clients, and connections, which no text, number, boolean, or string-list setting can supply.
     "firecrawl": {"search_params"},
