@@ -16,6 +16,7 @@ from mindroom.constants import (
     ROUTE_EVENT_TYPE,
     ROUTE_PROMPT_STRUCTURED_KEY,
     ROUTE_TOO_LARGE_KEY,
+    ROUTE_TOO_LARGE_NOTICE,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     ROUTE_VOICE_TRANSCRIPTS_LIMIT,
     SOURCE_KIND_KEY,
@@ -134,16 +135,13 @@ async def _earlier_attempt_outcome(deps: _RouterRelaySupport, room_id: str, even
     if earlier.history_scope is not None:
         return await _still_steward(deps, room_id, earlier)
     try:
-        sent_route = earlier.response_event_id or await deps.delivery_gateway.sent_route(
-            room_id,
-            earlier.source_event_ids,
-        )
+        sent = earlier.response_event_id or await deps.delivery_gateway.sent_route(room_id, earlier.source_event_ids)
     except UnresolvedOpaqueRoomHistoryError:
         deps.logger.warning("Cannot read whether this turn was routed; routing nobody again", event_id=event_id)
         return False
-    if sent_route is None:
+    if sent is None:
         return None
-    await deps.turn_store.record_responded_turn(canonicalize_turn_record(earlier, response_event_id=sent_route))
+    await deps.turn_store.record_responded_turn(canonicalize_turn_record(earlier, response_event_id=sent))
     await deps.visible_responses.settle_source_events_ignored(earlier)
     return False
 
@@ -353,10 +351,10 @@ async def execute_router_relay(  # noqa: PLR0911
         route["thread_id"] = thread_event_id
     transcripts = await _voice_transcripts(deps, route["event_ids"])
     content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route, **transcripts}
-    # The route carries its steward's whole prompt or, past what a responder reads of a long-text file, a notice.
+    # The route carries its steward's whole prompt or, past what a responder reads of its long-text file, a notice.
     content |= {"body": message or event.body, ROUTE_PROMPT_STRUCTURED_KEY: prompt_is_structured}
-    readable = len(json.dumps(content, ensure_ascii=False).encode()) <= MXC_TEXT_MAX_BYTES
-    content |= {} if readable else {"body": "Your message is too long for me to read.", ROUTE_TOO_LARGE_KEY: True}
+    readable = len(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode()) <= MXC_TEXT_MAX_BYTES
+    content |= {} if readable else {"body": ROUTE_TOO_LARGE_NOTICE, ROUTE_TOO_LARGE_KEY: True}
     event_id = await deps.delivery_gateway.send_route(room.room_id, content)
     with bound_log_context(**resolved_target.log_context):
         if event_id is None:

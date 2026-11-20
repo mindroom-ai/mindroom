@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from dataclasses import dataclass, field, fields, replace
 from functools import partial
 from types import SimpleNamespace
@@ -8591,6 +8592,48 @@ async def test_a_turn_too_long_for_any_route_is_refused_to_its_person(
     [notice] = responder.gateway.sent
     assert notice.response_text == _TOO_LONG
     assert notice.target.reply_to_event_id == "$part-2-again:localhost"
+
+
+@pytest.mark.asyncio
+async def test_a_route_exactly_at_the_read_limit_is_sent_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A steward measures a route as its long-text file stores it, so one at the limit still carries its prompt."""
+    config = _two_agent_config(tmp_path)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+
+    async def route_under(limit: int, name: str) -> dict[str, Any]:
+        monkeypatch.setattr("mindroom.router.relay.MXC_TEXT_MAX_BYTES", limit)
+        steward = _build_harness(config, tmp_path / name, agent_name=ROUTER_AGENT_NAME)
+        await steward.deliver(room, _text_event("Which release is next?", thread_id=_THREAD_ROOT))
+        [route] = steward.gateway.routes
+        return route
+
+    route = await route_under(10**9, "unbounded")
+    stored = len(json.dumps(route, ensure_ascii=False, separators=(",", ":")).encode())
+
+    assert (await route_under(stored, "exact"))["body"] == "Which release is next?"
+    assert (await route_under(stored - 1, "over"))[constants.ROUTE_TOO_LARGE_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_a_route_too_large_to_read_gets_no_title_and_posts_only_its_fixed_notice(tmp_path: Path) -> None:
+    """A too-large route asks no model, not even for a title, and its responder never echoes the route's text."""
+    config = _two_agent_config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 1
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    content = _route_content(config, thread_id="$question:localhost", body="Say something else.")
+    content[constants.ROUTE_TOO_LARGE_KEY] = True
+
+    with patch("mindroom.turns.dispatch.maybe_generate_prompt_summary", new=AsyncMock()) as early_title:
+        await harness.deliver(room, _route_as_delivered(config, content, steward="research"))
+
+    early_title.assert_not_called()
+    assert harness.runner.requests == []
+    assert [notice.response_text for notice in harness.gateway.sent] == [_TOO_LONG]
 
 
 def replace_event_id(event: nio.RoomMessageText) -> nio.RoomMessageText:

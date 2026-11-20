@@ -19,6 +19,7 @@ from mindroom.constants import (
     ROUTE_PROMPT_FILE_KEY,
     ROUTE_PROMPT_STRUCTURED_KEY,
     ROUTE_TOO_LARGE_KEY,
+    ROUTE_TOO_LARGE_NOTICE,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
@@ -399,9 +400,10 @@ class TurnDispatcher:
         prompt_event_ids = turn.handled_turn.source_event_ids
         routed_event_ids = turn.facts.routed_event_ids
         if routed_event_ids:
-            if thread_id not in routed_event_ids or turn.payload.raw_audio_fallback or turn.payload.voice_transcript:
+            unreadable = turn.payload.raw_audio_fallback or turn.event.source["content"].get(ROUTE_TOO_LARGE_KEY)
+            if thread_id not in routed_event_ids or unreadable or turn.payload.voice_transcript:
                 return
-            # A hidden route carries no text of the person's: their messages are titled as the thread shows them.
+            # The person's messages are titled as the thread shows them.
             prompt = None
             prompt_event_ids = routed_event_ids
         elif turn.handled_turn.is_coalesced:
@@ -593,8 +595,8 @@ class TurnDispatcher:
             assert plan.response_action is not None
             response_action = plan.response_action
         if prepared.turn.facts.routed_event_ids and prepared.turn.event.source["content"].get(ROUTE_TOO_LARGE_KEY):
-            # The route's text is its steward's notice that the turn is too long to read: no model is asked.
-            response_action = ResponseAction(kind="reject", rejection_message=prepared.turn.event.body)
+            # The turn is too long to read: no model is asked.
+            response_action = ResponseAction(kind="reject", rejection_message=ROUTE_TOO_LARGE_NOTICE)
         # Orderly shutdown has closed task ownership, so no response is planned after it.
         if self.deps.runtime.phase is RunPhase.SHUTTING_DOWN:
             raise ResponseAdmissionRefusedError
