@@ -19,8 +19,8 @@ dependencies = [
   "aiohttp>=3.13.3",
   "anthropic>=2.11,<3",
   "anyio>=4.10",
-  # Authlib 1.8 moves its HTTPX client to httpx2, which our token transports and error handling do not use yet.
-  "authlib>=1.6,<1.8",
+  # Authlib 1.8 moved its HTTPX client to httpx2, which oauth/providers.py now uses.
+  "authlib>=1.9.9",
   "certifi>=2026.4.22",
   # Click 8.5 drops `typer.Argument(help=...)` text from Typer 0.25's `--help`.
   "click<8.5",

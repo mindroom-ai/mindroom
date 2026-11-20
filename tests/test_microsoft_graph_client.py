@@ -10,6 +10,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import httpx
+import httpx2
 import pytest
 
 from mindroom.custom_tools.microsoft_graph import (
@@ -158,7 +159,7 @@ def test_a_call_without_a_requester_never_uses_a_stored_token(tmp_path: Path, mo
 
 def test_a_rejected_refresh_asks_the_requester_to_reconnect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     graph = FakeGraph(_answer(200, json={})).install(monkeypatch)
-    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(400, json={"error": "invalid_grant"})])
 
     result = _result(tmp_path, lambda session: session.json("GET", "/me/drive"), expires_at=1.0)
 
