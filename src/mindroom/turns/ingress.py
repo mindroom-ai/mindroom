@@ -262,7 +262,7 @@ class TurnIngress:
 
     @staticmethod
     async def _normalize_with_ingress_timing(
-        normalize: Awaitable[PreparedIngress | None],
+        normalize: Awaitable[PreparedIngress],
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> PreparedIngress:
         """Await one text-like normalization while recording ingress timing boundaries."""
@@ -271,7 +271,6 @@ class TurnIngress:
         prepared_event = await normalize
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_ready")
-        assert prepared_event is not None
         attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         return prepared_event
 
@@ -379,14 +378,21 @@ class TurnIngress:
         if facts.sender_is_managed:
             return None
         event_info = EventInfo.from_event(event.source)
+        # A steward that only routes this sender still routes their queued message as edited.
+        async with self.deps.ingress.admitted_reply_decision(
+            facts.lane_requester_id,
+            room.room_id,
+            unanswered=(event.event_id,),
+            or_routed=True,
+        ) as allowed:
+            if not allowed or await self._edit_queued_message(room, event, event_info):
+                return None
         async with self.deps.ingress.admitted_reply_decision(
             facts.lane_requester_id,
             room.room_id,
             unanswered=(event.event_id,),
         ) as allowed:
             if not allowed:
-                return None
-            if await self._edit_queued_message(room, event, event_info):
                 return None
             return await self.deps.edit_regenerator.handle_message_edit(room, event, event_info, facts)
 
@@ -906,7 +912,7 @@ class TurnIngress:
     ) -> TurnDispatchOutcome:
         """Dispatch one sidecar-backed file preview through the normal text pipeline."""
         prepared_text_event = await self._normalize_with_ingress_timing(
-            self.deps.normalizer.prepare_file_sidecar_text_event(event),
+            self.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=event)),
             get_dispatch_pipeline_timing(event.source),
         )
         return await self._dispatch_prepared_text_like_ingress(

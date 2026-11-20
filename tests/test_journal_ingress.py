@@ -65,7 +65,7 @@ from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_RETRY_DELAY_SECONDS,
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
 from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import claim_continuation
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, request_envelope
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, parsed_route, request_envelope
 from tests.journal_helpers import admit_dispatch_event
 from tests.journal_membership_helpers import admit_room_membership, room_membership_admission
 from tests.reply_span_helpers import paused_for_approval
@@ -150,22 +150,17 @@ def route_event(
     extra_content: dict[str, Any] | None = None,
 ) -> nio.UnknownEvent:
     """Return a parsed route: the hidden event a room's steward sends to the responder it selected."""
-    event = nio.Event.parse_event(
+    return parsed_route(
         {
-            "event_id": event_id,
-            "sender": sender,
-            "origin_server_ts": 1_000,
-            "type": ROUTE_EVENT_TYPE,
-            "content": {
-                ROUTE_EVENT_TYPE: {"entity": BOT, "event_ids": ["$question"]} if route is None else route,
-                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-                ORIGINAL_SENDER_KEY: ALICE,
-                **(extra_content or {}),
-            },
+            ROUTE_EVENT_TYPE: {"entity": BOT, "event_ids": ["$question"]} if route is None else route,
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: ALICE,
+            **(extra_content or {}),
         },
+        sender=sender,
+        event_id=event_id,
+        origin_server_ts=1_000,
     )
-    assert isinstance(event, nio.UnknownEvent)
-    return event
 
 
 def bot_event(event_id: str, body: str = "the answer", *, ts: int = 1_100) -> nio.Event:

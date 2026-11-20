@@ -174,6 +174,7 @@ from tests.conftest import (
     make_pending_event,
     make_relation_lookup,
     make_visible_message,
+    parsed_route,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -7863,6 +7864,31 @@ async def test_a_persons_edit_reaches_the_regenerator_classified_as_an_edit(conf
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("may_answer", [True, False])
+async def test_a_steward_regenerates_no_answer_for_a_sender_it_only_routes(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    may_answer: bool,
+) -> None:
+    """Permission to route regenerates nothing: an edit of an answered message regenerates for a sender it may answer."""
+    harness = _build_harness(config, tmp_path)
+    harness.runtime.orchestrator.steward = "general"
+    regenerator = _NoEditRegeneration()
+    _replace_harness_deps(harness, edit_regenerator=regenerator)
+    monkeypatch.setattr(harness.policy, "can_reply_to_sender_in_room", lambda *_args, **_kwargs: may_answer)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    edit = _text_event("* what is 3+3?", event_id="$edit:localhost", origin_server_ts=1_000_001)
+    edit.source["content"]["m.new_content"] = {"body": "what is 3+3?", "msgtype": "m.text"}
+    edit.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$answered:localhost"}
+
+    await harness.deliver(room, edit)
+
+    assert regenerator.edit_event_ids == ([edit.event_id] if may_answer else [])
+    assert harness.ignored_dispatch_sources == ([] if may_answer else [(edit.event_id,)])
+
+
+@pytest.mark.asyncio
 async def test_hook_text_that_looks_like_a_command_is_conversation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -8206,17 +8232,13 @@ def _route_as_delivered(
     event_id: str = "$route:localhost",
 ) -> nio.RoomMessageFormatted:
     """Return a steward's hidden route event as journal dispatch hands it to turn ingress."""
-    event = nio.Event.parse_event(
-        {
-            "content": content,
-            "event_id": event_id,
-            "sender": _entity_user_id(config, steward),
-            "origin_server_ts": 1_000_001,
-            "room_id": _ROOM_ID,
-            "type": constants.ROUTE_EVENT_TYPE,
-        },
+    event = parsed_route(
+        content,
+        sender=_entity_user_id(config, steward),
+        event_id=event_id,
+        origin_server_ts=1_000_001,
+        room_id=_ROOM_ID,
     )
-    assert isinstance(event, nio.UnknownEvent)
     return _route_as_message(event)
 
 
@@ -8814,6 +8836,48 @@ async def test_a_steward_routes_a_message_as_its_sender_edited_it_while_it_waite
 
 
 @pytest.mark.asyncio
+async def test_a_candidate_steward_that_only_routes_a_sender_routes_their_queued_batch_as_edited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate steward that may route a sender but not answer them still applies their edit to a queued batch."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name="general")
+    harness.runtime.orchestrator.steward = "general"
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(harness.policy, "can_reply_to_sender_in_room", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("research")),
+    )
+    first = _text_event("Book a table for June.", event_id="$first:localhost", thread_id=_THREAD_ROOT)
+    second = _text_event("For four people.", event_id="$second:localhost", thread_id=_THREAD_ROOT)
+    edit = _text_event("* Book a table for July.", event_id="$correction:localhost", origin_server_ts=1_000_002)
+    edit.source["content"]["m.new_content"] = {"body": "Book a table for July.", "msgtype": "m.text"}
+    edit.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": first.event_id}
+    key = CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER))
+
+    with patch.object(harness.ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
+        await harness.ingress.handle_text_event(room, first)
+        await harness.ingress.handle_text_event(room, second)
+
+        async def queued() -> None:
+            while len(harness.gate.queued_pending_events(key)) < 2:  # noqa: ASYNC110
+                await asyncio.sleep(0.001)
+
+        await asyncio.wait_for(queued(), timeout=5)
+        await harness.ingress.handle_text_event(room, edit)
+        await harness.gate.drain_all()
+
+    [route] = harness.gateway.routes
+    assert route[constants.ROUTE_EVENT_TYPE]["event_ids"] == [first.event_id, second.event_id]
+    assert "July" in route["body"]
+    assert "June" not in route["body"]
+    # The edit reaches no regeneration: this steward answers nothing of this sender's.
+    assert edit.event_id not in {event_id for sources in harness.ignored_dispatch_sources for event_id in sources}
+
+
+@pytest.mark.asyncio
 async def test_a_long_correction_read_after_a_restart_still_names_its_edit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -9214,6 +9278,20 @@ async def test_a_route_names_every_message_of_the_batch_it_routes(
 
     [route] = harness.gateway.routes
     assert route[constants.ROUTE_EVENT_TYPE]["event_ids"] == named
+
+
+@pytest.mark.asyncio
+async def test_a_steward_routes_an_event_without_content_with_no_revision(config: Config, tmp_path: Path) -> None:
+    """An event with no content took no edit while it waited, so its route names none."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = PreparedIngress(sender=_SENDER, event_id="$question:localhost", body="who can help?", source={})
+
+    await execute_router_relay(harness.dispatcher.deps, room, event, (), requester_user_id=_SENDER)
+
+    [route] = harness.gateway.routes
+    assert route["body"] == "who can help?"
+    assert constants.ROUTE_REVISION_KEY not in route
 
 
 @pytest.mark.asyncio

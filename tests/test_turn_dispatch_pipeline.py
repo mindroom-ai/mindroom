@@ -916,7 +916,7 @@ class TestAgentBot(AgentBotTestBase):
             handled_turn: TurnRecord | None = None,
             prompt_is_structured: bool = False,  # noqa: ARG001
         ) -> None:
-            assert message == "hello"
+            assert message is None
             assert requester_user_id == "@user:localhost"
             assert extra_content is None
             assert media_events is None
@@ -940,13 +940,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_policy,
                 "plan_turn",
-                new=AsyncMock(
-                    return_value=DispatchPlan(
-                        kind="route",
-                        router_message="hello",
-                        router_event=event,
-                    ),
-                ),
+                new=AsyncMock(return_value=DispatchPlan(kind="route")),
             ),
             patch(
                 "mindroom.turns.dispatch.execute_router_relay",
@@ -1918,7 +1912,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),
@@ -2007,7 +2001,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),

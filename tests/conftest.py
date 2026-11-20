@@ -100,7 +100,7 @@ from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.resolution import entity_model_name
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths, safe_replace
+from mindroom.constants import ROUTE_EVENT_TYPE, ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
@@ -1579,6 +1579,29 @@ def legacy_default_store_client(
     client = MindRoomAsyncClient(homeserver, user_id, store_path=str(store_dir), config=matrix_client_config())
     client.restore_login(user_id, device_id, access_token)
     return client
+
+
+def parsed_route(
+    content: dict[str, Any],
+    *,
+    sender: str,
+    event_id: str = "$route",
+    origin_server_ts: int = 1_001,
+    **source: object,
+) -> nio.UnknownEvent:
+    """Return a steward's hidden route event as nio parses it off the timeline."""
+    event = nio.Event.parse_event(
+        {
+            "type": ROUTE_EVENT_TYPE,
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": origin_server_ts,
+            "content": content,
+            **source,
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
+    return event
 
 
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:

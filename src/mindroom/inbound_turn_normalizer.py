@@ -31,7 +31,7 @@ from mindroom.matrix.media import (
     is_image_message_event,
     is_matrix_media_dispatch_event,
 )
-from mindroom.matrix.message_content import is_v2_sidecar_text_preview, resolve_event_source_content
+from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.thread_forks import fork_parent_thread_ids
 from mindroom.media_inputs import MediaInputs
@@ -227,12 +227,6 @@ class InboundTurnNormalizer:
                     payload_trusted=True,
                 ),
             )
-
-    async def prepare_file_sidecar_text_event(self, event: FileMessageEvent) -> PreparedIngress | None:
-        """Return a prepared text event when a file event is really a long-text preview."""
-        if not is_v2_sidecar_text_preview(event.source):
-            return None
-        return await self.resolve_text_event(TextNormalizationRequest(event=event))
 
     async def long_text_content(self, preview: Mapping[str, Any]) -> Mapping[str, Any]:
         """Return the whole content a long-text preview stands for, or none of it while its file cannot be read."""

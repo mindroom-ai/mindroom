@@ -1284,8 +1284,6 @@ class TestAgentBot(AgentBotTestBase):
             agent_name=ROUTER_AGENT_NAME,
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
-        event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
-        event.body = "continue"
         dispatch = PreparedDispatch(
             requester_user_id="@user:localhost",
             context=context,
@@ -1294,7 +1292,7 @@ class TestAgentBot(AgentBotTestBase):
             envelope=envelope,
         )
 
-        plan = await bot._turn_policy._plan_routing(room, event, dispatch)
+        plan = await bot._turn_policy._plan_routing(room, dispatch)
 
         assert plan is not None
         assert plan.kind == "route"
@@ -1674,6 +1672,6 @@ class TestAgentBot(AgentBotTestBase):
             envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id, target=dispatch_target),
         )
 
-        plan = await bot._turn_policy._plan_routing(room, event, dispatch)
+        plan = await bot._turn_policy._plan_routing(room, dispatch)
 
         assert plan == DispatchPlan(kind="ignore")

@@ -206,24 +206,6 @@ def _attachment_parts(prepared: _PreparedTextDispatch) -> tuple[list[str], list[
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 
-def _tracked_route_turn(
-    prepared: _PreparedTextDispatch,
-    *,
-    route_event: DispatchEvent,
-    single_direct_media_route: bool,
-) -> TurnRecord | None:
-    if single_direct_media_route:
-        return None
-    if not prepared.handled_turn.is_coalesced and (
-        not prepared.handled_turn.source_event_ids
-        or prepared.handled_turn.source_event_ids[0] == prepared.turn.event.event_id
-    ):
-        return None
-    if list(prepared.handled_turn.source_event_ids) == [route_event.event_id]:
-        return None
-    return prepared.handled_turn
-
-
 async def run_response_action(
     runner: ResponseRunner,
     request: ResponseRequest,
@@ -358,33 +340,19 @@ class TurnDispatcher:
                     prepared,
                 ):
                     return
-                message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(prepared)
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_start")
                 plan = await self.deps.turn_policy.plan_turn(
                     turn.room,
-                    turn.event,
                     prepared.dispatch,
                     has_active_response_for_target=self.deps.response_runner.has_active_response_for_target,
-                    extra_content=router_extra_content or None,
-                    media_events=list(turn.media_events) or None,
-                    router_event=turn.media_events[0]
-                    if turn.media_events and len(prepared.handled_turn.source_event_ids) == 1
-                    else turn.event,
                 )
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_ready")
                 # Only a turn this agent or its team answers; a routed one gets its title from its responder.
                 if plan.response_action is not None and plan.response_action.kind in {"individual", "team"}:
                     self._queue_prompt_summary(prepared)
-                await self._apply_turn_plan(
-                    turn.room,
-                    prepared,
-                    plan,
-                    message_attachment_ids=message_attachment_ids,
-                    trusted_attachment_ids=trusted_attachment_ids,
-                    take_claim=take_claim,
-                )
+                await self._apply_turn_plan(turn.room, prepared, plan, take_claim=take_claim)
         finally:
             if held is not None:
                 held.release()
@@ -453,9 +421,9 @@ class TurnDispatcher:
 
     async def _with_routed_text(self, turn: PreparedTurn) -> PreparedTurn | None:
         """Return a routed turn with its steward's prompt, the route's text or its long-text file's, or None while unread."""
-        content, body = turn.event.source["content"], turn.event.body
         if not turn.facts.routed_event_ids:
             return turn
+        content, body = turn.event.source["content"], turn.event.body
         if prompt_file := content.get(ROUTE_PROMPT_FILE_KEY):
             content = await self.deps.normalizer.long_text_content(prompt_file)
             body = content.get("body")
@@ -578,16 +546,15 @@ class TurnDispatcher:
         prepared: _PreparedTextDispatch,
         plan: DispatchPlan,
         *,
-        message_attachment_ids: list[str],
-        trusted_attachment_ids: list[str],
         take_claim: Callable[[], TurnClaim],
     ) -> None:
         visible_responses = self.deps.visible_responses
         if plan.kind == "ignore":
             await visible_responses.settle_source_events_ignored(prepared.handled_turn)
             return
+        message_attachment_ids, trusted_attachment_ids, route_extra_content = _attachment_parts(prepared)
         if plan.kind == "route":
-            if not await self._execute_route_plan(room, prepared, plan):
+            if not await self._execute_route_plan(room, prepared, route_extra_content or None):
                 return
             # The steward selected itself, so it answers as if the message had named it.
             self._queue_prompt_summary(prepared)
@@ -701,20 +668,16 @@ class TurnDispatcher:
         self,
         room: nio.MatrixRoom,
         prepared: _PreparedTextDispatch,
-        plan: DispatchPlan,
+        extra_content: dict[str, Any] | None,
     ) -> bool:
         """Route a turn as the room's steward; return whether the steward itself was selected and answers it."""
         turn = prepared.turn
-        route_event = plan.router_event or turn.event
+        ids = prepared.handled_turn.source_event_ids
+        route_event = turn.media_events[0] if turn.media_events and len(ids) == 1 else turn.event
         single_direct_media_route = (
             is_matrix_media_dispatch_event(route_event)
             and turn.media_events == (route_event,)
-            and prepared.handled_turn.source_event_ids == (turn.event.event_id,)
-        )
-        tracked_turn = _tracked_route_turn(
-            prepared,
-            route_event=route_event,
-            single_direct_media_route=single_direct_media_route,
+            and ids == (turn.event.event_id,)
         )
         # Config application waits until the selection and its relay delivery finish.
         async with self.deps.runtime.admission_fence():
@@ -724,11 +687,13 @@ class TurnDispatcher:
                 route_event,
                 prepared.dispatch.context.thread_history,
                 prepared.dispatch.target.resolved_thread_id,
-                message=turn.event.body if turn.media_events else plan.router_message,
+                message=turn.event.body if turn.media_events else None,
                 requester_user_id=prepared.dispatch.requester_user_id,
-                extra_content=plan.extra_content,
-                media_events=None if single_direct_media_route else plan.media_events,
-                handled_turn=tracked_turn,
+                extra_content=extra_content,
+                media_events=None if single_direct_media_route else list(turn.media_events) or None,
+                handled_turn=None
+                if ids in ((), (turn.event.event_id,), (route_event.event_id,))
+                else prepared.handled_turn,
                 prompt_is_structured=turn.current_prompt_is_structured,
             )
 

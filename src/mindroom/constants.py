@@ -1064,8 +1064,8 @@ SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
 SCHEDULED_MODEL_KEY = "com.mindroom.scheduled_model"
 SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
 # The hidden event a room's steward sends to the responder it selected for a message that names nobody.
-# Its content holds, under this same key, the responder's Matrix ID as `entity`, the person's event as `event_id`,
-# and the thread the answer belongs in as `thread_id`.
+# Its content holds, under this same key, the responder's Matrix ID as `entity`, the person's events it routes as
+# `event_ids` (the answer replies to the last), and the thread the answer belongs in as `thread_id`.
 ROUTE_EVENT_TYPE = "io.mindroom.route"
 # In a route's content: whether its `body`, the steward's prompt for the turn, holds the steward's own message tags.
 ROUTE_PROMPT_STRUCTURED_KEY = "io.mindroom.route_prompt_structured"

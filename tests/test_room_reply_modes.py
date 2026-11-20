@@ -68,7 +68,7 @@ from tests.conftest import (
 from tests.matrix_state_helpers import save_matrix_state
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.runtime_fakes import ready_runtime
-from tests.test_turn_policy import _context, _dispatch, _entity_id, _policy_for, _room_with_members, _text_event
+from tests.test_turn_policy import _context, _dispatch, _entity_id, _policy_for, _room_with_members
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -516,7 +516,6 @@ async def test_an_older_override_moves_into_the_room_through_its_steward(tmp_pat
 
     plan = await policy.plan_turn(
         _room_with_members(SENDER, _entity_id(config, "general").full_id, room_id=ROOM_ID),
-        _text_event("hello agents"),
         _dispatch(_context(), agent_name="general", room_id=ROOM_ID),
         has_active_response_for_target=lambda _target: False,
     )
@@ -903,7 +902,6 @@ async def _answers(config: Config, turn: _Turn) -> dict[str, str]:
                 dispatch = replace(dispatch, envelope=replace(dispatch.envelope, origin=origin))
             plan = await _policy_for(config, bot).plan_turn(
                 room,
-                _text_event("hello agents"),
                 dispatch,
                 has_active_response_for_target=lambda _target, bot=bot: bot == turn.answering,
             )

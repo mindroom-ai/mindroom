@@ -488,7 +488,7 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
         ),
         patch.object(
             bot._inbound_turn_normalizer,
-            "prepare_file_sidecar_text_event",
+            "resolve_text_event",
             new_callable=AsyncMock,
             return_value=prepared_event,
         ),

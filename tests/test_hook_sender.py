@@ -722,7 +722,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
-    dispatch = bot._turn_policy.plan_turn.await_args.args[2]
+    dispatch = bot._turn_policy.plan_turn.await_args.args[1]
     assert dispatch.envelope.source_kind == "hook"
     assert dispatch.envelope.message_received_depth == 1
     assert dispatch.envelope.mentioned_agents == ("code",)
@@ -932,7 +932,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 
     assert hook_calls == ["called"]
     bot._turn_policy.plan_turn.assert_awaited_once()
-    dispatch = bot._turn_policy.plan_turn.await_args.args[2]
+    dispatch = bot._turn_policy.plan_turn.await_args.args[1]
     assert dispatch.envelope.source_kind == "message"
 
 
@@ -1151,8 +1151,8 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     await bot._coalescing_gate.drain_all()
 
     assert captured_bodies == ["@mindroom_code:localhost what is 99+1?"]
-    assert bot._turn_policy.plan_turn.await_args.args[1].body == "@mindroom_code:localhost what is 99+1?"
     execute_args = bot._turn_dispatcher._execute_response_action.await_args.args
+    assert execute_args[1].body == "@mindroom_code:localhost what is 99+1?"
     assert isinstance(execute_args[4], DispatchPayloadInputs)
     await prepare_payload_via_seam(bot, execute_args)
     payload_request = bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments.await_args.args[0]
@@ -1625,7 +1625,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             },
         },
     )
-    bot._inbound_turn_normalizer.prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=prepared_text_event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=_dispatch_context(bot),
     )
@@ -1694,7 +1694,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             },
         },
     )
-    bot._inbound_turn_normalizer.prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=prepared_text_event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=_dispatch_context(bot),
     )
@@ -1753,7 +1753,7 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
-    dispatch = bot._turn_policy.plan_turn.await_args.args[2]
+    dispatch = bot._turn_policy.plan_turn.await_args.args[1]
     assert dispatch.envelope.source_kind == "hook_dispatch"
     assert dispatch.envelope.message_received_depth == 1
 
