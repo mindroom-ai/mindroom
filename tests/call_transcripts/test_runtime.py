@@ -644,9 +644,8 @@ async def test_an_agent_call_cannot_be_read_while_its_agent_is_not_ready(tmp_pat
 async def test_nobody_is_a_member_of_a_room_the_calls_agent_is_not_in(tmp_path: Path) -> None:
     """A room missing from the agent's own rooms is answered at once, without asking the homeserver for its state."""
     agent = _calls_agent(_FakeCallManager({ROOM, OTHER_ROOM}))
-    coordinator = _coordinator(
-        test_runtime_paths(tmp_path), lambda: _config(enabled=False), _Sleeps(), {"helper": agent}
-    )
+    paths = test_runtime_paths(tmp_path)
+    coordinator = _coordinator(paths, lambda: _config(enabled=False), _Sleeps(), {"helper": agent})
 
     left = coordinator.agent_call_room(OTHER_ROOM)
 
