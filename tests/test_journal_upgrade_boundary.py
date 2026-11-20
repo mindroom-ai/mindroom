@@ -464,4 +464,6 @@ async def test_messages_from_before_content_generations_get_one(legacy_database:
     finally:
         await store.close()
     assert fingerprint is not None
-    assert fingerprint[1] == {("$root", "$edit", None, 1)}
+    ((logical, revision, refresh, generation),) = fingerprint[1]
+    assert (logical, revision, refresh) == ("$root", "$edit", None)
+    assert generation != 0

@@ -338,6 +338,20 @@ class TestAThreadIsUnchangedOnlyWhenAStrictReadWouldRepeat(ThreadingBehaviorTest
         assert len({generation for *_, generation in fingerprint[1]}) == 2
 
     @pytest.mark.asyncio
+    async def test_an_edit_takes_a_generation_no_other_body_took(self, bot: AgentBot) -> None:
+        """An edit numbers its body from the same count as a new message, so a message stored again repeats none."""
+        store = bot._journal_store.principal(bot._journal_principal_id)
+        await seed_thread_history(bot, room_id=_ROOM, thread_id=_ROOT, messages=[])
+        await _admit(bot, _ROOT, "Root", ts=1)
+        await _admit(bot, "$one:localhost", "one", ts=2)
+        await _admit(bot, "$edit:localhost", "one, edited", ts=3, replaces="$one:localhost")
+        await _admit(bot, "$two:localhost", "two", ts=4)
+
+        fingerprint = await store.thread_fingerprint(room_id=_ROOM, thread_id=_ROOT)
+        assert fingerprint is not None
+        assert len({generation for *_, generation in fingerprint[1]}) == 3
+
+    @pytest.mark.asyncio
     async def test_a_history_that_is_not_the_whole_thread_never_stands(self, bot: AgentBot) -> None:
         """A page of a longer thread and a plain list prove nothing about the rest of the thread."""
         async with _thread(bot):

@@ -31,8 +31,9 @@ if TYPE_CHECKING:
 
     from .backend import Row, Transaction
 
-# A stored row's first generation: the clock when this runtime started, then one more for each row, so a message
-# deleted and stored again never repeats a number. One runtime holds a journal, and the next starts at a later clock.
+# Every stored body's generation, a new row's or an edit's: the clock when this runtime started, then one more for each
+# body, so a message deleted and stored again never repeats a number. One runtime holds a journal, and the next starts
+# at a later clock.
 _GENERATIONS = itertools.count(time.time_ns())
 
 _RELATES_TO = "m.relates_to"
@@ -498,8 +499,7 @@ def _install_revision(
     transaction.execute(
         """
         UPDATE visible_messages
-        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = ?,
-            content_generation = content_generation + 1
+        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = ?, content_generation = ?
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
         """,
         (
@@ -507,6 +507,7 @@ def _install_revision(
             revision_ts,
             content_json,
             refresh_token,
+            next(_GENERATIONS),
             principal_id,
             room_id,
             logical_event_id,
@@ -671,8 +672,7 @@ def install_refetched_revision(
     row = transaction.fetchone(
         """
         UPDATE visible_messages
-        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL,
-            content_generation = content_generation + 1
+        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL, content_generation = ?
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
           AND revision_event_id = ? AND refresh_token = ? AND membership_epoch = ?
         RETURNING sender, membership_epoch
@@ -681,6 +681,7 @@ def install_refetched_revision(
             revision_event_id,
             revision_ts,
             content_json,
+            next(_GENERATIONS),
             principal_id,
             room_id,
             logical_event_id,

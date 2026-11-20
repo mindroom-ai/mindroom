@@ -492,6 +492,8 @@ async def thread_is_unchanged(
         return False
     (_, complete, _, recovery_state), rows = fingerprint
     held = {(m.event_id, m.latest_event_id, None, m.content_generation) for m in history}
+    if not (complete and recovery_state is None and {row for row in rows if row[0] != ignoring_event_id} == held):
+        return False
     if any(row[0] == ignoring_event_id for row in rows):
         # A read counts the ignored message against its page's limit and budgets before its caller drops it, so the
         # page is whole only if that message, read here as the thread's newest, still fits beside ``history``.
@@ -503,7 +505,7 @@ async def thread_is_unchanged(
             or any(used + more > 1 for used, more in zip(history.budget_used, newest.budget_used, strict=True))
         ):
             return False
-    return bool(complete) and recovery_state is None and {row for row in rows if row[0] != ignoring_event_id} == held
+    return True
 
 
 async def refetched_thread_history(
