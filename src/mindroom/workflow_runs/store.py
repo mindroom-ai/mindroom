@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, fields, replace
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
     from pathlib import Path
 
+_BUSY_TIMEOUT_SECONDS = 10
 _MAX_INLINE_RESULT_BYTES = 8 * 1024 * 1024
 _RESULT_PREVIEW_BYTES = 64 * 1024
 _RUN_JSON_FIELDS = frozenset({"execution_identity", "persona", "args", "result"})
@@ -71,6 +73,7 @@ class WorkflowRunStore:
         self.database_path = path
         self.directory = path.parent
         self.directory.mkdir(parents=True, exist_ok=True)
+        self._enter_wal()
         self._migrate()
 
     def reserve_run(self, run: WorkflowRun) -> tuple[WorkflowRun, bool]:
@@ -377,15 +380,31 @@ class WorkflowRunStore:
                 connection.execute("DELETE FROM workflow_schema")
                 connection.execute("INSERT INTO workflow_schema (version) VALUES (?)", (len(_MIGRATIONS),))
 
+    def _enter_wal(self) -> None:
+        """Switch the database to WAL, which it then keeps, when the store opens.
+
+        SQLite refuses this one statement at once, without waiting out the busy timeout, while
+        another opener holds the database, so it is retried within the same bound.
+        """
+        deadline = time.monotonic() + _BUSY_TIMEOUT_SECONDS
+        with self._connection() as connection:
+            while True:
+                try:
+                    connection.execute("PRAGMA journal_mode = WAL")
+                except sqlite3.OperationalError as error:
+                    if error.sqlite_errorcode != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
+                else:
+                    return
+
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.database_path, isolation_level=None, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 10000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = FULL")
-        connection.execute("PRAGMA foreign_keys = ON")
+        connection = sqlite3.connect(self.database_path, isolation_level=None, timeout=_BUSY_TIMEOUT_SECONDS)
         try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("PRAGMA foreign_keys = ON")
             yield connection
         finally:
             connection.close()

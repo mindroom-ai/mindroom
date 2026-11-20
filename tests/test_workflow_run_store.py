@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -566,6 +568,45 @@ def test_log_returns_the_last_lines_in_order(tmp_path: Path) -> None:
 def _schema_version(path: Path) -> int:
     with sqlite3.connect(path) as connection:
         return connection.execute("SELECT version FROM workflow_schema").fetchone()[0]
+
+
+def test_open_waits_for_another_opener_that_holds_the_new_database(tmp_path: Path) -> None:
+    """Opening a database that someone else is still creating waits for them, as every other statement does."""
+    path = tmp_path / "w.sqlite3"
+    holder = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("CREATE TABLE placeholder (value TEXT)")
+
+    def release() -> None:
+        time.sleep(0.3)
+        holder.execute("COMMIT")
+        holder.close()
+
+    releaser = threading.Thread(target=release)
+    releaser.start()
+    try:
+        store = WorkflowRunStore(path)
+    finally:
+        releaser.join()
+    assert _schema_version(path) == store_module.SCHEMA_VERSION
+    assert store.reserve_run(_run())[1]
+
+
+def test_concurrent_first_opens_all_succeed(tmp_path: Path) -> None:
+    """Openers that race to create the database each get a store on the same schema."""
+    path = tmp_path / "fresh" / "w.sqlite3"
+    barrier = threading.Barrier(8)
+
+    def open_store(_number: int) -> WorkflowRunStore:
+        barrier.wait()
+        return WorkflowRunStore(path)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        stores = list(pool.map(open_store, range(8)))
+    assert len(stores) == 8
+    assert _schema_version(path) == store_module.SCHEMA_VERSION
+    stores[0].reserve_run(_run())
+    assert [run.run_id for run in stores[7].list_runs()] == [_RUN_A]
 
 
 def test_newer_schema_refuses_to_open(tmp_path: Path) -> None:
