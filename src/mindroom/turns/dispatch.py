@@ -1083,7 +1083,7 @@ class TurnDispatcher:
                 target_member_names=target_member_names,
                 dispatch_started_at=dispatch_started_at,
                 context_ready_monotonic=context_ready_monotonic,
-                routed_revision=event.source["content"].get(ROUTE_REVISION_KEY),
+                routed_revision=event.source.get("content", {}).get(ROUTE_REVISION_KEY),
             )
 
             response_request = ResponseRequest(
