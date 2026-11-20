@@ -31,6 +31,8 @@ type fakePrimary struct {
 	requests []fakeRequest
 	// onStatus, when set, runs while a POST /status waits for its answer.
 	onStatus func()
+	// onConnect, when set, runs while a POST /links/{id}/connect waits for its answer.
+	onConnect func()
 }
 
 type fakeAnswer struct {
@@ -61,10 +63,13 @@ func (p *fakePrimary) serve(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	p.requests = append(p.requests, fakeRequest{route, r.Header.Get("Authorization"), body})
 	answer, known := p.answers[route]
-	onStatus := p.onStatus
+	onStatus, onConnect := p.onStatus, p.onConnect
 	p.mu.Unlock()
 	if route == "POST /status" && onStatus != nil {
 		onStatus()
+	}
+	if strings.HasSuffix(route, "/connect") && onConnect != nil {
+		onConnect()
 	}
 	if !known {
 		http.NotFound(w, r)

@@ -34,6 +34,7 @@ _CODE_RUNNING_JOBS = (
     ("security-scan.yml", "scan"),
     ("smoke-stacks.yml", "smoke"),
     ("tach.yml", "check"),
+    ("tailnet-gateway.yml", "go-test"),
 )
 
 
@@ -96,6 +97,7 @@ def test_generated_docs_are_checked_rather_than_pushed_from_ci() -> None:
         "platform-backend-tests.yml",
         "publish-helm-charts.yml",
         "release.yml",
+        "tailnet-gateway.yml",
     ],
 )
 def test_workflows_pin_actions_to_commits(name: str) -> None:

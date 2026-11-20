@@ -1,0 +1,54 @@
+name: tailnet gateway
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tailnet-gateway/**"
+      - ".github/workflows/tailnet-gateway.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "tailnet-gateway/**"
+      - ".github/workflows/tailnet-gateway.yml"
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request makes older runs obsolete; other events never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  go-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: tailnet-gateway
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: tailnet-gateway/go.mod
+          cache-dependency-path: tailnet-gateway/go.sum
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...

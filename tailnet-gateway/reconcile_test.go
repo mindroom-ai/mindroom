@@ -19,8 +19,10 @@ type fakeNode struct {
 	dir, hostname string
 	listener      net.Listener
 
-	mu        sync.Mutex
-	observed  NodeObserved
+	mu       sync.Mutex
+	observed NodeObserved
+	// peer is who the tailnet says is behind every connection; nil is a peer it does not know.
+	peer      *fakePeer
 	calls     []string
 	logoutIn  time.Duration
 	logoutErr error
@@ -48,8 +50,23 @@ func hold(ctx context.Context, held, entered chan struct{}) {
 
 func (n *fakeNode) Listener() net.Listener { return n.listener }
 
+// fakePeer is a tailnet peer: its login, which is "" for a tagged device, and its machine.
+type fakePeer struct{ login, node string }
+
 func (n *fakeNode) WhoIs(context.Context, string) (string, string, error) {
-	return "", "", errors.New("no tailnet")
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.peer == nil {
+		return "", "", errors.New("no tailnet")
+	}
+	return n.peer.login, n.peer.node, nil
+}
+
+// peerIs sets who the tailnet says is behind every connection to the node.
+func (n *fakeNode) peerIs(login, node string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.peer = &fakePeer{login, node}
 }
 
 func (n *fakeNode) Observed() NodeObserved {
@@ -563,21 +580,38 @@ func TestStatusCountsAConnectionOnce75SecondsOld(t *testing.T) {
 	}
 }
 
-func TestNodeThatDoesNotStartIsTriedAgain(t *testing.T) {
+func TestNodeThatDoesNotStartIsReportedAndTriedAgain(t *testing.T) {
 	f := newFixtures(t, "login")
 	f.primary.list(t, on(idA))
-	f.nodes.startErr = errors.New("no space left on device")
+	f.nodes.startErr = errors.New("no space left on device in /state/" + idA)
 
 	f.reconcile(t)
 	failed := f.gateway.Status()
 	f.nodes.startErr = nil
 	f.reconcile(t)
 
-	if len(failed) != 0 {
-		t.Errorf("status = %+v, want no node reported while none started", failed)
+	// The card shows the sentence, so it says nothing of the gateway's disk.
+	want := map[string]LinkStatus{idA: {State: "needs_login", LastError: ptr(nodeDidNotStart)}}
+	if !reflect.DeepEqual(failed, want) {
+		t.Errorf("status = %+v while the node did not start, want %+v", failed, want)
 	}
-	if got := f.gateway.Status()[idA].State; got != "needs_login" {
-		t.Errorf("state = %q, want the node of the second pass", got)
+	if got := f.gateway.Status()[idA]; got.State != "needs_login" || got.LastError != nil || f.nodes.count() != 1 {
+		t.Errorf("status = %+v with %d nodes, want the node of the second pass and no error", got, f.nodes.count())
+	}
+}
+
+func TestNodeThatDoesNotStartIsNotReportedOnceItsLinkIsRemoved(t *testing.T) {
+	f := newFixtures(t, "login")
+	f.primary.list(t, on(idA))
+	f.nodes.startErr = errors.New("no space left on device")
+	f.reconcile(t)
+	f.primary.list(t, removing(idA))
+
+	f.reconcile(t)
+
+	want := map[string]LinkStatus{idA: {State: "removed"}}
+	if got := f.gateway.Status(); !reflect.DeepEqual(got, want) {
+		t.Errorf("status = %+v, want %+v", got, want)
 	}
 }
 
@@ -647,6 +681,42 @@ func TestRevokedConnectionsAreClosedBeforeAnyNodeCall(t *testing.T) {
 	}
 	if got := f.gateway.Status()[idB].State; got != "removed" || removedNode.called("Logout") != 1 {
 		t.Errorf("state = %q after %d Logout calls, want the link removed after 1", got, removedNode.called("Logout"))
+	}
+}
+
+func TestSuspendedAndCutConnectionsAreClosedBeforeAnyNodeCall(t *testing.T) {
+	f := newFixtures(t, "login")
+	slow, suspended, cut := on(idA), on(idB), on(idC)
+	f.primary.list(t, slow, suspended, cut)
+	f.run(t)
+	slowNode := f.nodes.node(t, 0)
+	endRelogin := slowNode.holdRelogin(t)
+	kept := f.connect(t, idA)
+	ofSuspended, ofCut := f.connect(t, idB), f.connect(t, idC)
+	// The link listed first has a node whose new login does not come back; of the others one is suspended and one
+	// has its connections cut.
+	slow.LoginAfter = 200
+	suspended.Desired = "suspended"
+	cut.ClosedBefore = 300
+	f.primary.list(t, slow, suspended, cut)
+
+	f.clock.advance(5 * time.Second)
+	await(t, slowNode.reloginEntered, "the pass that asks the node for a new login")
+
+	if !closed(t, ofSuspended) {
+		t.Error("the connection of a suspended link is open while another link's node is asked for a login")
+	}
+	if !closed(t, ofCut) {
+		t.Error("the connection of a link whose closed_before moved is open while another link's node is asked for a login")
+	}
+	endRelogin()
+	f.clock.settle(t)
+
+	f.gateway.mu.Lock()
+	open := len(f.gateway.conns[idA])
+	f.gateway.mu.Unlock()
+	if open != 1 || closed(t, kept) {
+		t.Errorf("the link that stays on has %d open connections, want its 1 still open", open)
 	}
 }
 

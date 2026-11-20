@@ -278,6 +278,18 @@ def test_build_mindroom_still_validates_pull_requests(build_mindroom_workflow: d
     assert build_step["with"]["push"] == "${{ github.event_name == 'workflow_dispatch' }}"
 
 
+def test_build_mindroom_builds_and_publishes_the_tailnet_gateway(build_mindroom_workflow: dict[str, Any]) -> None:
+    """The gateway image is built from the repository root like the others, and gets the same release manifests."""
+    jobs = build_mindroom_workflow["jobs"]
+    built = {target["image_name"]: target["dockerfile"] for target in jobs["build"]["strategy"]["matrix"]["target"]}
+    published = [target["image_name"] for target in jobs["manifest"]["strategy"]["matrix"]["target"]]
+
+    assert built["mindroom-tailnet-gateway"] == "tailnet-gateway/Dockerfile"
+    assert (ROOT / built["mindroom-tailnet-gateway"]).is_file()
+    assert published == list(built)
+    assert "tailnet-gateway/**" in build_mindroom_workflow["on"]["pull_request"]["paths"]
+
+
 def test_build_mindroom_publishes_release_images_on_dispatch(
     build_mindroom_workflow: dict[str, Any],
 ) -> None:

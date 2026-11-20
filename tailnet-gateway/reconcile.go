@@ -20,6 +20,8 @@ const (
 	nodeCallTimeout = 10 * time.Second
 	// A connection this old is past sshd's LoginGraceTime, so it is an authenticated session and counts as open.
 	countedAfter = 75 * time.Second
+	// What the card shows of a link whose node does not start; why is in the gateway's log.
+	nodeDidNotStart = "The gateway could not start this link's node."
 )
 
 // A link id names a state directory, so nothing but the primary's 16 hex characters is one.
@@ -88,7 +90,10 @@ type Gateway struct {
 	removed map[string]bool
 	// conns holds each link's open connections and when this clock saw them accepted.
 	conns map[string]map[net.Conn]time.Time
-	// lastError holds what the primary answered when it last refused a connection of the link.
+	// connects holds when the link's connect calls of the last minute were made.
+	connects map[string][]time.Time
+	// lastError holds why the link's last connection did not get to its worker, or, of a link without a node, that
+	// its node did not start.
 	lastError map[string]string
 }
 
@@ -105,6 +110,7 @@ func NewGateway(p Primary, f NodeFactory, stateDir, enrollment string) *Gateway 
 		relogin:    map[string]bool{},
 		removed:    map[string]bool{},
 		conns:      map[string]map[net.Conn]time.Time{},
+		connects:   map[string][]time.Time{},
 		lastError:  map[string]string{},
 	}
 }
@@ -192,9 +198,9 @@ func (g *Gateway) Run(ctx context.Context) {
 // pass that cannot read the links returns the error and changes nothing.
 //
 // A pass first does what the new rows revoke, before any call to a node, which may take 10 s: the rows are the ones
-// connections are checked against from then on, and the connections of a link that is removing or no longer listed
-// are closed. Then every link that stays gets its node, after which the status may be reported, and the removals
-// come last.
+// connections are checked against from then on, and the open connections are closed of every link that is not on
+// any more, or whose closed_before moved. Then every link that stays gets its node, after which the status may be
+// reported, and the removals come last.
 func (g *Gateway) Reconcile(ctx context.Context) error {
 	answer, err := g.primary.Links(ctx)
 	if err != nil {
@@ -224,15 +230,22 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 	g.links = listed
 	var revoked []net.Conn
 	for id, open := range g.conns {
-		if link, ok := listed[id]; !ok || link.Desired == "removing" {
+		// The primary moves closed_before to cut what is open, whenever this clock saw it opened.
+		if link := listed[id]; link.Desired != "on" || link.ClosedBefore != before[id].ClosedBefore {
 			for conn := range open {
 				revoked = append(revoked, conn)
 			}
 			delete(g.conns, id)
 		}
 	}
-	for id := range g.lastError {
+	for id := range g.connects {
 		if _, ok := listed[id]; !ok {
+			delete(g.connects, id)
+		}
+	}
+	for id := range g.lastError {
+		// A link that is removing has no node to report an error with.
+		if link, ok := listed[id]; !ok || link.Desired == "removing" {
 			delete(g.lastError, id)
 		}
 	}
@@ -278,8 +291,8 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 	return nil
 }
 
-// keep runs the link's node, and asks a node that needs a login for a new login URL when it fell back from running
-// or the link's login_after moved since the pass before.
+// keep runs the link's node and takes its connections, and asks a node that needs a login for a new login URL when
+// it fell back from running or the link's login_after moved since the pass before.
 func (g *Gateway) keep(ctx context.Context, link DesiredLink, moved bool) {
 	g.mu.Lock()
 	node := g.nodes[link.ID]
@@ -288,13 +301,19 @@ func (g *Gateway) keep(ctx context.Context, link DesiredLink, moved bool) {
 	if node == nil {
 		// Never the hostname: two nodes on one directory overwrite each other's state.
 		started, err := g.factory(filepath.Join(g.stateDir, link.ID), link.Hostname)
+		g.mu.Lock()
+		if err != nil {
+			g.lastError[link.ID] = nodeDidNotStart
+		} else {
+			g.nodes[link.ID] = started
+			delete(g.lastError, link.ID)
+		}
+		g.mu.Unlock()
 		if err != nil {
 			log.Printf("link %s: starting its node: %v", link.ID, err)
 			return
 		}
-		g.mu.Lock()
-		g.nodes[link.ID] = started
-		g.mu.Unlock()
+		go g.serve(ctx, link, started)
 		// A node asks for its first login itself.
 		return
 	}
@@ -365,8 +384,9 @@ func (g *Gateway) drop(id string) Node {
 	return node
 }
 
-// Status returns what Run reports to the primary: every node the gateway holds as its tailnet sees it, and every
-// link whose removal is done as removed. It does not wait for a pass under way.
+// Status returns what Run reports to the primary: every node the gateway holds as its tailnet sees it, every link
+// whose node did not start as one that needs a login, with the error, and every link whose removal is done as
+// removed. It does not wait for a pass under way.
 func (g *Gateway) Status() map[string]LinkStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -391,6 +411,11 @@ func (g *Gateway) Status() map[string]LinkStatus {
 			link.LastError = &detail
 		}
 		status[id] = link
+	}
+	for id, detail := range g.lastError {
+		if _, held := g.nodes[id]; !held {
+			status[id] = LinkStatus{State: "needs_login", LastError: &detail}
+		}
 	}
 	for id := range g.removed {
 		status[id] = LinkStatus{State: "removed"}
