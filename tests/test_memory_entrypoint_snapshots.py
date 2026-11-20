@@ -32,17 +32,22 @@ def _preamble(
     now: float = 0.0,
     root: str = "agent",
     whole: str | None = None,
+    frame: str = "header",
+    fits: bool = True,
 ) -> str:
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text.
 
-    ``whole`` is the text of the whole file when a preload cap cut ``text`` from it.
+    ``whole`` is the text of the whole file when a preload cap cut ``text`` from it, and ``fits`` whether the caps
+    would keep every line the conversation's copy shows.
     """
     return snapshots.stable_entrypoint_preamble(
         ConversationRef((summary, None), _snapshot(session, root)),
         path,
-        text,
-        f"preamble of {text!r}",
-        whole_body=text if whole is None else whole,
+        f"preamble of {text!r}" if text else "",
+        frame=frame,
+        shown=text.splitlines(),
+        file_lines=(text if whole is None else whole).splitlines(),
+        fits=lambda _lines: fits,
         now=now,
     )
 
@@ -89,6 +94,18 @@ def test_lines_a_cap_withholds_keep_the_preamble() -> None:
     assert _preamble("head\nc\nd", whole="head\na\nb\nc\nd") == "preamble of 'head\\nb\\nc'"
     # A kept line deleted from the whole file still loads it again.
     assert _preamble("head\nd\ne", whole="head\na\nb\nd\ne") == "preamble of 'head\\nd\\ne'"
+
+
+def test_a_changed_frame_loads_the_file_again() -> None:
+    """A prompt override that only adds a header line still changes what frames the copy."""
+    _preamble("a", frame="header")
+    assert _preamble("a\nb", frame="header\nadded") == "preamble of 'a\\nb'"
+
+
+def test_a_copy_the_caps_would_cut_loads_the_file_again() -> None:
+    """A lowered cap must shrink the conversation's copy, not keep the lines it now withholds."""
+    _preamble("a\nb")
+    assert _preamble("b", whole="a\nb", fits=False) == "preamble of 'b'"
 
 
 def test_empty_copy_loads_the_file_once_it_gains_lines() -> None:

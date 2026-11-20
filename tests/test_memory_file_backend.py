@@ -1895,12 +1895,21 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
     assert (await preamble(thread)).startswith("Edited header")
 
 
-@pytest.mark.asyncio
-async def test_file_backend_conversation_keeps_its_capped_entrypoint_after_a_memory_is_added(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A new entry pushes the oldest kept one out of a capped preload, which must leave the conversation's copy as sent."""
+async def _conversation_preamble(config: Config, conversation: ConversationRef | None) -> str:
+    prompt_parts = await public_build_memory_prompt_parts(
+        "What should I remember?",
+        "general",
+        config,
+        runtime_paths_for(config),
+        current_execution_identity(),
+        conversation=conversation,
+        counter=fake_token_counter(),
+    )
+    return prompt_parts.session_preamble
+
+
+def _capped_memory_file(storage_path: Path, config: Config) -> Path:
+    """Write a MEMORY.md whose three entries a three-line cap preloads as its head and two newest entries."""
     config.memory.file.max_entrypoint_lines = 3
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -1909,25 +1918,22 @@ async def test_file_backend_conversation_keeps_its_capped_entrypoint_after_a_mem
         "# Memory\n- [id=m1] Fact one.\n- [id=m2] Fact two.\n- [id=m3] Fact three.\n",
         encoding="utf-8",
     )
+    return memory_path
 
-    async def preamble(conversation: ConversationRef | None) -> str:
-        prompt_parts = await public_build_memory_prompt_parts(
-            "What should I remember?",
-            "general",
-            config,
-            runtime_paths_for(config),
-            current_execution_identity(),
-            conversation=conversation,
-            counter=fake_token_counter(),
-        )
-        return prompt_parts.session_preamble
 
+@pytest.mark.asyncio
+async def test_file_backend_conversation_keeps_its_capped_entrypoint_after_a_memory_is_added(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A new entry pushes the oldest kept one out of a capped preload, which must leave the conversation's copy as sent."""
+    memory_path = _capped_memory_file(storage_path, config)
     thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
-    first = await preamble(thread)
+    first = await _conversation_preamble(config, thread)
     await add_agent_memory("Fact four.", "general", config)
 
-    assert await preamble(thread) == first
-    fresh = await preamble(None)
+    assert await _conversation_preamble(config, thread) == first
+    fresh = await _conversation_preamble(config, None)
     assert "Fact four." in fresh
     assert "Fact two." in first
     assert "Fact two." not in fresh
@@ -1937,7 +1943,66 @@ async def test_file_backend_conversation_keeps_its_capped_entrypoint_after_a_mem
         memory_path.read_text(encoding="utf-8").replace("- [id=m3] Fact three.\n", ""),
         encoding="utf-8",
     )
-    assert "Fact three." not in await preamble(thread)
+    assert "Fact three." not in await _conversation_preamble(config, thread)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_reloads_its_entrypoint_when_its_framing_prompts_change(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A header override that only adds a line, or an edited truncation marker, must reach the conversation."""
+    _capped_memory_file(storage_path, config)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    await _conversation_preamble(config, thread)
+
+    header = PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"]
+    config.prompts["FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"] = f"{header}\nAdded header line."
+    assert "Added header line." in await _conversation_preamble(config, thread)
+    config.prompts["FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"] = (
+        "Withheld: {included_lines}/{total_lines} {max_entrypoint_lines} {max_entrypoint_tokens} {memory_path}"
+    )
+    assert "Withheld: 3/4" in await _conversation_preamble(config, thread)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_reloads_its_entrypoint_when_a_cap_is_lowered(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A lowered line or token cap must shrink a conversation's copy as it shrinks a fresh preload."""
+    _capped_memory_file(storage_path, config)
+    by_lines = ConversationRef((None, None), storage_path / "snapshots" / "lines.json")
+    by_tokens = ConversationRef((None, None), storage_path / "snapshots" / "tokens.json")
+    assert "Fact two." in await _conversation_preamble(config, by_lines)
+    assert "Fact two." in await _conversation_preamble(config, by_tokens)
+
+    config.memory.file.max_entrypoint_lines = 2
+    assert "Fact two." not in await _conversation_preamble(config, by_lines)
+    config.memory.file.max_entrypoint_lines = 3
+    config.memory.file.max_entrypoint_tokens = 10
+    assert "Fact two." not in await _conversation_preamble(config, by_tokens)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_keeps_a_headless_capped_window_whose_first_line_is_indented(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """The preload trims its first line, which must not read as an edit of that line in the file."""
+    config.memory.file.max_entrypoint_tokens = 250
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    lines = [f"  - [id=m{index}] fact {index} " + "x" * 384 for index in range(3)]
+    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await _conversation_preamble(config, thread)
+    assert lines[0].strip() not in first
+    assert f"\n{lines[1].strip()}" in first
+
+    await add_agent_memory("Fact four.", "general", config)
+    assert "Fact four." in await _conversation_preamble(config, None)
+    assert await _conversation_preamble(config, thread) == first
 
 
 @pytest.mark.asyncio

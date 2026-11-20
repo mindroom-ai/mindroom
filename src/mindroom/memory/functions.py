@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
@@ -13,7 +13,7 @@ from mindroom.timing import timed
 
 from ._backend import resolve_memory_backend
 from ._entrypoint_snapshots import stable_entrypoint_preamble
-from ._file_backend import append_agent_daily_file_memory, cap_entrypoint
+from ._file_backend import append_agent_daily_file_memory, cap_entrypoint, entrypoint_lines_fit
 from ._prompting import format_memories_as_context
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
 
@@ -233,15 +233,16 @@ async def _entrypoint_preamble(
     preamble = "\n".join(part for part in (body, _render_truncation_notice(entrypoint, config)) if part)
     if conversation is None or entrypoint.source_path is None:
         return preamble
-    whole = replace(entrypoint, text="\n".join(entrypoint.lines).strip())
-    whole_body = _render_entrypoint_body(whole, config, kept_copy=True) if body else ""
+    framing = ("HEADER_TEMPLATE", "KEPT_COPY_NOTICE", "TRUNCATION_TEMPLATE")
     return await asyncio.to_thread(
         stable_entrypoint_preamble,
         conversation,
         entrypoint.source_path,
-        body,
         preamble,
-        whole_body=whole_body,
+        frame="\n".join(config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{name}") for name in framing),
+        shown=entrypoint.included,
+        file_lines=entrypoint.lines,
+        fits=lambda lines: entrypoint_lines_fit(lines, config, counter),
         now=time.time(),
     )
 
