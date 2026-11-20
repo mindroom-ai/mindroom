@@ -48,7 +48,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
-    retire_subagent_worker,
+    retire_pinned_worker,
     stable_json_digest,
     subagent_worker_expired,
     validate_dedicated_worker_extra_env,
@@ -661,7 +661,7 @@ class DockerWorkerBackend:
                 running = self._container_is_running(container)
                 if expired_subagent_worker and not running:
                     # A subagent's own worker serves no one once it expires: it is stopped first, then removed.
-                    if retire_subagent_worker(self._retire_worker_locked, metadata.worker_key):
+                    if retire_pinned_worker(self._retire_worker_locked, metadata.worker_key):
                         cleaned.append(handle)
                 elif running and (handle.status == "idle" or expired_subagent_worker):
                     self._stop_container(container)

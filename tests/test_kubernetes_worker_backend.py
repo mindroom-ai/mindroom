@@ -39,6 +39,7 @@ from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    named_worker_key,
     private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
@@ -49,6 +50,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers import progress as progress_module
+from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError, WorkerStartTimeoutError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
@@ -707,6 +709,8 @@ def _backend(
     user_resources: dict[str, dict[str, dict[str, str]]] | None = None,
     image_pull_secrets: tuple[str, ...] = (),
     image_pull_policy: str = "IfNotPresent",
+    named_worker_idle_timeout_seconds: float = 600.0,
+    named_worker_max_age_seconds: float = 14400.0,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -743,6 +747,8 @@ def _backend(
         tmp_size_limit=tmp_size_limit,
         user_resources=user_resources or {},
         image_pull_secrets=image_pull_secrets,
+        named_worker_idle_timeout_seconds=named_worker_idle_timeout_seconds,
+        named_worker_max_age_seconds=named_worker_max_age_seconds,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -3860,7 +3866,7 @@ def test_kubernetes_cleanup_goes_on_when_a_subagent_worker_cannot_be_removed(
     assert [handle.worker_key for handle in cleaned] == [_TEST_SCOPED_WORKER_KEY_B]
     assert apps_api.deployments[normal.worker_id].spec.replicas == 0
     assert subagent.worker_id in apps_api.deployments
-    assert [entry["worker"] for entry in logs if entry["event"] == "subagent_worker_retire_failed"] == [
+    assert [entry["worker"] for entry in logs if entry["event"] == "pinned_worker_retire_failed"] == [
         worker_log_id(subagent_key),
     ]
 
@@ -3957,6 +3963,256 @@ def test_kubernetes_cleanup_keeps_a_subagent_worker_inside_the_idle_timeout(tmp_
 
     assert backend.cleanup_idle_workers(now=10.0) == []
     assert apps_api.deployments[handle.worker_id].spec.replicas == 1
+
+
+def _named_backend(
+    tmp_path: Path,
+    **settings: float,
+) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
+    """Return a backend with its own storage whose named workers expire as ``settings`` say."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    return _backend(runtime_paths=runtime_paths, idle_timeout_seconds=1800.0, **settings)
+
+
+def _named_spec(name_digit: str = "e") -> WorkerSpec:
+    return _spec(
+        named_worker_key(_TEST_SCOPED_WORKER_KEY_A, name_digit * 32),
+        state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A,
+    )
+
+
+def test_kubernetes_cleanup_stops_then_removes_a_named_worker_no_call_ran_in(tmp_path: Path) -> None:
+    """A named worker idle past its own, shorter timeout is stopped and then removed with its state."""
+    backend, apps_api, core_api = _named_backend(tmp_path, named_worker_idle_timeout_seconds=5.0)
+    named = backend.ensure_worker(_named_spec(), now=0.0)
+    normal = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    named_root = backend.storage_root / backend._state_subpath(named.worker_key)
+
+    assert backend.cleanup_idle_workers(now=4.0) == []
+    # A call in flight keeps its worker in use, which the cleanup loop records before every pass.
+    backend.touch_worker(named.worker_key, now=4.0)
+    assert backend.cleanup_idle_workers(now=8.0) == []
+
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=9.0)] == [named.worker_key]
+    assert apps_api.deployments[named.worker_id].spec.replicas == 0
+    assert named_root.is_dir()
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=10.0)] == [named.worker_key]
+
+    assert named.worker_id not in apps_api.deployments
+    assert named.worker_id not in core_api.services
+    assert named.worker_id not in core_api.secrets
+    assert named_root.exists() is False
+    # The agent's normal worker follows the ordinary idle timeout.
+    assert apps_api.deployments[normal.worker_id].spec.replicas == 1
+
+
+def test_kubernetes_cleanup_stops_a_named_worker_at_its_maximum_age_whatever_runs_in_it(tmp_path: Path) -> None:
+    """A named worker that reaches its maximum age is stopped even while calls keep it in use."""
+    backend, apps_api, _core_api = _named_backend(tmp_path, named_worker_max_age_seconds=100.0)
+    named = backend.ensure_worker(_named_spec(), now=0.0)
+
+    backend.touch_worker(named.worker_key, now=99.0)
+    assert backend.cleanup_idle_workers(now=99.0) == []
+    backend.touch_worker(named.worker_key, now=100.0)
+
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=100.0)] == [named.worker_key]
+    assert apps_api.deployments[named.worker_id].spec.replicas == 0
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=101.0)] == [named.worker_key]
+    assert named.worker_id not in apps_api.deployments
+
+
+def test_kubernetes_cleanup_removes_a_stopped_named_worker_before_it_expires(tmp_path: Path) -> None:
+    """A named worker that failed is removed on the next pass, because its reply starts a new one instead."""
+    backend, apps_api, core_api = _named_backend(tmp_path)
+    named = backend.ensure_worker(_named_spec(), now=0.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    backend.record_failure(named.worker_key, "pod was evicted", now=1.0)
+    backend.record_failure(subagent.worker_key, "pod was evicted", now=1.0)
+
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=2.0)] == [named.worker_key]
+
+    assert named.worker_id not in apps_api.deployments
+    assert named.worker_id not in core_api.services
+    assert (backend.storage_root / backend._state_subpath(named.worker_key)).exists() is False
+    # A subagent's worker stays until the idle timeout, as a follow-up may restart it.
+    assert subagent.worker_id in apps_api.deployments
+
+
+@pytest.mark.parametrize("pin", [subagent_worker_key, named_worker_key], ids=["subagent", "named"])
+def test_kubernetes_maintenance_removes_the_files_a_failed_removal_left_behind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pin: Callable[[str, str], str],
+) -> None:
+    """A removal that fails after its Deployment is gone is retried from the worker's files once they stay orphaned."""
+    backend, apps_api, core_api = _named_backend(tmp_path, named_worker_idle_timeout_seconds=5.0)
+    backend.idle_timeout_seconds = 5.0
+    pinned = backend.ensure_worker(
+        _spec(pin(_TEST_SCOPED_WORKER_KEY_A, "d" * 32), state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A),
+        now=0.0,
+    )
+    _expire(apps_api, pinned.worker_id, replicas=0)
+    pinned_root = backend.storage_root / backend._state_subpath(pinned.worker_key)
+
+    def stale_file_handle(*_args: object) -> None:
+        msg = "stale file handle"
+        raise OSError(msg)
+
+    with monkeypatch.context() as failing, capture_logs() as logs:
+        failing.setattr(worker_retirement_module, "_remove_tree", stale_file_handle)
+        assert backend.maintain_workers(now=10.0).cleaned == ()
+    assert [entry["worker"] for entry in logs if entry["event"] == "pinned_worker_retire_failed"] == [
+        worker_log_id(pinned.worker_key),
+    ]
+    # The Deployment, the Service, and the Secret are gone, so only the files stay, which no Deployment names.
+    assert pinned.worker_id not in apps_api.deployments
+    assert pinned.worker_id not in core_api.services
+    assert pinned_root.is_dir()
+
+    # Files without a Deployment are left alone until they have stayed that way for the grace period.
+    grace = kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS
+    backend.maintain_workers(now=11.0)
+    backend.maintain_workers(now=10.0 + grace)
+    assert pinned_root.is_dir()
+
+    backend.maintain_workers(now=11.0 + grace)
+
+    assert pinned_root.exists() is False
+
+
+def test_kubernetes_maintenance_keeps_files_that_are_not_an_orphaned_pinned_workers(tmp_path: Path) -> None:
+    """Only a pinned worker's own files without a Deployment are removed; every other directory stays."""
+    backend, apps_api, _core_api = _named_backend(tmp_path, named_worker_idle_timeout_seconds=10_000.0)
+    grace = kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS
+    normal = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    script_key = script_worker_key_for_run(
+        "v1:test:user_agent:@alice:example.test:watcher",
+        f"script-{'c' * 32}",
+    )
+    script = backend.ensure_worker(
+        _spec(
+            script_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key="v1:test:user_agent:@alice:example.test:watcher",
+        ),
+        now=0.0,
+    )
+    running = backend.ensure_worker(_named_spec("a"), now=0.0)
+    restarted = backend.ensure_worker(_named_spec("b"), now=0.0)
+    restarted_deployment = apps_api.deployments[restarted.worker_id]
+    workers_root = backend.storage_root / "workers"
+    (workers_root / "unrelated").mkdir()
+    # A normal worker and a script worker whose Deployments someone deleted keep their files.
+    for handle in (normal, script, restarted):
+        del apps_api.deployments[handle.worker_id]
+
+    backend.maintain_workers(now=1.0)
+    # A start since the first pass owns its files again.
+    apps_api.deployments[restarted.worker_id] = restarted_deployment
+    backend.maintain_workers(now=1.0 + grace)
+    backend.maintain_workers(now=2.0 + 2 * grace)
+
+    assert {path.name for path in workers_root.iterdir()} == {
+        "unrelated",
+        *(
+            backend._state_subpath(handle.worker_key).rpartition("/")[2]
+            for handle in (normal, script, running, restarted)
+        ),
+    }
+
+
+def test_kubernetes_maintenance_does_not_remove_files_whose_worker_is_being_started(tmp_path: Path) -> None:
+    """Files without a Deployment whose worker is locked, as during its start, are left for a later pass."""
+    backend, apps_api, _core_api = _named_backend(tmp_path)
+    grace = kubernetes_backend_module._ORPHANED_STATE_GRACE_SECONDS
+    named = backend.ensure_worker(_named_spec(), now=0.0)
+    named_root = backend.storage_root / backend._state_subpath(named.worker_key)
+    del apps_api.deployments[named.worker_id]
+    backend.maintain_workers(now=1.0)
+
+    with backend._worker_locks.for_key(named.worker_key):
+        backend.maintain_workers(now=1.0 + grace)
+    assert named_root.is_dir()
+
+    backend.maintain_workers(now=2.0 + grace)
+    assert named_root.exists() is False
+
+
+def test_kubernetes_backend_logs_a_named_worker_cold_start_as_named() -> None:
+    """A named worker logs its start as ``named`` with its normal worker's scope and agent."""
+    backend, _apps_api, _core_api = _backend()
+    spec = _named_spec()
+
+    with capture_logs() as logs:
+        backend.ensure_worker(spec, now=10.0)
+
+    [record] = _cold_start_records(logs)
+    assert (record["kind"], record["scope"], record["agent_name"]) == ("named", "shared", "code")
+    assert record["worker"] == worker_log_id(spec.worker_key)
+
+
+def test_kubernetes_named_worker_settings_come_from_the_environment(tmp_path: Path) -> None:
+    """The named worker limits default sensibly and follow their environment variables."""
+    env = {
+        "MINDROOM_WORKER_BACKEND": "kubernetes",
+        "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+    }
+
+    def configured(extra: dict[str, str]) -> tuple[KubernetesWorkerBackendConfig, tuple[str, ...]]:
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={**env, **extra},
+        )
+        signature = configure_kubernetes_worker_backend(
+            runtime_paths,
+            auth_token=_TEST_AUTH_TOKEN,
+            storage_root=runtime_paths.storage_root,
+        ).signature
+        return KubernetesWorkerBackendConfig.from_runtime(runtime_paths), signature
+
+    defaults, default_signature = configured({})
+    custom, custom_signature = configured(
+        {
+            "MINDROOM_KUBERNETES_NAMED_WORKER_IDLE_TIMEOUT_SECONDS": "120",
+            "MINDROOM_KUBERNETES_NAMED_WORKER_MAX_AGE_SECONDS": "3600",
+            "MINDROOM_KUBERNETES_NAMED_WORKERS_MAX": "4",
+        },
+    )
+
+    assert (
+        defaults.named_worker_idle_timeout_seconds,
+        defaults.named_worker_max_age_seconds,
+        defaults.named_workers_max,
+    ) == (600.0, 14400.0, 16)
+    assert (
+        custom.named_worker_idle_timeout_seconds,
+        custom.named_worker_max_age_seconds,
+        custom.named_workers_max,
+    ) == (120.0, 3600.0, 4)
+    # The manager is rebuilt when a limit changes, and unchanged defaults keep the signature older releases built.
+    assert custom_signature != default_signature
+    assert not any(part.startswith("named-workers:") for part in default_signature)
+
+
+def test_script_recovery_contract_ignores_named_worker_limits() -> None:
+    """Changing how long named workers live or how many may run leaves a live script worker's authority unchanged."""
+    backend, _apps, _core = _backend()
+    initial = backend.script_recovery_signature()
+    backend.config = replace(
+        backend.config,
+        named_worker_idle_timeout_seconds=60.0,
+        named_worker_max_age_seconds=120.0,
+        named_workers_max=1,
+    )
+
+    assert backend.named_workers_max == 1
+    assert backend.script_recovery_signature() == initial
 
 
 def test_kubernetes_backend_cleanup_skips_locked_worker() -> None:

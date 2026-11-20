@@ -1,0 +1,63 @@
+# Named workers
+
+A shell call that sets `worker="<name>"` runs in a worker of its own beside the agent's normal worker, so one reply or one shell script spreads commands over several pods without a model turn for each.
+
+## Problem
+
+The only ways to get another pod were a subagent with `dedicated_worker=True`, which costs a model turn for each pod, and a background script, which is Python only, takes no arguments, and outlives the reply that started it.
+Neither lets an agent's own shell run a command on a pod it chooses, which is what running several isolated end-to-end stacks or the shards of a test suite needs.
+
+## Decisions
+
+- **A named worker is a dedicated subagent worker without the subagent.**
+  Its key inserts one `named=<id>` part where a subagent's worker has `subagent=<id>`, with the normal worker as its state scope, so mounts, credentials, per-requester resources, runner tokens, NetworkPolicy, and the runner's own resolution of a pinned key apply unchanged.
+  The key helpers treat both kinds as one, so a third kind is a new literal, not new branches.
+- **The argument is on `run_shell_command`, not a new tool.**
+  The shell is already what `mindroom-agent` calls from inside a command, so one argument serves a model step, a background job, and a shell script, under the approval rules, hooks, call limits, and audit trail every shell call has.
+  `file` and `python` take no `worker`: every worker of an agent mounts the same workspace, and a named worker runs Python through its shell.
+- **A reply owns its named workers, and nothing about them is stored.**
+  The fleet is found by the turn ID the reply's tool context carries, which its own calls, its background jobs, and its CLI calls share while a subagent's turn has another, and it is released the way the reply's CLI grant is: at the end of the turn, or when the last background job the turn started settles.
+  After a crash the only truth is what the cluster runs, which cleanup reads, so a durable fleet record could only disagree with it.
+- **The key holds the fleet's digest of the name, from a nonce no restart keeps.**
+  The model's string never reaches a Kubernetes name, label, or path.
+  A worker that outlives its fleet can never be reached again, only removed: a resumed turn that reattached to a worker with stale processes and bound ports would fail in ways that are hard to see.
+- **Two layers remove a named worker.**
+  The fleet removes its workers when it is released, and cleanup removes any named worker in which no call ran for its idle timeout or that reached its maximum age.
+  The second layer needs no memory of who started what, so it also covers a primary that restarted, a failed removal, and a start that failed.
+  The maximum age is the only bound on a command that hangs inside a job without a `timeout`.
+- **A stopped named worker is removed, never restarted.**
+  The next call with its name starts an empty one with its full lifetime, where a restart would inherit the old creation time and be stopped at once.
+  A subagent's worker keeps its restart, because a follow-up continues the same child.
+- **Limits count the Deployments that run, plus the starts in flight.**
+  Counting from the cluster makes a worker a crashed primary left behind use up its requester's limit until cleanup removes it, which is what bounds the pods a restart loop could accumulate.
+  A call past a limit fails with the count instead of waiting, because a queue needs an owner, an order, and a cancellation path that a refused call does not.
+- **`workers run` is a client-side wrapper over `tools call`.**
+  It adds no route and no server state.
+  It exits with the command's exit code, so its own failures use 124 and 125 as `timeout` and `docker run` do, instead of the CLI's 1 to 4, which commands use too.
+- **Maintenance retries a failed removal from the worker's files.**
+  A removal deletes the Deployment before the files, because the pod must be gone first, so a failure in between left files no pass found.
+  A worker directory that no Deployment names for a grace period, and whose startup manifest names a pinned key that maps to that directory, is removed under the worker's lock.
+  A directory whose manifest names any other key, or none, is never touched: a normal worker keeps its state when someone deletes its Deployment, and a script worker's run retries its own removal.
+- **The worker protocol moves to 9 with an unchanged wire schema**, as 8 did, because a runner must map a `named=` key to its normal key.
+
+## Rejected alternatives
+
+- Kubernetes Jobs: `ttlSecondsAfterFinished` and `activeDeadlineSeconds` would clean up while the primary is down, but a Job runs no sandbox runner, so cancellation, progress, the call's environment, credential leases, and the egress identity would each need a second path, with `batch` permissions the worker manager's Role does not have.
+- One Deployment with several replicas: a worker is one key, one pod, one endpoint, one token, and one state directory in the ready cache, in-flight tracking, and removal.
+- Workers kept for the thread instead of the reply: stacks would stay warm between messages, but every fan-out would leave its pods idle until a timeout, and a name would reattach to a pod with stale processes.
+- Starting many background scripts: a script is detached from the reply, so a forgotten one holds a pod for up to a day.
+- A queue for calls past a limit; see the limits decision.
+- A `workers` argument on `request_network_access`; see the first limit.
+
+## Limits
+
+- Approved-egress grants do not reach a named worker, because the egress proxy matches a pod by its own worker key and reads a shared agent's name from the fourth key part.
+  Teaching the proxy to match a pinned key's normal key would carry grants over to named and subagent workers alike, and is the place to fix it, so MindRoom mints no extra grants meanwhile.
+- While the primary is down nothing is removed; commands stop because their connections drop, and the workers go once the primary is back and they have been idle.
+- A turn that resumes after its fleet was released, such as after an approval that outlived the reply and its jobs, gets new workers.
+- A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `extra_workers`.
+- Background scripts, OpenAI-compatible API requests, and other calls without a reply's turn cannot name a worker.
+- Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
+- With a `ReadWriteOnce` storage claim every worker runs on the runtime's node, so named workers add isolation and their own resource limits there, not capacity.
+- Dedicated subagent workers are still not counted against any limit.
+- The Docker backend runs no named workers and does not retry a failed removal from the worker's files.

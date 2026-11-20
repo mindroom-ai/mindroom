@@ -767,6 +767,18 @@ The default chat website is `https://chat.mindroom.chat`; for a self-hosted clie
 Use **Open in Browser** to use your browser session or a sign-in provider that requires a browser.
 **Reload** returns to the configured chat website, or reloads the approval page while you connect local agents.
 
+## Install MindRoom Chat
+
+MindRoom Chat is the separate chat app for the Mac, with voice messages, Quick Capture, and its own updates.
+On **Overview**, select **Install MindRoom Chat**, or choose **Install MindRoom Chat…** from the menu bar.
+MindRoom downloads the newest release from GitHub, checks that it is the notarized MindRoom Chat signed by MindRoom, and copies it to `/Applications/MindRoom Chat.app`, or to `~/Applications` when you cannot write to `/Applications`.
+It installs only into a folder that just you and this Mac's administrators can change.
+It then opens the app, and the button and menu item change to **Open MindRoom Chat**.
+If MindRoom Chat is already on this Mac, from the Mac App Store, Homebrew, or a disk image, MindRoom opens that copy and installs nothing.
+MindRoom checks the copy's signature first; if **Overview** says a copy was not opened because it is not the MindRoom Chat that MindRoom publishes, remove the app at the path it names and install again.
+MindRoom never replaces or updates MindRoom Chat; the app updates itself.
+The **Chat** section keeps working with or without it.
+
 ## Set Up Local Agents
 
 **Local agents** has four numbered steps, each with its own status.
@@ -1820,6 +1832,7 @@ agents:
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
 | `dedicated_subagent_workers` | bool | `false` | Let this agent run a subagent in a worker of its own on the Docker or Kubernetes worker backend; see [Dedicated workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) |
+| `extra_workers` | int | `0` | How many [named workers](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) this agent's shell commands may run at once for one requester on the Kubernetes worker backend, or for all requesters together when the agent's workers are not per requester; `0` turns named workers off |
 | `thread_exports` | bool or object | `null` | Keep YAML exports of the agent's threads under `<workspace>/thread_exports/`; `true` uses the defaults. See [Thread Exports](https://docs.mindroom.chat/thread-exports/#thread-exports) |
 
 Unset fields that appear in the inheritance table under [Defaults](#defaults) take the `defaults` value; a per-agent value overrides it.
@@ -5574,6 +5587,7 @@ When an agent calls tools, MindRoom shows inline markers in the message text:
 ```
 
 The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, result preview, and `tool_call_id` for call `[N]`.
+A completed call that did not succeed (it errored, was refused or denied, or was cancelled or interrupted) also carries `is_error: true`, and its result preview says why; the key is omitted on a call that succeeded and on a started one, in live frames and the final event alike.
 A secret request card (`io.mindroom.secret_request`) that a reply's tool call posted names that reply's event (`response_event_id`) and the call (`tool_call_id`), so a client can draw the card at the call's line; a call made through the CLI from a Bash call has its own line, which the card names.
 Tools that start in quick succession appear together in one edit.
 Markers and tool-trace metadata are shown by default; to hide them, set `show_tool_calls: false` on one agent or under `defaults` for every agent that leaves it unset (see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/#defaults)).
@@ -6562,7 +6576,8 @@ The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoev
 
 ### Let pages load libraries
 
-Pages can also load libraries such as Chart.js, D3, Mermaid, or KaTeX from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
+Chart.js, D3, Mermaid, and KaTeX need no switch: MindRoom Chat serves its own copies to pages whose agent names them in `show_canvas`, and no viewer's address reaches a CDN.
+Pages can also load any other npm library from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
 This takes two more switches, both off by default; turn on both, because a page that needs a library breaks where Chat blocks it.
 
 ```yaml
@@ -6590,7 +6605,7 @@ agents:
 
 `enable_canvas_libraries` (boolean, default `false`) tells the agent it may use the source, and Chat's `libraries` lets pages load from it.
 Pages may then load scripts, styles, and fonts from `/npm/` paths only; fetching data, external images, workers, and every other site stay blocked, and libraries that evaluate strings, such as Alpine or Vue in-page templates, do not run.
-Opening a page that uses a library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
+Opening a page that uses a CDN library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
 
 ### Let pages load remote assets
 
@@ -9334,7 +9349,7 @@ Use them for agents with many optional tools.
 | `initial` | bool | `false` | Send a deferred tool as an ordinary tool on every request; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
-The starter Mind agent from `mindroom config init` keeps `shell`, `memory`, `scheduler`, `update_awareness`, `todo`, and `matrix_message` eager and defers its other tools.
+The starter Mind agent from `mindroom config init` keeps `shell`, `coding`, `memory`, `scheduler`, `update_awareness`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:
@@ -9480,6 +9495,7 @@ mindroom-agent calls get CALL_ID
 mindroom-agent calls wait CALL_ID
 mindroom-agent context list
 mindroom-agent context read NAME --offset 0 --limit 8000
+mindroom-agent workers run NAME -- COMMAND
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
@@ -9524,6 +9540,42 @@ Images, audio, and files are handled like ordinary response attachments.
 
 Scripts using `set -e` must handle exit code `3` explicitly.
 After exit code `4`, check the original call ID before retrying, because submitting with a fresh ID may repeat a side effect.
+`workers run` has [exit codes of its own](#run-commands-in-named-workers).
+
+## Run commands in named workers
+
+`workers run` runs one command in a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) of the current reply, so one shell script can spread work over several workers.
+It is the agent's own `run_shell_command` call with `worker` set, under the same approval rules and limits as every other CLI call, and it is available only where the agent is offered `worker`.
+
+```bash
+mindroom-agent workers run NAME [--profile small|standard|large] [--timeout SECONDS] [--tail LINES] -- COMMAND [ARG...]
+```
+
+The command is everything after `--`: several arguments run as that exact argument list, and a single argument runs as a `bash -c` command line.
+The CLI waits until the command ends and prints the last `--tail` lines (default 100) of its output; for a failed command it prints stdout under `Output:` and stderr under `Stderr:`.
+`--timeout` (default 3600 seconds) stops the command, and `--profile` sizes the worker when its name is first used.
+
+| Code | Meaning |
+| --- | --- |
+| The command's exit code | The command ran in the named worker |
+| `124` | The command was stopped at `--timeout` |
+| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, failed, or cancelled, or MindRoom could not be reached; the reason is on stderr |
+| `2` | Invalid CLI arguments |
+
+This script runs eight shards at once, each in a worker of its own, and fails if any shard fails:
+
+```bash
+out="runs/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$out"
+for i in $(seq 0 7); do
+  mindroom-agent workers run "shard-$i" --profile large -- bash ci/shard.sh "$i" 8 > "$out/$i.log" 2>&1 &
+done
+failed=0
+for pid in $(jobs -p); do wait "$pid" || failed=1; done
+exit "$failed"
+```
+
+Run such a script as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) or with a `timeout` that covers it, because a script stopped at its time limit no longer collects its workers' results.
 
 ## Approvals, shells, and limits
 
@@ -10819,6 +10871,56 @@ run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "make test"], timeout=900)
 run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ```
+
+### Named workers
+
+On the Kubernetes worker backend, an agent's shell commands can run in extra workers that the agent names, so one reply runs several isolated environments side by side, such as end-to-end test stacks that listen on the same ports, or the shards of a test suite or a build.
+Set [`extra_workers`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent to the most named workers it may run at once; MindRoom then offers `worker` and `resource_profile` in its `run_shell_command`.
+The runtime must also run idle-worker cleanup, as for [dedicated subagent workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers).
+
+```yaml
+agents:
+  code:
+    display_name: Code
+    tools: [shell]
+    worker_tools: [shell]
+    extra_workers: 8
+```
+
+```python
+run_shell_command("bash e2e/shard.sh 0 2", worker="e2e-0", resource_profile="large", timeout=3600, background_after=0)
+run_shell_command("bash e2e/shard.sh 1 2", worker="e2e-1", resource_profile="large", timeout=3600, background_after=0)
+```
+
+- `worker` is a name of 1 to 32 lowercase letters, digits, or hyphens that starts with a letter or digit.
+  The first call with a name starts a worker, and later calls of the same reply with that name, including its [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) and its [`mindroom-agent`](https://docs.mindroom.chat/tools/agent-cli/#run-commands-in-named-workers) calls, run in it.
+  Another reply's calls with the same name get a worker of their own.
+- `resource_profile` is `small`, `standard`, or `large`, the [background script profiles](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), and sizes the worker when its name is first used; omitting it gives the worker the normal worker resources.
+  A later call that asks for another size fails.
+- The result starts with `[worker: <name>]`, or `[worker: <name>, started]` when the call ran in a newly started worker, where nothing from earlier commands is running.
+- A named worker has its own processes, network ports, and `/tmp`, and cannot connect to other workers.
+  It sees the same workspace, shared directories, and knowledge as the agent's normal worker, with the same leased tool settings and shared credentials, but not the packages installed into the normal worker's environment or its package caches.
+- Workers share the workspace, so give each one its own output directory, and its own git worktree when it changes a checkout, and build or install what all of them need once before starting them.
+
+Named workers are removed, with their processes and package caches, when the reply and its background jobs end.
+A named worker in which no command has run for 10 minutes is removed sooner, and every named worker is removed 4 hours after it started, whatever runs in it; [worker settings](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) lists both limits.
+Run long work as the call's own command rather than detached with `nohup`, and keep results in the workspace.
+Stopping the reply or cancelling a job stops its command in the named worker, as in the normal worker.
+A MindRoom restart ends a reply's use of its named workers: they are removed once idle, and a later reply's calls start new ones.
+If a named worker crashes, the call that ran in it fails, and the next call with its name starts a new one.
+
+A call that would start more named workers than `extra_workers` allows for its requester, or than `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` allows for the whole deployment, fails instead of waiting; calls to workers that already run always go through.
+Only calls of a reply in a Matrix conversation can name a worker, so [background scripts](https://docs.mindroom.chat/tools/background-scripts/) and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) requests cannot.
+[Approved egress](https://docs.mindroom.chat/deployment/approved-egress/#requesting-access) grants do not reach named workers.
+
+Errors:
+
+- `Named workers are off for this agent; `extra_workers` in its config allows them.` - set `extra_workers` on the agent.
+- `Named workers need the kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use the Kubernetes worker backend, run the API server, and set the cleanup interval.
+- `Cannot start worker '<name>': <n> of the <n> named workers this agent may run for you are running.` - run the command in a worker that already runs, wait until an idle one is removed, or raise `extra_workers`.
+- `Cannot start worker '<name>': this deployment runs its limit of <n> named workers.` - try again later, or raise `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX`.
+- `Worker '<name>' already runs with resource_profile <profile>; omit resource_profile, or name another worker.` - a worker keeps the size it started with.
+- `A named worker belongs to a reply in a conversation, and this call runs outside one, or after its reply and that reply's background jobs ended.` - the call came from a background script, an API request, or a job that outlived a restart.
 
 ### Per-workspace environment
 
@@ -16064,6 +16166,7 @@ Ended jobs that no reply collected get one follow-up: a new message in the conve
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
 Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
+The agent then posts one notice in the conversation that results wait for a reply, which starts no turn of its own.
 Another requester's reply in a shared room never hears of these results.
 A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 
@@ -22955,11 +23058,14 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | `workers.kubernetes.namePrefix` | `MINDROOM_KUBERNETES_WORKER_NAME_PREFIX` | `mindroom-worker` | Prefix for worker resource names |
 | `workers.kubernetes.runtimeClassName` | `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME` | Cluster default | RuntimeClass for all dedicated workers, including background-script workers |
 | `workers.kubernetes.resources` | `MINDROOM_KUBERNETES_WORKER_CPU_REQUEST`, `_CPU_LIMIT`, `_MEMORY_REQUEST`, `_MEMORY_LIMIT` | `100m`, `500m`, `256Mi`, `1Gi` | Worker container resources |
-| `workers.kubernetes.scriptResources` | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE`, `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | `small`; profiles in `values.yaml` | The `small`, `standard`, and `large` [background script](https://docs.mindroom.chat/tools/background-scripts/) resource profiles, all three required; a [dedicated subagent worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) that names a profile uses it too |
+| `workers.kubernetes.scriptResources` | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE`, `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | `small`; profiles in `values.yaml` | The `small`, `standard`, and `large` [background script](https://docs.mindroom.chat/tools/background-scripts/) resource profiles, all three required; a [dedicated subagent worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) or a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) that names a profile uses it too |
 | `workers.kubernetes.nodeName`, `colocateWithControlPlaneNode` | `MINDROOM_KUBERNETES_WORKER_NODE_NAME`, `MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE` | Unset, `false` | Pin workers to one node (see [Storage Requirements](#storage-requirements)) |
 | `workers.kubernetes.extraEnv` | `MINDROOM_KUBERNETES_WORKER_ENV_JSON` | `{}` | Extra environment variables for worker pods |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` | `1Gi` | Size of each worker's `/tmp` |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` | `{}` | Per-requester worker resources |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_IDLE_TIMEOUT_SECONDS` | `600` | Time without a running command after which a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) is removed |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_MAX_AGE_SECONDS` | `14400` | Time after its start at which a named worker is removed, whatever runs in it |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` | `16` | Most named workers that may run at once for all agents and requesters together |
 
 Changing the image, environment, resources, or RuntimeClass recreates scaled-down workers on the next cleanup pass and running workers on their next use, so no manual recycling is needed; finish active work before changing them.
 Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior.
@@ -24687,6 +24793,7 @@ Who a grant covers depends on the agent's effective [worker scope](https://docs.
 | `user` | Not supported, except from a subagent's dedicated worker; the request fails with `approved egress is not supported for worker_scope=user` |
 
 A grant that a subagent running in a [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) requests applies to that dedicated worker alone, whatever its agent's scope, and grants made for the agent or its normal worker do not apply there, so the subagent requests its own.
+No grant applies to a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers), which reaches only the hostnames the static allowlist allows.
 
 ### Temporary Full Access
 
@@ -25571,7 +25678,7 @@ A call to a ready worker logs nothing, and calls that wait for the same start sh
 |-------|---------|
 | `worker` | The worker's log ID, the hash other worker logs name it by and the end of its state directory name |
 | `backend` | `kubernetes` or `docker` |
-| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, `subagent` for the [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) of one subagent, otherwise `tool` |
+| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, `subagent` for the [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) of one subagent, `named` for a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers), otherwise `tool` |
 | `scope` | The worker's [scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes): `shared`, `user`, `user_agent`, or `unscoped` for an agent without `worker_scope` |
 | `agent_name` | Agent the worker serves, as its worker key spells it, or `null` for a `user` worker, which serves every agent on that scope |
 | `outcome` | `ready`, `timeout` for a worker that did not become ready within the backend's ready timeout, or `error` |

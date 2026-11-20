@@ -89,6 +89,7 @@ mindroom-agent calls get CALL_ID
 mindroom-agent calls wait CALL_ID
 mindroom-agent context list
 mindroom-agent context read NAME --offset 0 --limit 8000
+mindroom-agent workers run NAME -- COMMAND
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
@@ -133,6 +134,42 @@ Images, audio, and files are handled like ordinary response attachments.
 
 Scripts using `set -e` must handle exit code `3` explicitly.
 After exit code `4`, check the original call ID before retrying, because submitting with a fresh ID may repeat a side effect.
+`workers run` has [exit codes of its own](#run-commands-in-named-workers).
+
+## Run commands in named workers
+
+`workers run` runs one command in a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers) of the current reply, so one shell script can spread work over several workers.
+It is the agent's own `run_shell_command` call with `worker` set, under the same approval rules and limits as every other CLI call, and it is available only where the agent is offered `worker`.
+
+```bash
+mindroom-agent workers run NAME [--profile small|standard|large] [--timeout SECONDS] [--tail LINES] -- COMMAND [ARG...]
+```
+
+The command is everything after `--`: several arguments run as that exact argument list, and a single argument runs as a `bash -c` command line.
+The CLI waits until the command ends and prints the last `--tail` lines (default 100) of its output; for a failed command it prints stdout under `Output:` and stderr under `Stderr:`.
+`--timeout` (default 3600 seconds) stops the command, and `--profile` sizes the worker when its name is first used.
+
+| Code | Meaning |
+| --- | --- |
+| The command's exit code | The command ran in the named worker |
+| `124` | The command was stopped at `--timeout` |
+| `125` | The command did not run in the named worker, or its outcome is unknown: the call was refused, failed, or cancelled, or MindRoom could not be reached; the reason is on stderr |
+| `2` | Invalid CLI arguments |
+
+This script runs eight shards at once, each in a worker of its own, and fails if any shard fails:
+
+```bash
+out="runs/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$out"
+for i in $(seq 0 7); do
+  mindroom-agent workers run "shard-$i" --profile large -- bash ci/shard.sh "$i" 8 > "$out/$i.log" 2>&1 &
+done
+failed=0
+for pid in $(jobs -p); do wait "$pid" || failed=1; done
+exit "$failed"
+```
+
+Run such a script as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) or with a `timeout` that covers it, because a script stopped at its time limit no longer collects its workers' results.
 
 ## Approvals, shells, and limits
 

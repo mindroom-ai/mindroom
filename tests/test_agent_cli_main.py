@@ -287,3 +287,144 @@ def test_a_background_script_call_the_gateway_refused_failed(capsys, monkeypatch
 
     assert main(["tools", "call", "memory.add_memory", "{}"]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "failed"
+
+
+def _worker_client(monkeypatch, *receipts: dict[str, object]) -> list[dict[str, object]]:
+    """Answer one submitted call with *receipts* in turn, the last one for every later read, and return what was sent."""
+    sent: list[dict[str, object]] = []
+    remaining = list(receipts)
+
+    class Client:
+        def operation(self, payload) -> dict[str, object]:
+            sent.append(payload)
+            return self.receipt(payload["call_id"])
+
+        def receipt(self, call_id) -> dict[str, object]:
+            assert call_id == sent[0]["call_id"]
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    monkeypatch.setattr("mindroom.agent_cli.main.time.sleep", lambda _seconds: None)
+    return sent
+
+
+def _completed(outcome: object) -> dict[str, object]:
+    return {"status": "completed", "outcome": outcome}
+
+
+def test_workers_run_sends_one_shell_call_that_names_the_worker(capsys, monkeypatch) -> None:
+    """Everything after ``--`` is the command, and the call is waited for however long it takes."""
+    sent = _worker_client(
+        monkeypatch,
+        {"status": "queued"},
+        {"status": "running"},
+        _completed("[worker: e2e-3, started]\n[cwd: /workspace]\nshard 3 ok"),
+    )
+
+    argv = ["workers", "run", "e2e-3", "--profile", "large", "--timeout", "900", "--tail", "20"]
+    assert main([*argv, "--", "bash", "e2e/shard.sh", "--timeout", "3"]) == 0
+
+    [call] = sent
+    assert (call["operation"], call["toolkit"], call["function"]) == ("tools.call", "shell", "run_shell_command")
+    assert call["arguments"] == {
+        "args": ["bash", "e2e/shard.sh", "--timeout", "3"],
+        "worker": "e2e-3",
+        "resource_profile": "large",
+        "timeout": 900,
+        "tail": 20,
+    }
+    output = capsys.readouterr()
+    assert (output.out, output.err) == ("shard 3 ok\n", "")
+
+
+def test_workers_run_defaults_to_an_hour_and_the_normal_worker_size(monkeypatch) -> None:
+    sent = _worker_client(monkeypatch, _completed("[worker: build]\n"))
+
+    assert main(["workers", "run", "build", "--", "make test && make lint"]) == 0
+    assert sent[0]["arguments"] == {"args": ["make test && make lint"], "worker": "build", "timeout": 3600, "tail": 100}
+
+
+@pytest.mark.parametrize(
+    ("result", "exit_code", "printed"),
+    [
+        ("Exit code 3\nOutput:\nran 4 tests\nStderr:\n1 failed", 3, "Output:\nran 4 tests\nStderr:\n1 failed\n"),
+        ("Exit code 1", 1, ""),
+        ("Exit code 137\nStderr:\nKilled", 137, "Stderr:\nKilled\n"),
+        ("Stopped after 60s.\nOutput:\nstill going", 124, "Stopped after 60s.\nOutput:\nstill going\n"),
+        # A command that prints these words and succeeds did not fail or stop.
+        ("Exit code 3 was expected", 0, "Exit code 3 was expected\n"),
+        ("Exit code 3\nand more", 0, "Exit code 3\nand more\n"),
+        ("Stopped after 5s.", 0, "Stopped after 5s.\n"),
+    ],
+)
+def test_workers_run_exits_with_the_command_s_exit_code(result, exit_code, printed, capsys, monkeypatch) -> None:
+    """A failed command's exit code is the CLI's, and a command stopped at its time limit exits 124."""
+    _worker_client(monkeypatch, _completed(f"[worker: w]\n[cwd: /workspace]\n{result}"))
+
+    assert main(["workers", "run", "w", "--timeout", "60", "--", "pytest"]) == exit_code
+    assert capsys.readouterr().out == printed
+
+
+def test_workers_run_prints_the_start_of_a_long_result_and_where_the_rest_is(capsys, monkeypatch) -> None:
+    saved = {"status": "saved_to_file", "path": "mindroom_tool_outputs/run.txt", "preview": "[worker: w]\nline 1"}
+    _worker_client(monkeypatch, _completed({"mindroom_tool_output": saved}))
+
+    assert main(["workers", "run", "w", "--", "seq", "100000"]) == 0
+    output = capsys.readouterr()
+    assert output.out == "line 1\n"
+    assert "full output saved to mindroom_tool_outputs/run.txt" in output.err
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {"status": "failed", "outcome": "Cannot start worker 'w': 2 of the 2 named workers ..."},
+        {"status": "cancelled", "outcome": "Call interrupted after dispatch; effects may have occurred"},
+        # A shell that runs without workers answers without the worker's line, so nothing ran in a worker named so.
+        _completed("Error: `worker` and `resource_profile` need a shell that runs in a worker"),
+        _completed("[worker: other]\nran elsewhere"),
+    ],
+)
+def test_workers_run_exits_125_when_the_command_did_not_run_in_its_worker(receipt, capsys, monkeypatch) -> None:
+    """A refused, failed, or cancelled call prints its reason on stderr and never looks like the command's result."""
+    _worker_client(monkeypatch, receipt)
+
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert str(receipt["outcome"]) in output.err
+
+
+def test_workers_run_exits_125_when_mindroom_cannot_be_reached(capsys, monkeypatch) -> None:
+    monkeypatch.delenv("MINDROOM_AGENT_CLI_URL", raising=False)
+    monkeypatch.delenv("MINDROOM_AGENT_CLI_TOKEN", raising=False)
+
+    assert main(["workers", "run", "w", "--", "true"]) == 125
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Agent CLI authority is unavailable" in output.err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["workers", "run", "w"],
+        ["workers", "run", "w", "--"],
+        ["workers", "run", "w", "true"],
+        ["workers", "run", "--", "true"],
+        ["workers", "run", "w", "--timeout", "0", "--", "true"],
+        ["workers", "run", "w", "--tail", "-1", "--", "true"],
+        ["workers", "run", "w", "--profile", "huge", "--", "true"],
+    ],
+)
+def test_workers_run_needs_a_name_a_command_and_usable_limits(argv) -> None:
+    with pytest.raises(SystemExit):
+        parse_arguments(argv)
+
+
+def test_a_background_script_cannot_run_commands_in_named_workers(capsys, monkeypatch, tmp_path) -> None:
+    """Named workers belong to a reply, and a background script outlives the reply that started it."""
+    _in_background_script(monkeypatch, tmp_path)
+
+    assert main(["workers", "run", "w", "--", "true"]) == 2
+    assert "background script" in json.loads(capsys.readouterr().out)["error"]

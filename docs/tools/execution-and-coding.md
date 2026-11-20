@@ -176,6 +176,56 @@ run_shell_command(["bash", "-lc", "make test"], timeout=900)
 run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ```
 
+### Named workers
+
+On the Kubernetes worker backend, an agent's shell commands can run in extra workers that the agent names, so one reply runs several isolated environments side by side, such as end-to-end test stacks that listen on the same ports, or the shards of a test suite or a build.
+Set [`extra_workers`](../configuration/agents.md#configuration-options) on the agent to the most named workers it may run at once; MindRoom then offers `worker` and `resource_profile` in its `run_shell_command`.
+The runtime must also run idle-worker cleanup, as for [dedicated subagent workers](agent-orchestration.md#dedicated-workers).
+
+```yaml
+agents:
+  code:
+    display_name: Code
+    tools: [shell]
+    worker_tools: [shell]
+    extra_workers: 8
+```
+
+```python
+run_shell_command("bash e2e/shard.sh 0 2", worker="e2e-0", resource_profile="large", timeout=3600, background_after=0)
+run_shell_command("bash e2e/shard.sh 1 2", worker="e2e-1", resource_profile="large", timeout=3600, background_after=0)
+```
+
+- `worker` is a name of 1 to 32 lowercase letters, digits, or hyphens that starts with a letter or digit.
+  The first call with a name starts a worker, and later calls of the same reply with that name, including its [background jobs](agent-orchestration.md#background-jobs) and its [`mindroom-agent`](agent-cli.md#run-commands-in-named-workers) calls, run in it.
+  Another reply's calls with the same name get a worker of their own.
+- `resource_profile` is `small`, `standard`, or `large`, the [background script profiles](../deployment/kubernetes.md#worker-settings), and sizes the worker when its name is first used; omitting it gives the worker the normal worker resources.
+  A later call that asks for another size fails.
+- The result starts with `[worker: <name>]`, or `[worker: <name>, started]` when the call ran in a newly started worker, where nothing from earlier commands is running.
+- A named worker has its own processes, network ports, and `/tmp`, and cannot connect to other workers.
+  It sees the same workspace, shared directories, and knowledge as the agent's normal worker, with the same leased tool settings and shared credentials, but not the packages installed into the normal worker's environment or its package caches.
+- Workers share the workspace, so give each one its own output directory, and its own git worktree when it changes a checkout, and build or install what all of them need once before starting them.
+
+Named workers are removed, with their processes and package caches, when the reply and its background jobs end.
+A named worker in which no command has run for 10 minutes is removed sooner, and every named worker is removed 4 hours after it started, whatever runs in it; [worker settings](../deployment/kubernetes.md#worker-settings) lists both limits.
+Run long work as the call's own command rather than detached with `nohup`, and keep results in the workspace.
+Stopping the reply or cancelling a job stops its command in the named worker, as in the normal worker.
+A MindRoom restart ends a reply's use of its named workers: they are removed once idle, and a later reply's calls start new ones.
+If a named worker crashes, the call that ran in it fails, and the next call with its name starts a new one.
+
+A call that would start more named workers than `extra_workers` allows for its requester, or than `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` allows for the whole deployment, fails instead of waiting; calls to workers that already run always go through.
+Only calls of a reply in a Matrix conversation can name a worker, so [background scripts](background-scripts.md) and [OpenAI-compatible API](../openai-api.md) requests cannot.
+[Approved egress](../deployment/approved-egress.md#requesting-access) grants do not reach named workers.
+
+Errors:
+
+- `Named workers are off for this agent; `extra_workers` in its config allows them.` - set `extra_workers` on the agent.
+- `Named workers need the kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use the Kubernetes worker backend, run the API server, and set the cleanup interval.
+- `Cannot start worker '<name>': <n> of the <n> named workers this agent may run for you are running.` - run the command in a worker that already runs, wait until an idle one is removed, or raise `extra_workers`.
+- `Cannot start worker '<name>': this deployment runs its limit of <n> named workers.` - try again later, or raise `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX`.
+- `Worker '<name>' already runs with resource_profile <profile>; omit resource_profile, or name another worker.` - a worker keeps the size it started with.
+- `A named worker belongs to a reply in a conversation, and this call runs outside one, or after its reply and that reply's background jobs ended.` - the call came from a background script, an API request, or a job that outlived a restart.
+
 ### Per-workspace environment
 
 An agent can set its own environment variables for worker-routed `shell` and `python`, such as `PATH` entries, npm prefixes, or package indexes, by exporting them from `.mindroom/worker-env.sh` in its workspace.
