@@ -102,6 +102,7 @@ def stable_entrypoint_preamble(
     frame: Sequence[str | int],
     shown: Sequence[str],
     file_lines: Sequence[str],
+    store: bool = True,
     now: float,
 ) -> str:
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
@@ -111,7 +112,8 @@ def stable_entrypoint_preamble(
     shows in order, so lines inserted anywhere or withheld by a cap for newer ones keep it, and while each part of
     ``frame`` is unchanged, so an edited prompt override or cap loads again. The copy is not measured again, so a
     model switch or a cold token encoder does not cut it. Its truncation marker keeps the counts of its last load, and
-    an empty ``fresh_preamble`` always replaces it.
+    an empty ``fresh_preamble`` always replaces it. Without ``store``, a turn that cannot reuse the copy sends
+    ``fresh_preamble`` and keeps nothing, so a later turn loads the file again.
     A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
     anyway, and the turn after one costs only its compacted history.
     An edited or deleted line loads at once. A route that holds the system prompt tells that as a system prompt
@@ -127,6 +129,8 @@ def stable_entrypoint_preamble(
                 if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:
                     other.unlink()
             kept = _kept_preamble(conversation, source_path, frame, file_lines, now) if fresh_preamble else None
+            if kept is None and not store:
+                return fresh_preamble
             if kept is None:
                 row = [str(source_path), fresh_preamble, list(frame), list(shown), *conversation.compaction]
                 write_text_atomic(path, json.dumps(row))

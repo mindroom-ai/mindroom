@@ -2025,6 +2025,25 @@ async def test_file_backend_cold_token_encoder_does_not_cut_a_warm_copy(
 
 
 @pytest.mark.asyncio
+async def test_file_backend_cold_token_encoder_does_not_store_a_copy_it_truncated(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A first load before the encoder loads may withhold lines, so the next warm turn must load the whole file."""
+    _capped_memory_file(storage_path, config)
+    config.memory.file.max_entrypoint_lines = 50
+    config.memory.file.max_entrypoint_tokens = 30
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "Fact one." not in await _conversation_preamble(config, thread, TokenCounter(estimate=lambda _text: None))
+    assert not thread.snapshot.exists()
+
+    warm = await _conversation_preamble(config, thread)
+    assert "Fact one." in warm
+    assert "truncated" not in warm
+    assert await _conversation_preamble(config, thread) == warm
+
+
+@pytest.mark.asyncio
 async def test_file_backend_conversation_clears_its_entrypoint_once_memory_is_emptied(
     storage_path: Path,
     config: Config,

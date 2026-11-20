@@ -224,6 +224,8 @@ async def _entrypoint_preamble(
         config,
         execution_identity=execution_identity,
     )
+    # Asked before capping, so an encoder that loads meanwhile only makes the turn store nothing.
+    cold = counter.estimate("") is None
     entrypoint = await asyncio.to_thread(cap_entrypoint, entrypoint, config, counter)
     body = (
         _render_entrypoint_body(entrypoint, config, kept_copy=conversation is not None)
@@ -243,6 +245,8 @@ async def _entrypoint_preamble(
         frame=[*(config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{name}") for name in framing), *caps, conversation.model],
         shown=entrypoint.included,
         file_lines=entrypoint.lines,
+        # A cold encoder's byte counts may withhold lines the model's own count keeps.
+        store=not (cold and len(entrypoint.included) < len(entrypoint.lines)),
         now=time.time(),
     )
 
