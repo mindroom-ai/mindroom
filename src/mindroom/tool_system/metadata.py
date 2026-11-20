@@ -739,14 +739,15 @@ def resolve_tool_settings(
     #   Agno FileTools switches or an include_tools or exclude_tools filter.
     # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit reads service filesystem.
     # Handling: Refuse to resolve the toolkit's settings while such a document holds any setting, so the toolkit is
-    #   not built and grants no workspace write until the operator saves it again under filesystem or deletes it.
+    #   not built and grants no workspace write until the operator deletes it; the dashboard reads and deletes it
+    #   in the store read here.
     # Coverage:
     #   tests/api/test_plugin_room_agents.py::test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant.
     for alias, name in TOOL_ALIASES.items():
         if name == tool_name and any(not key.startswith("_") for key in stored(alias) or ()):
             msg = (
                 f"{tool_name}: settings stored under '{alias}' no longer apply; "
-                f"save them again under '{tool_name}' or delete them."
+                f"delete them, and save any you still want under '{tool_name}'."
             )
             raise ToolConfigOverrideError(msg)
     if tool_name == "filesystem" and (retired := retired_file_setting(stored_credentials or {})) is not None:

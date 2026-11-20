@@ -562,7 +562,7 @@ async def test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_worksp
     manager.save_credentials(service, {"_source": "ui", "exclude_tools": ["write_file", "edit_file"]})
 
     assert _access(await room.agents(ALICE)) == []
-    message = f"under '{service}'.*save them again under 'filesystem' or delete them"
+    message = f"under '{service}'.*delete them, and save any you still want under 'filesystem'"
     with pytest.raises(ToolConfigOverrideError, match=message):
         await room.agent(ALICE, room.ids["helper"])
     with pytest.raises(ToolConfigOverrideError, match=message):
