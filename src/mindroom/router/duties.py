@@ -65,10 +65,8 @@ class RouterDuties:
     _member_join_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     # Rooms the router joined since the last sync frame; a local join's room has no members until that frame.
     _joined_room_ids: set[str] = field(default_factory=set, init=False, repr=False)
-    # Rooms a completed sync frame handed to the publish task, which that task has yet to take.
-    _publish_room_ids: set[str] = field(default_factory=set, init=False, repr=False)
-    # The one background task that publishes joined rooms, so no sync frame waits for a room state read.
-    _publish_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    # The joined-room publishes in flight, which run in the background so no sync frame waits for a room state read.
+    _room_state_publishes: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     # The one background retry per room that a failed room state reconcile schedules.
     _room_state_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     # Rooms where a trigger failed while their retry ran, so that retry runs once more.
@@ -91,9 +89,8 @@ class RouterDuties:
         The next router redoes both, and waiting for them would spend the stop budget its replies need to finish.
         """
         self._membership_sync.cancel_refresh()
-        for task in (self._publish_task, *self._room_state_retries.values()):
-            if task is not None:
-                task.cancel()
+        for task in (*self._room_state_publishes, *self._room_state_retries.values()):
+            task.cancel()
 
     async def room_joined(self, room_id: str) -> None:
         """Restore pending config confirmations in a room the router joined, then welcome an empty room."""
@@ -112,27 +109,20 @@ class RouterDuties:
         """Publish the room state of a room the router joined by any path, once a sync frame carries its members."""
         self._joined_room_ids.add(room_id)
 
-    def publish_joined_room_state(self) -> asyncio.Task[None] | None:
-        """Reconcile the thread mode and MindRoom accounts of the rooms the router joined and still holds.
-
-        A completed sync frame calls this and waits for nothing: one background task publishes at a time, and rooms a
-        later frame hands over while it runs are published in its next round. Return that task, if there is one.
-        """
-        self._publish_room_ids |= self._joined_room_ids
-        self._joined_room_ids = set()
-        if self._publish_room_ids and (self._publish_task is None or self._publish_task.done()):
-            self._publish_task = create_background_task(
-                self._publish_handed_rooms(),
+    def publish_joined_room_state(self) -> None:
+        """Reconcile the thread mode and MindRoom accounts of the rooms the router joined and still holds."""
+        room_ids, self._joined_room_ids = self._joined_room_ids, set()
+        if room_ids:
+            task = create_background_task(
+                self._publish_rooms(room_ids),
                 name="router_joined_room_state",
                 owner=self.deps.runtime,
             )
-        return self._publish_task
+            self._room_state_publishes.add(task)
+            task.add_done_callback(self._room_state_publishes.discard)
 
-    async def _publish_handed_rooms(self) -> None:
-        """Publish the handed-over rooms in rounds until a round ends with none left."""
-        while self._publish_room_ids:
-            room_ids, self._publish_room_ids = self._publish_room_ids, set()
-            await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))
+    async def _publish_rooms(self, room_ids: set[str]) -> None:
+        await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))
 
     async def _publish_room_state(self, room_id: str) -> None:
         """Reconcile one held room's thread mode and MindRoom accounts.

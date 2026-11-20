@@ -745,9 +745,9 @@ def _router_duties(state: RoomState) -> RouterDuties:
 
 
 def _publish_joined_rooms(duties: RouterDuties) -> asyncio.Task[None]:
-    """Hand the joined rooms to the router's background publish task, as a completed sync frame does, and return it."""
-    task = duties.publish_joined_room_state()
-    assert task is not None
+    """Publish the joined rooms in the background, as a completed sync frame does, and return that publish."""
+    duties.publish_joined_room_state()
+    (task,) = duties._room_state_publishes
     return task
 
 
@@ -1342,8 +1342,8 @@ async def test_the_router_owns_its_refresh_and_room_state_retry(room_state: Room
 
 
 @pytest.mark.asyncio
-async def test_router_stop_cancels_its_refresh_and_room_state_retry_without_waiting(room_state: RoomState) -> None:
-    """A stopping router discards both, so they leave its stop budget to the replies it drains."""
+async def test_router_stop_cancels_its_refresh_and_room_state_tasks_without_waiting(room_state: RoomState) -> None:
+    """A stopping router discards them, so they leave its stop budget to the replies it drains."""
     config, paths, ids, _, client = room_state
     user = AgentMatrixUser(ROUTER_AGENT_NAME, ids[ROUTER_AGENT_NAME].full_id, "Router", TEST_PASSWORD)
     bot = install_runtime_journal_support(make_test_agent_bot(user, config=config, runtime_paths=paths))
@@ -1351,8 +1351,11 @@ async def test_router_stop_cancels_its_refresh_and_room_state_retry_without_wait
     duties = bot._router
     assert duties is not None
     await _hang_a_room_state_retry(duties, room_state)
+    duties.mark_joined_for_room_state(ROOM_ID)
+    publish = _publish_joined_rooms(duties)
     frame = await _hang_a_membership_refresh(duties, bot.orchestrator)
     budget = bot._sync_shutdown_budget = ShutdownBudget.start(5.0)
     await bot.prepare_for_sync_shutdown()
     assert budget.remaining_seconds() > 4
+    assert publish.cancelled()
     assert isinstance((await asyncio.gather(frame, return_exceptions=True))[0], asyncio.CancelledError)
