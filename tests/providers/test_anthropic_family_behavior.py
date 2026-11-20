@@ -2121,9 +2121,9 @@ async def test_the_next_turn_resends_the_cached_prefix_byte_for_byte(tmp_path: P
     )
     provider = route_provider(route, tmp_path, wire)
     tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=None)]
-    history = [Message(role="system", content="Shared instructions."), *_user("First request.")]
+    history = _user("First request.")
     first = await claude_turn(provider, ModelRequest(messages=history, tools=tools))
-    history = [*history, first.message, *_user("Follow-up request.")]
+    history = [*history, first.message, Message(role="user", content="Follow-up request.")]
     second = await claude_turn(provider, ModelRequest(messages=history, tools=tools))
 
     one, two = wire.body(0), wire.body(1)
