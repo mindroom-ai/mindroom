@@ -144,9 +144,6 @@ def test_unloadable_image_becomes_a_note(markdown: str, alt: str) -> None:
         "![logo](mxc://matrix.org/abc123)",
         "![logo](https://example.org/logo.png)",
         "![l](http://example.org:8080)",
-        '<img src="mxc://[2001:db8::1]:8448/id">',
-        "![a](mxc://[2001:db8::1]:8448/id)",
-        "![a](https://[2001:db8::1]/x.png)",
         "![a](https://user@example.org/x.png)",
     ],
 )
@@ -155,6 +152,22 @@ def test_loadable_image_is_kept(markdown: str) -> None:
     html = markdown_to_html(markdown)
     assert "<img" in html
     assert "Image not sent" not in html
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ('<img src="mxc://[2001:db8::1]:8448/id" alt="a">', '<img src="mxc://[2001:db8::1]:8448/id" alt="a">'),
+        ('<img src="https://[2001:db8::1]/x.png" alt="a">', '<img src="https://[2001:db8::1]/x.png" alt="a">'),
+        ("![a](mxc://[2001:db8::1]:8448/id)", "<p>⚠️ Image not sent: a (no uploaded file)</p>\n"),
+        ("![a](https://[2001:db8::1]/x.png)", "<p>⚠️ Image not sent: a (no uploaded file)</p>\n"),
+        ('<img src="https://a b/x" alt="a">', "⚠️ Image not sent: a (no uploaded file)"),
+        ('<img src="mxc://server/a b" alt="a">', "⚠️ Image not sent: a (no uploaded file)"),
+    ],
+)
+def test_the_checked_src_is_the_emitted_src(markdown: str, expected: str) -> None:
+    """Raw bracketed IPv6 loads and is kept as written; markdown-it's ``%5B…%5D`` spelling and whitespace cannot load."""
+    assert markdown_to_html(markdown) == expected
 
 
 def test_quoted_image_beside_its_code_span_copy_leaves_the_code() -> None:

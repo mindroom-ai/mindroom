@@ -325,8 +325,7 @@ IMAGE_NOT_SENT_NOTE = "⚠️ Image not sent:"
 
 def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
     """Return the text replacing an ``<img>`` whose first ``src`` no client can load, or None to keep it."""
-    src = next((value or "" for name, value in attrs if name == "src"), "").strip()
-    src = src.replace("%5B", "[").replace("%5D", "]")  # markdown-it percent-encodes IPv6 brackets
+    src = unescape(next((value or "" for name, value in attrs if name == "src"), ""))  # the src as emitted
     server, _, media_id = src.removeprefix("mxc://").partition("/")
     try:
         parts = urlsplit(src)
@@ -334,7 +333,7 @@ def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
     except ValueError:
         web = False
     mxc = src.startswith("mxc://") and valid_matrix_server_name(server) and bool(media_id)
-    if web or (mxc and not {"/", "?", "#"} & set(media_id)):
+    if (web or (mxc and not {"/", "?", "#"} & set(media_id))) and not any(char.isspace() for char in src):
         return None
     alt = next((value for name, value in attrs if name == "alt" and value), "image")
     return escape(f"{IMAGE_NOT_SENT_NOTE} {alt} (no uploaded file)")
