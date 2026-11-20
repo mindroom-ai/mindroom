@@ -116,18 +116,6 @@ class TestEnsureRoomEncryptionEnabled:
         assert cached_room.encrypted is True
 
     @pytest.mark.asyncio
-    async def test_reports_failure_when_put_state_rejected(self) -> None:
-        """A rejected state change reports failure."""
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
-        client.room_put_state.return_value = nio.RoomPutStateError.from_dict(
-            {"errcode": "M_FORBIDDEN", "error": "no permission"},
-            "!room:localhost",
-        )
-
-        assert await ensure_room_encryption_enabled(client, "!room:localhost") is False
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(("errcode", "level"), [("M_FORBIDDEN", "warning"), ("M_UNKNOWN", "error")])
     async def test_a_refusal_the_homeserver_states_is_no_error(self, errcode: str, level: str) -> None:
         """An account without the power is refused as expected and told so; only another failure is an error."""
