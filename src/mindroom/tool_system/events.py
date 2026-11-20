@@ -634,7 +634,8 @@ def _html_block_spans(html: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     depth = 0
     text_start = 0
-    for tag in [*_HTML_TAG_PATTERN.finditer(html), None]:
+    # No tag ends after the last ">", and before it every tag that opens ends, so no "<" is read twice.
+    for tag in [*_HTML_TAG_PATTERN.finditer(html, 0, html.rfind(">") + 1), None]:
         text_end = len(html) if tag is None else tag.start()
         if depth == 0 and (text := _NON_BLANK_PATTERN.search(html, text_start, text_end)) is not None:
             spans.append((text.start(), text_end))
@@ -655,10 +656,7 @@ def _html_block_spans(html: str) -> list[tuple[int, int]]:
 
 
 def _trace_calls(layer: Mapping[str, Any], version: int) -> dict[int, dict[str, Any]] | None:
-    """Return the named calls of a layer's trace of ``version`` by marker index, or None for any other trace.
-
-    Marker [n] names entry n, so a list with an entry that is no mapping has no call to trust.
-    """
+    """Return the named calls of a layer's trace of ``version`` by marker index; None unless each entry is a mapping."""
     payload = layer.get(_TOOL_TRACE_KEY)
     if not isinstance(payload, dict) or payload.get("version") != version:
         return None
@@ -684,21 +682,20 @@ def _layer_with_markers(layer: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return a layer with a version-3 trace as version 2, its markers back in its text; None for any other layer.
 
     A marker goes before body line ``body_line`` with a blank line after it, or at the end after one, and before
-    top-level HTML block ``at`` (``_html_block_spans``). A call without the two keys has no marker. Positions that
-    are no whole numbers, in the calls' order, up to the end of the text make it another layer.
+    top-level HTML block ``at``. A call without the two keys has no marker. A layer whose positions are not whole
+    numbers, in the calls' order, up to the end of the text is another layer, and so is one without any.
     """
     calls = _trace_calls(layer, _TOOL_TRACE_VERSION)
     body, html = layer.get("body"), layer.get("formatted_body")
-    if calls is None or not isinstance(body, str) or not isinstance(html, str):
+    placed = [(index, event) for index, event in (calls or {}).items() if "body_line" in event or "at" in event]
+    if not placed or not isinstance(body, str) or not isinstance(html, str):
         return None
     lines = body.split("\n") if body else []
     starts = [start for start, _end in _html_block_spans(html)]
     marked_lines: list[str] = []
     marked_html = ""
     line = block = offset = 0
-    for index, event in calls.items():
-        if "body_line" not in event and "at" not in event:
-            continue
+    for index, event in placed:
         next_line, next_block = event.get("body_line"), event.get("at")
         if type(next_line) is not int or type(next_block) is not int:
             return None
@@ -789,27 +786,19 @@ def _each_layer[C: Mapping[str, Any]](
     # A fallback repeats its replacement after "* ", so it converts as the replacement with the fallback's text does.
     # One that shows other HTML or other calls, or whose calls stand elsewhere, is someone's own and stays as it is.
     fallback = convert({**replacement, "body": body[2:]})
-    repeated = [key for key in ("formatted_body", _TOOL_TRACE_KEY) if key in content]
-    if (
-        fallback is None
-        or fallback[_TOOL_TRACE_KEY] != converted[_TOOL_TRACE_KEY]
-        or any(content[key] != replacement.get(key) for key in repeated)
-    ):
+    keys = ("formatted_body", _TOOL_TRACE_KEY) if _TOOL_TRACE_KEY in content else ("formatted_body",)
+    if fallback is None or fallback[_TOOL_TRACE_KEY] != converted[_TOOL_TRACE_KEY]:
         return content
-    return {
-        **content,
-        "m.new_content": converted,
-        "body": f"* {fallback['body']}",
-        **{key: converted[key] for key in repeated},
-    }
+    if any(content.get(key) != replacement[key] for key in keys):
+        return content
+    return {**content, "m.new_content": converted, "body": f"* {fallback['body']}", **{k: converted[k] for k in keys}}
 
 
 def tool_markers_out_of_text(content: dict[str, Any]) -> dict[str, Any]:
-    """Return content as Matrix gets it, the last step of a send: its calls' marker lines out of its text.
+    """Return a whole event's content as Matrix gets it, the last step of a send: its marker lines out of its text.
 
-    The content is a whole event's: a message, or an edit with its replacement and its fallback. Its trace becomes
-    version 3, where each call keeps its place as ``body_line``, the number of ``body`` lines before it, and ``at``,
-    the number of top-level ``formatted_body`` blocks before it. Content that ``tool_markers_in_text`` would not give
+    Its trace becomes version 3, where each call keeps its place as ``body_line``, the ``body`` lines before it, and
+    ``at``, the top-level ``formatted_body`` blocks before it. Content that ``tool_markers_in_text`` would not give
     back exactly, and content without a version-2 trace and HTML, comes back as the same object.
     """
     sent = _each_layer(content, _layer_without_markers)
@@ -817,9 +806,9 @@ def tool_markers_out_of_text(content: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_markers_in_text[C: Mapping[str, Any]](content: C) -> C | dict[str, Any]:
-    """Return content read from Matrix as it was before ``tool_markers_out_of_text``; other content as the same object.
+    """Return an agent's content read from Matrix as it was before ``tool_markers_out_of_text``, else the same object.
 
-    Every reader of a sent message reads it through here first, so each reads a reply with its markers in its text.
+    Only an agent's reply had markers, so whoever reads content from Matrix calls this for an agent's and no other.
     """
     return _each_layer(content, _layer_with_markers)
 

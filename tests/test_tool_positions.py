@@ -60,6 +60,7 @@ from mindroom.tool_system.events import (
 )
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import make_matrix_client_mock
+from tests.cpu_budget_helpers import cpu_budget
 from tests.test_matrix_api_tool import _make_context
 from tests.test_mentions import _default_runtime_paths, _make_config, _runtime_paths_for
 
@@ -578,12 +579,38 @@ def test_an_edit_whose_fallback_is_not_its_replacement_again_is_sent_as_it_is(fa
     assert tool_markers_out_of_text(edit) is edit
 
 
+@pytest.mark.asyncio
+async def test_an_edit_whose_fallback_has_no_html_is_sent_as_it_is() -> None:
+    """MindRoom Chat puts a fallback's markers back only beside its replacement's HTML, so without it they stay."""
+    replacement = _sent(_case(_BETWEEN))
+    edit = {
+        "msgtype": "m.text",
+        "body": f"* {replacement['body']}",
+        "m.new_content": replacement,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+    }
+    client = _client()
+
+    await send_message_result(client, _ROOM, edit)
+
+    assert _on_the_wire(client) == edit
+
+
 @pytest.mark.parametrize("fallback", _OTHER_FALLBACKS)
 def test_an_edit_whose_fallback_is_not_its_replacement_again_reads_as_it_is(fallback: dict[str, Any]) -> None:
     """Only what the write boundary sends is restored, so someone's own fallback is never overwritten."""
     wire = _wire(_case(_BETWEEN))
     edit = {**wire, "body": f"* {wire['body']}", **fallback, "m.new_content": wire}
     assert tool_markers_in_text(edit) is edit
+
+
+@pytest.mark.parametrize("call", [{**_SHELL, "body_line": 0, "at": 0}, _SHELL])
+def test_reading_html_that_never_closes_a_tag_takes_time_in_proportion_to_its_size(call: dict[str, Any]) -> None:
+    """An event's HTML is anyone's to write, so a tag is looked for once, not again from every "<" before it."""
+    content = _content("Found it.", "<a " * 21_000, 3, [call])
+    with cpu_budget(0.5):
+        read = tool_markers_in_text(content)
+    assert (read is content) == ("at" not in call)
 
 
 def test_top_level_blocks() -> None:
