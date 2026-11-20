@@ -68,15 +68,14 @@ def agent_reply_membership_policy_changed(
     return _agent_reply_membership_policy_signature(current) != _agent_reply_membership_policy_signature(replacement)
 
 
-def _referenced_room_keys(config: Config) -> tuple[str, ...]:
+def _referenced_room_keys(signature: _AgentReplyMembershipPolicySignature) -> tuple[str, ...]:
     """Return distinct managed grant-room keys in deterministic order."""
-    signature = _agent_reply_membership_policy_signature(config)
     return tuple(sorted({room_key for _, _, room_keys in signature for room_key in room_keys}))
 
 
-def _requires_current_room_memberships(config: Config) -> bool:
+def _requires_current_room_memberships(signature: _AgentReplyMembershipPolicySignature) -> bool:
     """Return whether any active responder policy reads current-room membership."""
-    return any(current_room_members for _, current_room_members, _ in _agent_reply_membership_policy_signature(config))
+    return any(current_room_members for _, current_room_members, _ in signature)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,10 +140,11 @@ class AgentReplyMembershipIndex:
 
     def needs_refresh(self, config: Config) -> bool:
         """Return whether room-backed grants need an authoritative rebuild, or a room needs reading again."""
-        if not _referenced_room_keys(config) and not _requires_current_room_memberships(config):
+        signature = _agent_reply_membership_policy_signature(config)
+        if not _referenced_room_keys(signature) and not _requires_current_room_memberships(signature):
             return False
         return (
-            self._snapshot.policy_signature != _agent_reply_membership_policy_signature(config)
+            self._snapshot.policy_signature != signature
             or self._snapshot.refresh_required
             or bool(self._reread_room_ids)
         )
@@ -202,25 +202,26 @@ class AgentReplyMembershipIndex:
             and not self.is_current_room_member(sender_id, room_id, config, runtime_paths)
         )
 
-    async def refresh_reading_room(
+    async def refresh_until_member(
         self,
+        sender_id: str,
         room_id: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
         refresh: Callable[[], Awaitable[None]],
-        current: Callable[[], bool],
-    ) -> bool:
-        """Refresh through ``refresh`` until ``current`` holds, twice at most, reading ``room_id`` again while it fails.
+    ) -> None:
+        """Refresh through ``refresh`` until the room's ready row holds ``sender_id``, twice at most, reading ``room_id`` again while it does not.
 
-        Only that room is read again; the other ready rooms stay. The room's observer applies a join from its own
-        sync, which can trail the room's live roster, and a refresh already in flight may have read the room before
-        the join, so one more follows it. Return whether ``current`` holds at the end.
+        The room's live roster just showed the sender joined. Only that room is read again; the other ready rooms
+        stay. The room's observer applies a join from its own sync, which can trail the room's live roster, and a
+        refresh already in flight may have read the room before the join, so one more follows it.
         """
         for _ in range(2):
-            if not current():
+            if self.misses_member(sender_id, room_id, config, runtime_paths):
                 self._reread_room_ids.add(room_id)
             await refresh()
-            if current():
-                return True
-        return False
+            if not self.misses_member(sender_id, room_id, config, runtime_paths):
+                return
 
     def awaits_observer_join(
         self,
@@ -292,9 +293,9 @@ class AgentReplyMembershipIndex:
     def invalidate(self, config: Config, *, reason: str) -> None:
         """Revoke every room-backed grant until an authoritative refresh succeeds."""
         previous_rooms = {room.room_key: room for room in self._snapshot.rooms}
-        room_keys = _referenced_room_keys(config)
-        requires_current_rooms = _requires_current_room_memberships(config)
         signature = _agent_reply_membership_policy_signature(config)
+        room_keys = _referenced_room_keys(signature)
+        requires_current_rooms = _requires_current_room_memberships(signature)
         self._desired_signature = signature
         self._epoch += 1
         grant_rooms = tuple(
@@ -390,11 +391,11 @@ class AgentReplyMembershipIndex:
         state = matrix_state_for_runtime(runtime_paths)
         matching_room_keys = {
             room_key
-            for room_key in _referenced_room_keys(config)
+            for room_key in _referenced_room_keys(signature)
             if (managed_room := state.rooms.get(room_key)) is not None and managed_room.room_id == room_id
         }
         room_has_row = any(room.room_id == room_id or room.room_key in matching_room_keys for room in snapshot.rooms)
-        if not room_has_row and not _requires_current_room_memberships(config):
+        if not room_has_row and not _requires_current_room_memberships(signature):
             return False
         observed_rooms = tuple(
             room
@@ -465,7 +466,6 @@ class AgentReplyMembershipIndex:
             self._refresh_joined_room_ids.clear()
             try:
                 candidate = await _build_authoritative_snapshot(
-                    config,
                     runtime_paths,
                     clients,
                     pick_observer,
@@ -481,7 +481,7 @@ class AgentReplyMembershipIndex:
                 self._refresh_transitions = None
             if self._desired_signature != signature or self._epoch != expected_epoch:
                 return "voided"
-            candidate = _replay_refresh_transitions(candidate, self._snapshot, config, transitions)
+            candidate = _replay_refresh_transitions(candidate, self._snapshot, signature, transitions)
             now_clients, _, complete = observers()
             superseded = [client.user_id for client in now_clients] != [client.user_id for client in clients]
             possible_room_ids = candidate.possible_joined_room_ids
@@ -526,7 +526,7 @@ class AgentReplyMembershipIndex:
         snapshot = self._snapshot
         if snapshot.policy_signature != signature:
             return False
-        applied = _snapshot_after_transition(snapshot, config, transition)
+        applied = _snapshot_after_transition(snapshot, signature, transition)
         if applied is None:
             return False
         snapshot, changed_room_keys = applied
@@ -553,28 +553,25 @@ class _LiveTransition:
 
 def _snapshot_after_transition(
     snapshot: _AgentReplyMembershipSnapshot,
-    config: Config,
+    signature: _AgentReplyMembershipPolicySignature,
     transition: _LiveTransition,
 ) -> tuple[_AgentReplyMembershipSnapshot, list[str | None]] | None:
     """Return the snapshot after one transition and the room keys it changed, or None when it changes nothing."""
     room_id = transition.room_id
     # A row without a room ID is an unready room no transition can grant in;
     # the refresh that resolves it reads Matrix after this transition or replays it.
-    matching_rooms = tuple(room for room in snapshot.rooms if room.room_id == room_id)
-    if not matching_rooms and not _requires_current_room_memberships(config):
+    if any(room.room_id == room_id for room in snapshot.rooms):
+        updated_rooms = tuple(_apply_transition_to_room(room, transition) for room in snapshot.rooms)
+        changed_room_keys = [
+            previous.room_key
+            for previous, updated in zip(snapshot.rooms, updated_rooms, strict=True)
+            if previous != updated
+        ]
+    elif _requires_current_room_memberships(signature):
+        updated_rooms = (*snapshot.rooms, _GrantRoomMembership(room_key=None, room_id=room_id, ready=False))
+        changed_room_keys = [None]
+    else:
         return None
-
-    updated_rooms = [_apply_transition_to_room(room, transition) for room in snapshot.rooms]
-    if not matching_rooms:
-        updated_rooms.append(_GrantRoomMembership(room_key=None, room_id=room_id, ready=False))
-    updated_rooms_tuple = tuple(updated_rooms)
-    changed_room_keys = [
-        previous.room_key
-        for previous, updated in zip(snapshot.rooms, updated_rooms_tuple, strict=False)
-        if previous != updated
-    ]
-    if len(updated_rooms_tuple) > len(snapshot.rooms):
-        changed_room_keys.append(None)
 
     possible_joined_room_ids = (
         None if snapshot.possible_joined_room_ids is None else snapshot.possible_joined_room_ids | {room_id}
@@ -583,9 +580,9 @@ def _snapshot_after_transition(
         return None
     updated_snapshot = replace(
         snapshot,
-        rooms=updated_rooms_tuple,
+        rooms=updated_rooms,
         # A live transition never ends a pending rebuild: only a refresh that answered everything does.
-        refresh_required=snapshot.refresh_required or any(not room.ready for room in updated_rooms_tuple),
+        refresh_required=snapshot.refresh_required or any(not room.ready for room in updated_rooms),
         possible_joined_room_ids=possible_joined_room_ids,
     )
     return updated_snapshot, changed_room_keys
@@ -594,13 +591,13 @@ def _snapshot_after_transition(
 def _replay_refresh_transitions(
     candidate: _AgentReplyMembershipSnapshot,
     published: _AgentReplyMembershipSnapshot,
-    config: Config,
+    signature: _AgentReplyMembershipPolicySignature,
     transitions: list[_LiveTransition],
 ) -> _AgentReplyMembershipSnapshot:
     """Return a refreshed candidate after the live transitions recorded while it queried Matrix."""
     answered = {_row_identity(room): room for room in candidate.rooms}
     for transition in transitions:
-        applied = _snapshot_after_transition(candidate, config, transition)
+        applied = _snapshot_after_transition(candidate, signature, transition)
         if applied is not None:
             candidate = applied[0]
     # Nothing orders a recorded transition against Matrix's answer for its
@@ -662,7 +659,6 @@ def _apply_transition_to_room(room: _GrantRoomMembership, transition: _LiveTrans
 
 
 async def _build_authoritative_snapshot(
-    config: Config,
     runtime_paths: RuntimePaths,
     clients: Sequence[nio.AsyncClient],
     pick_observer: Callable[[str, Sequence[str]], str | None],
@@ -672,8 +668,8 @@ async def _build_authoritative_snapshot(
     pinned_observers: dict[str, str],
 ) -> _AgentReplyMembershipSnapshot:
     """Build one complete candidate without exposing partially refreshed rooms."""
-    room_keys = _referenced_room_keys(config)
-    requires_current_rooms = _requires_current_room_memberships(config)
+    room_keys = _referenced_room_keys(signature)
+    requires_current_rooms = _requires_current_room_memberships(signature)
     if not room_keys and not requires_current_rooms:
         return _AgentReplyMembershipSnapshot(policy_signature=signature, refresh_required=False)
 
@@ -754,23 +750,17 @@ async def _authoritative_joined_room_ids(client: nio.AsyncClient) -> frozenset[s
     """Return one observing account's joined rooms or fail closed."""
     try:
         response = await client.joined_rooms()
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
-        logger.warning(
-            "agent_reply_observer_joined_rooms_failed",
-            observer_user_id=client.user_id,
-            readiness="unready",
-            error=_query_error(exc),
-        )
-        return None
-    if isinstance(response, nio.JoinedRoomsResponse):
-        return frozenset(response.rooms)
+        error = _query_error(exc)
+    else:
+        if isinstance(response, nio.JoinedRoomsResponse):
+            return frozenset(response.rooms)
+        error = str(response)
     logger.warning(
         "agent_reply_observer_joined_rooms_failed",
         observer_user_id=client.user_id,
         readiness="unready",
-        error=str(response),
+        error=error,
     )
     return None
 
@@ -784,27 +774,20 @@ async def _authoritative_room_members(
     """Return raw joined Matrix user IDs for one stable room ID or fail closed."""
     try:
         response = await read_joined_members(client, room_id)
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
-        logger.warning(
-            "agent_reply_grant_room_snapshot_failed",
-            room_key=room_key,
-            room_id=room_id,
-            readiness="unready",
-            error=_query_error(exc),
-        )
-        return None
-    if not isinstance(response, nio.JoinedMembersResponse):
-        logger.warning(
-            "agent_reply_grant_room_snapshot_failed",
-            room_key=room_key,
-            room_id=room_id,
-            readiness="unready",
-            error=str(response),
-        )
-        return None
-    return frozenset(member.user_id for member in response.members)
+        error = _query_error(exc)
+    else:
+        if isinstance(response, nio.JoinedMembersResponse):
+            return frozenset(member.user_id for member in response.members)
+        error = str(response)
+    logger.warning(
+        "agent_reply_grant_room_snapshot_failed",
+        room_key=room_key,
+        room_id=room_id,
+        readiness="unready",
+        error=error,
+    )
+    return None
 
 
 def _raw_membership_matches_sender(
