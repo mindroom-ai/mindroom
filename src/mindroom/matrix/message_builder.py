@@ -318,6 +318,18 @@ def _escape_unterminated_html_fragments(html_text: str) -> str:
     return _HTML_LINE_PATTERN.sub(_escape_unterminated_html_fragment, html_text)
 
 
+IMAGE_NOT_SENT_NOTE = "⚠️ Image not sent:"
+_LOADABLE_IMG_SRC = re.compile(r"(?i)mxc://[A-Za-z0-9.\-]+(:\d+)?/[^/\s]+|https?://\w[^/?#\s\[\]]*([/?#]\S*)?")
+
+
+def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
+    """Return the text replacing an ``<img>`` whose ``src`` no client can load, or None to keep it."""
+    values = dict(attrs)
+    if _LOADABLE_IMG_SRC.fullmatch((values.get("src") or "").strip()):
+        return None
+    return escape(f"{IMAGE_NOT_SENT_NOTE} {values.get('alt') or 'image'} (no uploaded file)")
+
+
 def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | None]]) -> str:
     allowed_attributes = _ALLOWED_FORMATTED_BODY_ATTRIBUTES.get(tag_name, frozenset())
     sanitized_attributes: list[str] = []
@@ -368,6 +380,9 @@ class _FormattedBodyHtmlSanitizer(HTMLParser):
         if normalized_tag not in _ALLOWED_FORMATTED_BODY_TAGS:
             self._parts.append(escape(starttag_text))
             return
+        if normalized_tag == "img" and (note := _image_not_sent_note(attrs)) is not None:
+            self._parts.append(note)
+            return
         self._parts.append(f"<{normalized_tag}{_format_sanitized_attributes(normalized_tag, attrs)}>")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -377,7 +392,7 @@ class _FormattedBodyHtmlSanitizer(HTMLParser):
             self._parts.append(escape(starttag_text))
             return
         if normalized_tag in _VOID_FORMATTED_BODY_TAGS:
-            self._parts.append(f"<{normalized_tag}{_format_sanitized_attributes(normalized_tag, attrs)}>")
+            self.handle_starttag(tag, attrs)
             return
         self._parts.append(
             f"<{normalized_tag}{_format_sanitized_attributes(normalized_tag, attrs)}></{normalized_tag}>",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from mindroom.matrix.message_builder import (
     build_matrix_edit_content,
     build_message_content,
@@ -105,3 +107,64 @@ def test_nested_quote_list_div_keeps_inner_markdown_literal() -> None:
     assert "<div>ok</div>" in html
     assert "**bold**" in html
     assert "<strong>bold</strong>" not in html
+
+
+@pytest.mark.parametrize(
+    ("markdown", "alt"),
+    [
+        ("![logo](mxc://placeholder)", "logo"),
+        ("![logo](./x.png)", "logo"),
+        ("![chart](att_1)", "chart"),
+        ("![](https://?q)", "image"),
+        ("![s](mxc://s//)", "s"),
+        ("![p](/home/user/plot.png)", "p"),
+        ("![p](sandbox:/mnt/data/plot.png)", "p"),
+        ('<img src="mxc://placeholder" alt="raw">', "raw"),
+    ],
+)
+def test_unloadable_image_becomes_a_note(markdown: str, alt: str) -> None:
+    """An image whose source no client can load renders as a visible note, never as a broken <img>."""
+    html = markdown_to_html(markdown)
+    assert "<img" not in html
+    assert f"⚠️ Image not sent: {alt} (no uploaded file)" in html
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    ["![logo](mxc://matrix.org/abc123)", "![logo](https://example.org/logo.png)", "![l](http://example.org:8080)"],
+)
+def test_loadable_image_is_kept(markdown: str) -> None:
+    """Uploaded media and web images still render as <img>."""
+    html = markdown_to_html(markdown)
+    assert "<img" in html
+    assert "Image not sent" not in html
+
+
+def test_image_syntax_in_code_stays_code() -> None:
+    """Image syntax in code spans and fences is code, not an image or a note."""
+    html = markdown_to_html("Use `![logo](mxc://placeholder)` here.\n\n```\n![logo](./x.png)\n```")
+    assert "<code>![logo](mxc://placeholder)</code>" in html
+    assert "![logo](./x.png)" in html
+    assert "Image not sent" not in html
+
+
+@pytest.mark.parametrize(
+    ("markdown", "note"),
+    [
+        ("![![x](mxc://placeholder)](bad)", "⚠️ Image not sent: x (no uploaded file)"),
+        ("![<b>x</b>](bad)", "⚠️ Image not sent: x (no uploaded file)"),
+        ('<img src="bad" alt="<b>x</b>">', "⚠️ Image not sent: &lt;b&gt;x&lt;/b&gt; (no uploaded file)"),
+    ],
+)
+def test_unloadable_image_alt_is_escaped_text(markdown: str, note: str) -> None:
+    """The alt text goes into the note as escaped text, so neither Markdown nor HTML in it renders."""
+    html = markdown_to_html(markdown)
+    assert note in html
+    assert "<img" not in html
+    assert "<b>" not in html
+
+
+def test_unloadable_image_inside_link_keeps_the_link() -> None:
+    """A linked image with no usable source leaves the link around the note."""
+    html = markdown_to_html("[![a](bad)](https://example.org)")
+    assert '<a href="https://example.org">⚠️ Image not sent: a (no uploaded file)</a>' in html
