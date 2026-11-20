@@ -388,15 +388,15 @@ wheels = [
 
 [[package]]
 name = "arxiv"
-version = "3.0.0"
+version = "4.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "feedparser" },
+    { name = "lxml" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ff/78/1e93a001ed51b5114e1978247078fa3130cbb2794a520603949cbe9a7028/arxiv-3.0.0.tar.gz", hash = "sha256:c8cb0d31208afbc1ceb17bd3f9816c8d4c5ca1e0abf199d211e216715440498d", size = 67344, upload-time = "2026-04-12T22:48:59.623Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4f/44/9f100f10dfa8587c010aad92f690eaa10a826f68a3415c5f544beee2008e/arxiv-4.1.0.tar.gz", hash = "sha256:9d64901c63369a62fbc90930d03f604cb60312bda56b2894ca6d733be69c3515", size = 197167, upload-time = "2026-11-13T23:33:26.108Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9d/0d/bb2ef604e5548ba73ba6326576908d8285ebf3468b02b86af83381c7c973/arxiv-3.0.0-py3-none-any.whl", hash = "sha256:8b4d4e2e336bfeb71ea653623d7dadb260f682f0475cee2aecad0560a23b34db", size = 11928, upload-time = "2026-04-12T22:48:58.44Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/da/8aef78b2b7fce480a3d2bac384b05aedb16d0e080bb8403be71c626f4645/arxiv-4.1.0-py3-none-any.whl", hash = "sha256:025684948282acd81e1bcb66b82c8dcd9d674addaf0dc255c8987ff32df7b00d", size = 13370, upload-time = "2026-11-13T23:33:25.003Z" },
 ]
 
 [[package]]
@@ -4462,7 +4462,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=2.11,<3" },
     { name = "anyio", specifier = ">=4.10" },
     { name = "apify-client", marker = "extra == 'apify'", specifier = ">=1.12.2" },
-    { name = "arxiv", marker = "extra == 'arxiv'", specifier = "<4" },
+    { name = "arxiv", marker = "extra == 'arxiv'", specifier = ">=4.1" },
     { name = "atlassian-python-api", marker = "extra == 'confluence'", specifier = "<5" },
     { name = "authlib", specifier = ">=1.6,<1.8" },
     { name = "baidusearch", marker = "extra == 'baidusearch'" },

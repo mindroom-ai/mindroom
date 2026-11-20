@@ -17,6 +17,7 @@ Issue and PR states were checked on September 24, 2026, unless a row gives anoth
 | --- | --- | --- |
 | Library loggers install their own stdout handler at INFO with propagation disabled, so their records bypass the host's level, format, redaction, and stream. | [Issue #4097](https://github.com/agno-agi/agno/issues/4097), closed (checked October 10, 2026) after Agno 2.0 added `configure_agno_logging`, which swaps module globals but leaves the default handlers on the loggers that modules imported directly. | `logging_config.py` |
 | Mem0Tools passes its user to Mem0 2 search and listing as a top-level `user_id`, which Mem0 rejects, so `search_memory` and `get_all_memories` return Mem0's error instead of memories. | [Issue #11340](https://github.com/agno-agi/agno/issues/11340), open with no fix PR (checked October 27, 2026). | `tools/agno_compat_mem0.py` |
+| ArxivTools `read_arxiv_papers` calls `Result.download_pdf`, which arxiv 4 removed, so every paper fails and the tool returns an empty list. | [Issue #10771](https://github.com/agno-agi/agno/issues/10771) and [PR #10769](https://github.com/agno-agi/agno/pull/10769), both open (checked November 20, 2026); the PR downloads `Result.pdf_url` itself. | `tools/arxiv.py` |
 
 ### Tracking gaps
 

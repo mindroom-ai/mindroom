@@ -90,8 +90,7 @@ apify = [
 ]
 approved_egress = []
 arxiv = [
-  # Agno 3.2.1 ArxivTools calls Result.download_pdf, which arxiv 4 removed.
-  "arxiv<4",
+  "arxiv>=4.1",
 ]
 atlassian = []
 attachments = []
