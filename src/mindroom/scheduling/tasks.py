@@ -262,8 +262,8 @@ class ScheduledTaskRecord:
     created_at: datetime | None
     workflow: ScheduledWorkflow
     revision: str | None = None
-    # Matrix ID of the bot that runs the task, decided once when it was saved; None for a task saved before owners
-    # were stored.
+    # Matrix ID of the bot that runs the task. A record read from a room always has one: a task stored without an
+    # owner reads with its last writer (`_runtime_authored_task_content`). None only on a record built without a read.
     owner_id: str | None = None
 
 
@@ -481,29 +481,25 @@ def _parse_scheduled_task_record(
     )
 
 
-def _cancelled_task_content(
-    task_id: str,
-    existing_content: dict[str, object] | None,
-) -> dict[str, object]:
+def _cancelled_task_content(task_id: str, existing_content: dict[str, object]) -> dict[str, object]:
     """Build cancelled task state while preserving existing metadata where possible."""
     cancelled_content: dict[str, object] = {"status": "cancelled", "task_id": task_id}
 
-    if existing_content:
-        workflow = existing_content.get("workflow")
-        if isinstance(workflow, str):
-            cancelled_content["workflow"] = workflow
+    workflow = existing_content.get("workflow")
+    if isinstance(workflow, str):
+        cancelled_content["workflow"] = workflow
 
-        created_at = existing_content.get("created_at")
-        if isinstance(created_at, str) and created_at:
-            cancelled_content["created_at"] = created_at
+    created_at = existing_content.get("created_at")
+    if isinstance(created_at, str) and created_at:
+        cancelled_content["created_at"] = created_at
 
-        original_task_id = existing_content.get("task_id")
-        if isinstance(original_task_id, str) and original_task_id:
-            cancelled_content["task_id"] = original_task_id
+    original_task_id = existing_content.get("task_id")
+    if isinstance(original_task_id, str) and original_task_id:
+        cancelled_content["task_id"] = original_task_id
 
-        owner = existing_content.get("owner")
-        if isinstance(owner, str):
-            cancelled_content["owner"] = owner
+    owner = existing_content.get("owner")
+    if isinstance(owner, str):
+        cancelled_content["owner"] = owner
 
     cancelled_content["updated_at"] = datetime.now(UTC).isoformat()
     return cancelled_content
@@ -796,27 +792,6 @@ async def persist_scheduled_task_state(
         writers=writers,
     )
     return revision
-
-
-async def _save_pending_scheduled_task(
-    client: nio.AsyncClient,
-    room_id: str,
-    task_id: str,
-    workflow: ScheduledWorkflow,
-    config: Config,
-    task_runtime: ScheduledTaskRuntime | None = None,
-) -> str:
-    """Persist a new task as pending, owned by the bot that saves it, and return that owner; its runner is not started."""
-    await persist_scheduled_task_state(
-        client=client,
-        room_id=room_id,
-        task_id=task_id,
-        workflow=workflow,
-        config=config,
-        owner_id=client.user_id,
-        writers=task_runtime,
-    )
-    return client.user_id
 
 
 def _raise_unless_editable(task: ScheduledTaskRecord) -> None:
@@ -1220,16 +1195,18 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 writers=runtime.task_runtime,
             )
         else:
-            owner_id = await _save_pending_scheduled_task(
+            # A new task is owned by the bot that saves it; the room's steward only writes its state.
+            await persist_scheduled_task_state(
                 client=client,
                 room_id=room_id,
                 task_id=task_id,
                 workflow=workflow_result,
                 config=config,
-                task_runtime=runtime.task_runtime,
+                owner_id=client.user_id,
+                writers=runtime.task_runtime,
             )
             if runtime.task_runtime is not None:
-                runtime.task_runtime.start_new_task(task_id, workflow_result, owner_id=owner_id)
+                runtime.task_runtime.start_new_task(task_id, workflow_result, owner_id=client.user_id)
     except SchedulingError as e:
         msg = f"Failed to schedule: {e}"
         raise SchedulingError(msg) from e
@@ -1435,13 +1412,14 @@ async def schedule_approved_tool_call(
             msg = "Could not post an approvable approval card for this call; nothing was scheduled."
             raise SchedulingError(msg)
         try:
-            owner_id = await _save_pending_scheduled_task(
+            await persist_scheduled_task_state(
                 runtime.client,
                 room_id,
                 task_id,
                 workflow,
-                config,
-                task_runtime=runtime.task_runtime,
+                config=config,
+                owner_id=runtime.client.user_id,
+                writers=runtime.task_runtime,
             )
         except SchedulingError as e:
             msg = f"Failed to schedule: {e}"
@@ -1452,7 +1430,7 @@ async def schedule_approved_tool_call(
             await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
     # Started only once the task is published, so a failed start never withdraws the approval a stored task uses.
     if runtime.task_runtime is not None:
-        runtime.task_runtime.start_new_task(task_id, workflow, owner_id=owner_id)
+        runtime.task_runtime.start_new_task(task_id, workflow, owner_id=runtime.client.user_id)
     scheduled_for = _format_scheduled_time(send_at, timezone)
     return (
         f"✅ Scheduled `{tool_name}` for {scheduled_for} (task `{task_id}`).\n"
@@ -1659,8 +1637,7 @@ async def cancel_all_scheduled_tasks(
     """
     response = await _room_state_for_tasks(client, room_id)
     cancelled_count = 0
-    failed_count = 0
-    refusals: list[ScheduledTaskStateRefusedError | None] = []
+    failures: list[ScheduledTaskStateRefusedError | None] = []
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
 
     for event in response.events:
@@ -1682,18 +1659,17 @@ async def cancel_all_scheduled_tasks(
             logger.info("scheduled_task_cancelled", task_id=task_id)
         except Exception as error:
             logger.exception("scheduled_task_cancel_failed", task_id=task_id)
-            failed_count += 1
-            refusals.append(refused_for_power(error))
+            failures.append(refused_for_power(error))
     if cancelled_count == 0:
-        if (refusal := next(iter(refusals), None)) is not None and all(refusals):
+        if failures and (refusal := failures[0]) is not None and all(failures):
             raise refusal
-        if failed_count > 0:
-            msg = f"Failed to cancel {failed_count} scheduled task(s)"
+        if failures:
+            msg = f"Failed to cancel {len(failures)} scheduled task(s)"
             raise SchedulingError(msg)
         return "No scheduled tasks to cancel."
 
     result = f"✅ Cancelled {cancelled_count} scheduled task(s)"
-    if failed_count > 0:
-        result += f"\n⚠️ Failed to cancel {failed_count} task(s)"
+    if failures:
+        result += f"\n⚠️ Failed to cancel {len(failures)} task(s)"
 
     return result

@@ -100,7 +100,6 @@ from tests.scheduling_helpers import (
     run_once_task,
     scheduled_task_runtime,
     scheduling_bot,
-    serve_full_room_state,
 )
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
@@ -1084,7 +1083,6 @@ def _gated_config(match: str = "post_slack_message") -> Config:
 def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolRuntimeContext:
     context = _make_context(config)
     client = context.client
-    serve_full_room_state(client, "!room:localhost")
     client.room_put_state = AsyncMock(
         return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!room:localhost"),
     )
@@ -1285,6 +1283,8 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     assert kwargs["scheduled_for_text"] == "2030-01-02 14:00 UTC"
     assert kwargs["any_arguments_offered"] is True
     start.assert_called_once()
+    assert record.owner_id == context.client.user_id
+    assert start.call_args.kwargs["owner_id"] == context.client.user_id
     assert record.task_id in result
     assert "approve" in result.lower()
 

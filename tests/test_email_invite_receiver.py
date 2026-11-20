@@ -13,6 +13,7 @@ import pytest_asyncio
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.email_invites import receiver as receiver_module
 from mindroom.email_invites import store
 from mindroom.email_invites.receiver import _CLAIM_EVENT_TYPE, _RESULT_EVENT_TYPE, register_email_invite_receiver
@@ -98,12 +99,12 @@ class Harness:
             side_effect=lambda callback, _type: self.callbacks.append(callback),
         )
 
-    async def start(self) -> None:
-        """Register the receiver, as the `code` agent's bot does at each start."""
+    async def start(self, agent_name: str = "code") -> None:
+        """Register the receiver, as the `code` agent's bot (or ``agent_name``'s) does at each start."""
         self.callbacks.clear()
         await register_email_invite_receiver(
             client=self.client,
-            agent_name="code",
+            agent_name=agent_name,
             runtime_paths=self.paths,
             config_getter=lambda: self.config,
             callback_wrapper=lambda callback: callback,
@@ -453,6 +454,26 @@ async def test_crash_while_sending_revokes_the_link_at_restart(harness: Harness)
     harness.client.room_invite.assert_not_awaited()
     await harness.start()
     assert len(harness.notices) == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_account_revokes_links_a_crash_left_sending_for_an_entity_no_longer_configured(
+    harness: Harness,
+) -> None:
+    """No receiver starts for a removed or renamed entity, so the owner account revokes its links with one notice.
+
+    A configured agent's send is left to that agent's own receiver.
+    """
+    request = store.Request(ROOM, "$thread", "bob@example.com", BAS, "retired")
+    retired, _ = store.issue_code(harness.paths, request, expiry_days=7)
+    current, _ = harness.sent_invite()
+    for invite in (retired, current):
+        assert store.bind_claim(harness.paths, invite.id, ALICE)
+        assert store.start_sending(harness.paths, invite.id, ALICE)
+    await harness.start(ROUTER_AGENT_NAME)
+    assert (harness.row(retired.id).revoked, harness.row(current.id).revoked) == (True, False)
+    (notice,) = harness.notices
+    assert "bob@example.com may or may not have gone out" in notice["body"]
 
 
 @pytest.mark.asyncio

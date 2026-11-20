@@ -23,10 +23,10 @@ from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
-    _save_pending_scheduled_task,
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
     get_scheduled_task,
+    persist_scheduled_task_state,
     save_edited_scheduled_task,
 )
 from tests.conftest import install_bots, make_matrix_client_mock, orchestrator_runtime_paths
@@ -34,7 +34,6 @@ from tests.identity_helpers import entity_ids
 from tests.scheduling_helpers import (
     persist_schedule_writer,
     scheduled_task_runtime,
-    scheduled_task_state_event,
     scheduling_bot,
     serve_task_state_events,
 )
@@ -90,18 +89,33 @@ def _runtime(runtime_paths: RuntimePaths, config: Config, bots: dict[str, AgentB
 
 async def _save_task(runtime: ScheduledTaskRuntime, client: nio.AsyncClient, workflow: ScheduledWorkflow) -> None:
     """Save a pending task as a scheduling command does, without starting its runner."""
-    await _save_pending_scheduled_task(
+    await persist_scheduled_task_state(
         client,
         ROOM_ID,
         TASK_ID,
         workflow,
-        runtime.config_provider(),
-        task_runtime=runtime,
+        config=runtime.config_provider(),
+        owner_id=client.user_id,
+        writers=runtime,
     )
 
 
 async def _wait_forever(*_args: object, **_kwargs: object) -> None:
     await asyncio.Event().wait()
+
+
+def _hold_writes(client: AsyncMock) -> tuple[asyncio.Event, asyncio.Event]:
+    """Hold the client's state writes: the first event is set when one starts, and it lands once the second is set."""
+    writing, release = asyncio.Event(), asyncio.Event()
+    write_state = client.room_put_state.side_effect
+
+    async def held_write(**kwargs: Any) -> object:  # noqa: ANN401
+        writing.set()
+        await release.wait()
+        return await write_state(**kwargs)
+
+    client.room_put_state.side_effect = held_write
+    return writing, release
 
 
 @contextmanager
@@ -475,27 +489,6 @@ async def test_restore_names_a_room_whose_state_it_cannot_read(tmp_path: Path) -
     assert [log["room_id"] for log in logs if log["event"] == "scheduled_task_room_state_unread"] == [ROOM_ID]
 
 
-def _room_state(writer_id: str, agent_id: str, task_content: dict[str, Any], *, agent_level: int) -> list[dict]:
-    """Return a room's full state: one agent joined at a power level, no router, and a task ``writer_id`` wrote."""
-
-    def state(event_type: str, state_key: str, content: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "type": event_type,
-            "state_key": state_key,
-            "content": content,
-            "sender": agent_id,
-            "event_id": f"${event_type}:{state_key}",
-            "origin_server_ts": 1,
-            "room_id": ROOM_ID,
-        }
-
-    return [
-        state("m.room.member", agent_id, {"membership": "join"}),
-        state("m.room.power_levels", "", {"users": {agent_id: agent_level}, "state_default": 50}),
-        scheduled_task_state_event(TASK_ID, task_content, room_id=ROOM_ID, sender=writer_id),
-    ]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_may_write", [True, False])
 async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_down(
@@ -508,18 +501,9 @@ async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_d
     persist_schedule_writer(runtime_paths, retired_id, entity_name="retired")
     workflow = _workflow(due=False)
     content = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"}
-    client = make_matrix_client_mock(user_id=ids["general"])
-    client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(
-        _room_state(retired_id, ids["general"], content, agent_level=100 if agent_may_write else 0),
-        room_id=ROOM_ID,
-    )
-
-    async def read_task(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
-        return nio.RoomGetStateEventResponse(dict(content), event_type, state_key, room_id)
-
-    client.room_get_state_event.side_effect = read_task
-    client.room_put_state.return_value = nio.RoomPutStateResponse("$failed", ROOM_ID)
-    serve_task_state_events(client, sender=retired_id)
+    room = _SharedRoom({ids["general"]: 100 if agent_may_write else 0})
+    room._put("com.mindroom.scheduled.task", TASK_ID, content, retired_id)
+    client = room.client(ids["general"])
     bot = scheduling_bot(client, agent_name="general")
     runtime = _runtime(runtime_paths, config, {"general": bot})
 
@@ -540,18 +524,14 @@ async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_d
 
 @pytest.mark.asyncio
 async def test_restore_by_a_bot_that_does_not_own_the_task_starts_no_runner(tmp_path: Path) -> None:
-    """Only the owner the rule picks starts a task's runner; another bot joining the room leaves it alone."""
+    """An ownerless task runs under the agent that last wrote it; another bot restoring the room leaves it alone."""
     config, runtime_paths, ids = _config_and_ids(tmp_path)
     workflow = _workflow(due=False)
     content = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"}
-    # The router is not joined, so the agent that wrote the task owns it.
-    state = _room_state(ids["general"], ids["general"], content, agent_level=100)
-    router_client = make_matrix_client_mock(user_id=ids["router"])
-    router_client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(state, room_id=ROOM_ID)
-    agent_client = make_matrix_client_mock(user_id=ids["general"])
-    agent_client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(state, room_id=ROOM_ID)
-    router = scheduling_bot(router_client)
-    agent = scheduling_bot(agent_client, agent_name="general")
+    room = _SharedRoom({ids["general"]: 100})
+    room._put("com.mindroom.scheduled.task", TASK_ID, content, ids["general"])
+    router = scheduling_bot(room.client(ids["router"]))
+    agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
     runtime = _runtime(runtime_paths, config, {"router": router, "general": agent})
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
@@ -626,15 +606,8 @@ async def test_a_task_is_written_by_the_room_steward_and_owned_by_the_bot_that_s
     workflow = _workflow(due=False)
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
-        owner_id = await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            task_runtime=runtime,
-        )
-        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
+        await _save_task(runtime, agent.client, workflow)
+        runtime.start_new_task(TASK_ID, workflow, owner_id=ids["general"])
         restored = [await runtime.restore_room(bot, ROOM_ID) for bot in (agent, steward)]
 
     assert room.task()["content"]["owner"] == ids["general"]
@@ -655,15 +628,8 @@ async def test_an_edit_by_another_agent_keeps_the_owner_its_runner_and_who_fails
     workflow = _workflow(due=False)
 
     with patch.object(scheduling_runtime._TaskRunner, "run_once", _wait_forever):
-        owner_id = await _save_pending_scheduled_task(
-            owner.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            task_runtime=runtime,
-        )
-        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
+        await _save_task(runtime, owner.client, workflow)
+        runtime.start_new_task(TASK_ID, workflow, owner_id=ids["general"])
         existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
         assert existing is not None
         await save_edited_scheduled_task(
@@ -726,17 +692,8 @@ async def test_a_cancel_during_an_edit_leaves_the_task_cancelled(tmp_path: Path,
     await _save_task(runtime, owner.client, workflow)
     existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
     assert existing is not None
-    edit_writing = asyncio.Event()
-    finish_edit = asyncio.Event()
+    edit_writing, finish_edit = _hold_writes(editor.client)
     cancel_started = asyncio.Event()
-    write_state = editor.client.room_put_state.side_effect
-
-    async def slow_edit_write(**kwargs: Any) -> object:  # noqa: ANN401
-        edit_writing.set()
-        await finish_edit.wait()
-        return await write_state(**kwargs)
-
-    editor.client.room_put_state.side_effect = slow_edit_write
 
     async def cancel() -> str:
         cancel_started.set()
@@ -777,16 +734,7 @@ async def test_restore_waits_for_an_edit_still_rescheduling_an_overdue_task(tmp_
     await _save_task(runtime, agent.client, overdue)
     existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
     assert existing is not None
-    edit_writing = asyncio.Event()
-    finish_edit = asyncio.Event()
-    write_state = editor.client.room_put_state.side_effect
-
-    async def slow_edit_write(**kwargs: Any) -> object:  # noqa: ANN401
-        edit_writing.set()
-        await finish_edit.wait()
-        return await write_state(**kwargs)
-
-    editor.client.room_put_state.side_effect = slow_edit_write
+    edit_writing, finish_edit = _hold_writes(editor.client)
     restore_waiting = asyncio.Event()
     lock = scheduling_runtime.scheduled_task_state_lock
 
@@ -1057,15 +1005,8 @@ async def test_schedule_in_one_agent_room_fires_without_owner_account(tmp_path: 
     workflow = _workflow()
 
     with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()) as execute:
-        owner_id = await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            task_runtime=runtime,
-        )
-        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
+        await _save_task(runtime, agent.client, workflow)
+        runtime.start_new_task(TASK_ID, workflow, owner_id=ids["general"])
         await asyncio.wait_for(runtime._runners[TASK_ID][1], timeout=2)
 
     assert execute.await_args.args[0] is agent.client
@@ -1093,15 +1034,8 @@ async def test_unnamed_scheduled_prompt_is_routed_in_process(tmp_path: Path) -> 
         "mindroom.scheduling.executor.client_delivery.send_message_outcome",
         new=AsyncMock(return_value=SimpleNamespace(event_id="$trigger")),
     ) as send:
-        owner_id = await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            task_runtime=runtime,
-        )
-        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
+        await _save_task(runtime, agent.client, workflow)
+        runtime.start_new_task(TASK_ID, workflow, owner_id=ids["general"])
         await asyncio.wait_for(runtime._runners[TASK_ID][1], timeout=2)
 
     send.assert_awaited_once()
@@ -1130,15 +1064,7 @@ def _due_task_under_a_steward(
 async def test_a_steward_stop_waits_for_the_final_status_write_it_is_lent_for(tmp_path: Path) -> None:
     """A steward that starts stopping while another bot's runner writes through it lets that write land first."""
     room, runtime, bots, ids = _due_task_under_a_steward(tmp_path)
-    writing, finish = asyncio.Event(), asyncio.Event()
-    write_state = bots["helper"].client.room_put_state.side_effect
-
-    async def held_write(**kwargs: Any) -> object:  # noqa: ANN401
-        writing.set()
-        await finish.wait()
-        return await write_state(**kwargs)
-
-    bots["helper"].client.room_put_state.side_effect = held_write
+    writing, finish = _hold_writes(bots["helper"].client)
 
     with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()):
         runtime.start_new_task(TASK_ID, _workflow(), owner_id=ids["general"])

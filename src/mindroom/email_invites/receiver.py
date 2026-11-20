@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Literal, TypeGuard
 import aiohttp
 import nio
 
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.email_invites import store
 from mindroom.email_invites.policy import may_invite, refused_room_kind
 from mindroom.logging_config import get_logger
@@ -159,7 +160,12 @@ async def register_email_invite_receiver(
 ) -> None:
     """Register this account's claim receiver, revoking its links a crash left sending, before any claim."""
     receiver = _Receiver(client, agent_name, runtime_paths, config_getter)
-    if abandoned := store.abandon_sending(runtime_paths, agent_name=agent_name):
+    configured: tuple[str, ...] = ()
+    if agent_name == ROUTER_AGENT_NAME:
+        # No receiver starts for a removed or renamed entity, so the owner account revokes its links too.
+        config = config_getter()
+        configured = (ROUTER_AGENT_NAME, *config.agents, *config.teams)
+    if abandoned := store.abandon_sending(runtime_paths, agent_name=agent_name, configured=configured):
         await callback_wrapper(receiver.abandoned)(abandoned)
     wrapped = callback_wrapper(receiver.on_event)
 

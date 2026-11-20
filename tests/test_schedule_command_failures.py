@@ -346,18 +346,6 @@ async def test_cancel_of_a_task_that_already_ended(tmp_path: Path, status: str) 
 
 
 @pytest.mark.asyncio
-async def test_state_refusal_says_moderator_rights(tmp_path: Path) -> None:
-    """A cancellation the room refuses for lack of power answers with the moderator-rights sentence and nothing else."""
-    client = make_matrix_client_mock()
-    _serve_task(client, _workflow())
-    client.room_put_state = AsyncMock(return_value=_STATE_WRITE_REFUSED)
-
-    reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client)
-
-    assert reply == "I need moderator rights in this room to save schedules."
-
-
-@pytest.mark.asyncio
 async def test_state_write_timeout_gives_no_moderator_advice(tmp_path: Path) -> None:
     """A cancellation that fails for another reason than power reports the failure, without moderator advice."""
     client = make_matrix_client_mock()
@@ -422,11 +410,17 @@ def _serve_pending_tasks(client: AsyncMock, *task_ids: str) -> None:
             AsyncMock(side_effect=[_STATE_WRITE_REFUSED, TimeoutError("slow")]),
             "❌ Failed to cancel 2 scheduled task(s)",
         ),
+        (
+            AsyncMock(
+                side_effect=[nio.RoomPutStateResponse(event_id="$cancelled", room_id=ROOM_ID), _STATE_WRITE_REFUSED],
+            ),
+            "✅ Cancelled 1 scheduled task(s)\n⚠️ Failed to cancel 1 task(s)",
+        ),
     ],
-    ids=["all-refused-for-power", "all-timed-out", "mixed"],
+    ids=["all-refused-for-power", "all-timed-out", "mixed", "one-cancelled-one-refused"],
 )
-async def test_cancel_all_when_every_cancellation_fails(tmp_path: Path, write: AsyncMock, expected: str) -> None:
-    """Cancelling every schedule when none can be stored counts the failures, unless power is all that is missing."""
+async def test_cancel_all_reports_what_failed(tmp_path: Path, write: AsyncMock, expected: str) -> None:
+    """Cancelling every schedule counts the failures, unless none was cancelled and power is all that is missing."""
     client = make_matrix_client_mock()
     _serve_pending_tasks(client, "first", "second")
     client.room_put_state = write
@@ -434,23 +428,6 @@ async def test_cancel_all_when_every_cancellation_fails(tmp_path: Path, write: A
     reply = await _reply(tmp_path, "!cancel_schedule all", client=client)
 
     assert reply == expected
-
-
-@pytest.mark.asyncio
-async def test_cancel_all_when_some_cancellations_fail(tmp_path: Path) -> None:
-    """Cancelling every schedule when only some can be stored reports both counts."""
-    client = make_matrix_client_mock()
-    _serve_pending_tasks(client, "first", "second")
-    client.room_put_state = AsyncMock(
-        side_effect=[
-            nio.RoomPutStateResponse(event_id="$cancelled", room_id=ROOM_ID),
-            _STATE_WRITE_REFUSED,
-        ],
-    )
-
-    reply = await _reply(tmp_path, "!cancel_schedule all", client=client)
-
-    assert reply == "✅ Cancelled 1 scheduled task(s)\n⚠️ Failed to cancel 1 task(s)"
 
 
 @pytest.mark.asyncio

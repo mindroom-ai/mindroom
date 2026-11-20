@@ -224,13 +224,24 @@ def start_sending(paths: RuntimePaths, invite_id: int, claimant: str, now: int |
     return _update(paths, current, sql, (current, invite_id, claimant, current))
 
 
-def abandon_sending(paths: RuntimePaths, *, invite_id: int | None = None, agent_name: str) -> list[EmailInvite]:
-    """Revoke one request of an entity, or at its start all, left sending with an unknown outcome; return those."""
-    where = "sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0 AND agent_name = ?" + (
+def abandon_sending(
+    paths: RuntimePaths,
+    *,
+    invite_id: int | None = None,
+    agent_name: str,
+    configured: tuple[str, ...] = (),
+) -> list[EmailInvite]:
+    """Revoke one request of an entity, or at its start all, left sending with an unknown outcome; return those.
+
+    With ``configured``, also revoke those of every entity not in it.
+    """
+    others = f" OR agent_name NOT IN ({','.join('?' * len(configured))})" if configured else ""
+    where = f"sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0 AND (agent_name = ?{others})" + (
         "" if invite_id is None else " AND id = ?"
     )
+    params = (agent_name, *configured, *(() if invite_id is None else (invite_id,)))
     with _write(paths, _now(None)) as connection:
-        rows = _select(connection, where, (agent_name,) if invite_id is None else (agent_name, invite_id))
+        rows = _select(connection, where, params)
         connection.executemany("UPDATE email_invites SET revoked = 1 WHERE id = ?", [(row.id,) for row in rows])
     return rows
 
