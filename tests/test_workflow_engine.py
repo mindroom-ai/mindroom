@@ -164,11 +164,32 @@ async def test_large_tool_result_is_returned_in_full(stack: WorkflowStack) -> No
     size = 300 * 1024
 
     assert await stack.result("@0", "tool", tool_args("counter", "text", size=size)) == "x" * size
-    assert _broker_call(stack).error == {
-        "kind": "result_too_large",
-        "message": "The tool result exceeds the background receipt size limit.",
-        "retryable": False,
-    }
+    assert _broker_call(stack).result == "x" * size
+
+
+@pytest.mark.asyncio
+async def test_large_result_survives_a_crash_between_its_receipt_and_its_node(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed receipt holds the whole result, so the node recovers it and the tool is not called again."""
+    size = 300 * 1024
+
+    def crash(*_args: object, **_fields: object) -> bool:
+        msg = "The primary stopped before the node was written."
+        raise sqlite3.OperationalError(msg)
+
+    monkeypatch.setattr(stack.store, "settle_node", crash)
+    await stack.submit("@0", "tool", tool_args("counter", "text", size=size))
+    await stack.until(lambda: stack.counting_tool.calls == 1)
+    await stack.until(lambda: _broker_call(stack).state is not ScriptCallState.PENDING)
+
+    stack = await stack.restart()
+    await stack.end_attempt(ScriptRunState.INTERRUPTED)
+
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    assert (node.state, node.result, stack.counting_tool.calls) == (WorkflowNodeState.COMPLETED, "x" * size, 1)
 
 
 @pytest.mark.asyncio

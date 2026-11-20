@@ -310,7 +310,9 @@ class ScriptRunStore:
         if state not in _TERMINAL_CALL_STATES:
             msg = "A script call result must use a terminal state."
             raise ScriptRunStoreError(msg)
-        receipt_json = _serialize_receipt(result=result, error=error)
+        # A workflow node's result is recovered from this receipt after a crash, so the receipt keeps all of it.
+        bounded = self.get_run(run_id).workflow_run_id is None
+        receipt_json = _serialize_receipt(result=result, error=error, bounded=bounded)
         metadata_json = None if metadata is None else json.dumps(metadata, allow_nan=False)
         with self._write_transaction() as connection:
             row = connection.execute(
@@ -750,7 +752,7 @@ def _call_from_row(row: sqlite3.Row) -> ScriptCallRecord:
     )
 
 
-def _serialize_receipt(*, result: object | None, error: object | None) -> str:
+def _serialize_receipt(*, result: object | None, error: object | None, bounded: bool = True) -> str:
     try:
         wire_value = json.loads(
             json.dumps(
@@ -770,7 +772,7 @@ def _serialize_receipt(*, result: object | None, error: object | None) -> str:
         serialized_bytes = serialized.encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ScriptRunStoreError(_RECEIPT_NOT_SERIALIZABLE) from exc
-    if len(serialized_bytes) > _MAX_RECEIPT_BYTES:
+    if bounded and len(serialized_bytes) > _MAX_RECEIPT_BYTES:
         msg = f"Script call receipt exceeds the {_MAX_RECEIPT_BYTES}-byte limit."
         raise ScriptReceiptTooLargeError(msg)
     return serialized

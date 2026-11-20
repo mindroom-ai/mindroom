@@ -428,7 +428,7 @@ class ScriptToolBroker:
     ) -> ScriptCallRecord:
         """Claim one call of the workflow attempt *run*, which its gateway authenticated, and await its receipt.
 
-        The returned receipt holds the tool's whole result, also when the stored receipt had to drop it for its size.
+        The stored receipt holds the tool's whole result, whatever its size, so the node can be settled from it later.
         """
         request = ScriptToolCallRequest(run.run_id, call_id, grant, arguments)
         await run_coroutine_until_complete(self._accept_prepared_call(request, authorization=None, authenticated=True))
@@ -531,17 +531,11 @@ class ScriptToolBroker:
                     error=error,
                 )
             value = _strict_json_result(result.value)
-            receipt = await self._publish_async(
+            return await self._publish_async(
                 call,
                 state=ScriptCallState.COMPLETED,
                 result=value,
                 metadata=metadata or None,
-            )
-            # A workflow node saves its result in the workflow store, so its engine gets all of it.
-            return (
-                replace(receipt, state=ScriptCallState.COMPLETED, result=value, error=None, metadata=metadata or None)
-                if run.workflow_run_id is not None and receipt.error == _RESULT_TOO_LARGE_ERROR
-                else receipt
             )
         except asyncio.CancelledError:
             raise
