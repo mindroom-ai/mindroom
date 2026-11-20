@@ -32,7 +32,7 @@ type fakePrimary struct {
 	// onStatus, when set, runs while a POST /status waits for its answer.
 	onStatus func()
 	// onConnect, when set, runs while a POST /links/{id}/connect waits for its answer.
-	onConnect func()
+	onConnect func(r *http.Request)
 }
 
 type fakeAnswer struct {
@@ -69,7 +69,7 @@ func (p *fakePrimary) serve(w http.ResponseWriter, r *http.Request) {
 		onStatus()
 	}
 	if strings.HasSuffix(route, "/connect") && onConnect != nil {
-		onConnect()
+		onConnect(r)
 	}
 	if !known {
 		http.NotFound(w, r)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -32,14 +33,34 @@ func TestObserveMapsTsnetStatesToTheContracts(t *testing.T) {
 		ipn.NeedsMachineAuth: {State: "needs_approval"},
 		ipn.Running:          {State: "running"},
 	} {
-		if got := observe(state, url, &ipnstate.Status{}); !reflect.DeepEqual(got, want) {
+		if got := observe(state, url, &ipnstate.Status{}, &ipnstate.TailnetLockStatus{}); !reflect.DeepEqual(got, want) {
 			t.Errorf("a node that is %v is seen as %+v, want %+v", state, got, want)
 		}
 	}
 }
 
+func TestObserveSeesANodeItsTailnetsLockKeepsOutAsWaitingForApproval(t *testing.T) {
+	for name, test := range map[string]struct {
+		lock ipnstate.TailnetLockStatus
+		want string
+	}{
+		"a tailnet without a lock":             {ipnstate.TailnetLockStatus{}, "running"},
+		"a lock that has the node's signature": {ipnstate.TailnetLockStatus{Enabled: true, NodeKeySigned: true}, "running"},
+		"a lock without the node's signature":  {ipnstate.TailnetLockStatus{Enabled: true}, "needs_approval"},
+	} {
+		if got := observe(ipn.Running, nil, enrolled(), &test.lock); got.State != test.want || got.DNSName == nil {
+			t.Errorf("a running node in %s is seen as %+v, want %s with its names", name, got, test.want)
+		}
+	}
+	// Only a node in a tailnet is kept out by its lock: one that needs a login still needs it.
+	unsigned := &ipnstate.TailnetLockStatus{Enabled: true}
+	if got := observe(ipn.NeedsLogin, nil, &ipnstate.Status{}, unsigned); got.State != "needs_login" {
+		t.Errorf("a node that needs a login is seen as %+v under a lock, want needs_login", got)
+	}
+}
+
 func TestObserveReadsTheTailnetFromTheStatus(t *testing.T) {
-	got := observe(ipn.Running, nil, enrolled())
+	got := observe(ipn.Running, nil, enrolled(), &ipnstate.TailnetLockStatus{})
 
 	want := NodeObserved{
 		State:     "running",
@@ -89,6 +110,13 @@ func TestTsnetNodeStartsWithoutALoginServer(t *testing.T) {
 	}
 	if node.Listener() == nil || !exists(t, filepath.Join(dir, "tailscaled.state")) {
 		t.Error("the node has no listener or no state in its directory")
+	}
+	// The watch asks for the lock's status on every change and takes no answer for no change, so the node has to
+	// answer it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if lock, err := node.(*tsnetNode).client.TailnetLockStatus(ctx); err != nil || lock.Enabled {
+		t.Errorf("the node's lock status is %+v, %v, want one of no lock", lock, err)
 	}
 	if err := node.Close(); err != nil {
 		t.Errorf("closing the node: %v", err)

@@ -18,7 +18,8 @@ const (
 	statusEvery = 30 * time.Second
 	// How long logging a node in again, or out, may take.
 	nodeCallTimeout = 10 * time.Second
-	// A connection this old is past sshd's LoginGraceTime, so it is an authenticated session and counts as open.
+	// A connection that reached sshd this long ago is past its LoginGraceTime, so it is an authenticated session
+	// and counts as open.
 	countedAfter = 75 * time.Second
 	// What the card shows of a link whose node does not start; why is in the gateway's log.
 	nodeDidNotStart = "The gateway could not start this link's node."
@@ -52,6 +53,14 @@ type Node interface {
 	Close() error
 }
 
+// held is a connection the gateway keeps for a link, from its accept on.
+type held struct {
+	// cancel ends what the connection waits for: its peer's name, the primary's answer, its worker.
+	cancel context.CancelFunc
+	// reached is when this clock saw the connection get to its worker's sshd; zero until then.
+	reached time.Time
+}
+
 // NodeFactory starts the node whose state is in dir, under hostname.
 type NodeFactory func(dir, hostname string) (Node, error)
 
@@ -75,6 +84,8 @@ type Gateway struct {
 	stateDir   string
 	enrollment string
 	clock      clock
+	// dial reaches a worker's sshd at the address the primary named.
+	dial func(ctx context.Context, address string) (net.Conn, error)
 
 	// mu guards the maps below; no call to a node, the primary or the disk is made under it, except Observed.
 	mu sync.Mutex
@@ -88,8 +99,8 @@ type Gateway struct {
 	relogin map[string]bool
 	// removed holds the links listed as removing whose state is gone.
 	removed map[string]bool
-	// conns holds each link's open connections and when this clock saw them accepted.
-	conns map[string]map[net.Conn]time.Time
+	// conns holds each link's open connections.
+	conns map[string]map[net.Conn]*held
 	// connects holds when the link's connect calls of the last minute were made.
 	connects map[string][]time.Time
 	// lastError holds why the link's last connection did not get to its worker, or, of a link without a node, that
@@ -105,11 +116,12 @@ func NewGateway(p Primary, f NodeFactory, stateDir, enrollment string) *Gateway 
 		stateDir:   stateDir,
 		enrollment: enrollment,
 		clock:      systemClock{},
+		dial:       dialWorker,
 		links:      map[string]DesiredLink{},
 		nodes:      map[string]Node{},
 		relogin:    map[string]bool{},
 		removed:    map[string]bool{},
-		conns:      map[string]map[net.Conn]time.Time{},
+		conns:      map[string]map[net.Conn]*held{},
 		connects:   map[string][]time.Time{},
 		lastError:  map[string]string{},
 	}
@@ -199,8 +211,8 @@ func (g *Gateway) Run(ctx context.Context) {
 //
 // A pass first does what the new rows revoke, before any call to a node, which may take 10 s: the rows are the ones
 // connections are checked against from then on, and the open connections are closed of every link that is not on
-// any more, or whose closed_before moved. Then every link that stays gets its node, after which the status may be
-// reported, and the removals come last.
+// any more, or whose closed_before moved, with what they wait for given up. Then every link that stays gets its
+// node, after which the status may be reported, and the removals come last.
 func (g *Gateway) Reconcile(ctx context.Context) error {
 	answer, err := g.primary.Links(ctx)
 	if err != nil {
@@ -232,7 +244,8 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 	for id, open := range g.conns {
 		// The primary moves closed_before to cut what is open, whenever this clock saw it opened.
 		if link := listed[id]; link.Desired != "on" || link.ClosedBefore != before[id].ClosedBefore {
-			for conn := range open {
+			for conn, kept := range open {
+				kept.cancel()
 				revoked = append(revoked, conn)
 			}
 			delete(g.conns, id)
@@ -378,7 +391,8 @@ func (g *Gateway) drop(id string) Node {
 	delete(g.relogin, id)
 	delete(g.conns, id)
 	g.mu.Unlock()
-	for conn := range open {
+	for conn, kept := range open {
+		kept.cancel()
 		conn.Close()
 	}
 	return node
@@ -402,8 +416,8 @@ func (g *Gateway) Status() map[string]LinkStatus {
 			LoginName: seen.LoginName,
 			KeyExpiry: seen.KeyExpiry,
 		}
-		for _, opened := range g.conns[id] {
-			if now.Sub(opened) >= countedAfter {
+		for _, kept := range g.conns[id] {
+			if !kept.reached.IsZero() && now.Sub(kept.reached) >= countedAfter {
 				link.OpenConnections++
 			}
 		}

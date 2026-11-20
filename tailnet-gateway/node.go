@@ -73,7 +73,7 @@ func NewTsnetNode(loginServer, authKey string, tags []string) NodeFactory {
 func (n *tsnetNode) watch(ctx context.Context, id string) {
 	var state ipn.State
 	var loginURL *string
-	status := &ipnstate.Status{}
+	status, lock := &ipnstate.Status{}, &ipnstate.TailnetLockStatus{}
 	for {
 		bus, err := n.client.WatchIPNBus(ctx, ipn.NotifyInitialState)
 		for err == nil {
@@ -95,7 +95,10 @@ func (n *tsnetNode) watch(ctx context.Context, id string) {
 			if fresh, statusErr := n.client.Status(ctx); statusErr == nil {
 				status = fresh
 			}
-			seen := observe(state, loginURL, status)
+			if fresh, lockErr := n.client.TailnetLockStatus(ctx); lockErr == nil {
+				lock = fresh
+			}
+			seen := observe(state, loginURL, status, lock)
 			n.mu.Lock()
 			n.observed = seen
 			n.mu.Unlock()
@@ -118,11 +121,17 @@ func (n *tsnetNode) watch(ctx context.Context, id string) {
 // observe is what a node sees of itself: the state and the login URL as its bus told them, the rest as its status
 // has it. Only a node that needs a login reports a URL, and whatever tsnet is doing that is not running or waiting
 // for an approval is a node that needs one.
-func observe(state ipn.State, loginURL *string, status *ipnstate.Status) NodeObserved {
+//
+// A tailnet's lock keeps a node whose key no trusted key signed away from every peer, while tsnet calls it
+// running: it waits for an approval as much as one whose device the tailnet's admin has to approve.
+func observe(state ipn.State, loginURL *string, status *ipnstate.Status, lock *ipnstate.TailnetLockStatus) NodeObserved {
 	seen := NodeObserved{State: "needs_login"}
 	switch state {
 	case ipn.Running:
 		seen.State = "running"
+		if lock.Enabled && !lock.NodeKeySigned {
+			seen.State = "needs_approval"
+		}
 	case ipn.NeedsMachineAuth:
 		seen.State = "needs_approval"
 	default:

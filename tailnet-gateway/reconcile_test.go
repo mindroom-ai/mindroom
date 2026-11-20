@@ -450,7 +450,7 @@ func (f *fixtures) connect(t *testing.T, id string) net.Conn {
 	})
 	f.gateway.mu.Lock()
 	defer f.gateway.mu.Unlock()
-	f.gateway.conns[id] = map[net.Conn]time.Time{ours: f.clock.Now()}
+	f.gateway.conns[id] = map[net.Conn]*held{ours: {cancel: func() {}, reached: f.clock.Now()}}
 	return theirs
 }
 
