@@ -104,6 +104,20 @@ async def _wait_forever(*_args: object, **_kwargs: object) -> None:
     await asyncio.Event().wait()
 
 
+def _hold_writes(client: AsyncMock) -> tuple[asyncio.Event, asyncio.Event]:
+    """Hold the client's state writes: the first event is set when one starts, and it lands once the second is set."""
+    writing, release = asyncio.Event(), asyncio.Event()
+    write_state = client.room_put_state.side_effect
+
+    async def held_write(**kwargs: Any) -> object:  # noqa: ANN401
+        writing.set()
+        await release.wait()
+        return await write_state(**kwargs)
+
+    client.room_put_state.side_effect = held_write
+    return writing, release
+
+
 @contextmanager
 def _owner_polls(runtime: ScheduledTaskRuntime) -> Iterator[asyncio.Event]:
     """Yield an event that is set each time a runner looks for its owner's live bot."""
@@ -678,17 +692,8 @@ async def test_a_cancel_during_an_edit_leaves_the_task_cancelled(tmp_path: Path,
     await _save_task(runtime, owner.client, workflow)
     existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
     assert existing is not None
-    edit_writing = asyncio.Event()
-    finish_edit = asyncio.Event()
+    edit_writing, finish_edit = _hold_writes(editor.client)
     cancel_started = asyncio.Event()
-    write_state = editor.client.room_put_state.side_effect
-
-    async def slow_edit_write(**kwargs: Any) -> object:  # noqa: ANN401
-        edit_writing.set()
-        await finish_edit.wait()
-        return await write_state(**kwargs)
-
-    editor.client.room_put_state.side_effect = slow_edit_write
 
     async def cancel() -> str:
         cancel_started.set()
@@ -729,16 +734,7 @@ async def test_restore_waits_for_an_edit_still_rescheduling_an_overdue_task(tmp_
     await _save_task(runtime, agent.client, overdue)
     existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
     assert existing is not None
-    edit_writing = asyncio.Event()
-    finish_edit = asyncio.Event()
-    write_state = editor.client.room_put_state.side_effect
-
-    async def slow_edit_write(**kwargs: Any) -> object:  # noqa: ANN401
-        edit_writing.set()
-        await finish_edit.wait()
-        return await write_state(**kwargs)
-
-    editor.client.room_put_state.side_effect = slow_edit_write
+    edit_writing, finish_edit = _hold_writes(editor.client)
     restore_waiting = asyncio.Event()
     lock = scheduling_runtime.scheduled_task_state_lock
 
@@ -1068,15 +1064,7 @@ def _due_task_under_a_steward(
 async def test_a_steward_stop_waits_for_the_final_status_write_it_is_lent_for(tmp_path: Path) -> None:
     """A steward that starts stopping while another bot's runner writes through it lets that write land first."""
     room, runtime, bots, ids = _due_task_under_a_steward(tmp_path)
-    writing, finish = asyncio.Event(), asyncio.Event()
-    write_state = bots["helper"].client.room_put_state.side_effect
-
-    async def held_write(**kwargs: Any) -> object:  # noqa: ANN401
-        writing.set()
-        await finish.wait()
-        return await write_state(**kwargs)
-
-    bots["helper"].client.room_put_state.side_effect = held_write
+    writing, finish = _hold_writes(bots["helper"].client)
 
     with patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=_delivered()):
         runtime.start_new_task(TASK_ID, _workflow(), owner_id=ids["general"])
