@@ -18,6 +18,7 @@ from mindroom.email_invites.mail import (
 )
 from mindroom.email_invites.policy import may_invite, refused_room_kind
 from mindroom.matrix.client_room_admin import get_room_name, room_encryption_enabled
+from mindroom.steward_duties import moderator_rights_message
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -87,7 +88,7 @@ class EmailInviteTools(Toolkit):
             return refusal or _BAD_ADDRESS
         # The account that answers here is the one the link names: it sends the Matrix invite when the link is used.
         if await may_invite(context.client, room_id, context.client.user_id) is not True:
-            return "Error: I need moderator rights in this room to invite people."
+            return f"Error: {moderator_rights_message('invite people')}"
         rights = await may_invite(context.client, room_id, approver, config.email_invites.approvers)
         if rights is None:
             return _UNREADABLE
