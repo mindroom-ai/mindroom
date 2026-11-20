@@ -524,6 +524,8 @@ class MessageReceivedContext(HookContext):
     envelope: MessageEnvelope
     skip_plugin_names: frozenset[str] = field(default_factory=frozenset)
     suppress: bool = False
+    # Whether the envelope is a steward's hidden route of a person's message, which ran the room's hooks as it arrived.
+    _routed: bool = field(default=False, kw_only=True, repr=False, compare=False)
 
 
 @dataclass(slots=True)

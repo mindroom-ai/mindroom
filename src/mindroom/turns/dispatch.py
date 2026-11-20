@@ -829,6 +829,7 @@ class TurnDispatcher:
             room=room,
             envelope=envelope,
             handled_turn=handled_turn,
+            routed=bool(facts.routed_event_ids),
         ):
             return True
         self.deps.logger.debug(
@@ -846,6 +847,7 @@ class TurnDispatcher:
         room: nio.MatrixRoom,
         envelope: MessageEnvelope,
         handled_turn: TurnRecord,
+        routed: bool,
     ) -> bool:
         """Run the authorized ingress hook and settle when it blocks dispatch."""
         hooks_start = time.monotonic()
@@ -865,6 +867,7 @@ class TurnDispatcher:
                 envelope=envelope,
                 correlation_id=envelope.source_event_id,
                 policy=hook_ingress_policy(envelope),
+                routed=routed,
             )
         emit_elapsed_timing(
             "dispatch_handoff.prepare_dispatch.emit_message_received_hooks",
@@ -945,6 +948,7 @@ class TurnDispatcher:
             room=room,
             envelope=envelope,
             handled_turn=handled_turn,
+            routed=bool(facts.routed_event_ids),
         ):
             return None
 

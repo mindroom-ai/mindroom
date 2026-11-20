@@ -119,6 +119,9 @@ def _scope_room_ids(context: HookContext) -> tuple[str, ...]:
 
 async def _emitter_runs_room_hooks(event_name: str, context: HookContext) -> bool:
     """Return whether this emission runs the event's room-scoped hooks, which one no runtime's bot made always does."""
+    if isinstance(context, MessageReceivedContext) and context._routed:
+        # The person's message holds the one claim, taken by the first bot it reached; its route takes none.
+        return False
     lifetime = context._hook_registry_state
     if not isinstance(lifetime, HookRegistryLifetime):
         return True

@@ -17,6 +17,7 @@ import asyncio
 import inspect
 import json
 from dataclasses import dataclass, field, fields, replace
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -133,6 +134,7 @@ from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.scheduling.executor import _prepare_scheduled_trigger
 from mindroom.scheduling.tasks import ScheduledWorkflow
+from mindroom.steward_duties import runs_room_hooks
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_origin import TurnIntent
@@ -8184,6 +8186,48 @@ async def test_a_routed_responder_answers_the_persons_own_event_for_that_person(
     # The route is hidden, so the answer replies to the message the person wrote.
     assert envelope.target.reply_to_event_id == "$question:localhost"
     assert envelope.target.resolved_thread_id == (thread_id or "$question:localhost")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_emitter", ["general", "research"])
+async def test_a_routed_message_runs_its_room_hook_once(tmp_path: Path, first_emitter: str) -> None:
+    """A room-scoped `message:received` hook runs once for a person's message, never again for the route of it."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name="research")
+    room = _room_with_members(config, "general", "research")
+    observed: list[tuple[str, str]] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED, scope="room")
+    async def observe(context: MessageReceivedContext) -> None:
+        observed.append((context.envelope.source_event_id, context.envelope.agent_name))
+
+    plugin = SimpleNamespace(
+        name="room-observer",
+        discovered_hooks=(observe,),
+        discovered_automations=(),
+        entry_config=PluginEntryConfig(path="./plugins/room-observer"),
+        plugin_order=0,
+    )
+    orchestrator = SimpleNamespace(
+        room_steward=lambda _room_id: None,
+        event_journal_store=lambda: harness.journal_store,
+    )
+    hooks = HookRegistryState(
+        HookRegistry.from_plugins([cast("Any", plugin)]),
+        room_hook_owner=partial(runs_room_hooks, orchestrator),
+    )
+    harness.dispatcher.deps.ingress_hook_runner.hook_context.hook_registry_state = hooks.lifetime("research")
+    if first_emitter == "general":
+        # The steward's copy of the message arrived first and ran the hook there.
+        claim = (_ROOM_ID, "$question:localhost", f"hook:{EVENT_MESSAGE_RECEIVED}", "general")
+        assert await harness.journal_store.claim_room_event(*claim) == "general"
+        observed.append(("$question:localhost", "general"))
+
+    await harness.deliver(room, _text_event("who can help with this?", event_id="$question:localhost"))
+    await harness.deliver(room, _route_message(config, steward="general", entity="research"))
+
+    assert observed == [("$question:localhost", first_emitter)]
+    assert len(harness.runner.requests) == 1
 
 
 @pytest.mark.asyncio
