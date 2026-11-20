@@ -439,9 +439,7 @@ def test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks(tmp_path: Pa
             ),
         )
 
-    # An empty list would say the call had no output, so the baseline is a block without text.
-    baseline = route.request_tokens(request([{"type": "text", "text": ""}]))
-    added = route.request_tokens(request([{"type": "text", "text": _REASONING}])) - baseline
+    added = route.request_tokens(request([{"type": "text", "text": _REASONING}])) - route.request_tokens(request([]))
 
     # Counted within the joined request, the block can round a token or two apart from its own count.
     assert abs(added - count(route.token_counter, _REASONING)) <= 2

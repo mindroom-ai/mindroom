@@ -244,8 +244,6 @@ def _answered_tool_turn() -> list[Message]:
         "ok": ("sunny", False),
         "failed": ("No city", True),
         "empty": (None, None),
-        "blank": ("", False),
-        "no_blocks": ([], False),
         "failed_none": (None, True),
         "failed_blank": ("", True),
     }
@@ -272,13 +270,10 @@ def _answered_tool_turn() -> list[Message]:
 
 
 _NO_ERROR_TEXT = "The tool call failed without an error message."
-_NO_OUTPUT_TEXT = "The tool call succeeded with no text output."
 _GEMINI_RESULTS = [
     {"id": "call_ok", "name": "get_weather", "response": {"result": "sunny"}},
     {"id": "call_failed", "name": "get_weather", "response": {"error": "No city"}},
-    {"id": "call_empty", "name": "get_weather", "response": {"result": _NO_OUTPUT_TEXT}},
-    {"id": "call_blank", "name": "get_weather", "response": {"result": _NO_OUTPUT_TEXT}},
-    {"id": "call_no_blocks", "name": "get_weather", "response": {"result": _NO_OUTPUT_TEXT}},
+    {"id": "call_empty", "name": "get_weather", "response": {"result": ""}},
     {"id": "call_failed_none", "name": "get_weather", "response": {"error": _NO_ERROR_TEXT}},
     {"id": "call_failed_blank", "name": "get_weather", "response": {"error": _NO_ERROR_TEXT}},
 ]
@@ -286,9 +281,7 @@ _GEMINI_RESULTS = [
 _CHAT_RESULTS = [
     {"role": "tool", "tool_call_id": "call_ok", "content": "sunny"},
     {"role": "tool", "tool_call_id": "call_failed", "content": "No city"},
-    {"role": "tool", "tool_call_id": "call_empty", "content": _NO_OUTPUT_TEXT},
-    {"role": "tool", "tool_call_id": "call_blank", "content": _NO_OUTPUT_TEXT},
-    {"role": "tool", "tool_call_id": "call_no_blocks", "content": _NO_OUTPUT_TEXT},
+    {"role": "tool", "tool_call_id": "call_empty", "content": ""},
     {"role": "tool", "tool_call_id": "call_failed_none", "content": _NO_ERROR_TEXT},
     {"role": "tool", "tool_call_id": "call_failed_blank", "content": _NO_ERROR_TEXT},
 ]
@@ -296,22 +289,18 @@ _ENCODED_RESULTS: dict[str, list[dict[str, Any]]] = {
     "anthropic": [
         {"type": "tool_result", "tool_use_id": "call_ok", "content": "sunny"},
         {"type": "tool_result", "tool_use_id": "call_failed", "content": "No city", "is_error": True},
-        {"type": "tool_result", "tool_use_id": "call_empty", "content": _NO_OUTPUT_TEXT},
-        {"type": "tool_result", "tool_use_id": "call_blank", "content": _NO_OUTPUT_TEXT},
-        {"type": "tool_result", "tool_use_id": "call_no_blocks", "content": _NO_OUTPUT_TEXT},
+        {"type": "tool_result", "tool_use_id": "call_empty", "content": ""},
         # The API rejects a failed result with empty content.
         {"type": "tool_result", "tool_use_id": "call_failed_none", "content": _NO_ERROR_TEXT, "is_error": True},
         {"type": "tool_result", "tool_use_id": "call_failed_blank", "content": _NO_ERROR_TEXT, "is_error": True},
     ],
     "gemini": _GEMINI_RESULTS,
     "gemini_vertexai": _GEMINI_RESULTS,
-    # Ollama has no failure field or call ids: a result names the tool that answered.
+    # Ollama has no failure field or call ids: a result names the tool that answered, and the SDK drops empty content.
     "ollama": [
         {"role": "tool", "content": "sunny", "tool_name": "get_weather"},
         {"role": "tool", "content": "No city", "tool_name": "get_weather"},
-        {"role": "tool", "content": _NO_OUTPUT_TEXT, "tool_name": "get_weather"},
-        {"role": "tool", "content": _NO_OUTPUT_TEXT, "tool_name": "get_weather"},
-        {"role": "tool", "content": _NO_OUTPUT_TEXT, "tool_name": "get_weather"},
+        {"role": "tool", "tool_name": "get_weather"},
         {"role": "tool", "content": _NO_ERROR_TEXT, "tool_name": "get_weather"},
         {"role": "tool", "content": _NO_ERROR_TEXT, "tool_name": "get_weather"},
     ],
@@ -319,11 +308,9 @@ _ENCODED_RESULTS: dict[str, list[dict[str, Any]]] = {
     "openai_responses": [
         {"type": "function_call_output", "call_id": "call_00000000", "output": "sunny"},
         {"type": "function_call_output", "call_id": "call_00000001", "output": "No city"},
-        {"type": "function_call_output", "call_id": "call_00000002", "output": _NO_OUTPUT_TEXT},
-        {"type": "function_call_output", "call_id": "call_00000003", "output": _NO_OUTPUT_TEXT},
-        {"type": "function_call_output", "call_id": "call_00000004", "output": _NO_OUTPUT_TEXT},
-        {"type": "function_call_output", "call_id": "call_00000005", "output": _NO_ERROR_TEXT},
-        {"type": "function_call_output", "call_id": "call_00000006", "output": _NO_ERROR_TEXT},
+        {"type": "function_call_output", "call_id": "call_00000002", "output": ""},
+        {"type": "function_call_output", "call_id": "call_00000003", "output": _NO_ERROR_TEXT},
+        {"type": "function_call_output", "call_id": "call_00000004", "output": _NO_ERROR_TEXT},
     ],
     "openai_chat": _CHAT_RESULTS,
     "cerebras": _CHAT_RESULTS,
@@ -358,8 +345,8 @@ async def test_every_family_encodes_a_tool_result_with_its_call_name_content_and
     """A failed call reads as a failure wherever the API has a field for it, and no result goes unanswered.
 
     Claude marks it ``is_error`` and Gemini sends it as the response's ``error``; Ollama names the tool that
-    answered. A result without content still answers its call, saying the call succeeded with no text output, and a
-    failed one says that it failed.
+    answered. A result stored without content still answers its call with empty content, which the Ollama SDK leaves
+    out of the request, and a failed one says that it failed.
     """
     spec = FAMILIES[family]
     wire = Wire(spec.reply())

@@ -371,17 +371,14 @@ def with_joined_system(messages: Sequence[Message]) -> list[Message]:
 
 
 _NO_ERROR_TEXT = "The tool call failed without an error message."
-# Providers show an empty result in their own way: Anthropic adds a note that the tool ran without output, OpenRouter's
-# Claude route shows ``...``, and most other routes show nothing. "Text", since a result's media follows it separately.
-_NO_OUTPUT_TEXT = "The tool call succeeded with no text output."
 
 
 @dataclass(frozen=True, slots=True)
 class ToolResultView:
     """What a wire encodes of a tool message: the call it answers, the tool's name, its content, and whether it failed.
 
-    A result without content says the call succeeded with no text output, and a failed result without error text says that
-    it failed, since Claude rejects a failed result with empty content; either way no wire leaves its call unanswered.
+    A result stored without content answers with empty content, so no wire leaves its call unanswered, and a failed
+    result without error text says that it failed, since Claude rejects a failed result with empty content.
     """
 
     call_id: str | None
@@ -396,8 +393,7 @@ class ToolResultView:
 # missing.
 # Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
 # content.
-# Handling: the view gives such a result ``_NO_OUTPUT_TEXT``, so every wire still answers its call when the row
-# replays.
+# Handling: the view gives such a result empty content, so every wire still answers its call when the row replays.
 # Coverage: tests/providers/test_provider_families.py::test_every_family_encodes_a_tool_result_with_its_call_name_content_and_failure
 # LEGACY_COMPAT: Failed tool results stored without error text.
 # Legacy format: a stored ``tool`` message with ``tool_call_error`` true and null or empty ``content``. The Agno
@@ -411,11 +407,11 @@ class ToolResultView:
 def tool_result_view(message: Message) -> ToolResultView:
     """Return the tool result a ``tool`` message carries, as every wire encodes it."""
     is_error = message.tool_call_error is True
-    content = message.content or (_NO_ERROR_TEXT if is_error else _NO_OUTPUT_TEXT)
+    content = "" if message.content is None else message.content
     return ToolResultView(
         call_id=message.tool_call_id,
         name=message.tool_name,
-        content=content,
+        content=_NO_ERROR_TEXT if is_error and not content else content,
         is_error=is_error,
     )
 
