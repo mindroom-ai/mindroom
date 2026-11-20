@@ -428,7 +428,7 @@ wheels = [
 
 [[package]]
 name = "atlassian-python-api"
-version = "4.0.7"
+version = "5.0.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -439,9 +439,9 @@ dependencies = [
     { name = "requests-oauthlib" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/40/e8/f23b7273e410c6fe9f98f9db25268c6736572f22a9566d1dc9ed3614bb68/atlassian_python_api-4.0.7.tar.gz", hash = "sha256:8d9cc6068b1d2a48eb434e22e57f6bbd918a47fac9e46b95b7a3cefb00fceacb", size = 271149, upload-time = "2025-08-21T13:19:40.746Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/85/786f01d20ad6fddd95d01bd0585a39aad7cfe0cff9e63530770e817152ae/atlassian_python_api-5.0.5.tar.gz", hash = "sha256:ae7f34349939ec0674ffb9bea812bc3f4acb4b6ace9a7cf1c15141719669f3bb", size = 1989565, upload-time = "2026-09-14T20:20:45.87Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/83/e4f9976ce3c933a079b8931325e7a9c0a8bba7030a2cb85764c0048f3479/atlassian_python_api-4.0.7-py3-none-any.whl", hash = "sha256:46a70cb29eaab87c0a1697fccd3e25df1aa477e6aa4fb9ba936a9d46b425933c", size = 197746, upload-time = "2025-08-21T13:19:39.044Z" },
+    { url = "https://files.pythonhosted.org/packages/55/81/a91c05174ef68e44e7ce53a6ce8eeb647cbd80dc40c267b089a9e351729e/atlassian_python_api-5.0.5-py3-none-any.whl", hash = "sha256:647b650ff04f186bad1495caaed9772c249a2416a685fbacc1dfa340fa6376ab", size = 346005, upload-time = "2026-09-14T20:20:42.429Z" },
 ]
 
 [[package]]
@@ -4463,7 +4463,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.10" },
     { name = "apify-client", marker = "extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'", specifier = ">=4.1" },
-    { name = "atlassian-python-api", marker = "extra == 'confluence'", specifier = "<5" },
+    { name = "atlassian-python-api", marker = "extra == 'confluence'", specifier = ">=5.0.5" },
     { name = "authlib", specifier = ">=1.6,<1.8" },
     { name = "baidusearch", marker = "extra == 'baidusearch'" },
     { name = "beautifulsoup4", marker = "extra == 'website'" },

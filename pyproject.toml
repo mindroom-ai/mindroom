@@ -153,8 +153,8 @@ config_manager = [
   "pyyaml>=6",
 ]
 confluence = [
-  # Agno 3.2.1 ConfluenceTools calls create_page and get_page_by_title, which atlassian-python-api 5 removed.
-  "atlassian-python-api<5",
+  # tools/agno_compat_confluence.py builds on the v1 client in atlassian.confluence.server, new in 5.
+  "atlassian-python-api>=5.0.5",
 ]
 contacts = []
 crawl4ai = [
