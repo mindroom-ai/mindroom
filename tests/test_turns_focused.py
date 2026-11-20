@@ -8546,8 +8546,13 @@ async def test_a_route_without_a_prompt_reads_a_long_message_in_full(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_a_route_without_a_prompt_reads_a_message_as_its_sender_last_edited_it(tmp_path: Path) -> None:
-    """The steward routed the person's correction, so its responder answers that, not the text it replaced."""
+@pytest.mark.parametrize(("editor", "text"), [(_SENDER, "July, not June."), ("@mallory:localhost", "June.")])
+async def test_a_route_without_a_prompt_reads_a_message_as_its_sender_last_edited_it(
+    tmp_path: Path,
+    editor: str,
+    text: str,
+) -> None:
+    """The steward routed the person's correction, so its responder answers that; nobody else's edit replaces it."""
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
@@ -8559,7 +8564,7 @@ async def test_a_route_without_a_prompt_reads_a_message_as_its_sender_last_edite
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$question:localhost"},
         },
         "event_id": "$correction:localhost",
-        "sender": _SENDER,
+        "sender": editor,
         "origin_server_ts": 1_000_001,
         "room_id": _ROOM_ID,
         "type": "m.room.message",
@@ -8572,7 +8577,7 @@ async def test_a_route_without_a_prompt_reads_a_message_as_its_sender_last_edite
     await harness.deliver(room, _route_message(config, steward="research", thread_id="$question:localhost", body=None))
 
     [request] = harness.runner.requests
-    assert request.prompt == "July, not June."
+    assert request.prompt == text
 
 
 @pytest.mark.asyncio

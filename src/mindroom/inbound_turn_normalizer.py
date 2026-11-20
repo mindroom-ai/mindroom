@@ -23,7 +23,11 @@ from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.logging_config import bound_log_context
-from mindroom.matrix.client_visible_messages import bundled_replacement_body, resolve_visible_event_source
+from mindroom.matrix.client_visible_messages import (
+    bundled_replacement_body,
+    bundled_replacement_candidates,
+    resolve_visible_event_source,
+)
 from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.media import (
     AudioMessageEvent,
@@ -236,18 +240,17 @@ class InboundTurnNormalizer:
         return await self.resolve_text_event(TextNormalizationRequest(event=event))
 
     async def fetched_message_text(self, event: nio.Event | None) -> str | None:
-        """Return the text of a message read by its ID, as ingress reads one and in its sender's latest revision.
-
-        None is an event with no text to read: one missing, undecrypted, or neither a text nor a long-text file.
-        """
+        """Return the text of a message read by its ID as ingress reads one, in its sender's latest revision, if any."""
         if is_file_message_event(event):
             prepared = await self.prepare_file_sidecar_text_event(event)
         elif isinstance(event, nio.RoomMessageFormatted):
             prepared = await self.resolve_text_event(TextNormalizationRequest(event=event))
         else:
             return None
-        if prepared is None:
-            return None
+        candidates = bundled_replacement_candidates(event.source)
+        # A replacement from anyone but the message's sender is not an edit of it.
+        if prepared is None or any(c.get("sender", event.sender) != event.sender for c in candidates):
+            return None if prepared is None else prepared.body
         edited = await bundled_replacement_body(
             event.source,
             client=self._client(),
