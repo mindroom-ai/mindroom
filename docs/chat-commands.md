@@ -89,12 +89,12 @@ Otherwise it replies `❌ Config command disabled.` or `❌ Admin only.`
 /config set agents.analyst.display_name "Research Expert"
 /config set models.default.id gpt-6.2-astra
 /config set defaults.markdown false
-/config set agents.analyst.tools [shell, file]
+/config set agents.analyst.tools [shell, filesystem]
 ```
 
 `/config` alone is the same as `/config show`.
 Paths use dot notation, such as `agents.analyst.role`, and list items use indexes, such as `agents.analyst.tools.0` for the first tool.
-Values are parsed as YAML, so `false`, `42`, and `[shell, file]` become a boolean, a number, and a list.
+Values are parsed as YAML, so `false`, `42`, and `[shell, filesystem]` become a boolean, a number, and a list.
 Quote a value to keep its exact spacing.
 
 Shown values are redacted like `config_manager` output; see [Access, Redaction, and Saving](tools/agent-orchestration.md#access-redaction-and-saving).

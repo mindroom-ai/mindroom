@@ -524,13 +524,15 @@ A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`
 On `deepseek`, `use_thinking`, a boolean that defaults to `true`, runs requests in DeepSeek's thinking mode, where the model reasons before it answers; set it to `false` to answer without thinking.
 An `ollama` model's `think` turns a thinking model's reasoning on (`true`) or off (`false`), or sets its effort (`low`, `medium`, or `high`) on models that take a level; unset leaves the choice to Ollama.
 A `google` or `gemini` model's `search: true` grounds its answers with Google Search, and search with tools needs a Gemini 3 or later model name on the Gemini API, such as `gemini-4-hydrogen`: there the agent keeps its tools beside search, while other models, aliases such as `gemini-flash-latest`, and every Vertex AI model use search alone, in place of the agent's tools.
+On the Gemini API, `google` and `gemini` models and the `gemini` tool send to API version `v1beta`, which serves the `-latest` aliases and preview models; set `extra_kwargs.client_params.http_options.api_version` to choose another version for a model.
 
 When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its maximum output on `anthropic`, 128,000 tokens for Claude 5 models, except Claude Sonnet 4.5 and models older than Claude 4.5, which write up to 8,192 tokens, as every model does on `bedrock_claude` and `vertexai_claude`, whose quotas count the requested output when a request starts; set `max_tokens` to choose another limit.
 
 Some models reject sampling controls:
 
-- Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
+- Claude API version `2026-10-21`, which MindRoom sends on Anthropic, Bedrock, and Vertex requests, rejects `temperature`, `top_p`, and `top_k` on every model, so MindRoom omits them there, from `request_params` too, and logs a warning once per model that sets them; a Claude model's `extra_kwargs` still accepts them, and they have no effect.
+  Bedrock serves `2026-10-21` only for Claude 4.7 and later, so a `bedrock_claude` model older than 4.7, such as `anthropic.claude-haiku-4-5`, keeps API version `2023-06-01` and its sampling controls.
 - MindRoom also omits those controls for direct Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
 - [GPT-6.2 Astra and GPT-6.2 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 

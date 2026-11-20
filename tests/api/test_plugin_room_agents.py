@@ -7,6 +7,7 @@ agent for that caller resolves.
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
 from mindroom.runtime_resolution import ResolvedAgentRuntime, resolve_agent_runtime
+from mindroom.tool_system.catalog import ToolConfigOverrideError, get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, normal_worker_key
 from tests.access_schema_support import joined_members_response
@@ -55,11 +57,10 @@ CAROL = "@carol:localhost"
 DAVE = "@dave:localhost"
 # Bob's power level keeps him from posting; Alice and Carol may post.
 POWER_LEVELS = {"users": {ALICE: 100, CAROL: 10}, "events_default": 10}
-READ_ONLY_FILE = {"file": {"enable_save_file": False, "enable_replace_file_chunk": False}}
+READ_ONLY_FILE = {"file": {"exclude_tools": ["write_file", "edit_file"]}}
 # The functions of each built-in toolkit that change the workspace's files, by writing them or by running code there.
 WRITING_FUNCTIONS = {
-    "file": ("save_file", "replace_file_chunk"),
-    "coding": ("write_file", "edit_file"),
+    "filesystem": ("write_file", "edit_file"),
     "python": (
         "run_python_code",
         "save_to_file_and_run",
@@ -311,9 +312,10 @@ async def test_agent_refuses_a_user_that_is_no_current_agent(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("tools", "files"),
     [
-        ([{"file": {"enable_save_file": False}}], "write"),
-        ([{"file": {"all": True, **READ_ONLY_FILE["file"]}}], "write"),
+        ([{"file": {"exclude_tools": ["write_file"]}}], "write"),
         ([{"file": {"enable_delete_file": True, **READ_ONLY_FILE["file"]}}], "read"),
+        ([{"filesystem": {"enable_delete_file": True, "include_tools": ["delete_file"]}}], "read"),
+        ([{"file": READ_ONLY_FILE["file"]}], "read"),
         ([{"file": {"include_tools": ["delete_file"]}}], "none"),
         ([{"coding": {"include_tools": ["read_file", "grep"]}}], "read"),
         ([{"python": {"include_tools": ["read_file", "list_files"]}}], "read"),
@@ -546,11 +548,55 @@ async def test_a_setting_saved_on_the_dashboard_counts_like_an_authored_one(tmp_
     assert _access(await room.agents(ALICE)) == [("helper", "write", "none")]
 
     get_runtime_credentials_manager(room.paths).save_credentials(
-        "file",
-        {"exclude_tools": "save_file, replace_file_chunk"},
+        "filesystem",
+        {"exclude_tools": "write_file, edit_file"},
     )
 
     assert _access(await room.agents(ALICE)) == [("helper", "read", "none")]
+
+
+@pytest.mark.parametrize("service", ["file", "coding"])
+@pytest.mark.asyncio
+async def test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant(
+    tmp_path: Path,
+    service: str,
+) -> None:
+    """A dashboard document saved for file or coding is never guessed at: no toolkit and no grant until it is moved."""
+    room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=[service], access={"users": [ALICE]})})
+    manager = get_runtime_credentials_manager(room.paths)
+    manager.save_credentials(service, {"_source": "ui"})
+    assert _access(await room.agents(ALICE)) == [("helper", "write", "none")]
+
+    manager.save_credentials(service, {"_source": "ui", "exclude_tools": ["write_file", "edit_file"]})
+
+    assert _access(await room.agents(ALICE)) == []
+    message = f"under '{service}'.*delete them, and save any you still want under 'filesystem'"
+    with pytest.raises(ToolConfigOverrideError, match=message):
+        await room.agent(ALICE, room.ids["helper"])
+    with pytest.raises(ToolConfigOverrideError, match=message):
+        get_tool_by_name("filesystem", room.paths, tools=builtin_tool_registry(), worker_target=None)
+
+
+@pytest.mark.parametrize(
+    ("stored", "replacement"),
+    [
+        ({"enable_save_file": False}, "exclude_tools: [write_file]"),
+        ({"exclude_tools": ["save_file", "replace_file_chunk"]}, "exclude_tools: [write_file]"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_old_settings_copied_under_filesystem_stop_the_toolkit_and_its_workspace_grant(
+    tmp_path: Path,
+    stored: dict[str, object],
+    replacement: str,
+) -> None:
+    """An old document saved again as it was would be ignored, so it fails like the same settings in the config."""
+    room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"users": [ALICE]})})
+    get_runtime_credentials_manager(room.paths).save_credentials("filesystem", {"_source": "ui", **stored})
+
+    assert _access(await room.agents(ALICE)) == []
+    with pytest.raises(ToolConfigOverrideError, match=re.escape(replacement)):
+        get_tool_by_name("filesystem", room.paths, tools=builtin_tool_registry(), worker_target=None)
 
 
 @pytest.mark.asyncio
@@ -619,8 +665,8 @@ def _broken(room: _Room, kind: str) -> str:
         # A grant room MindRoom has not created stays unresolved.
         agents["broken"] = AgentConfig(display_name="Broken", tools=["file"], access={"members_of_rooms": ["lobby"]})
     else:
-        agents["broken"] = AgentConfig(display_name="Broken", tools=["coding"], access={"users": [ALICE]})
-        get_runtime_credentials_manager(room.paths).save_credentials("coding", {"exclude_tools": 5})
+        agents["broken"] = AgentConfig(display_name="Broken", tools=["python"], access={"users": [ALICE]})
+        get_runtime_credentials_manager(room.paths).save_credentials("python", {"exclude_tools": 5})
     config = Config(agents=agents, rooms={"lobby": {}})
     ids = entity_ids(config, room.paths)
     room.ids["broken"] = ids["broken"].full_id

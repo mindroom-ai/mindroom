@@ -140,11 +140,11 @@
     "headers": {
       "accept": "application/json",
       "anthropic-beta": "structured-outputs-2025-11-13,thinking-binding-controls-2026-08-01",
-      "anthropic-version": "2023-06-01",
+      "anthropic-version": "2026-10-21",
       "content-type": "application/json"
     },
     "method": "POST",
-    "url": "https://api.anthropic.com/v1/messages?beta=true"
+    "url": "https://api.anthropic.com/v1/messages"
   },
   "response_raw": {
     "headers": {

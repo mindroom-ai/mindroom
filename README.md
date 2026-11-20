@@ -319,7 +319,7 @@ To work on MindRoom itself, run it from a checkout.
 <summary><b>Run from source</b></summary>
 
 Requires Python 3.13–3.14 and [uv](https://github.com/astral-sh/uv).
-For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) 1.4 or newer so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
 The repository dev shell provides Node.js 24 and Bun.
 
 ```bash

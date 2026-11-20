@@ -157,6 +157,46 @@ describe("ModelConfig", () => {
     expect(screen.getByText("openai_local")).toBeTruthy();
   });
 
+  describe("default order, as TanStack Table 8 sorted it", () => {
+    const renderModels = (names: string[]) => {
+      const models = Object.fromEntries(
+        names.map((name) => [name, { provider: "ollama", id: `${name}-id` }]),
+      );
+      (
+        useConfigStore as unknown as {
+          mockReturnValue: (value: unknown) => void;
+        }
+      ).mockReturnValue({
+        ...mockStore,
+        config: { ...mockStore.config, models },
+      });
+      render(<ModelConfig />);
+      return within(screen.getByRole("table"))
+        .getAllByRole("row")
+        .slice(1)
+        .map((row) => within(row).getAllByRole("cell")[0].textContent);
+    };
+
+    it("compares ten or fewer names as they are", () => {
+      expect(renderModels(["model-2", "model-10", "Model-3"])).toEqual([
+        "Model-3",
+        "model-10",
+        "model-2",
+      ]);
+    });
+
+    it("sorts more than ten names naturally, ignoring case", () => {
+      const names = [2, 10, 1, 3, 12, 4, 5, 6, 7, 8, 11, 9].map((n) =>
+        n === 3 ? "Model-3" : `model-${n}`,
+      );
+      expect(renderModels(names)).toEqual(
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((n) =>
+          n === 3 ? "Model-3" : `model-${n}`,
+        ),
+      );
+    });
+  });
+
   it("keeps the models table horizontally scrollable", () => {
     render(<ModelConfig />);
 

@@ -67,7 +67,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_computer_announcement.py",
         "test_delegation_execution.py",
         "test_dynamic_toolkits.py",
-        "test_file_access_contract.py",
         "test_gemini_tools.py",
         "test_github_oauth_tool.py",
         "test_gmail_tools.py",

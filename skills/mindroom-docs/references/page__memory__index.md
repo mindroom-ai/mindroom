@@ -167,6 +167,7 @@ With `provider: ollama`, `config.host` names the Ollama server only when no `OLL
 With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
 With `provider: openai`, `config.openai_base_url` sets the server; without it, extraction uses [`OPENAI_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else OpenAI's API.
 With `provider: anthropic`, `config.anthropic_base_url` sets the server; without it, extraction uses [`ANTHROPIC_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else Anthropic's API.
+With `provider: anthropic`, Mem0 sends no `temperature`, `top_p`, or `top_k`, which Claude API version `2026-10-21` rejects on every model, so `config` sampling values have no effect.
 For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
 ```yaml
@@ -204,9 +205,6 @@ File memory keeps `MEMORY.md` and dated notes under `memory/` in the agent's wor
 ```yaml
 memory:
   backend: file
-  file:
-    max_entrypoint_lines: 200
-    max_entrypoint_tokens: 50000
   search:
     mode: keyword
     include:
@@ -219,13 +217,13 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since it last loaded the file, for example from another conversation: lines added anywhere while the file fits the preload caps below, and lines added at the end of a file a cap truncates, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
+An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since it last loaded the file, for example from another conversation: lines added anywhere while the file fits the preload limit below, and lines added at the end of a file the limit cuts, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations load the current file (its first lines that fit, when the limit cuts it), and the agent can read the file directly.
 On a route that keeps the system prompt unchanged while its cache is warm and sends changes as a system prompt update, such as Claude Opus through OpenRouter with the hour-long prompt cache, an edited or deleted line that an update can state exactly reaches the conversation as such an update, and the old line can stay quoted in that conversation's later requests until its held prompt starts over: when it idles past the cache lifetime, its history is compacted or its updates alone would need that, the route or model changes, or a change comes that an update cannot state, such as one too long or one whose lines appear more than once in the prompt.
 Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
-`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their size in the turn model's tokens ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)).
-Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
-Only whole lines are inlined, never part of a line.
-When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
+`MEMORY.md` is cut by the rule that cuts every [context file](https://docs.mindroom.chat/configuration/agents/#file-based-context-loading): `defaults.max_preload_file_chars` (default `30000`, minimum `1`) characters per file.
+A longer file inlines its first whole lines that fit the limit, counted as they are in the file (only a line feed ends a line), and withholds the rest; only a first line longer than the limit inlines its first characters.
+Lines `add_memory` appends past the cut never reach the prompt until the file is condensed, and they leave the inlined copy unchanged.
+After a cut, a marker names the file, says the rest is left out of the prompt, and asks the agent to condense it without losing information (moving detail into files it can read or search on demand); it holds no counts, so it stays the same while the file grows.
 
 ### File layout
 
@@ -253,7 +251,7 @@ Each file is read up to 1 MiB, cut at its last complete line, and updating a tru
 | `rerank` | unset | In `semantic` mode, rerank the hits with the root [`reranker`](https://docs.mindroom.chat/knowledge/#reranking); unset reranks only when that reranker's `provider` is `openai_decisions` or `typesafe` |
 
 In `keyword` mode, `search_memories` matches structured entries with IDs in `MEMORY.md`, plus entries and plain-text lines in `memory/**/*.md`.
-Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload cap, read the file directly or use semantic search with `include_entrypoint: true`.
+Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload limit, read the file directly or use semantic search with `include_entrypoint: true`.
 
 In `semantic` mode, MindRoom builds a vector index of the `include` files not matched by `exclude` with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](https://docs.mindroom.chat/knowledge/#storage)).
 Each memory entry (a `- [id=...]` line, or a Markdown section up to `###`) is indexed and returned on its own, split at 1,200 characters; a `#` line inside a fenced code block is code, not a new section.
@@ -353,7 +351,7 @@ The retired `max_dirty_age_seconds` and `max_cross_session_reprioritize` setting
 ## Prompt Curation
 
 Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
-Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger or the preload has to withhold part of `MEMORY.md`, ask the agent in a visible thread to condense them gradually, fold corrections into the entries they correct, and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
+Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger or the preload has to withhold part of one of them, ask the agent in a visible thread to condense them gradually, fold corrections into the entries they correct, and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
 
 ```yaml
 agents:
@@ -410,6 +408,6 @@ A silent turn stores no run, so neither automatic extraction nor the file auto-f
 
 ## UI Configuration
 
-The Dashboard **Memory** page edits the `memory` section: backend, embedder provider, model, credential service, and host, file settings (`max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
+The Dashboard **Memory** page edits the `memory` section: backend, embedder provider, model, credential service, and host, search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.

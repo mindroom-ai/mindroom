@@ -208,7 +208,7 @@ agents:
     display_name: Mind
     role: Personal assistant
     model: sonnet
-    tools: [calculator, file]
+    tools: [calculator, filesystem]
     created_agents_per_owner: 2
 ```
 

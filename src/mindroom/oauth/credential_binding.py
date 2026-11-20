@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -88,7 +88,7 @@ def parse_oauth_credential_binding_payload(
         reason = "invalid_target"
         raise OAuthCredentialBindingParseError(reason)
 
-    resolved_scope = cast("ResolvedWorkerKeyScope", worker_scope)
+    resolved_scope = worker_scope
     return OAuthCredentialBinding(
         provider.id,
         provider.credential_service,

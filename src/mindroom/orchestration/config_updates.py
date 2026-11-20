@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from mindroom.access_policy import resolve_responder_access
 from mindroom.agent_reply_membership import agent_reply_membership_policy_changed
@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from mindroom.bot import AgentBot
-    from mindroom.config.calls import LiveCallProfile
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
@@ -28,8 +27,6 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
     {
         "AGENT_IDENTITY_CONTEXT_TEMPLATE",
         "CODEX_DEFAULT_INSTRUCTIONS",
-        "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
-        "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
         "DATETIME_CONTEXT_TEMPLATE",
         "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS",
         "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
@@ -40,6 +37,7 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
         "OPENAI_COMPAT_HISTORY_GUIDANCE",
         "OUTPUT_REDIRECT_PROMPT",
         "PERSONALITY_CONTEXT_SECTION_HEADING",
+        "PRELOAD_FILE_CUT_MARKER_TEMPLATE",
         "QUEUED_MESSAGE_NOTICE_TEXT",
         "SKILLS_TOOL_USAGE_PROMPT",
         "WORKSPACE_SKILL_AUTHORING_PROMPT",
@@ -269,7 +267,7 @@ def _call_manager_signature(config: Config, agent_name: str) -> object | None:
     if profile.backend == "cascaded":
         model_name = profile.model
     elif profile.backend == "live":
-        model_name = cast("LiveCallProfile", profile).agent_model
+        model_name = profile.agent_model
     model = config.models.get(model_name) if model_name is not None else None
     return (
         config.calls.livekit_service_url,

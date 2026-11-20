@@ -1768,7 +1768,7 @@
         },
         "file_access": {
           "default": "workspace",
-          "description": "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) may read and write files: workspace confines them to the agent workspace and its attachments, unrestricted allows any path their process can reach. Code-execution tools such as shell and python are always unrestricted; isolate them with worker_tools",
+          "description": "Where in-process path-taking tools (filesystem, attachments, matrix_message, gmail, google_drive, browser) may read and write files: workspace confines them to the agent workspace and its attachments, unrestricted allows any path their process can reach. Code-execution tools such as shell and python are always unrestricted; isolate them with worker_tools",
           "enum": [
             "workspace",
             "unrestricted"
@@ -1841,11 +1841,12 @@
           "title": "Allow Self Config",
           "type": "boolean"
         },
-        "max_preload_chars": {
-          "default": 50000,
-          "description": "Hard cap for extra role preload context loaded from context_files",
+        "max_preload_file_chars": {
+          "default": 30000,
+          "description": "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; a longer file keeps its first whole lines within this limit",
+          "maximum": 200000,
           "minimum": 1,
-          "title": "Max Preload Chars",
+          "title": "Max Preload File Chars",
           "type": "integer"
         },
         "automations": {
@@ -2312,6 +2313,37 @@
         }
       },
       "title": "EgressService",
+      "type": "object"
+    },
+    "EmailInvitesConfig": {
+      "additionalProperties": false,
+      "description": "Settings of the `email_invite` tool: the Chat link, the expiry, and the approvers.",
+      "properties": {
+        "chat_url": {
+          "default": "https://chat.mindroom.chat",
+          "description": "Origin of the MindRoom Chat web app the invite link opens, without a path",
+          "title": "Chat Url",
+          "type": "string"
+        },
+        "expiry_days": {
+          "default": 7,
+          "description": "Days an invite link stays valid",
+          "maximum": 30,
+          "minimum": 1,
+          "title": "Expiry Days",
+          "type": "integer"
+        },
+        "approvers": {
+          "default": [],
+          "description": "Matrix user IDs who may approve email invites in any room",
+          "items": {
+            "type": "string"
+          },
+          "title": "Approvers",
+          "type": "array"
+        }
+      },
+      "title": "EmailInvitesConfig",
       "type": "object"
     },
     "EmbedderConfig": {
@@ -3865,14 +3897,6 @@
           "default": null,
           "description": "LLM configuration for memory"
         },
-        "file": {
-          "$ref": "#/$defs/_MemoryFileConfig",
-          "default": {
-            "max_entrypoint_lines": 200,
-            "max_entrypoint_tokens": 50000
-          },
-          "description": "File-backed memory configuration"
-        },
         "search": {
           "$ref": "#/$defs/MemorySearchConfig",
           "default": {
@@ -4722,7 +4746,7 @@
         },
         "trigger_tokens": {
           "default": 20000,
-          "description": "Post the prompt once MEMORY.md and the context files total more than this many of the agent model's tokens; a MEMORY.md the preload cannot show whole (memory.file.max_entrypoint_lines or max_entrypoint_tokens) also posts it",
+          "description": "Post the prompt once MEMORY.md and the context files total more than this many of the agent model's tokens; a file the preload cannot show whole (over defaults.max_preload_file_chars) also posts it",
           "minimum": 1,
           "title": "Trigger Tokens",
           "type": "integer"
@@ -5919,28 +5943,6 @@
       "title": "_MemoryEmbedderConfig",
       "type": "object"
     },
-    "_MemoryFileConfig": {
-      "additionalProperties": false,
-      "description": "File-backed memory configuration.",
-      "properties": {
-        "max_entrypoint_lines": {
-          "default": 200,
-          "description": "Maximum number of lines to preload from MEMORY.md",
-          "minimum": 1,
-          "title": "Max Entrypoint Lines",
-          "type": "integer"
-        },
-        "max_entrypoint_tokens": {
-          "default": 50000,
-          "description": "Maximum tokens, as the turn's model counts them, of whole lines to preload from MEMORY.md",
-          "minimum": 1,
-          "title": "Max Entrypoint Tokens",
-          "type": "integer"
-        }
-      },
-      "title": "_MemoryFileConfig",
-      "type": "object"
-    },
     "_MemoryLLMConfig": {
       "additionalProperties": false,
       "description": "Memory LLM configuration.",
@@ -6220,7 +6222,7 @@
         "allow_shell_without_worker": false,
         "worker_grantable_credentials": null,
         "allow_self_config": false,
-        "max_preload_chars": 50000,
+        "max_preload_file_chars": 30000,
         "automations": [],
         "tool_output_auto_save_threshold_bytes": 51200,
         "streaming": {
@@ -6254,10 +6256,6 @@
           "provider": "openai"
         },
         "llm": null,
-        "file": {
-          "max_entrypoint_lines": 200,
-          "max_entrypoint_tokens": 50000
-        },
         "search": {
           "exclude": [],
           "include": [
@@ -6372,6 +6370,15 @@
         "scheduled_any_arguments": true
       },
       "description": "Tool-approval rules for agent-initiated tool calls"
+    },
+    "email_invites": {
+      "$ref": "#/$defs/EmailInvitesConfig",
+      "default": {
+        "chat_url": "https://chat.mindroom.chat",
+        "expiry_days": 7,
+        "approvers": []
+      },
+      "description": "Invites to a room by email through the email_invite tool"
     },
     "router": {
       "$ref": "#/$defs/RouterConfig",

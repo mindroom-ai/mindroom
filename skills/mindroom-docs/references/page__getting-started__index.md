@@ -65,7 +65,7 @@ See [`mindroom service`](https://docs.mindroom.chat/cli/#service) for when the q
 - **Preflight check:** `uvx mindroom doctor` checks config, API keys, Matrix connectivity, pairing, and storage in one pass; see [doctor](https://docs.mindroom.chat/cli/#doctor).
 
 See [Hosted Matrix + Local Backend](https://docs.mindroom.chat/deployment/hosted-matrix/) for what runs where and the credential and trust model.
-To run worker-routed execution tools such as `coding`, `docker`, `file`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+To run worker-routed execution tools such as `docker`, `filesystem`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 
 
@@ -171,7 +171,7 @@ Prerequisites:
     source .venv/bin/activate
     ```
 
-    Install Node.js 24 and [Bun](https://bun.sh/) to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+    Install Node.js 24 and [Bun](https://bun.sh/) 1.4 or newer to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
     Without assets and Bun, the API is available but the dashboard is not.
 
 ### Configuration

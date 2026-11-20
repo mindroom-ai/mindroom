@@ -15,7 +15,7 @@ Use them for agents with many optional tools.
 | `initial` | bool | `false` | Send a deferred tool as an ordinary tool on every request; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
-The starter Mind agent from `mindroom config init` keeps `shell`, `coding`, `memory`, `scheduler`, `update_awareness`, and `matrix_message` eager and defers its other tools.
+The starter Mind agent from `mindroom config init` keeps `shell`, `filesystem`, `memory`, `scheduler`, `update_awareness`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:
@@ -24,7 +24,7 @@ agents:
     role: Help in chat
     tools:
       - shell
-      - coding: {defer: true, initial: true}
+      - filesystem: {defer: true, initial: true}
       - searxng: {defer: true, host: https://search.example.test, fixed_max_results: 10}
       - name: serper
         defer: true

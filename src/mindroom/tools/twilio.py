@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="SiTwilio",
+    icon="TbBrandTwilio",
     icon_color="text-red-600",  # Twilio red
     config_fields=[
         ConfigField(

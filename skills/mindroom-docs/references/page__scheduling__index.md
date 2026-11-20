@@ -334,13 +334,13 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
 1. The check measures `MEMORY.md` plus the agent's `context_files` by the token estimate of the agent's configured model, not of a room or thread model override, which may count high ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
-2. Above `trigger_tokens`, or when the preload has to withhold part of `MEMORY.md` because it passes `memory.file.max_entrypoint_lines` (default `200`) or `memory.file.max_entrypoint_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 19800 tokens in total, but not below 18700", a cut between `min_reduction` and `max_reduction` (10 to 15%).
-3. The prompt asks the agent to commit the files to git first, take lines out of a `MEMORY.md` over either preload cap first (the prompt shows its line and token counts against both caps), fold each later correction into the entry it corrects, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and otherwise never invent facts or change their meaning.
+2. Above `trigger_tokens`, or when the preload has to withhold part of a file because it passes `defaults.max_preload_file_chars` (default `30000` characters per file), it posts a prompt with exact numbers, for example "bring them to at most 19800 tokens in total, but not below 18700", a cut between `min_reduction` and `max_reduction` (10 to 15%).
+3. The prompt asks the agent to commit the files to git first, take content out of any file over that limit first (the prompt names those files), fold each later correction into the entry it corrects, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and otherwise never invent facts or change their meaning.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
     - a file can no longer be read safely;
     - a file shrank by more than 25%;
     - the files total less than the floor, or did not shrink;
-    - `MEMORY.md` was over the line cap and still has as many lines;
+    - a file was over the character limit and did not get shorter;
     - a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
@@ -383,7 +383,7 @@ Each run keeps its agenda and report, and a run that reached review also its pat
 | `model` | the agent's model | A key of `models` to run both prompts with |
 
 `dreaming` needs `memory_backend: file` and something to work from: [auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](https://docs.mindroom.chat/thread-exports/) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
-It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+It also needs a tool that writes workspace files, such as `filesystem` or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
 Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.
 
 ### `exploration`

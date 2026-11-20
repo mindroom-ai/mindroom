@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-import tiktoken
 from pydantic import TypeAdapter
 
 import mindroom.knowledge.rerank as rerank_module
@@ -34,7 +33,6 @@ from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowled
 from mindroom.knowledge.read_protocol import DISTANCE_KEY, SearchHit
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
-from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.memory import ConversationRef, MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -46,11 +44,10 @@ from mindroom.memory import store_conversation_memory as public_store_conversati
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
+from mindroom.prompt_templates import render_prompt_template
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
-from mindroom.token_counting import families
-from mindroom.token_counting.counts import count
-from mindroom.token_counting.families import counter_for_model, load_o200k
+from mindroom.token_counting.families import load_o200k
 from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -61,7 +58,6 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.fakes.knowledge import install_recording_refresh_scheduler
-from tests.fakes.token_counter import fake_token_counter
 from tests.knowledge_test_support import collection_meta
 from tests.memory_test_support import MockTeamConfig
 
@@ -186,7 +182,6 @@ async def build_memory_prompt_parts(
         config,
         runtime_paths_for(config),
         current_execution_identity(),
-        counter=fake_token_counter(),
     )
 
 
@@ -711,7 +706,6 @@ async def test_user_scoped_worker_prompt_reads_daily_memory(
     config: Config,
 ) -> None:
     config.agents["general"].worker_scope = "user"
-    config.memory.file.max_entrypoint_lines = 0
 
     alice_identity = _identity("alice")
 
@@ -922,7 +916,6 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
             "general",
             config,
             runtime_paths_for(config),
-            counter=fake_token_counter(),
         )
 
     assert "Semantic memory search is unavailable this turn" in prompt_parts.transient_turn_context
@@ -1750,8 +1743,6 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.file.max_entrypoint_lines = 10
-
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nCurated fact.\n- [id=m1] Structured fact.\n", encoding="utf-8")
@@ -1761,70 +1752,45 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     assert "- [id=m1] Structured fact." in prompt_parts.session_preamble
 
 
-@pytest.mark.asyncio
-async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: Path, config: Config) -> None:
-    config.memory.file.max_entrypoint_lines = 2
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text(
-        "# Memory\nCurated fact.\n- [id=m1] Structured fact.\nTrailing fact.\n",
-        encoding="utf-8",
+def _cut_marker(memory_path: Path, max_chars: int) -> str:
+    return render_prompt_template(
+        PROMPT_DEFAULTS["PRELOAD_FILE_CUT_MARKER_TEMPLATE"],
+        path=memory_path,
+        max_chars=max_chars,
     )
 
-    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
-    assert "# Memory\nCurated fact." in prompt_parts.session_preamble
-    assert "Structured fact." not in prompt_parts.session_preamble
-    assert "Trailing fact." not in prompt_parts.session_preamble
-
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cap", ["lines", "tokens"])
-async def test_file_backend_capped_entrypoint_withholds_the_oldest_entries(
+async def test_file_backend_entrypoint_over_its_limit_keeps_its_first_whole_lines(
     storage_path: Path,
     config: Config,
-    cap: str,
 ) -> None:
-    """add_memory appends, so a capped preload keeps the curated head and the newest entries, not the oldest."""
-    if cap == "lines":
-        config.memory.file.max_entrypoint_lines = 3
-    else:
-        config.memory.file.max_entrypoint_tokens = 15
-
+    """MEMORY.md keeps the first lines that fit, each counted with its newline, then a marker naming the file."""
+    config.defaults.max_preload_file_chars = len("# Memory\nCurated fact.\n")
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text(
-        "# Memory\nCurated fact.\n- [id=m1] Oldest entry.\n- [id=m2] Middle entry.\n- [id=m3] Newest entry.\n",
-        encoding="utf-8",
-    )
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text("# Memory\nCurated fact.\n- [id=m1] Oldest entry.\n- [id=m2] Newest entry.\n", "utf-8")
 
     prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
 
-    assert "# Memory\nCurated fact.\n- [id=m3] Newest entry." in prompt_parts.session_preamble
+    marker = _cut_marker(memory_path, config.defaults.max_preload_file_chars)
+    assert prompt_parts.session_preamble.endswith(f"\n# Memory\nCurated fact.\n{marker}")
     assert "Oldest entry." not in prompt_parts.session_preamble
-    assert "Middle entry." not in prompt_parts.session_preamble
-    assert "[Memory entrypoint truncated - showing 3 of 5 lines" in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
-async def test_file_backend_oversized_oldest_entry_does_not_withhold_newer_entries(
+async def test_file_backend_entrypoint_cuts_a_first_line_longer_than_its_limit(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """An oldest entry too long for the token cap is withheld alone, not with every newer entry."""
-    config.memory.file.max_entrypoint_tokens = 15
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text(
-        f"# Memory\nCurated fact.\n- [id=m1] {'Long oldest entry. ' * 5}\n- [id=m2] Newest entry.\n",
-        encoding="utf-8",
-    )
+    """A first line longer than the limit keeps its first characters, never nothing."""
+    config.defaults.max_preload_file_chars = 10
+    memory_path = _memory_file(storage_path, "y" * 400 + "\nshort\n")
 
     prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
 
-    assert "# Memory\nCurated fact.\n- [id=m2] Newest entry." in prompt_parts.session_preamble
-    assert "Long oldest entry." not in prompt_parts.session_preamble
+    assert prompt_parts.session_preamble.endswith(f"\n{'y' * 10}\n{_cut_marker(memory_path, 10)}")
 
 
 @pytest.mark.asyncio
@@ -1846,7 +1812,7 @@ async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
 
     assert "is inlined below automatically every turn" in prompt_parts.session_preamble
     assert str(memory_path) in prompt_parts.session_preamble
-    assert "truncated" not in prompt_parts.session_preamble
+    assert "prompt limit" not in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
@@ -1870,7 +1836,6 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
             runtime_paths_for(config),
             current_execution_identity(),
             conversation=conversation,
-            counter=fake_token_counter(),
         )
         return prompt_parts.session_preamble
 
@@ -1903,7 +1868,6 @@ async def _conversation_preamble(config: Config, conversation: ConversationRef |
         runtime_paths_for(config),
         current_execution_identity(),
         conversation=conversation,
-        counter=fake_token_counter(),
     )
     return prompt_parts.session_preamble
 
@@ -1917,6 +1881,8 @@ def _memory_file(storage_path: Path, text: str) -> Path:
 
 
 _ENTRIES = "# Memory\n- [id=m1] Fact one.\n- [id=m2] Fact two.\n- [id=m3] Fact three.\n"
+# The characters of the first three lines of _ENTRIES, each with its newline.
+_THREE_ENTRY_LINES = len("# Memory\n- [id=m1] Fact one.\n- [id=m2] Fact two.\n")
 
 
 @pytest.mark.asyncio
@@ -1942,17 +1908,42 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_lines_are_in
 
 
 @pytest.mark.asyncio
+async def test_file_backend_capped_conversation_keeps_its_entrypoint_after_memories_are_added(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Lines appended past the cut leave the preamble byte-identical, kept copy or not; an edited kept line does not."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await _conversation_preamble(config, thread)
+    first_fresh = await _conversation_preamble(config, None)
+    assert _cut_marker(memory_path, _THREE_ENTRY_LINES) in first
+
+    await add_agent_memory("Added fact.", "general", config)
+    await add_agent_memory("Another added fact.", "general", config)
+    assert await _conversation_preamble(config, thread) == first
+    assert await _conversation_preamble(config, None) == first_fresh
+    assert "Added fact." not in first_fresh
+
+    memory_path.write_text(memory_path.read_text(encoding="utf-8").replace("Fact two.", "Fact 2."), "utf-8")
+    edited = await _conversation_preamble(config, thread)
+    assert "Fact 2." in edited
+    assert "Fact two." not in edited
+
+
+@pytest.mark.asyncio
 async def test_file_backend_capped_conversation_reloads_its_entrypoint_after_a_line_is_inserted(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A capped copy keeps main's rule, only lines added at its end, so a line inserted mid-file loads it again."""
-    config.memory.file.max_entrypoint_lines = 3
+    """A capped copy keeps only lines added at its end, so a line inserted inside its head loads it again."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
     memory_path = _memory_file(storage_path, _ENTRIES)
     thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
-    assert "truncated" in await _conversation_preamble(config, thread)
+    assert "prompt limit" in await _conversation_preamble(config, thread)
 
-    memory_path.write_text(_ENTRIES.replace("Fact two.\n", "Fact two.\nInserted.\n"), encoding="utf-8")
+    memory_path.write_text(_ENTRIES.replace("Fact one.\n", "Fact one.\nInserted.\n"), encoding="utf-8")
     assert "Inserted." in await _conversation_preamble(config, thread)
 
 
@@ -1973,15 +1964,63 @@ async def test_file_backend_conversation_reloads_its_entrypoint_when_its_framing
 
 
 @pytest.mark.asyncio
+async def test_file_backend_conversation_reloads_its_entrypoint_when_its_limit_or_marker_changes(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A new limit or marker override that keeps the same lines still changes the marker the copy shows."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    await _conversation_preamble(config, thread)
+
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES + 1
+    assert _cut_marker(memory_path, _THREE_ENTRY_LINES + 1) in await _conversation_preamble(config, thread)
+    config.prompts["PRELOAD_FILE_CUT_MARKER_TEMPLATE"] = "Cut `{path}` at {max_chars}."
+    assert f"Cut `{memory_path}` at {_THREE_ENTRY_LINES + 1}." in await _conversation_preamble(config, thread)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_cut_conversation_reloads_its_entrypoint_once_the_file_fits(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A copy that was cut drops its condense marker once the file fits, though the kept lines are unchanged."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "prompt limit" in await _conversation_preamble(config, thread)
+
+    memory_path.write_text(_ENTRIES.replace("- [id=m3] Fact three.\n", ""), encoding="utf-8")
+    fitted = await _conversation_preamble(config, thread)
+    assert "Fact two." in fitted
+    assert "prompt limit" not in fitted
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_reloads_its_entrypoint_when_a_line_break_changes(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Only a line feed ends a line, so turning a carriage return into one is an edit, not an inserted line."""
+    memory_path = _memory_file(storage_path, "# Memory\nx\ra\n")
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    await _conversation_preamble(config, thread)
+
+    memory_path.write_text("# Memory\nx\na\n", encoding="utf-8")
+    assert (await _conversation_preamble(config, thread)).endswith("\nx\na")
+
+
+@pytest.mark.asyncio
 async def test_file_backend_conversation_clears_its_entrypoint_once_memory_is_emptied(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A copy whose token cap showed no line keeps only a header and marker, which an emptied file must clear."""
-    config.memory.file.max_entrypoint_tokens = 1
-    memory_path = _memory_file(storage_path, "A fact longer than the token cap.\n")
+    """A copy kept from a cut file keeps its marker, which an emptied file must clear."""
+    config.defaults.max_preload_file_chars = 5
+    memory_path = _memory_file(storage_path, "A fact longer than the limit.\n")
     thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
-    assert "showing 0 of 1 lines" in await _conversation_preamble(config, thread)
+    assert "prompt limit" in await _conversation_preamble(config, thread)
 
     memory_path.write_text("", encoding="utf-8")
     assert await _conversation_preamble(config, thread) == ""
@@ -2000,191 +2039,6 @@ async def test_file_backend_conversation_keeps_its_entrypoint_whose_first_line_i
 
     memory_path.write_text("Newest note.\n" + memory_path.read_text(encoding="utf-8"), encoding="utf-8")
     assert await _conversation_preamble(config, thread) == first
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_preamble_reports_truncated_lines(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A capped MEMORY.md preload must say how much was withheld and where to read it."""
-    config.memory.file.max_entrypoint_lines = 2
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    memory_path = workspace / "MEMORY.md"
-    memory_path.write_text("# Memory\nCurated fact.\nThird fact.\nFourth fact.\n", encoding="utf-8")
-
-    prompt_parts = await build_memory_prompt_parts(
-        "What should I remember?",
-        "general",
-        config,
-    )
-
-    assert "[Memory entrypoint truncated - showing 2 of 4 lines" in prompt_parts.session_preamble
-    assert "memory.file.max_entrypoint_lines=2" in prompt_parts.session_preamble
-    assert str(memory_path) in prompt_parts.session_preamble
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_reports_truncation_when_preloaded_head_is_blank(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """Truncation must be reported even when the preloaded lines carry no text."""
-    config.memory.file.max_entrypoint_lines = 2
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    memory_path = workspace / "MEMORY.md"
-    memory_path.write_text("\n\n# Memory\nCurated fact.\nThird fact.\n", encoding="utf-8")
-
-    prompt_parts = await build_memory_prompt_parts(
-        "What should I remember?",
-        "general",
-        config,
-    )
-
-    assert "[Memory entrypoint truncated - showing 2 of 5 lines" in prompt_parts.session_preamble
-    assert str(memory_path) in prompt_parts.session_preamble
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_token_cap_keeps_whole_lines(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A few very long lines must not slip past the line cap: the token cap bounds the preload size."""
-    config.memory.file.max_entrypoint_tokens = 250
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    memory_path = workspace / "MEMORY.md"
-    lines = [f"fact {index} " + "x" * 392 for index in range(10)]
-    memory_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
-
-    assert lines[1] in prompt_parts.session_preamble
-    assert lines[2] not in prompt_parts.session_preamble
-    assert "[Memory entrypoint truncated - showing 2 of 10 lines" in prompt_parts.session_preamble
-    assert "memory.file.max_entrypoint_tokens=250" in prompt_parts.session_preamble
-    assert str(memory_path) in prompt_parts.session_preamble
-
-
-def _fact_lines(storage_path: Path, config: Config, count_lines: int) -> list[str]:
-    """Write a MEMORY.md of ``count_lines`` 41-character facts under a 100-token cap, and return its lines."""
-    config.memory.file.max_entrypoint_lines = 500
-    config.memory.file.max_entrypoint_tokens = 100
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    lines = [f"fact {index:02} " + "z" * 32 for index in range(count_lines)]
-    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return lines
-
-
-async def _preloaded(lines: list[str], config: Config, counter: TokenCounter) -> list[str]:
-    parts = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
-    return [line for line in lines if line in parts.session_preamble]
-
-
-def _line_tokens(counter: TokenCounter, lines: list[str]) -> int:
-    return sum(count(counter, f"{line}\n", upper_bound=True) for line in lines)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "identity",
-    [ModelIdentity(id="gpt-4o", provider="openai"), ModelIdentity(id="claude-opus-5-5", provider="anthropic")],
-    ids=["own-tokenizer", "family-estimate"],
-)
-async def test_file_backend_entrypoint_fills_the_token_cap_as_the_model_counts_it(
-    storage_path: Path,
-    config: Config,
-    identity: ModelIdentity,
-) -> None:
-    """The preload keeps as many whole lines as fit the cap, each counted with its newline, and the text fits it."""
-    load_o200k()
-    lines = _fact_lines(storage_path, config, 40)
-    counter = counter_for_model(identity, local_encoder=identity.provider == "openai")
-
-    kept = await _preloaded(lines, config, counter)
-
-    assert count(counter, "\n".join(kept)) <= _line_tokens(counter, kept) <= 100
-    assert _line_tokens(counter, lines[: len(kept) + 1]) > 100
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_fits_the_cap_before_the_vocabulary_loads(
-    storage_path: Path,
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Before o200k_base loads, each line counts its UTF-8 bytes, which no model's tokenizer exceeds.
-
-    A quarter token per character would put the file at 420 tokens, under the 500-token cap.
-    """
-    lines = _fact_lines(storage_path, config, 40)
-    config.memory.file.max_entrypoint_tokens = 500
-    release = threading.Event()
-    real_get_encoding = tiktoken.get_encoding
-
-    def slow_get_encoding(name: str) -> tiktoken.Encoding:
-        release.wait()
-        return real_get_encoding(name)
-
-    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
-    monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
-    counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"))
-    try:
-        kept = await _preloaded(lines, config, counter)
-    finally:
-        release.set()
-
-    def utf8_bytes(chosen: list[str]) -> int:
-        return sum(len(f"{line}\n".encode()) for line in chosen)
-
-    assert utf8_bytes(kept) <= 500 < utf8_bytes(lines[: len(kept) + 1])
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_over_the_cap_keeps_the_head_and_the_newest_entries(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A file over the cap keeps its curated head, then the newest entries that fit."""
-    config.memory.file.max_entrypoint_tokens = 120
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    entries = [f"- [id=m{index:02}] Entry {index:02} " + "w" * 24 for index in range(20)]
-    (workspace / "MEMORY.md").write_text("# Memory\nCurated fact.\n" + "\n".join(entries) + "\n", encoding="utf-8")
-
-    counter = TokenCounter(estimate=lambda text: len(text) // 2)
-    counted = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
-
-    kept = [entry for entry in entries if entry in counted.session_preamble]
-    assert "# Memory\nCurated fact." in counted.session_preamble
-    assert 0 < len(kept) < len(entries)
-    assert kept == entries[len(entries) - len(kept) :]
-    assert _line_tokens(counter, ["# Memory", "Curated fact.", *kept]) <= 120
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_token_cap_reports_an_oversized_first_line(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A first line larger than the token cap is withheld and still reported, never silently cut."""
-    config.memory.file.max_entrypoint_tokens = 10
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text("y" * 400 + "\nshort\n", encoding="utf-8")
-
-    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
-
-    assert "y" * 400 not in prompt_parts.session_preamble
-    assert "[Memory entrypoint truncated - showing 0 of 2 lines" in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio

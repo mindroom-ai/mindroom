@@ -1,7 +1,15 @@
 // Leaf widgets for schema-driven config forms. Nothing here renders nested
 // schema nodes, so SchemaField.tsx can compose these without import cycles.
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
-import yaml from "js-yaml";
+import {
+  CORE_SCHEMA,
+  defineScalarTag,
+  dump,
+  intCoreTag,
+  load,
+  loadAll,
+  mergeTag,
+} from "js-yaml";
 import {
   ArrowDown,
   ArrowUp,
@@ -688,7 +696,31 @@ export function MapKeyInput({
 }
 
 function dumpYaml(value: unknown): string {
-  return value === undefined ? "" : yaml.dump(value);
+  return value === undefined ? "" : dump(value);
+}
+
+/**
+ * Plain scalars read as integers the way js-yaml 4 read them: core integers plus signed hex and octal and binary
+ * (`-0x10`, `+0o20`, `0b101`), which the core rule accepts only behind an explicit `!!int`. One too large for a
+ * number stays a string, as before.
+ */
+const intTag = defineScalarTag("tag:yaml.org,2002:int", {
+  ...intCoreTag,
+  resolve: (source, _isExplicit, tagName) =>
+    intCoreTag.resolve(source, true, tagName),
+});
+
+// js-yaml 5 loads with the bare YAML 1.2 core schema. Merge keys (`<<: *defaults`) and signed or binary integers
+// keep the values js-yaml 4 gave them; dates stay the strings that were typed.
+const YAML_LOAD_OPTIONS = {
+  schema: CORE_SCHEMA.withTags(mergeTag, intTag),
+};
+
+/** Parse the editor's YAML; a draft with no document (blank or only comments) clears the value. */
+function loadYaml(draft: string): unknown {
+  return loadAll(draft, YAML_LOAD_OPTIONS).length === 0
+    ? undefined
+    : load(draft, YAML_LOAD_OPTIONS);
 }
 
 export function YamlEditor({
@@ -746,7 +778,7 @@ export function YamlEditor({
             return;
           }
           try {
-            onChange(draft.trim() === "" ? undefined : yaml.load(draft));
+            onChange(loadYaml(draft));
             setParseError(null);
           } catch (error) {
             setParseError(

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import httpx2
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
@@ -117,17 +118,17 @@ def _exchange(runtime_paths: RuntimePaths) -> OAuthTokenResult:
     return asyncio.run(provider.exchange_code("authorization-code", runtime_paths, token_url=provider.token_url))
 
 
-def _serve_token_endpoint(monkeypatch: pytest.MonkeyPatch, body: dict[str, Any]) -> list[httpx.Request]:
+def _serve_token_endpoint(monkeypatch: pytest.MonkeyPatch, body: dict[str, Any]) -> list[httpx2.Request]:
     """Answer the code exchange through the real OAuth client and record the request."""
-    requests: list[httpx.Request] = []
+    requests: list[httpx2.Request] = []
 
-    def handle(request: httpx.Request) -> httpx.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
-        return httpx.Response(200, json=body)
+        return httpx2.Response(200, json=body)
 
     class _MockTransportClient(AsyncOAuth2Client):
         def __init__(self, **kwargs: object) -> None:
-            super().__init__(**kwargs, transport=httpx.MockTransport(handle))
+            super().__init__(**kwargs, transport=httpx2.MockTransport(handle))
 
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _MockTransportClient)
     return requests

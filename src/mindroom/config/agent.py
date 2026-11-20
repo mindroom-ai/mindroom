@@ -40,6 +40,7 @@ from mindroom.config.participation import ParticipationConfig  # noqa: TC001
 from mindroom.config.room_activity import AgentRoomActivityConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
+from mindroom.config.tool_aliases import ToolNames  # noqa: TC001
 from mindroom.config.validation import (
     OptionalNonBlankStr,
     TimezoneName,
@@ -432,7 +433,7 @@ class AgentConfig(BaseModel):
         default=None,
         description="Whether streamed replies show the model's reasoning to the room (per-agent override)",
     )
-    worker_tools: list[str] | None = Field(
+    worker_tools: ToolNames | None = Field(
         default=None,
         description="Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
         json_schema_extra=dashboard_hint(reference="tool"),

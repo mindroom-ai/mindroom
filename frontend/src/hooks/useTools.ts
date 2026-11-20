@@ -7,13 +7,7 @@ export interface ToolFieldSchema {
   name: string;
   label: string;
   type:
-    | "boolean"
-    | "number"
-    | "password"
-    | "select"
-    | "string[]"
-    | "text"
-    | "url";
+    "boolean" | "number" | "password" | "select" | "string[]" | "text" | "url";
   required?: boolean;
   default?: unknown;
   placeholder?: string | null;

@@ -54,8 +54,11 @@ logger = get_logger(__name__)
 
 
 class _WorkerProxyResponse(Protocol):
-    status_code: int
-    text: str
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def text(self) -> str: ...
 
     def raise_for_status(self) -> object: ...
 

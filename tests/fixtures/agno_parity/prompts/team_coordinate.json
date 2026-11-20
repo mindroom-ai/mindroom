@@ -214,7 +214,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Planner (Matrix ID: @mindroom_planner:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Planner and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nBreak work into ordered steps.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n- Number every step.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.",
+          "content": "<your_role>\n## Your Identity\nYou are Planner (Matrix ID: @mindroom_planner:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Planner and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nBreak work into ordered steps.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n- Number every step.\n\n- To save a tool's full supported output, such as large output, to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.",
           "role": "system"
         },
         {
@@ -251,7 +251,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -280,7 +280,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -312,7 +312,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -378,7 +378,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -411,7 +411,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -440,7 +440,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -468,7 +468,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -492,7 +492,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": []
@@ -522,7 +522,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -562,7 +562,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -627,7 +627,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -668,7 +668,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -699,7 +699,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -731,7 +731,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -752,7 +752,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `scheduler`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nWrite clear announcements.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.",
+          "content": "<your_role>\n## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `scheduler`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nWrite clear announcements.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n- To save a tool's full supported output, such as large output, to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.",
           "role": "system"
         },
         {
@@ -785,7 +785,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -850,7 +850,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -875,7 +875,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": []
@@ -912,7 +912,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -977,7 +977,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1018,7 +1018,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [

@@ -35,6 +35,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHARED_CREDENTIALS_PATH_ENV,
 )
+from mindroom.tool_system.catalog import ToolConfigOverrideError, get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -1867,3 +1868,45 @@ def test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings(tmp_path
 
     assert manager.for_primary_runtime_agent_scope("alpha").load_credentials("openweather") is None
     assert worker_manager.load_credentials("openweather") is None
+
+
+@pytest.mark.parametrize("service", ["file", "coding"])
+def test_dashboard_deletes_old_name_settings_from_the_store_the_toolkit_build_reads(
+    tmp_path: Path,
+    service: str,
+) -> None:
+    """A scoped agent's settings saved for file or coding stop its toolkit until the dashboard deletes that document."""
+    runtime_paths = constants_mod.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox:8765", "MINDROOM_SANDBOX_PROXY_TOKEN": "token"},
+    )
+    manager = CredentialsManager(tmp_path / "credentials")
+    worker_target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    target = RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        worker_scope="shared",
+        agent_name="alpha",
+        execution_identity=_ALPHA_IDENTITY,
+        tools=builtin_tool_registry(),
+    )
+    stored = {"_source": "ui", "exclude_tools": ["write_file"]}
+    manager.for_primary_runtime_agent_scope("alpha").save_credentials(service, stored)
+
+    def build() -> object:
+        return get_tool_by_name(
+            "filesystem",
+            runtime_paths,
+            tools=builtin_tool_registry(),
+            credentials_manager=manager,
+            worker_target=worker_target,
+        )
+
+    with pytest.raises(ToolConfigOverrideError, match=f"under '{service}' no longer apply; delete them"):
+        build()
+    assert load_credentials_for_target(service, target) == stored
+
+    delete_credentials_for_target(service, target)
+
+    assert build().name == "filesystem"

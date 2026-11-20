@@ -790,8 +790,8 @@ function AgentKeys({ checked }: { checked: ServicesListing }) {
         <CardTitle className="text-xl">Agent Keys</CardTitle>
         <CardDescription>
           API keys and connected accounts your agents use but never see. The
-          egress broker adds them to your agents' outbound requests. Keys
-          are write-only and never shown again.
+          egress broker adds them to your agents' outbound requests. Keys are
+          write-only and never shown again.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">

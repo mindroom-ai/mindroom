@@ -15,6 +15,10 @@ if TYPE_CHECKING:
     from agno.agent import Agent
 
 
+# google-genai 3 sends the Gemini API to v1, which lacks the preview image models; Vertex AI keeps its own default.
+_GEMINI_API_VERSION = "v1beta"
+
+
 class MindRoomGeminiTools(GeminiTools):
     """Preserve Agno's Gemini toolkit contract while using Nano Banana image models."""
 
@@ -32,6 +36,7 @@ class MindRoomGeminiTools(GeminiTools):
                 config=types.GenerateContentConfig(
                     response_modalities=["IMAGE"],
                     image_config=types.ImageConfig(aspect_ratio="1:1"),
+                    http_options=None if self.vertexai else types.HttpOptions(api_version=_GEMINI_API_VERSION),
                 ),
             )
             generated_images = [

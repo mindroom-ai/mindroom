@@ -22,9 +22,14 @@ if TYPE_CHECKING:
 class _ApprovalWaitSupport(Protocol):
     """Collaborators the approval-wait reaction needs."""
 
-    runtime: BotRuntimeView
-    response_runner: ResponseRunner
-    delivery_gateway: DeliveryGateway
+    @property
+    def runtime(self) -> BotRuntimeView: ...
+
+    @property
+    def response_runner(self) -> ResponseRunner: ...
+
+    @property
+    def delivery_gateway(self) -> DeliveryGateway: ...
 
 
 def queued_notice_reservation_if_busy(

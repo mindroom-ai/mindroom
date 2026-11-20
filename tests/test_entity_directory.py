@@ -108,6 +108,6 @@ def test_directory_lists_each_prepared_entity_and_follows_the_config_and_account
     entity = entity_directory(changed, runtime_paths)["@mindroom_editor:localhost"]
     assert (entity.name, entity.kind, entity.display_name) == ("editor", "agent", "Editor")
     # A preset is no toolkit, so the editor lists the toolkits it expands to instead.
-    assert entity.tool_names[:3] == ("file", "scheduler", "shell")
+    assert entity.tool_names[:3] == ("filesystem", "scheduler", "shell")
     assert "browser" in entity.tool_names
     assert "openclaw_compat" not in entity.tool_names

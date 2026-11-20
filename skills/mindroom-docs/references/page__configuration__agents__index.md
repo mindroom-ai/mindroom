@@ -25,11 +25,11 @@ agents:
     role: Generate code, manage files, execute shell commands
     model: sonnet
     tools:
-      - file
+      - filesystem
       - github
       - shell:
           extra_env_passthrough: "DAWARICH_*"
-    worker_tools: [shell, file]
+    worker_tools: [shell, filesystem]
     instructions:
       - Always read files before modifying them
     context_files: [AGENTS.md, USER.md]
@@ -98,7 +98,7 @@ agents:
 | `show_reasoning` | bool | `null` | Show the model's reasoning on streamed replies to everyone in the room; see [Reasoning](https://docs.mindroom.chat/streaming/#reasoning) |
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes) decides. See [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing) |
 | `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
-| `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `file` and `coding` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
+| `file_access` | string | `null` | `workspace` limits path-taking tools such as `filesystem`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `filesystem` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
 | `terminals` | string | `none` | What people in the agent's rooms may do with its [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal): `none` shows them nothing, `watch` lets them watch, and `type` also lets people who may post open, close, and type in them where the agent's shell runs in a worker that mounts its workspace, and lets them only watch in a worker that does not. It applies to this agent only and is not inherited from `defaults`; the agent's own use of the `terminal` toolkit does not depend on it |
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
@@ -124,8 +124,8 @@ agents:
     display_name: Mind
     role: A persistent personal AI companion
     model: sonnet
-    tools: [file, shell]
-    worker_tools: [file, shell]
+    tools: [filesystem, shell]
+    worker_tools: [filesystem, shell]
     memory_backend: file
     private:
       per: user
@@ -183,10 +183,10 @@ How a private agent behaves:
 - Missing files are skipped with a warning in the logs.
 - Edits take effect on the next reply without a restart.
 
-`defaults.max_preload_chars` (default `50000`) caps the section.
-When it is exceeded, MindRoom drops whole files from the start of the list first and then trims the last remaining file from its end.
-Each affected file keeps its path and a marker with the omitted character count, so the agent can open the file for the rest.
-A cap too small to hold the headings and markers fails with `max_preload_chars=<n> cannot fit required context headings and omission markers`.
+`defaults.max_preload_file_chars` (default `30000`, at most `200000`) limits each file on its own, and the same limit applies to an inlined [`MEMORY.md`](https://docs.mindroom.chat/memory/#backend-file).
+A longer file keeps its first whole lines that fit the limit, counted as they are in the file (only a line feed ends a line); only a first line longer than the limit keeps its first characters.
+A marker naming the file follows the kept text, says the rest is left out, and asks the agent to condense the file without losing information.
+One file growing never shortens or drops another, and the marker holds no count, so lines added past the cut leave the prompt unchanged.
 
 ## Listening
 
@@ -251,7 +251,7 @@ A silent turn calls only the tools it names, but each keeps its usual effects, h
 
 - `scheduler`, one of the default agent tools, schedules a later turn of the agent, and can edit or cancel any pending task in the room; an edited task becomes the agent's own.
   A scheduled message can also address other agents and teams in the room, which answer the listening agent's account under that account's access, not the heard sender's.
-- `file`, `coding`, `shell`, and `python` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script`, `shell`, and `python` run code with the agent's worker and credentials.
+- `filesystem`, `shell`, and `python` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script`, `shell`, and `python` run code with the agent's worker and credentials.
 - A tool with a shared connection acts on that connection's credentials, for example `github`, `sql`, `postgres`, `google_drive`, `homeassistant`, and `composio`.
 - `report_publishing` publishes workspace files at a public link.
 - A tool that starts a turn starts it with all of the agent's tools, as the agent's own account, and a tool that checks who asked sees that account, because no person asked for a silent turn.
@@ -310,9 +310,9 @@ The `defaults` section sets values every agent inherits unless it sets its own, 
 defaults:
   tools: [scheduler]
   max_tool_calls_per_turn: 200
-  worker_tools: [shell, file, python]
+  worker_tools: [shell, filesystem, python]
   enable_streaming: true
-  max_preload_chars: 50000
+  max_preload_file_chars: 30000
 ```
 
 These defaults apply to each agent that leaves the same field unset:
@@ -348,7 +348,7 @@ These settings are global-only:
 | `coalescing.debounce_ms` | `1000` | Milliseconds (>= 0) to wait after unmarked media for more attachments or a trailing caption before replying; text replies immediately, and [marked submissions](https://docs.mindroom.chat/attachments/#files-sent-with-text) use their own bound |
 | `show_stop_button` | `true` | Add a 🛑 reaction while an agent responds; see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button) |
 | `max_consecutive_agent_replies` | `50` | Consecutive agent or team messages (>= 1) before agents stop waking each other; see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents) |
-| `max_preload_chars` | `50000` | Cap (>= 1) on preloaded context files; see [File-Based Context Loading](#file-based-context-loading) |
+| `max_preload_file_chars` | `30000` | Characters (1 to 200000) of each file inlined into the prompt, context files and `MEMORY.md` alike; see [File-Based Context Loading](#file-based-context-loading) |
 | `tool_output_auto_save_threshold_bytes` | `51200` | Larger tool outputs are saved to the workspace; see [Workspace and tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) |
 | `allow_shell_without_worker` | `false` | Let the [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) tool run commands in the MindRoom process for agents whose `shell` does not run in a worker; when `false`, each such call is refused with a message naming this setting. `mindroom config init` sets it to `true` |
 | `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services, `google_vertex_adc`, and `slack_app` cannot be granted. See [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) |

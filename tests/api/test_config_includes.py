@@ -655,7 +655,7 @@ class TestIncludeAwareSnapshots:
         assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
         after = api_snapshot(api_app)
         assert after.source_fingerprint != before.source_fingerprint
-        assert after.runtime_config.authored_model_dump()["defaults"]["tools"] == ["file"]
+        assert after.runtime_config.authored_model_dump()["defaults"]["tools"] == ["filesystem"]
 
         with pytest.raises(HTTPException) as exc_info:
             save_config(

@@ -24,11 +24,8 @@ from mindroom import agents as agents_module
 from mindroom import path_confinement, prompts
 from mindroom.agent_loop.build import AgentBuild, prompt_for_turn
 from mindroom.agents import (
-    _apply_preload_cap,
     _load_context_files,
-    _PreloadChunk,
     _render_tool_execution_environment,
-    _trim_chunk_tails,
     agent_build_can_overlap_file_memory,
     build_agent_toolkit,
     create_agent,
@@ -54,11 +51,13 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.llm.messages import system_text
 from mindroom.matrix.state import MatrixState
+from mindroom.memory import build_memory_prompt_parts
 from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentity,
     load_private_instance_identity,
     private_instances_for_agent,
 )
+from mindroom.prompt_templates import render_prompt_template
 from mindroom.prompts import (
     HIDDEN_TOOL_CALLS_PROMPT,
     OPENAI_COMPAT_HISTORY_GUIDANCE,
@@ -952,7 +951,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
     assert config.resolve_agent("summary").tools.tool_names == (
         "openclaw_compat",
         "shell",
-        "coding",
+        "filesystem",
         "duckduckgo",
         "website",
         "browser",
@@ -978,7 +977,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
         "browser",
         "openclaw_compat",
         "shell",
-        "coding",
+        "filesystem",
         "python",
         "scheduler",
         "duckduckgo",
@@ -1194,7 +1193,7 @@ def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
     build_agent_toolkit = agents_module.build_agent_toolkit
 
     def build(tool_name: str, **kwargs: object) -> Toolkit | None:
-        if tool_name == "file":
+        if tool_name == "filesystem":
             msg = "toolkit constructor bug"
             raise RuntimeError(msg)
         return build_agent_toolkit(tool_name, **kwargs)
@@ -1217,8 +1216,8 @@ def test_create_agent_skips_a_toolkit_whose_function_sets_an_agno_hook(tmp_path:
         return text
 
     def build(tool_name: str, **kwargs: object) -> Toolkit | None:
-        if tool_name == "file":
-            return Toolkit(name="file", tools=[Function(name="ping", entrypoint=ping, pre_hook=lambda: None)])
+        if tool_name == "filesystem":
+            return Toolkit(name="filesystem", tools=[Function(name="ping", entrypoint=ping, pre_hook=lambda: None)])
         return build_agent_toolkit(tool_name, **kwargs)
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build), capture_logs() as logs:
@@ -1226,7 +1225,7 @@ def test_create_agent_skips_a_toolkit_whose_function_sets_an_agno_hook(tmp_path:
 
     assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
     [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
-    assert warning["tool"] == "file"
+    assert warning["tool"] == "filesystem"
     assert "'ping' sets an Agno pre_hook" in warning["error"]
 
 
@@ -1274,7 +1273,7 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["filesystem"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
 
@@ -2475,7 +2474,7 @@ def test_agent_workspace_file_tools_stay_inside_the_workspace(
     agent = _agent_offered("file", runtime_paths, file_memory=file_memory)
     file_tools = _tool_entrypoints(agent)
     coding = _tool_entrypoints(_agent_offered("coding", runtime_paths, file_memory=file_memory))
-    assert file_tools["read_file"]("notes.md") == "workspace notes\n"
+    assert file_tools["read_file"]("notes.md") == "1| workspace notes"
     assert "workspace notes" in coding["read_file"]("notes.md")
     assert coding["write_file"]("draft.md", "draft\n").startswith("Wrote")
     assert (workspace / "draft.md").read_text(encoding="utf-8") == "draft\n"
@@ -2543,7 +2542,7 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["filesystem"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 
@@ -3104,7 +3103,7 @@ def test_load_context_files_reads_a_huge_workspace_file_up_to_its_cap(
         workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
-    assert [chunk.body for chunk in loaded] == [("soul " * 4).strip()]
+    assert [chunk.body for chunk in loaded] == ["soul " * 4]
 
 
 def test_context_files_in_a_workspace_reached_through_a_link_are_refused(tmp_path: Path) -> None:
@@ -3184,7 +3183,7 @@ def test_load_context_files_keeps_internal_workspace_links(tmp_path: Path) -> No
     )
 
     assert [(chunk.title, chunk.body) for chunk in loaded] == [
-        (str(workspace.resolve() / "docs" / "soul.md"), "Linked soul."),
+        (str(workspace.resolve() / "docs" / "soul.md"), "Linked soul.\n"),
     ]
 
 
@@ -3214,7 +3213,7 @@ def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
     )
 
     assert len(loaded) == 1
-    assert loaded[0].body == "config"
+    assert loaded[0].body == "config\n"
 
 
 def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_root(
@@ -3352,97 +3351,148 @@ def test_agent_context_files_are_loaded_into_role(tmp_path: Path) -> None:
     assert "Canonical soul directive." in _role(updated_agent)
 
 
-def _preload_chunks() -> list[_PreloadChunk]:
-    return [
-        _PreloadChunk(title="/ws/FIRST.md", body="FIRST_START " + "A" * 600),
-        _PreloadChunk(title="/ws/SECOND.md", body="SECOND_START " + "B" * 600),
-    ]
+def _context_files_role(tmp_path: Path, files: dict[str, str], max_chars: int) -> str:
+    """Render the role of an agent that preloads ``files``, each cut to ``max_chars`` characters."""
+    config = _test_config()
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    for name, text in files.items():
+        (workspace / name).write_text(text, encoding="utf-8")
+    config.agents["general"].context_files = list(files)
+    bound = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    bound.defaults.max_preload_file_chars = max_chars
+    return _role(_create_agent_for_test("general", config=bound))
 
 
-def _apply_test_preload_cap(chunks: list[_PreloadChunk], max_preload_chars: int) -> tuple[str, int]:
-    return _apply_preload_cap(
-        chunks,
-        max_preload_chars,
-        section_heading=prompts.PERSONALITY_CONTEXT_SECTION_HEADING,
-        truncation_marker_template=prompts.CONTEXT_TRUNCATION_MARKER_TEMPLATE,
-        chunk_marker_template=prompts.CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE,
+def _cut_marker(path: Path, max_chars: int) -> str:
+    return render_prompt_template(
+        prompts.PRELOAD_FILE_CUT_MARKER_TEMPLATE,
+        path=path,
+        max_chars=max_chars,
     )
 
 
-def test_trim_chunk_tails_counts_whitespace_removed_by_cleanup() -> None:
-    """Tail trimming must count whitespace removed after the requested slice."""
-    chunk = _PreloadChunk(title="/ws/SOUL.md", body="alpha   beta")
-
-    omitted_chars = _trim_chunk_tails(
-        [chunk],
-        len("alpha   "),
-        render=lambda chunks: chunks[0].body,
-    )
-
-    assert chunk.body == "alpha"
-    assert chunk.omitted_chars == 7
-    assert omitted_chars == 7
+_LONG_FILE = "".join(f"line {index:02} of the file\n" for index in range(10))
 
 
-def test_preload_cap_truncates_context_files_in_order() -> None:
-    """Preload cap should drop earlier context files before later ones."""
-    chunks = _preload_chunks()
-    heading_and_markers = len(prompts.PERSONALITY_CONTEXT_SECTION_HEADING) + 400
+def test_preload_keeps_the_first_whole_lines_of_a_file_over_its_limit(tmp_path: Path) -> None:
+    """Each line counts with its newline: 3 lines of 21 characters fill 63, so the 4th is left out, marked."""
+    with capture_logs() as logs:
+        role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, 70)
+    soul = agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
 
-    rendered, omitted_chars = _apply_test_preload_cap(chunks, len(chunks[1].body) + heading_and_markers)
-
-    assert omitted_chars >= len(_preload_chunks()[0].body)
-    assert "FIRST_START" not in rendered
-    assert "SECOND_START" in rendered
-    assert "[Context files exceeded the preload budget - " in rendered
-
-
-def test_preload_cap_keeps_the_dropped_file_path_visible() -> None:
-    """A dropped context file must stay visible as its path plus an omission marker."""
-    chunks = _preload_chunks()
-    dropped_body_length = len(chunks[0].body)
-    heading_and_markers = len(prompts.PERSONALITY_CONTEXT_SECTION_HEADING) + 400
-
-    rendered, _ = _apply_test_preload_cap(chunks, len(chunks[1].body) + heading_and_markers)
-
-    assert "### /ws/FIRST.md" in rendered
-    assert f"[Truncated - {dropped_body_length} chars omitted. Read /ws/FIRST.md for the rest.]" in rendered
+    [cut_log] = [entry for entry in logs if entry["event"] == "context_file_preload_cut"]
+    assert (cut_log["agent"], cut_log["path"]) == ("general", str(soul))
+    kept = "line 00 of the file\nline 01 of the file\nline 02 of the file"
+    assert f"### {soul}\n{kept}\n{_cut_marker(soul, 70)}" in role
+    assert "line 03" not in role
 
 
-def test_preload_cap_rejects_budget_too_small_for_required_markers() -> None:
-    """A hard cap must fail explicitly rather than slice away required file markers."""
-    chunks = [
-        _PreloadChunk(
-            title=f"/workspace/context/file-{index}.md",
-            body="x" * 700,
-        )
-        for index in range(6)
-    ]
+def test_preload_cuts_a_first_line_longer_than_the_limit_at_the_limit(tmp_path: Path) -> None:
+    """A file whose first line alone is over the limit keeps that line's first characters."""
+    role = _context_files_role(tmp_path, {"SOUL.md": "x" * 50 + "\nsecond line\n"}, 20)
+    soul = agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
 
-    with pytest.raises(ValueError, match="cannot fit required context headings and omission markers"):
-        _apply_test_preload_cap(chunks, 400)
+    assert f"### {soul}\n{'x' * 20}\n{_cut_marker(soul, 20)}" in role
+    assert "x" * 21 not in role
 
 
-def test_preload_cap_trims_last_context_body_instead_of_dropping_it() -> None:
-    """After dropping earlier files, the final file should keep as much leading content as fits."""
-    rendered, omitted_chars = _apply_test_preload_cap(_preload_chunks(), 1_000)
+def test_preload_cuts_each_file_on_its_own(tmp_path: Path) -> None:
+    """A growing file never shortens or drops another one; both stay in the prompt."""
+    small = {"SOUL.md": "Soul directive.\n", "USER.md": "User fact.\n"}
+    grown = {"SOUL.md": "Soul directive.\n", "USER.md": "User fact.\n" + _LONG_FILE * 5}
 
-    assert len(_preload_chunks()[0].body) < omitted_chars < sum(len(chunk.body) for chunk in _preload_chunks())
-    assert "FIRST_START" not in rendered
-    assert "SECOND_START" in rendered
-    assert "### /ws/FIRST.md" in rendered
-    assert "### /ws/SECOND.md" in rendered
-    assert len(rendered) <= 1_000
+    role = _context_files_role(tmp_path, small, 70)
+    grown_role = _context_files_role(tmp_path, grown, 70)
+    soul = agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
+    user = agent_workspace_root_path(tmp_path, "general") / "USER.md"
+
+    assert f"### {soul}\nSoul directive." in role
+    assert f"### {soul}\nSoul directive.\n\n### {user}\nUser fact." in grown_role
+    assert _cut_marker(user, 70) in grown_role
+    assert _cut_marker(soul, 70) not in grown_role
+    first_grown = {"SOUL.md": "Soul directive.\n" + _LONG_FILE * 5, "USER.md": "User fact.\n"}
+    assert f"### {user}\nUser fact." in _context_files_role(tmp_path, first_grown, 70)
 
 
-def test_preload_cap_leaves_untruncated_context_unmarked() -> None:
-    """Context that fits the budget must carry no omission markers."""
-    rendered, omitted_chars = _apply_test_preload_cap(_preload_chunks(), 50_000)
+def test_preload_is_unchanged_by_lines_added_past_a_cut(tmp_path: Path) -> None:
+    """The marker holds no count that grows with the file, so appended lines leave the prompt byte-identical."""
+    role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, 70)
 
-    assert omitted_chars == 0
-    assert "Truncated" not in rendered
-    assert "FIRST_START" in rendered
-    assert "SECOND_START" in rendered
+    assert _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE + "appended line\n" * 100}, 70) == role
+    edited = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE.replace("line 01", "line 1")}, 70)
+    assert edited != role
+    assert "line 1 of the file" in edited
+
+
+def test_preload_leaves_a_file_within_its_limit_unmarked(tmp_path: Path) -> None:
+    """A file that fits its limit exactly is inlined whole, with no marker."""
+    role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, len(_LONG_FILE))
+
+    assert "line 09 of the file" in role
+    assert "prompt limit" not in role
+
+
+async def _memory_preamble(tmp_path: Path, text: str, max_chars: int) -> str:
+    """Return the MEMORY.md preamble of an agent whose MEMORY.md is ``text``, cut to ``max_chars`` characters."""
+    config = _test_config()
+    config.agents["general"].memory_backend = "file"
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_bytes(text.encode())
+    bound = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    bound.defaults.max_preload_file_chars = max_chars
+    parts = await build_memory_prompt_parts("x", "general", bound, runtime_paths_for(bound))
+    return parts.session_preamble
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "max_chars", "kept"),
+    [
+        (_LONG_FILE, 70, "line 00 of the file\nline 01 of the file\nline 02 of the file"),
+        ("aa\r\nbb\r\ncc\r\n", 6, "aa"),
+        ("  a\nz", 3, "a"),
+    ],
+    ids=["lines", "crlf", "leading-space"],
+)
+async def test_memory_entrypoint_and_a_context_file_get_the_same_cut(
+    tmp_path: Path,
+    text: str,
+    max_chars: int,
+    kept: str,
+) -> None:
+    """One rule cuts every preloaded file: MEMORY.md keeps exactly what a context file of the same text keeps."""
+    role = _context_files_role(tmp_path, {"SOUL.md": text}, max_chars)
+    preamble = await _memory_preamble(tmp_path, text, max_chars)
+
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    assert f"\n{kept}\n{_cut_marker(workspace / 'SOUL.md', max_chars)}" in role
+    assert preamble.endswith(f"\n{kept}\n{_cut_marker(workspace / 'MEMORY.md', max_chars)}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "max_chars", "appended"),
+    [("aa\nbb\n", 5, "cc\n"), ("x" * ((1 << 20) + 10), 100, "y")],
+    ids=["lines", "past-the-read-cap"],
+)
+async def test_both_preloads_are_unchanged_by_text_added_past_the_cut(
+    tmp_path: Path,
+    text: str,
+    max_chars: int,
+    appended: str,
+) -> None:
+    """Text added past the cut leaves both renders as they were, even for a one-line file past the 1 MiB read."""
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    role = _context_files_role(tmp_path, {"SOUL.md": text}, max_chars)
+    preamble = await _memory_preamble(tmp_path, text, max_chars)
+
+    assert _cut_marker(workspace / "SOUL.md", max_chars) in role
+    assert preamble.endswith(_cut_marker(workspace / "MEMORY.md", max_chars))
+    assert text[:3] in preamble
+    assert _context_files_role(tmp_path, {"SOUL.md": text + appended}, max_chars) == role
+    assert await _memory_preamble(tmp_path, text + appended, max_chars) == preamble
 
 
 def test_agent_context_section_states_files_are_preloaded(
@@ -4435,6 +4485,49 @@ def test_config_rejects_retired_auto_resume_after_restart() -> None:
             defaults={"auto_resume_after_restart": True},
             agents={"calculator": {"display_name": "CalculatorAgent"}},
         )
+
+
+def test_config_ignores_overrides_of_the_retired_cut_markers() -> None:
+    """Overrides of the marker templates the per-file cut replaced still load, and a save drops them."""
+    config = Config(
+        prompts={
+            "CONTEXT_TRUNCATION_MARKER_TEMPLATE": "[{omitted_chars} omitted]",
+            "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE": "[{title}: {omitted_chars} omitted]",
+            "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE": "[{included_lines} of {total_lines}]",
+            "PERSONALITY_CONTEXT_SECTION_HEADING": "## Files",
+        },
+    )
+
+    assert config.prompts == {"PERSONALITY_CONTEXT_SECTION_HEADING": "## Files"}
+
+
+def test_a_curation_prompt_override_with_retired_placeholders_names_them() -> None:
+    """The curation prompt lost its MEMORY.md line and token placeholders; an override still using them says which."""
+    with pytest.raises(ValidationError, match=r"Unsupported prompt placeholder.*: max_entrypoint_lines, memory_lines"):
+        Config(prompts={"PROMPT_CURATION_PROMPT_TEMPLATE": "{memory_lines} lines, cap {max_entrypoint_lines}"})
+
+
+def test_config_ignores_the_retired_shared_preload_budget() -> None:
+    """A config that still sets the retired total budget loads, keeps the per-file limit, and a save drops it."""
+    config = Config.model_validate(
+        {
+            "defaults": {"max_preload_chars": 65000},
+            "memory": {"file": {"max_entrypoint_lines": 200, "max_entrypoint_tokens": 50000}},
+            "agents": {"calculator": {"display_name": "CalculatorAgent"}},
+        },
+    )
+
+    assert config.defaults.max_preload_file_chars == 30000
+    dumped = config.model_dump(exclude_unset=True)
+    assert "max_preload_chars" not in dumped["defaults"]
+    assert "file" not in dumped.get("memory", {})
+    assert Config(defaults={"max_preload_file_chars": 500}).defaults.max_preload_file_chars == 500
+    with pytest.raises(ValidationError):
+        Config(defaults={"max_preload_file_chars": 0})
+    # The limit's next character must fit the 1 MiB read even at 4 bytes a character.
+    assert Config(defaults={"max_preload_file_chars": 200_000}).defaults.max_preload_file_chars == 200_000
+    with pytest.raises(ValidationError):
+        Config(defaults={"max_preload_file_chars": 200_001})
 
 
 @pytest.mark.parametrize("field", ["learning", "learning_mode", "compress_tool_results"])

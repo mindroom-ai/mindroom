@@ -186,6 +186,11 @@ def retained_personal_rooms(runtime_paths: RuntimePaths, agent_name: str, *, use
     return {record.room_id for record in records if record.room_id is not None}
 
 
+def is_personal_room(runtime_paths: RuntimePaths, room_id: str) -> bool:
+    """Return whether any agent's personal-room record names this room."""
+    return any(record.room_id == room_id for record in _every_agents_personal_room_records(runtime_paths))
+
+
 async def personal_room_cleanup_exclusions(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,

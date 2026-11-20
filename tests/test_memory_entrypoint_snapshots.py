@@ -36,7 +36,7 @@ def _preamble(
 ) -> str:
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text.
 
-    Its body is ``text`` under the ``frame`` prompts, and a ``capped`` file withheld lines to fit its preload caps.
+    Its body is ``text`` under the ``frame`` prompts, and a ``capped`` file withheld lines to fit its preload limit.
     """
     return snapshots.stable_entrypoint_preamble(
         ConversationRef((summary, None), _snapshot(session, root)),
@@ -100,6 +100,24 @@ def test_a_changed_frame_loads_the_file_again() -> None:
     _preamble("a", frame=("header", "notice"))
     assert _preamble("x\na", frame=("header\nadded", "notice")) == "preamble of 'x\\na'"
     assert _preamble("x\na\ny", frame=("header\nadded", "notice\nadded")) == "preamble of 'x\\na\\ny'"
+
+
+def test_a_changed_frame_loads_a_cut_file_whose_body_is_unchanged() -> None:
+    """A new limit or cut marker changes only the marker after the kept text, so the frame alone must reload it."""
+
+    def preamble(frame: list[str], marker: str) -> str:
+        return snapshots.stable_entrypoint_preamble(
+            ConversationRef((None, None), _snapshot()),
+            MEMORY,
+            "header\na",
+            f"header\na\n{marker}",
+            frame=frame,
+            lines=None,
+            now=0.0,
+        )
+
+    preamble(["header", "marker for 50"], "cut at 50")
+    assert preamble(["header", "marker for 60"], "cut at 60") == "header\na\ncut at 60"
 
 
 def test_empty_copy_loads_the_file_once_it_gains_lines() -> None:

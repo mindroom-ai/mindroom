@@ -52,7 +52,7 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
-    tools: [coding, shell]
+    tools: [filesystem, shell]
     delegate_to: [research]  # can delegate further
 
   research:
@@ -158,7 +158,7 @@ agents:
     display_name: Lead
     delegate_to: [lead]
     dedicated_subagent_workers: true
-    worker_tools: [shell, file, python]
+    worker_tools: [shell, filesystem, python]
 ```
 
 ```python
@@ -219,7 +219,7 @@ The agent creates and edits profiles with its own file or shell tools.
 ```markdown
 ---
 description: Adversarial reviewer that returns the three biggest risks in a proposal.
-tools: [file, duckduckgo]
+tools: [filesystem, duckduckgo]
 model: haiku
 mode: standard
 ---

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import threading
 import time
@@ -12,8 +13,11 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
+import anthropic
 import httpx
+import httpx2
 import pytest
+from anthropic.resources.messages import Messages
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import TextBlock
 from anthropic.types import Usage as AnthropicUsage
@@ -319,36 +323,28 @@ class TestMemoryConfig:
         assert ("temperature" in create_completion.call_args.kwargs) is (expected_reasoning_model is not True)
 
     @pytest.mark.parametrize(
-        ("authored_config", "expected_sampling"),
+        "authored_config",
         [
-            ({"model": "claude-sonnet-5-5"}, {}),
-            ({"model": "claude-opus-5-5", "temperature": 0.3}, {}),
-            ({"model": "claude-fable-5-1", "top_p": 0.8}, {}),
-            ({"model": "claude-sonnet-5-5", "temperature": None}, {}),
-            ({"model": "claude-sonnet-5-5", "temperature": 0.3, "top_p": 0.8, "top_k": 5}, {}),
-            # Models that accept sampling values keep Mem0's default temperature and the authored values.
-            ({"model": "claude-sonnet-4-5"}, {"temperature": 0.1}),
-            ({"model": "claude-sonnet-4-5", "temperature": None, "top_p": 0.8}, {"top_p": 0.8}),
-            ({}, {"temperature": 0.1}),
+            {"model": "claude-sonnet-5-5"},
+            {"model": "claude-opus-5-5", "temperature": 0.3},
+            {"model": "claude-fable-5-1", "top_p": 0.8},
+            {"model": "claude-sonnet-5-5", "temperature": 0.3, "top_p": 0.8, "top_k": 5},
+            {"model": "claude-sonnet-4-5"},
+            {"model": "claude-sonnet-4-5", "temperature": None, "top_p": 0.8},
+            {},
         ],
         ids=[
             "sonnet-5.5-default",
             "opus-5.5-temperature",
             "fable-5.1-top-p",
-            "sonnet-5.5-null-temperature",
             "sonnet-5.5-all-three",
             "sonnet-4.5-default",
             "sonnet-4.5-top-p",
             "mem0-default-model",
         ],
     )
-    def test_mem0_anthropic_sends_sampling_only_to_models_that_accept_it(
-        self,
-        tmp_path: Path,
-        authored_config: dict[str, object],
-        expected_sampling: dict[str, float],
-    ) -> None:
-        """A Claude memory LLM sends no ``temperature``, ``top_p``, or ``top_k`` to the models that reject them."""
+    def test_mem0_anthropic_sends_no_sampling(self, tmp_path: Path, authored_config: dict[str, object]) -> None:
+        """A Claude memory LLM sends no ``temperature``, ``top_p``, or ``top_k``, which the SDK and API reject."""
         config = Config(
             memory={"llm": {"provider": "anthropic", "config": {"api_key": "sk-ant-test", **authored_config}}},
             router=RouterConfig(model="default"),
@@ -369,9 +365,50 @@ class TestMemoryConfig:
 
         assert mem0_llm.generate_response([{"role": "user", "content": "remember this"}]) == '{"memory": []}'
 
-        request_params = create_message.call_args.kwargs
-        sampling_names = ("temperature", "top_p", "top_k")
-        assert {name: request_params[name] for name in sampling_names if name in request_params} == expected_sampling
+        sent = create_message.call_args.kwargs
+        assert not {"temperature", "top_p", "top_k"} & sent.keys()
+        inspect.signature(Messages.create).bind(mem0_llm.client.messages, **sent)  # the SDK takes every argument
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("custom_headers", "sent"),
+        [(None, {"x-api-key": "sk-shared"}), ("X-Api-Key: gw", {"x-api-key": "gw"})],
+        ids=["shared-key", "gateway-key"],
+    )
+    async def test_mem0_anthropic_sends_its_key_as_x_api_key_which_a_gateway_key_replaces(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        custom_headers: str | None,
+        sent: dict[str, str],
+    ) -> None:
+        """Mem0's own Claude client sends the shared key as SDK 1 did, so a gateway's ``X-Api-Key`` replaces it."""
+        if custom_headers is not None:
+            monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", custom_headers)
+        runtime_paths = _runtime_paths(tmp_path)
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+        llm = {"model": "claude-haiku-5-5", "anthropic_base_url": "https://gateway.example"}
+        config = Config(memory={"llm": {"provider": "anthropic", "config": llm}}, router=RouterConfig(model="default"))
+        llm_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]
+        mem0_llm = LlmFactory.create(llm_config["provider"], llm_config["config"])
+        requests: list[httpx2.Request] = []
+
+        def reply(request: httpx2.Request) -> httpx2.Response:
+            requests.append(request)
+            return httpx2.Response(400, json={"type": "error", "error": {"type": "invalid_request_error"}})
+
+        mem0_llm.client._client = httpx2.Client(transport=httpx2.MockTransport(reply))
+        for name in ("copy", "with_options"):
+            monkeypatch.setattr(anthropic.Anthropic, name, MagicMock(side_effect=AssertionError("copied the client")))
+        stored = SimpleNamespace(llm=mem0_llm, embedding_model=MagicMock(), vector_store=MagicMock())
+        with patch.object(AsyncMemory, "from_config", return_value=stored):
+            await create_memory_instance(tmp_path / "memory", config, runtime_paths)
+
+        with pytest.raises(anthropic.BadRequestError):
+            mem0_llm.client.messages.create(model="claude-haiku-5-5", max_tokens=1, messages=[])
+
+        headers = requests[0].headers
+        assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
 
     def test_mem0_openai_memory_llm_keeps_its_authored_sampling_for_claude_models(self, tmp_path: Path) -> None:
         """Only Mem0's Anthropic LLM omits a sampling value set to None; its OpenAI LLM would send it as null."""
@@ -1635,21 +1672,15 @@ class TestMemoryConfig:
         ]
 
     def test_retired_team_memory_fields_still_load(self) -> None:
-        """A config the dashboard saved with the retired team-read switch and file fallback root loads, and a save drops them."""
+        """A config the dashboard saved with the retired team-read switch and memory.file settings loads, and a save drops them."""
         memory = MemoryConfig.model_validate(
             {
                 "backend": "file",
                 "team_reads_member_memory": True,
-                "file": {"path": "team_memory", "max_entrypoint_lines": 9},
+                "file": {"path": "team_memory", "max_entrypoint_lines": 9, "max_entrypoint_tokens": 5},
             },
         )
-        assert memory.model_dump(exclude_unset=True) == {"backend": "file", "file": {"max_entrypoint_lines": 9}}
-
-        with pytest.raises(ValidationError) as exc_info:
-            MemoryConfig.model_validate({"file": {"paths": "team_memory"}})
-        assert config_validation_issues(exc_info.value) == [
-            (("file", "paths"), "Unknown key 'paths': remove it or correct its spelling"),
-        ]
+        assert memory.model_dump(exclude_unset=True) == {"backend": "file"}
 
     def test_misspelled_embedder_field_fails_config_load(self) -> None:
         """An embedder field MindRoom does not define fails config load, naming its location, instead of doing nothing."""

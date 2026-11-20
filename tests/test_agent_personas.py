@@ -233,10 +233,16 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path, monke
 def test_persona_with_tools_hides_generated_functions_from_the_agent() -> None:
     """An explicit tool list hides functions with no owning toolkit, which the configured agent offers."""
     generated = ToolFunction(name="generated", description=None, parameters={}, entrypoint=lambda: None)
-    owned = ToolFunction(name="read_file", toolkit="file", description=None, parameters={}, entrypoint=lambda: None)
+    owned = ToolFunction(
+        name="read_file",
+        toolkit="filesystem",
+        description=None,
+        parameters={},
+        entrypoint=lambda: None,
+    )
 
-    configured_filter, _ = persona_tool_policy(None, lambda: ["file"], None)
-    authored_filter, disabled = persona_tool_policy(("file",), lambda: ["file", "shell"], None)
+    configured_filter, _ = persona_tool_policy(None, lambda: ["filesystem"], None)
+    authored_filter, disabled = persona_tool_policy(("filesystem",), lambda: ["filesystem", "shell"], None)
 
     assert configured_filter is None
     assert authored_filter is not None
@@ -247,8 +253,8 @@ def test_persona_with_tools_hides_generated_functions_from_the_agent() -> None:
 
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
     """Only the named toolkit's functions are offered; an unnamed caller toolkit offers none."""
-    runtime = _runtime(tmp_path, tools=["file", "shell"])
-    build = _child(runtime, ["file"])
+    runtime = _runtime(tmp_path, tools=["filesystem", "shell"])
+    build = _child(runtime, ["filesystem"])
     toolkit_functions = _function_names(build)
     assert "read_file" in toolkit_functions
     assert "run_shell_command" not in toolkit_functions
@@ -256,41 +262,44 @@ def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
 
 def test_persona_function_entry_exposes_only_that_function(tmp_path: Path) -> None:
     """A toolkit.function entry keeps one function of its toolkit visible."""
-    runtime = _runtime(tmp_path, tools=["file"])
-    build = _child(runtime, ["file.read_file"])
+    runtime = _runtime(tmp_path, tools=["filesystem"])
+    build = _child(runtime, ["filesystem.read_file"])
     assert _function_names(build) == ["read_file"]
 
 
 def test_persona_refuses_a_function_its_caller_configuration_removes(tmp_path: Path) -> None:
     """A named function the caller's configuration filters out stops construction."""
-    runtime = _runtime(tmp_path, tools=[{"file": {"include_tools": ["read_file"]}}])
+    runtime = _runtime(tmp_path, tools=[{"filesystem": {"include_tools": ["read_file"]}}])
 
-    with pytest.raises(PersonaError, match=r"'file\.save_file' is not available to you"):
-        _child(runtime, ["file.read_file", "file.save_file"])
+    with pytest.raises(PersonaError, match=r"'filesystem\.write_file' is not available to you"):
+        _child(runtime, ["filesystem.read_file", "filesystem.write_file"])
 
 
 def test_persona_names_a_function_its_caller_offers_but_cannot_pause_for(tmp_path: Path) -> None:
     """A named function only approval hiding removes, for a caller that cannot resume a paused run, stops nothing."""
-    runtime = _runtime(tmp_path, tools=["file"])
+    runtime = _runtime(tmp_path, tools=["filesystem"])
     runtime.config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="save_file", action="require_approval")],
+        rules=[ApprovalRuleConfig(match="write_file", action="require_approval")],
     )
 
-    build = _child(runtime, ["file.read_file", "file.save_file"], supports_native_tool_approval=False)
+    build = _child(runtime, ["filesystem.read_file", "filesystem.write_file"], supports_native_tool_approval=False)
 
     assert _function_names(build) == ["read_file"]
 
 
 @pytest.mark.parametrize(
     ("tools", "missing"),
-    [(["file.read_file", "file.save_file"], r"'file\.save_file'"), (["file", "calculator"], "'calculator'")],
+    [
+        (["filesystem.read_file", "filesystem.write_file"], r"'filesystem\.write_file'"),
+        (["filesystem", "calculator"], "'calculator'"),
+    ],
 )
 def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: list[str], missing: str) -> None:
     """A named function or toolkit the caller's own function filter hides, such as during a call, stops construction."""
-    runtime = _runtime(tmp_path, tools=["file", "calculator"])
+    runtime = _runtime(tmp_path, tools=["filesystem", "calculator"])
 
     def caller_filter(function: ToolFunction) -> bool:
-        return function.name != "save_file" and function.toolkit != "calculator"
+        return function.name != "write_file" and function.toolkit != "calculator"
 
     with pytest.raises(PersonaError, match=f"{missing} is not available to you"):
         _child(runtime, tools, tool_function_filter=caller_filter)
@@ -298,7 +307,7 @@ def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: li
 
 def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> None:
     """A minimal persona's mindroom-agent catalog offers neither unnamed deferred toolkits nor the deferred-tool manager."""
-    runtime = _runtime(tmp_path, tools=["shell", {"file": {"defer": True}}])
+    runtime = _runtime(tmp_path, tools=["shell", {"filesystem": {"defer": True}}])
 
     build = _child(runtime, ["shell"], agent_mode="minimal")
 
@@ -312,7 +321,7 @@ def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> No
 
 def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
     """On a model with native tool search, a persona's named toolkits are present from its first request."""
-    runtime = _runtime(tmp_path, tools=[{"file": {"defer": True}}])
+    runtime = _runtime(tmp_path, tools=[{"filesystem": {"defer": True}}])
     runtime.config.models["default"] = ModelConfig(
         provider="anthropic",
         id="claude-sonnet-5-5",
@@ -328,7 +337,7 @@ def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
-    persona = _child(runtime, ["file"])
+    persona = _child(runtime, ["filesystem"])
 
     # Only the configured agent defers its toolkit; the persona's requests defer nothing.
     assert "read_file" in configured.request_template.deferred_tools.names
@@ -365,18 +374,18 @@ def test_delegate_lists_its_caller_as_a_fresh_copy(tmp_path: Path) -> None:
 
 def test_minimal_persona_inheriting_tools_lists_only_callable_toolkits(tmp_path: Path) -> None:
     """A persona that inherits its caller's tools lists only the toolkits that survived approval filtering."""
-    runtime = _runtime(tmp_path, tools=["shell", {"file": {"include_tools": ["save_file"]}}])
-    runtime.config.tool_approval.rules.append(ApprovalRuleConfig(match="save_file", action="require_approval"))
+    runtime = _runtime(tmp_path, tools=["shell", {"filesystem": {"include_tools": ["write_file"]}}])
+    runtime.config.tool_approval.rules.append(ApprovalRuleConfig(match="write_file", action="require_approval"))
 
     build = _child(runtime, None, agent_mode="minimal")
 
-    assert "file" not in _roster(_bootstrap(build))
+    assert "filesystem" not in _roster(_bootstrap(build))
 
 
 def test_persona_with_tools_never_advertises_knowledge_search(tmp_path: Path) -> None:
     """A tool list hides knowledge search, so the prompt never points at it."""
-    runtime = _runtime(tmp_path, tools=["file"])
-    build = _child(runtime, ["file"], knowledge=_knowledge())
+    runtime = _runtime(tmp_path, tools=["filesystem"])
+    build = _child(runtime, ["filesystem"], knowledge=_knowledge())
 
     assert "search_knowledge_base" not in _function_names(build)
     assert "search_knowledge_base" not in _system_prompt(build)
@@ -384,13 +393,13 @@ def test_persona_with_tools_never_advertises_knowledge_search(tmp_path: Path) ->
 
 def test_persona_with_tools_searches_the_knowledge_it_names(tmp_path: Path) -> None:
     """A persona listing tools keeps knowledge search when it names knowledge bases."""
-    runtime = _runtime(tmp_path, tools=["file"])
+    runtime = _runtime(tmp_path, tools=["filesystem"])
     build = agents.create_agent(
         "helper",
         runtime.config,
         runtime.runtime_paths,
         None,
-        persona=inline_persona("P", ["file"], None, ["docs"]),
+        persona=inline_persona("P", ["filesystem"], None, ["docs"]),
         knowledge=_knowledge(),
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         plugins=config_plugins(runtime.config, runtime.runtime_paths),
@@ -488,7 +497,7 @@ def test_persona_with_tools_and_no_skill_list_builds_without_skills(tmp_path: Pa
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
     identity = runtime.execution_identity
     _write_skills(runtime, "scripted")
-    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("filesystem",))
 
     build = agents.create_agent(
         "helper",
@@ -515,7 +524,7 @@ def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: P
         runtime.config,
         runtime.runtime_paths,
         identity,
-        persona=inline_persona("P", ["file"], ["removed"], None),
+        persona=inline_persona("P", ["filesystem"], ["removed"], None),
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         plugins=config_plugins(runtime.config, runtime.runtime_paths),
@@ -537,7 +546,7 @@ def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
             runtime.config,
             runtime.runtime_paths,
             identity,
-            persona=inline_persona("P", ["file"], ["scripted"], None),
+            persona=inline_persona("P", ["filesystem"], ["scripted"], None),
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
             plugins=config_plugins(runtime.config, runtime.runtime_paths),
@@ -574,9 +583,9 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
 
 def test_persona_with_tools_gets_no_tool_search_guidance(tmp_path: Path) -> None:
     """An explicit tool list loads its toolkits up front, so the prompt never points at tool_search."""
-    runtime = _runtime(tmp_path, tools=["file", {"calculator": {"defer": True}}])
+    runtime = _runtime(tmp_path, tools=["filesystem", {"calculator": {"defer": True}}])
 
-    build = _child(runtime, ["file"])
+    build = _child(runtime, ["filesystem"])
 
     instructions = "\n".join((*build.prompt.instructions, *build.prompt.tool_instructions))
     assert "tool_search" not in instructions
@@ -585,22 +594,22 @@ def test_persona_with_tools_gets_no_tool_search_guidance(tmp_path: Path) -> None
 
 def test_minimal_persona_roster_lists_the_toolkits_it_built(tmp_path: Path) -> None:
     """A minimal persona's bootstrap lists the toolkits it can call, deferred ones it named included."""
-    runtime = _runtime(tmp_path, tools=["shell", "file", {"calculator": {"defer": True}}])
+    runtime = _runtime(tmp_path, tools=["shell", "filesystem", {"calculator": {"defer": True}}])
 
     build = _child(runtime, ["shell", "calculator"], agent_mode="minimal")
 
     roster = _roster(_bootstrap(build))
     assert "calculator" in roster
-    assert "file" not in roster
+    assert "filesystem" not in roster
 
 
 def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
     """An explicit tool list loads every toolkit it names, so the deferred-tool manager is not a caller tool to name."""
-    runtime = _runtime(tmp_path, tools=[{"file": {"defer": True}}])
+    runtime = _runtime(tmp_path, tools=[{"filesystem": {"defer": True}}])
 
     names = caller_toolkit_names("helper", runtime.config, builtin_tool_registry(), delegation_depth=0)
 
-    assert "file" in names
+    assert "filesystem" in names
     assert "dynamic_tools" not in names
 
 
@@ -706,7 +715,7 @@ def test_persona_refuses_a_function_an_earlier_toolkit_takes(tmp_path: Path, mon
 
 def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A named toolkit that cannot be built stops construction instead of being skipped."""
-    runtime = _runtime(tmp_path, tools=["file", "calculator"])
+    runtime = _runtime(tmp_path, tools=["filesystem", "calculator"])
     build = agents.build_agent_toolkit
 
     def failing_build(tool_name: str, **kwargs: object) -> Toolkit | None:
@@ -718,12 +727,12 @@ def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypat
     monkeypatch.setattr(agents, "build_agent_toolkit", failing_build)
 
     with pytest.raises(PersonaError, match="'calculator' is not available to you"):
-        _child(runtime, ["file", "calculator"])
+        _child(runtime, ["filesystem", "calculator"])
 
 
 def test_empty_persona_tools_build_toolless_agent(tmp_path: Path) -> None:
     """An explicit empty tool list leaves the child with no provider-visible functions."""
-    runtime = _runtime(tmp_path, tools=["file", "shell"])
+    runtime = _runtime(tmp_path, tools=["filesystem", "shell"])
     build = _child(runtime, [])
     assert _function_names(build) == []
 
@@ -731,7 +740,7 @@ def test_empty_persona_tools_build_toolless_agent(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No recalled memories enter a persona child's prompt."""
-    runtime = _runtime(tmp_path, tools=["file"])
+    runtime = _runtime(tmp_path, tools=["filesystem"])
 
     async def recall(*_args: object, **_kwargs: object) -> object:
         msg = "persona children must not recall memories"
@@ -795,12 +804,12 @@ def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) -> None:
     """A preset's member toolkit keeps its functions when a persona names it."""
     runtime = _runtime(tmp_path, tools=["openclaw_compat"])
     names = caller_toolkit_names("helper", runtime.config, builtin_tool_registry(), delegation_depth=0)
-    build = _child(runtime, ["shell", "coding.read_file"])
+    build = _child(runtime, ["shell", "filesystem.read_file"])
 
     functions = _function_names(build)
 
     assert "openclaw_compat" not in names
-    assert {"shell", "coding"} <= set(names)
+    assert {"shell", "filesystem"} <= set(names)
     assert {"run_shell_command", "read_file"} <= set(functions)
     assert "write_file" not in functions
 
@@ -815,12 +824,12 @@ def test_persona_loads_named_member_of_a_deferred_tool(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_persona_delegate_tool_keeps_its_cap_without_runtime_context(tmp_path: Path) -> None:
     """An authored child's delegate tool enforces its own tools even without a Matrix tool context."""
-    runtime = _runtime(tmp_path, tools=["file", "calculator"], delegate_to=["helper"])
-    build = _child(runtime, ["delegate", "file"])
+    runtime = _runtime(tmp_path, tools=["filesystem", "calculator"], delegate_to=["helper"])
+    build = _child(runtime, ["delegate", "filesystem"])
     run_subagent = build.spec.functions["run_subagent"].entrypoint
 
     unauthored = await run_subagent(task="Plain copy.")
     widened = await run_subagent(task="Add.", system_prompt="Q", tools=["calculator"])
 
     assert "pass system_prompt or profile so the copy stays within your tools" in unauthored
-    assert widened == "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file."
+    assert widened == "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, filesystem."

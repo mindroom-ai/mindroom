@@ -921,7 +921,7 @@ async def test_retitling_a_thread_summarizes_it_now_counting_the_message_just_po
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A thread titled again after a post is summarized at once, far short of its threshold, with the posted text in it."""
-    model = ScriptedModel([answer('{"summary": "Launch plan call"}')])
+    model = ScriptedModel([answer('{"title": "Launch plan call"}')])
     install_model_providers(monkeypatch, {"default": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 50
@@ -971,7 +971,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
-    model = ScriptedModel([answer('{"summary": "Summary"}')])
+    model = ScriptedModel([answer('{"title": "Summary"}')])
     install_model_providers(monkeypatch, {"default": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 5
@@ -1014,7 +1014,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
 ) -> None:
     """Ad-hoc invited rooms should inherit the responding entity's summary model override."""
     # Only "qwen" is served, so summarizing with the default model would fail to build it.
-    model = ScriptedModel([answer('{"summary": "Summary"}')])
+    model = ScriptedModel([answer('{"title": "Summary"}')])
     install_model_providers(monkeypatch, {"qwen": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 1

@@ -991,7 +991,7 @@ class ApprovalContinuationRunner:
         payload = dict(delivery.payload)
         nested = payload.get("m.new_content")
         visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else payload
-        semantic = cast("dict[str, object]", delivery.result) if isinstance(delivery.result, dict) else {}
+        semantic = delivery.result if isinstance(delivery.result, dict) else {}
         interactive_metadata = InteractiveMetadata.from_metadata(semantic.get("interactive"))
         reply = None if delivery.reply_id is None else await self.deps.replies.store.replies.load(delivery.reply_id)
         span = None if delivery.span_id is None else await self.deps.replies.store.replies.span(delivery.span_id)

@@ -161,6 +161,16 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     assert catalog.run.session_state["count"] == 1
 
 
+def test_cli_operations_select_filesystem_by_its_other_names() -> None:
+    """A call, a description, and a search naming file or coding address the catalog's filesystem toolkit."""
+    call = ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="coding", function="read_file")
+    describe = ToolDescribeOperation(operation="tools.describe", toolkit="file", function="read_file")
+    search = ToolSearchOperation(operation="tools.search", query="read", toolkit="coding")
+
+    assert (call.toolkit, describe.toolkit, search.toolkit) == ("filesystem", "filesystem", "filesystem")
+    assert ToolSearchOperation(operation="tools.search", query="read").toolkit is None
+
+
 @pytest.mark.asyncio
 async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: Path) -> None:
     """A standard-mode shell call opens the response's CLI window and environment around its own work."""

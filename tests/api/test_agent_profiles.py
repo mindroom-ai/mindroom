@@ -103,7 +103,7 @@ def test_a_member_reads_the_role_model_and_toolkits_and_no_tool_settings(tmp_pat
         "role": "Writes and reviews code.",
         "model": {"config": "luna", "display_name": "Luna", "id": "gpt-luna", "provider": "openai"},
         "tools": [
-            _registry_tool("file"),
+            _registry_tool("filesystem"),
             _registry_tool("shell"),
             {
                 "name": "mcp_notes",
@@ -123,7 +123,7 @@ def test_a_member_reads_the_role_model_and_toolkits_and_no_tool_settings(tmp_pat
     )
     turn_toolkits = [entry.name for entry in candidates if entry.name != "calculator"]
     assert [tool["name"] for tool in response.json()["tools"]] == turn_toolkits
-    for secret in (MCP_URL, "mcp-secret-token", "enable_save_file"):
+    for secret in (MCP_URL, "mcp-secret-token", "exclude_tools"):
         assert secret not in response.text
     assert client.profile(BOB, client.room.ids["coder"]).json() == response.json()
 

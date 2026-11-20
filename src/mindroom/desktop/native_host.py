@@ -1043,8 +1043,8 @@ def _permission_status() -> dict[str, object]:
         import ApplicationServices
         import Quartz
 
-        accessibility = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[unresolved-attribute]
-        screen_recording = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[unresolved-attribute]
+        accessibility = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[missing-attribute]
+        screen_recording = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[missing-attribute]
     except (ImportError, AttributeError):
         return {"accessibility": unknown.copy(), "screen_recording": unknown.copy()}
     return {
@@ -1067,13 +1067,13 @@ def _request_permission(permission: str) -> None:
     if permission == "accessibility":
         import ApplicationServices
 
-        ApplicationServices.AXIsProcessTrustedWithOptions(  # ty: ignore[unresolved-attribute]
-            {ApplicationServices.kAXTrustedCheckOptionPrompt: True},  # ty: ignore[unresolved-attribute]
+        ApplicationServices.AXIsProcessTrustedWithOptions(  # ty: ignore[missing-attribute]
+            {ApplicationServices.kAXTrustedCheckOptionPrompt: True},  # ty: ignore[missing-attribute]
         )
     else:
         import Quartz
 
-        Quartz.CGRequestScreenCaptureAccess()  # ty: ignore[unresolved-attribute]
+        Quartz.CGRequestScreenCaptureAccess()  # ty: ignore[missing-attribute]
 
 
 def _expect_keys(parameters: dict[str, object], allowed: set[str]) -> None:

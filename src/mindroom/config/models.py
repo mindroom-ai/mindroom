@@ -8,14 +8,19 @@ from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
-from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.legacy_fields import (
+    RETIRED_DEFAULTS_FIELDS,
+    drop_retired_fields,
+    reject_legacy_defaults_fields,
+)
 from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.tool_aliases import ToolNames, canonical_tool_name
 from mindroom.config.validation import (
     CredentialServiceName,
     OptionalNonBlankStr,
@@ -53,7 +58,7 @@ _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 # Config-only tool names that expand to their member tools wherever they are authored.
 TOOL_PRESETS: dict[str, tuple[str, ...]] = {
-    "openclaw_compat": ("shell", "coding", "duckduckgo", "website", "browser", "scheduler", "matrix_message"),
+    "openclaw_compat": ("shell", "filesystem", "duckduckgo", "website", "browser", "scheduler", "matrix_message"),
 }
 # Tools that runtime policy injects, so they are never lazy-loading units.
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
@@ -137,7 +142,7 @@ class BackgroundToolJobsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(default=True, description="Enable managed tool waits and durable jobs; requires restart.")
-    exclude_toolkits: list[str] = Field(
+    exclude_toolkits: ToolNames = Field(
         default_factory=list,
         description="Registered toolkit names that keep their own waiting behavior; requires restart.",
         json_schema_extra=dashboard_hint(reference="tool"),
@@ -178,7 +183,7 @@ def _normalize_tool_entry_overrides(
         return {}
     if not isinstance(overrides, dict):
         raise ValueError(error_message)  # noqa: TRY004 - keep Pydantic validation errors structured
-    return cast("dict[str, object]", dict(overrides))
+    return dict(overrides)
 
 
 def _coerce_named_tool_entry(data: dict[object, object]) -> dict[str, object]:
@@ -248,6 +253,13 @@ class ToolConfigEntry(BaseModel):
         default=False,
         description="Send a deferred tool as an ordinary tool on every request; requires defer",
     )
+    # Every name this entry's layer authored it under when one is an alias, so no spelling is read as another's layer.
+    _spellings: tuple[str, ...] = PrivateAttr(default=())
+
+    @property
+    def spellings(self) -> tuple[str, ...]:
+        """Return every name this entry's layer authored it under, which may be aliases of ``name``."""
+        return self._spellings or (self.name,)
 
     @model_validator(mode="before")
     @classmethod
@@ -301,9 +313,32 @@ def validate_unique_tool_entries(
     *,
     scope_name: str,
 ) -> list[ToolConfigEntry]:
-    """Ensure each normalized tool name appears at most once within one scope."""
+    """Ensure each tool appears once within one scope, with a toolkit's other names read as its registered name."""
     validate_unique_entries([entry.name for entry in tools], field_name=f"{scope_name} tools")
-    return tools
+    kept: dict[str, ToolConfigEntry] = {}
+    for entry in tools:
+        name = canonical_tool_name(entry.name)
+        first = kept.get(name)
+        if first is not None:
+            reject_unmergeable_spellings(first, entry, scope=f"{scope_name} tools")
+        spellings = (*(first.spellings if first is not None else ()), entry.name)
+        if spellings == (name,):
+            kept[name] = entry
+        else:
+            kept[name] = (entry if first is None else first).model_copy(update={"name": name})
+            kept[name]._spellings = spellings
+    return list(kept.values())
+
+
+def reject_unmergeable_spellings(first: ToolConfigEntry, other: ToolConfigEntry, *, scope: str) -> None:
+    """Fail unless two entries naming one toolkit by different names are plain and agree on lazy loading."""
+    if first.overrides or other.overrides or (first.defer, first.initial) != (other.defer, other.initial):
+        mine, theirs = next((a, b) for a in first.spellings for b in other.spellings if a != b)
+        msg = (
+            f"{scope} '{mine}' and '{theirs}' both select {first.name}; "
+            f"keep one entry named {first.name} and put its settings and lazy-loading flags there"
+        )
+        raise ValueError(msg)
 
 
 def _validate_compaction_threshold_choice(
@@ -533,13 +568,13 @@ class DefaultsConfig(BaseModel):
     file_access: FileAccess = Field(
         default="workspace",
         description=(
-            "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) "
+            "Where in-process path-taking tools (filesystem, attachments, matrix_message, gmail, google_drive, browser) "
             "may read and write files: workspace confines them to the agent workspace and its attachments, "
             "unrestricted allows any path their process can reach. Code-execution tools such as shell and python "
             "are always unrestricted; isolate them with worker_tools"
         ),
     )
-    worker_tools: list[str] | None = Field(
+    worker_tools: ToolNames | None = Field(
         default=None,
         description="Tool names to route through scoped workers by default (None = use the built-in default routing policy)",
         json_schema_extra=dashboard_hint(reference="tool"),
@@ -576,10 +611,15 @@ class DefaultsConfig(BaseModel):
         default=False,
         description="Default setting for allowing agents to modify their own configuration",
     )
-    max_preload_chars: int = Field(
-        default=50000,
+    max_preload_file_chars: int = Field(
+        default=30000,
         ge=1,
-        description="Hard cap for extra role preload context loaded from context_files",
+        # The limit's next character must fit the 1 MiB read of a file even at 4 bytes a character.
+        le=200_000,
+        description=(
+            "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; "
+            "a longer file keeps its first whole lines within this limit"
+        ),
     )
     automations: AutomationList = Field(
         default_factory=list,
@@ -626,8 +666,8 @@ class DefaultsConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
-        """Reject removed legacy fields to prevent silent misconfiguration."""
-        return reject_legacy_defaults_fields(data)
+        """Drop retired fields that changed nothing, and reject removed legacy fields to prevent silent misconfiguration."""
+        return reject_legacy_defaults_fields(drop_retired_fields(data, RETIRED_DEFAULTS_FIELDS))
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -1014,7 +1054,7 @@ class ModelTable(dict[str, ModelConfig]):
         model = super().get(name)
         if level is None or model is None or model.reasoning is None or level not in model.reasoning.levels:
             return None
-        return model if level == model.reasoning.default else model.at_level(cast("_ReasoningLevel", level))
+        return model if level == model.reasoning.default else model.at_level(level)
 
     def __contains__(self, reference: object) -> bool:
         """Return whether ``reference`` names a configured model or one of its levels."""
@@ -1025,7 +1065,7 @@ class ModelTable(dict[str, ModelConfig]):
         model = self._at_level(reference)
         return super().__getitem__(reference) if model is None else model
 
-    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # ty: ignore[invalid-method-override]
+    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # ty: ignore[incompatible-method-override]
         """Return the model ``reference`` names, at its level for ``name@level``, or ``default``."""
         model = self._at_level(reference)
         return super().get(reference, default) if model is None else model

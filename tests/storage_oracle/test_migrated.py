@@ -775,5 +775,6 @@ def test_every_mask_is_used_and_every_pin_names_an_input() -> None:
     assert set(_END_STATE_PINS) <= {sequence_id(path) for path in SEQUENCES}
     assert set(_STORED_REQUIREMENTS) <= set(_INPUTS)
     assert set(_END_STATES_STORED_REQUIREMENTS) <= {sequence_id(path) for path in SEQUENCES}
-    stored_requirements = {"paused_calls_stored_once"} if _STORED_REQUIREMENTS else set()
+    # The guard keeps the test right once the pinned tuple empties.
+    stored_requirements = {"paused_calls_stored_once"} if _STORED_REQUIREMENTS else set()  # ty: ignore[redundant-condition]
     assert set().union(*_PINS.values(), *_END_STATE_PINS.values(), stored_requirements) == set(MASKS)
