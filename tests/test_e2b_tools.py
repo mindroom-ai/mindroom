@@ -5,19 +5,17 @@ from __future__ import annotations
 import base64
 import json
 import os
-import struct
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from email.parser import BytesParser
-from email.policy import HTTP
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qs, urlsplit
 
-import e2b.api.client_sync as e2b_client_sync
+import httpx
 import pytest
-from e2b_code_interpreter import Sandbox
+from e2b import ConnectionConfig
+from e2b.envd.process import process_pb2
+from e2b.sandbox_sync.commands.command_handle import CommandHandle
 from e2b_code_interpreter.models import Execution, Result
-from pyqwest import ConnectTimeout, Headers, ReadError, SyncRequest, SyncResponse
 
 import mindroom.custom_tools.e2b as e2b_module
 from mindroom.credentials.manager import CredentialsManager
@@ -31,6 +29,8 @@ from tests.conftest import test_runtime_paths
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
+
+    from e2b.sandbox.commands.command_handle import CommandResult
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nfake"
 _CHART = {
@@ -48,10 +48,8 @@ _CHART = {
 }
 
 
-_SANDBOX_HOST = "sandbox.e2b.app"
-_SANDBOX_ID = "sandbox-1"
-_ENVD_PORT = "49983"
-_JUPYTER_PORT = "49999"
+_ENVD_URL = "https://49983-sandbox.e2b.test"
+_JUPYTER_URL = "https://49999-sandbox.e2b.test"
 _ENVD_TOKEN = "envd-token"  # noqa: S105
 _CHUNK = 1 << 20
 
@@ -61,18 +59,9 @@ def _actor() -> ToolCallActor:
     return ToolCallActor(session_state={})
 
 
-def _json_response(status: int, payload: object) -> SyncResponse:
-    return SyncResponse(
-        status=status,
-        headers=Headers({"content-type": "application/json"}),
-        content=json.dumps(payload).encode(),
-    )
-
-
-def _connect_envelope(message: object, *, end_stream: bool = False) -> bytes:
-    """Frame one Connect streaming message: a flags byte, a big-endian length, and the JSON payload."""
-    payload = json.dumps(message).encode()
-    return struct.pack(">BI", 0x02 if end_stream else 0, len(payload)) + payload
+@dataclass
+class _WriteInfo:
+    path: str
 
 
 @dataclass
@@ -81,6 +70,10 @@ class _FakeFiles:
     sparse: dict[str, int] = field(default_factory=dict)
     reads: list[str] = field(default_factory=list)
     served: int = 0
+
+    def write(self, path: str, data: bytes) -> _WriteInfo:
+        self.stored[path] = data
+        return _WriteInfo(path=f"/home/user/{path}")
 
     def chunks(self, path: str) -> Iterator[bytes]:
         """Serve a stored file whole, or a sparse file lazily in zero-filled chunks."""
@@ -96,84 +89,79 @@ class _FakeFiles:
 
 @dataclass
 class _FakeCommands:
+    """Run commands through the SDK's own handle, which keeps every output chunk until the command ends."""
+
     stdout_bytes: int = 0
     served: int = 0
 
-    def events(self) -> Iterator[bytes]:
-        """Stream envd's process events for one command, as a server-streaming Connect response."""
-        yield _connect_envelope({"event": {"start": {"pid": 1}}})
+    def run(
+        self,
+        _cmd: str,
+        *,
+        background: bool,
+        on_stdout: Callable[[str], None] | None = None,
+        on_stderr: Callable[[str], None] | None = None,
+    ) -> CommandResult:
+        assert not background
+        handle = CommandHandle(pid=1, handle_kill=lambda: True, events=self._events())
+        return handle.wait(on_stdout=on_stdout, on_stderr=on_stderr)
+
+    def _events(self) -> Iterator[process_pb2.StartResponse]:
         for offset in range(0, self.stdout_bytes, _CHUNK):
             chunk = b"x" * min(_CHUNK, self.stdout_bytes - offset)
             self.served += len(chunk)
-            yield _connect_envelope({"event": {"data": {"stdout": base64.b64encode(chunk).decode()}}})
-        yield _connect_envelope({"event": {"end": {"exitCode": 0, "exited": True}}})
-        yield _connect_envelope({}, end_stream=True)
+            data = process_pb2.ProcessEvent.DataEvent(stdout=chunk)
+            yield process_pb2.StartResponse(event=process_pb2.ProcessEvent(data=data))
+        end = process_pb2.ProcessEvent.EndEvent(exit_code=0, exited=True)
+        yield process_pb2.StartResponse(event=process_pb2.ProcessEvent(end=end))
 
 
 @dataclass
-class _FakeE2B:
-    """Answer the E2B API, envd, and Jupyter on the wire, in place of the SDK's reqwest transport.
-
-    Every SDK stack (REST client, envd HTTP API, envd Connect RPC, the Jupyter client)
-    sends its requests through this one transport, so the real SDK builds and parses them.
-    """
-
+class _FakeSandbox:
     files: _FakeFiles = field(default_factory=_FakeFiles)
     commands: _FakeCommands = field(default_factory=_FakeCommands)
-    cell_output: Callable[[str], Iterator[bytes]] = lambda _code: iter(())
-    cell_failure: BaseException | None = None
-    running: bool = True
+    envd_api_url: str = _ENVD_URL
+    connection_config: ConnectionConfig = field(
+        default_factory=lambda: ConnectionConfig(api_key="test", extra_sandbox_headers={"X-Access-Token": _ENVD_TOKEN}),
+    )
 
-    def execute_sync(self, request: SyncRequest) -> SyncResponse:
-        url = urlsplit(request.url)
-        if (request.method, url.netloc, url.path) == ("POST", "api.e2b.app", "/v2/sandboxes"):
-            assert request.headers["x-api-key"] == "test"
-            sandbox = {"templateID": "code-interpreter-v1", "sandboxID": _SANDBOX_ID, "clientID": "client"}
-            return _json_response(201, {**sandbox, "envdVersion": "0.6.7", "envdAccessToken": _ENVD_TOKEN})
-        assert url.netloc == _SANDBOX_HOST
-        assert request.headers["e2b-sandbox-id"] == _SANDBOX_ID
-        assert request.headers["x-access-token"] == _ENVD_TOKEN
-        if request.headers["e2b-sandbox-port"] == _JUPYTER_PORT:
-            return self._execute(request, url.path)
-        assert request.headers["e2b-sandbox-port"] == _ENVD_PORT
-        query = {key: values[0] for key, values in parse_qs(url.query).items()}
-        match request.method, url.path:
-            case "GET", "/files":
-                return self._read(query["path"])
-            case "POST", "/files":
-                return self._write(request, query["path"])
-            case "POST", "/process.Process/Start":
-                assert request.headers["content-type"] == "application/connect+json"
-                headers = Headers({"content-type": "application/connect+json"})
-                return SyncResponse(status=200, headers=headers, content=self.commands.events())
-            case "GET", "/health":
-                return SyncResponse(status=204 if self.running else 502, content=b"")
-        msg = f"unexpected request {request.method} {request.url}"
-        raise AssertionError(msg)
+    @classmethod
+    def create(cls, **_kwargs: object) -> _FakeSandbox:
+        return cls()
 
-    def _read(self, path: str) -> SyncResponse:
-        self.files.reads.append(path)
-        if path not in self.files.stored and path not in self.files.sparse:
-            return _json_response(404, {"code": 404, "message": f"path '{path}' does not exist"})
-        headers = Headers({"content-type": "application/octet-stream"})
-        return SyncResponse(status=200, headers=headers, content=self.files.chunks(path))
+    def get_host(self, port: int) -> str:
+        return f"{port}-sandbox.e2b.test"
 
-    def _write(self, request: SyncRequest, path: str) -> SyncResponse:
-        content = request.content
-        body = content if isinstance(content, bytes) else b"".join(content)
-        head = f"Content-Type: {request.headers['content-type']}\r\n\r\n".encode()
-        (part,) = BytesParser(policy=HTTP).parsebytes(head + body).iter_parts()
-        self.files.stored[path] = part.get_payload(decode=True)
-        return _json_response(200, [{"name": path.rsplit("/", 1)[-1], "type": "file", "path": f"/home/user/{path}"}])
 
-    def _execute(self, request: SyncRequest, path: str) -> SyncResponse:
-        assert (request.method, path) == ("POST", "/execute")
-        if self.cell_failure is not None:
-            raise self.cell_failure
-        content = request.content
-        code = json.loads(content if isinstance(content, bytes) else b"".join(content))["code"]
-        headers = Headers({"content-type": "application/x-ndjson"})
-        return SyncResponse(status=200, headers=headers, content=self.cell_output(code))
+def _serve_files(files: _FakeFiles) -> Callable[..., object]:
+    """Answer the envd file route the way the sandbox does, streaming bodies without buffering them."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.copy_with(query=None) == f"{_ENVD_URL}/files"
+        assert request.headers["X-Access-Token"] == _ENVD_TOKEN
+        assert request.url.params["username"] == "user"
+        path = request.url.params["path"]
+        files.reads.append(path)
+        if path not in files.stored and path not in files.sparse:
+            return httpx.Response(404, json={"message": f"path '{path}' does not exist"})
+        return httpx.Response(200, content=files.chunks(path))
+
+    return _mock_stream(handle)
+
+
+def _mock_stream(handle: Callable[[httpx.Request], httpx.Response]) -> Callable[..., object]:
+    """Stand in for ``httpx.stream`` with responses from ``handle``."""
+
+    @contextmanager
+    def stream(method: str, url: str, *, proxy: object, **kwargs: object) -> Iterator[httpx.Response]:
+        assert proxy is None
+        with (
+            httpx.Client(transport=httpx.MockTransport(handle)) as client,
+            client.stream(method, url, **kwargs) as response,
+        ):
+            yield response
+
+    return stream
 
 
 @pytest.fixture
@@ -193,38 +181,25 @@ def outside(tmp_path: Path) -> Path:
     return path
 
 
-def _install_fake_e2b(monkeypatch: pytest.MonkeyPatch) -> _FakeE2B:
-    """Route every request the E2B SDK sends to a fresh in-memory E2B service."""
-    service = _FakeE2B()
-    monkeypatch.setattr(e2b_client_sync, "SyncHTTPTransport", lambda **_options: service)
-    for cache in ("_transports", "_pools", "_httpx_transports"):
-        monkeypatch.setattr(e2b_client_sync, cache, {})
-    return service
-
-
 @pytest.fixture
-def e2b_service(monkeypatch: pytest.MonkeyPatch) -> _FakeE2B:
-    """Route every request the E2B SDK sends to an in-memory E2B service."""
-    return _install_fake_e2b(monkeypatch)
-
-
-@pytest.fixture
-def make_tool(
-    e2b_service: _FakeE2B,  # noqa: ARG001  # routes the SDK to the fake service
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> Callable[[Path | None], MindRoomE2BTools]:
-    """Build toolkits backed by a real SDK sandbox talking to the fake service."""
+def make_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[[Path | None], MindRoomE2BTools]:
+    """Build toolkits backed by an in-memory sandbox."""
+    monkeypatch.setattr("agno.tools.e2b.Sandbox", _FakeSandbox)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
 
     def build(workspace_root: Path | None) -> MindRoomE2BTools:
         tool = MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace_root)
-        assert isinstance(tool.sandbox, Sandbox)
+        monkeypatch.setattr(httpx, "stream", _serve_files(_files(tool)))
         return tool
 
     return build
+
+
+def _files(tool: MindRoomE2BTools) -> _FakeFiles:
+    assert isinstance(tool.sandbox, _FakeSandbox)
+    return tool.sandbox.files
 
 
 def _error(result: str) -> str:
@@ -246,7 +221,7 @@ def _local_path(requested: str, outside: Path) -> str:
 
 
 def test_registry_injects_workspace_into_model_entrypoints(
-    e2b_service: _FakeE2B,
+    make_tool: Callable[[Path | None], MindRoomE2BTools],  # noqa: ARG001  # installs the fake sandbox
     tmp_path: Path,
     workspace: Path,
     outside: Path,
@@ -269,12 +244,11 @@ def test_registry_injects_workspace_into_model_entrypoints(
 
     assert upload("report.csv") == "/home/user/report.csv"
     assert "Error uploading file" in _error(upload(str(outside / "secret.env")))
-    assert e2b_service.files.stored == {"report.csv": b"a,b\n"}
+    assert _files(tool).stored == {"report.csv": b"a,b\n"}
 
 
 def test_upload_reads_workspace_relative_file(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
 ) -> None:
     """Uploads read workspace-relative files."""
@@ -283,12 +257,11 @@ def test_upload_reads_workspace_relative_file(
     tool = make_tool(workspace)
 
     assert tool.upload_file("data/report.csv", "workspace/report.csv") == "/home/user/workspace/report.csv"
-    assert e2b_service.files.stored == {"workspace/report.csv": b"a,b\n"}
+    assert _files(tool).stored == {"workspace/report.csv": b"a,b\n"}
 
 
 def test_upload_follows_links_that_stay_inside_workspace(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
 ) -> None:
     """Uploads follow symlinks whose targets stay inside the workspace."""
@@ -298,7 +271,7 @@ def test_upload_follows_links_that_stay_inside_workspace(
     tool = make_tool(workspace)
 
     assert tool.upload_file("knowledge/notes.md") == "/home/user/notes.md"
-    assert e2b_service.files.stored == {"notes.md": b"notes"}
+    assert _files(tool).stored == {"notes.md": b"notes"}
 
 
 @pytest.mark.parametrize(
@@ -307,7 +280,6 @@ def test_upload_follows_links_that_stay_inside_workspace(
 )
 def test_upload_rejects_paths_outside_workspace(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
     outside: Path,
     requested: str,
@@ -317,13 +289,12 @@ def test_upload_rejects_paths_outside_workspace(
     tool = make_tool(workspace)
 
     assert "Error uploading file" in _error(tool.upload_file(_local_path(requested, outside), "/tmp/x"))  # noqa: S108
-    assert e2b_service.files.stored == {}
+    assert _files(tool).stored == {}
 
 
 @pytest.mark.parametrize("name", ["folder", "pipe"])
 def test_upload_rejects_non_regular_files(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
     name: str,
 ) -> None:
@@ -333,12 +304,11 @@ def test_upload_rejects_non_regular_files(
     tool = make_tool(workspace)
 
     assert "regular file" in _error(tool.upload_file(name))
-    assert e2b_service.files.stored == {}
+    assert _files(tool).stored == {}
 
 
 def test_upload_refuses_oversized_file_before_reading(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
 ) -> None:
     """A sparse workspace file above the shared read limit is refused instead of buffered whole."""
@@ -347,12 +317,11 @@ def test_upload_refuses_oversized_file_before_reading(
     tool = make_tool(workspace)
 
     assert "size limit" in _error(tool.upload_file("huge.bin"))
-    assert e2b_service.files.stored == {}
+    assert _files(tool).stored == {}
 
 
 def test_upload_rejects_file_swapped_to_link_after_resolution(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
     outside: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -371,25 +340,21 @@ def test_upload_rejects_file_swapped_to_link_after_resolution(
     monkeypatch.setattr(e2b_module, "resolve_agent_file", resolve_then_swap)
 
     assert "Error uploading file" in _error(tool.upload_file("report.csv"))
-    assert e2b_service.files.stored == {}
+    assert _files(tool).stored == {}
 
 
-def test_transfers_require_workspace(
-    make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
-) -> None:
+def test_transfers_require_workspace(make_tool: Callable[[Path | None], MindRoomE2BTools]) -> None:
     """Agents without a workspace cannot transfer local files."""
     tool = make_tool(None)
-    e2b_service.files.stored["/tmp/x"] = b"payload"  # noqa: S108
+    _files(tool).stored["/tmp/x"] = b"payload"  # noqa: S108
 
     assert "requires an agent workspace" in _error(tool.upload_file("report.csv"))
     assert "require an agent workspace" in _error(tool.download_file_from_sandbox("/tmp/x"))  # noqa: S108
-    assert e2b_service.files.reads == []
+    assert _files(tool).reads == []
 
 
 def test_download_writes_inside_workspace(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -397,7 +362,7 @@ def test_download_writes_inside_workspace(
     """Downloads land in the workspace, never the process working directory."""
     monkeypatch.chdir(tmp_path)
     tool = make_tool(workspace)
-    e2b_service.files.stored["/tmp/out/result.csv"] = b"x,y\n"  # noqa: S108
+    _files(tool).stored["/tmp/out/result.csv"] = b"x,y\n"  # noqa: S108
 
     assert tool.download_file_from_sandbox("/tmp/out/result.csv") == "result.csv"  # noqa: S108
     assert tool.download_file_from_sandbox("/tmp/out/result.csv", "exports/final.csv") == "exports/final.csv"  # noqa: S108
@@ -408,12 +373,11 @@ def test_download_writes_inside_workspace(
 
 def test_download_streams_file_in_chunks(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
 ) -> None:
     """A sandbox file below the limit arrives whole even when it spans many chunks."""
     tool = make_tool(workspace)
-    e2b_service.files.sparse["/tmp/data.bin"] = 3 * _CHUNK + 5  # noqa: S108
+    _files(tool).sparse["/tmp/data.bin"] = 3 * _CHUNK + 5  # noqa: S108
 
     assert tool.download_file_from_sandbox("/tmp/data.bin") == "data.bin"  # noqa: S108
     assert (workspace / "data.bin").stat().st_size == 3 * _CHUNK + 5
@@ -421,18 +385,17 @@ def test_download_streams_file_in_chunks(
 
 def test_download_refuses_oversized_file_while_streaming(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
 ) -> None:
     """A huge sandbox file is refused once it passes the limit, without buffering it or publishing a partial file."""
     (workspace / "result.bin").write_bytes(b"previous")
     tool = make_tool(workspace)
-    e2b_service.files.sparse["/tmp/huge.bin"] = 8 << 30  # noqa: S108
+    _files(tool).sparse["/tmp/huge.bin"] = 8 << 30  # noqa: S108
 
     message = _error(tool.download_file_from_sandbox("/tmp/huge.bin", "result.bin"))  # noqa: S108
 
     assert "64 MiB transfer limit" in message
-    assert e2b_service.files.served <= MAX_READ_BYTES + _CHUNK
+    assert _files(tool).served <= MAX_READ_BYTES + _CHUNK
     assert (workspace / "result.bin").read_bytes() == b"previous"
     assert [entry.name for entry in workspace.iterdir()] == ["result.bin"]
 
@@ -450,12 +413,11 @@ def test_download_reports_missing_sandbox_file(
 
 def test_read_file_content_returns_text(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
 ) -> None:
     """File reads return the decoded sandbox file."""
     tool = make_tool(workspace)
-    e2b_service.files.stored["/tmp/notes.txt"] = "caf\u00e9\n".encode()  # noqa: S108
+    _files(tool).stored["/tmp/notes.txt"] = "caf\u00e9\n".encode()  # noqa: S108
 
     assert tool.read_file_content("/tmp/notes.txt") == "caf\u00e9\n"  # noqa: S108
     assert tool.read_file_content("/tmp/notes.txt", encoding="latin-1") == "caf\u00c3\u00a9\n"  # noqa: S108
@@ -463,25 +425,24 @@ def test_read_file_content_returns_text(
 
 def test_read_file_content_refuses_oversized_file_while_streaming(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
 ) -> None:
     """A huge sandbox file read is refused once it passes the limit instead of being buffered whole."""
     tool = make_tool(workspace)
-    e2b_service.files.sparse["/tmp/huge.log"] = 8 << 30  # noqa: S108
+    _files(tool).sparse["/tmp/huge.log"] = 8 << 30  # noqa: S108
 
     assert "64 MiB transfer limit" in _error(tool.read_file_content("/tmp/huge.log"))  # noqa: S108
-    assert e2b_service.files.served <= MAX_READ_BYTES + _CHUNK
+    assert _files(tool).served <= MAX_READ_BYTES + _CHUNK
 
 
 def test_run_command_refuses_output_past_the_limit_while_streaming(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
 ) -> None:
     """A command's output is refused once it passes the limit, before the SDK can keep the rest."""
     tool = make_tool(workspace)
-    commands = e2b_service.commands
+    assert isinstance(tool.sandbox, _FakeSandbox)
+    commands = tool.sandbox.commands
     commands.stdout_bytes = 5
 
     assert json.loads(tool.run_command("printf xxxxx")) == ["STDOUT:\nxxxxx"]
@@ -494,8 +455,8 @@ def test_run_command_refuses_output_past_the_limit_while_streaming(
 
 def test_run_python_code_refuses_output_past_the_limit_while_streaming(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cell's output is refused once it passes the limit, even as the one line the SDK would read whole."""
     tool = make_tool(workspace)
@@ -512,7 +473,12 @@ def test_run_python_code_refuses_output_past_the_limit_while_streaming(
             yield b'"}\n'
         yield b'{"type": "result", "text": "2", "is_main_result": true}\n'
 
-    e2b_service.cell_output = cell_output
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url == f"{_JUPYTER_URL}/execute"
+        assert request.headers["X-Access-Token"] == _ENVD_TOKEN
+        return httpx.Response(200, content=cell_output(json.loads(request.content)["code"]))
+
+    monkeypatch.setattr(httpx, "stream", _mock_stream(handle))
 
     assert json.loads(tool.run_python_code("small()")) == [
         "Logs:\nLogs(stdout: ['hi\\n'], stderr: [])",
@@ -526,46 +492,26 @@ def test_run_python_code_refuses_output_past_the_limit_while_streaming(
 
 
 @pytest.mark.parametrize(
-    ("failure", "message"),
+    ("timeout", "message"),
     [
-        (TimeoutError("timed out"), "Execution timed out"),
-        (ConnectTimeout("timed out"), "Request timed out"),
+        (httpx.ReadTimeout("timed out"), "Execution timed out"),
+        (httpx.ConnectTimeout("timed out"), "Request timed out"),
     ],
 )
 def test_run_python_code_reports_timeouts_like_the_sdk(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failure: Exception,
+    timeout: httpx.TimeoutException,
     message: str,
 ) -> None:
     """A cell that stays silent too long, or a sandbox that cannot be reached, reports the SDK's timeout message."""
-    monkeypatch.setattr(e2b_client_sync, "connection_retries", 0)  # skip the SDK's connect retry backoff
-    tool = make_tool(workspace)
-    e2b_service.cell_failure = failure
-
-    assert message in _error(tool.run_python_code("train()"))
-
-
-@pytest.mark.parametrize(("running", "message"), [(False, "The sandbox was killed"), (True, "connection reset")])
-def test_run_python_code_reports_dropped_connections_like_the_sdk(
-    make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
-    workspace: Path,
-    running: bool,
-    message: str,
-) -> None:
-    """A connection dropped mid-cell reports a killed sandbox when its health check says so, else the read error."""
     tool = make_tool(workspace)
 
-    def cell_output(_code: str) -> Iterator[bytes]:
-        yield b'{"type": "stdout", "text": "hi\\n", "timestamp": "2026-10-05T00:00:00Z"}\n'
-        e2b_service.running = running
-        msg = "connection reset"
-        raise ReadError(msg)
+    def handle(_request: httpx.Request) -> httpx.Response:
+        raise timeout
 
-    e2b_service.cell_output = cell_output
+    monkeypatch.setattr(httpx, "stream", _mock_stream(handle))
 
     assert message in _error(tool.run_python_code("train()"))
 
@@ -586,7 +532,6 @@ def test_run_python_code_reports_dropped_connections_like_the_sdk(
 )
 def test_download_rejects_paths_outside_workspace(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
     outside: Path,
     requested: str,
@@ -594,18 +539,17 @@ def test_download_rejects_paths_outside_workspace(
     """Downloads never write absolute, parent-escaping, outward-linked, or looping paths."""
     _plant_escape_links(workspace, outside)
     tool = make_tool(workspace)
-    e2b_service.files.stored["/tmp/evil.py"] = b"import os"  # noqa: S108
+    _files(tool).stored["/tmp/evil.py"] = b"import os"  # noqa: S108
     path = _local_path(requested, outside)
 
     assert "Error downloading file" in _error(tool.download_file_from_sandbox("/tmp/evil.py", path))  # noqa: S108
-    assert e2b_service.files.reads == []
+    assert _files(tool).reads == []
     assert (outside / "secret.env").read_text(encoding="utf-8") == "TOKEN=secret"
     assert sorted(entry.name for entry in outside.iterdir()) == ["secret.env"]
 
 
 def test_download_rejects_parent_swapped_to_link_after_resolution(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
     outside: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -613,7 +557,7 @@ def test_download_rejects_parent_swapped_to_link_after_resolution(
     """A parent swapped for an outward link after resolution cannot redirect a download."""
     (workspace / "plugins").mkdir()
     tool = make_tool(workspace)
-    e2b_service.files.stored["/tmp/evil.py"] = b"import os"  # noqa: S108
+    _files(tool).stored["/tmp/evil.py"] = b"import os"  # noqa: S108
     resolve = e2b_module.resolve_path_within_root
 
     def resolve_then_swap(root: Path, path: Path, **kwargs: object) -> Path:
@@ -631,7 +575,6 @@ def test_download_rejects_parent_swapped_to_link_after_resolution(
 @pytest.mark.parametrize("local_path", ["result.csv", "exports/final.csv"])
 def test_download_refuses_workspace_replaced_by_link(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
-    e2b_service: _FakeE2B,
     workspace: Path,
     outside: Path,
     tmp_path: Path,
@@ -639,7 +582,7 @@ def test_download_refuses_workspace_replaced_by_link(
 ) -> None:
     """A workspace that worker code replaced with a link after the toolkit was built never redirects a download."""
     tool = make_tool(workspace)
-    e2b_service.files.stored["/tmp/out/result.csv"] = b"x,y\n"  # noqa: S108
+    _files(tool).stored["/tmp/out/result.csv"] = b"x,y\n"  # noqa: S108
     workspace.rename(tmp_path / "moved-workspace")
     workspace.symlink_to(outside, target_is_directory=True)
 

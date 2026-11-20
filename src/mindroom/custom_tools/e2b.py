@@ -15,6 +15,7 @@ from agno.team.team import Team  # noqa: TC002  # resolved by Agno function sche
 from agno.tools.e2b import E2BTools
 from agno.tools.function import ToolResult
 from agno.utils.code_execution import prepare_python_code
+from e2b.envd.api import ENVD_API_FILES_ROUTE, handle_envd_api_exception
 from e2b_code_interpreter.constants import DEFAULT_TIMEOUT, JUPYTER_PORT
 from e2b_code_interpreter.exceptions import format_execution_timeout_error, format_request_timeout_error
 from e2b_code_interpreter.models import Execution, extract_exception, parse_output
@@ -47,9 +48,23 @@ def _write_within_root(root: Path, relative: Path, chunks: Iterable[bytes]) -> N
 
 @contextmanager
 def _sandbox_file_chunks(sandbox: Sandbox, path: str) -> Iterator[Iterator[bytes]]:
-    """Stream one sandbox file in chunks, refusing it once it passes the shared read limit."""
-    with sandbox.files.read(path, format="stream") as stream:
-        yield _within_read_limit(stream)
+    """Stream one sandbox file in chunks, refusing it once it passes the shared read limit.
+
+    The SDK's ``files.read`` buffers the whole body even with ``format="stream"``,
+    so this sends the same request without reading the body up front.
+    """
+    config = sandbox.connection_config
+    with httpx.stream(
+        "GET",
+        f"{sandbox.envd_api_url}{ENVD_API_FILES_ROUTE}",
+        params={"path": path, "username": "user"},
+        headers=config.sandbox_headers,
+        proxy=config.proxy,
+        timeout=config.get_request_timeout(),
+    ) as response:
+        if error := handle_envd_api_exception(response):
+            raise error
+        yield _within_read_limit(response.iter_bytes())
 
 
 def _check_read_limit(total: int, subject: str) -> None:
@@ -72,22 +87,15 @@ def _run_code_within_read_limit(sandbox: Sandbox, code: str) -> Execution:
     The SDK reads each output line whole, so one large print or image would be buffered
     before any output callback could stop it; this sends the same request and stops reading at the limit.
     """
-    headers = {
-        "Content-Type": "application/json",
-        "E2b-Sandbox-Id": sandbox.sandbox_id,
-        "E2b-Sandbox-Port": str(JUPYTER_PORT),
-    }
-    if sandbox._envd_access_token:
-        headers["X-Access-Token"] = sandbox._envd_access_token
-    if sandbox.traffic_access_token:
-        headers["E2B-Traffic-Access-Token"] = sandbox.traffic_access_token
+    config = sandbox.connection_config
     try:
-        with sandbox._client.stream(
+        with httpx.stream(
             "POST",
-            f"{sandbox._jupyter_url}/execute",
+            f"{'http' if config.debug else 'https'}://{sandbox.get_host(JUPYTER_PORT)}/execute",
             json={"code": code, "context_id": None, "language": None, "env_vars": None},
-            headers=headers,
-            timeout=httpx.Timeout(DEFAULT_TIMEOUT, connect=sandbox.connection_config.request_timeout),
+            headers=config.sandbox_headers,
+            proxy=config.proxy,
+            timeout=httpx.Timeout(config.request_timeout, read=DEFAULT_TIMEOUT),
         ) as response:
             if error := extract_exception(response):
                 raise error
@@ -96,9 +104,6 @@ def _run_code_within_read_limit(sandbox: Sandbox, code: str) -> Execution:
         raise format_execution_timeout_error() from None
     except httpx.TimeoutException:
         raise format_request_timeout_error() from None
-    except (httpx.ReadError, httpx.RemoteProtocolError) as error:
-        sandbox._handle_connection_error(error)
-        raise
     execution = Execution()
     for line in output.splitlines():
         parse_output(execution, line.decode())
@@ -146,10 +151,9 @@ class MindRoomE2BTools(E2BTools):
         raise ValueError(msg)
 
     # AGNO_COMPAT: E2BTools.run_python_code reads sandbox code output without a size bound.
-    # Reason: Agno 3.2.1 calls Sandbox.run_code, which in e2b-code-interpreter 2.11.10 reads each output line whole
-    # (iter_lines), so one large print or image grows the primary's memory before any callback runs. This override
-    # copies Agno's result formatting, and _run_code_within_read_limit copies the SDK's /execute request, sent
-    # through the sandbox's own HTTP/1.1 Jupyter client.
+    # Reason: Agno 3.2.1 calls Sandbox.run_code, which in e2b-code-interpreter 2.1.1 reads each output line whole,
+    # so one large print or image grows the primary's memory before any callback runs. This override copies
+    # Agno's result formatting, and _run_code_within_read_limit copies the SDK's /execute request.
     # Upstream issue: Tracking gap; no matching issue has been verified.
     # Upstream PR: No matching fix has been verified.
     # Remove when: E2BTools stops reading code output past a caller-supplied byte limit; refusing output past
@@ -190,9 +194,8 @@ class MindRoomE2BTools(E2BTools):
         return json.dumps(results)
 
     # AGNO_COMPAT: E2BTools.run_command keeps a command's whole output without a size bound.
-    # Reason: Agno 3.2.1 waits on the E2B SDK's commands.run and reads result.stdout, so e2b 2.64 keeps all
-    # stdout and stderr until the command ends (Agno never passes retain_output=False), and a chatty command
-    # grows the primary's memory without limit.
+    # Reason: Agno 3.2.1 waits on the E2B SDK's commands.run, which in e2b 2.2.3 keeps all stdout and stderr
+    # until the command ends, so a chatty command grows the primary's memory without limit.
     # Upstream issue: Tracking gap; no matching issue has been verified.
     # Upstream PR: No matching fix has been verified.
     # Remove when: E2BTools stops collecting command output past a caller-supplied byte limit; refusing output

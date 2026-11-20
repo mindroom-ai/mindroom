@@ -186,8 +186,7 @@ dynamic_tools = []
 dynamic_workflow = []
 report_publishing = []
 e2b = [
-  # custom_tools/e2b.py copies 2.11.10's /execute request (shared sandbox URL, routing headers, Jupyter client).
-  "e2b-code-interpreter>=2.11.10",
+  "e2b-code-interpreter",
 ]
 egress_credentials = []
 eleven_labs = [
