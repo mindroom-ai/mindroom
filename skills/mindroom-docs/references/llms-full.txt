@@ -18206,6 +18206,7 @@ A plugin route reaches the same terminals through `RoomReader.terminals()`, for 
 `client_rooms` checks each candidate room for the session's own user the same way and leaves out one it cannot check.
 The [workspace file routes](https://docs.mindroom.chat/workspace-files/) under `/api/rooms/` take the same sessions and admit the caller through `RoomReader.agents()` or `agent()` on every request, so a saved change to an agent's access applies to the next request; they serve only the `root` that check resolves, never a path or folder from the request, refuse paths that leave it by `..` or a link, and change files only for a caller whose `files` is `write`, which needs a writing toolkit that works in the workspace: in the primary, a dedicated worker, or a `static_runner` the deployment says mounts the agents' storage, since only there could the agent itself change those files.
 The workspace is the agent's `HOME`, so they hide the credentials that page lists, even through a link, and never move or delete a folder that keeps one by its place.
+The agent profile route `GET /api/rooms/<room_id>/agents/<agent_user_id>/profile` takes the same sessions and admits through `RoomReader.agent()` on every request, so a contact room opens none; it answers the agent's role, the model its turns in the room run, and a catalog of the toolkits its config gives its Matrix turns there, leaving out one whose authored settings switch off every function. The catalog is not what a turn for the caller would build: the route builds no toolkit and asks no MCP server, so approval rules, stored settings and construction may still hide functions. Every admitted caller sees each toolkit's registry name, display name, description and category and an MCP server's configured ID, text an operator may write for display, never a toolkit's settings, credentials or environment, or an MCP server's address or headers.
 The [secret request route](https://docs.mindroom.chat/deployment/egress-broker/#asking-in-chat) `POST /api/rooms/<room_id>/secret-requests/<request_id>` takes the same sessions through `require_room_member` and answers only the person the agent asked, for a request registered in that room, once, while it is pending; under the config the API serves when the answer arrives, it checks again that the caller may manage the agent's Agent Keys, that the agent still keeps the caller's keys in the store the card was made for, and that the service still takes a user's key and has the hosts the card showed, and it writes the key only into that store, never into a scope the agent moved to.
 The key never appears in a response, a log line, or a Matrix event.
 The change stream rechecks `agent()` every 15 seconds under the config served then, closing once the workspace is no longer open to the caller or its `root` moved; it registers no watch by path, but scans the workspace by opening every folder from the root without following a link, as the file routes do, and reports only what those scans saw, so a link planted or swapped in the workspace never makes the primary look at or report anything outside it.
@@ -18607,6 +18608,9 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [pull-request-plugin](https://github.com/mindroom-ai/pull-request-plugin) | Hooks and tools | Links GitHub pull requests to a thread in Matrix room state, by a tool and automatically when an agent creates one. |
 | [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
+| [error-notifier-plugin](https://github.com/mindroom-ai/error-notifier-plugin) | Hooks | Posts a short, redacted alert to one Matrix room when MindRoom logs an error, with a suggested fix when it knows one. |
+| [injection-guard-plugin](https://github.com/mindroom-ai/injection-guard-plugin) | Hooks | Checks tool results with outside text for prompt injection with a [judgment backend](https://docs.mindroom.chat/configuration/threads/#judgment-backends) before the model reads them. |
+| [deep-research-plugin](https://github.com/mindroom-ai/deep-research-plugin) | Tools | Bounded, multi-round web research on the agent's own model that returns cited reports. |
 
 MindRoom now has a built-in [`thread_snooze`](https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_snooze) toolkit, so remove `thread-snooze-plugin` from `plugins` when you upgrade.
 Its `thread_snooze` tool name collides with the built-in toolkit, so MindRoom does not load the plugin, and the built-in toolkit replaces it.
@@ -22332,7 +22336,7 @@ MINDROOM_MCP_SCIM_TOKEN=<at least 32 random characters>
 | `MINDROOM_MCP_EXTERNAL_AUTHORIZATION_SERVER` | required | Issuer advertised in protected-resource metadata; its discovery document supplies the client's OAuth endpoints |
 | `MINDROOM_MCP_EXTERNAL_ISSUER` | required | Required `iss` value; may differ from the authorization server, and significant trailing slashes matter |
 | `MINDROOM_MCP_EXTERNAL_AUDIENCE` | required | Required `aud`; use an audience dedicated to this MCP resource, not a client ID or browser application audience |
-| `MINDROOM_MCP_EXTERNAL_JWKS_URL` | required | Signing keys |
+| `MINDROOM_MCP_EXTERNAL_JWKS_URL` | required | Signing keys, at a URL that answers directly, since MindRoom refuses JWKS redirects |
 | `MINDROOM_MCP_EXTERNAL_TOKEN_HEADER` | `Authorization` | Header carrying the token; `Authorization` expects `Bearer <JWT>`, other headers carry the raw JWT |
 | `MINDROOM_MCP_EXTERNAL_EMAIL_CLAIM` | `email` | Claim holding the user's email |
 | `MINDROOM_MCP_EXTERNAL_MATRIX_USER_ID_CLAIM` | unset | Claim holding the Matrix user ID |
@@ -24859,7 +24863,7 @@ MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM=matrix_user_id
 | --- | --- |
 | `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED` | Turns the mode on; default `false` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER` | Required; header carrying the JWT |
-| `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL` | Required; the gateway's signing keys |
+| `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL` | Required; the gateway's signing keys, at a URL that answers directly, since MindRoom refuses JWKS redirects |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE` | Required; expected `aud` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER` | Required; expected `iss` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM` | Claim holding the verified email; default `email` |
