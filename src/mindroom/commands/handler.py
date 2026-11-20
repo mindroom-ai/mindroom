@@ -254,7 +254,7 @@ def _format_welcome_message(
 
     welcome_msg = (
         "🎉 **Welcome to MindRoom!**\n\n"
-        "I'm your routing assistant, here to help coordinate our team of specialized AI agents. 🤖\n\n"
+        "The AI agents and teams in this room answer you directly. 🤖\n\n"
     )
 
     if entity_list:

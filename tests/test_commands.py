@@ -464,6 +464,9 @@ async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None
     assert quick_command_block in welcome_message
     assert "using its configured alias" in welcome_message
     assert "@mindroom_assistant" not in welcome_message
+    # No router speaks any more: the welcome's sender is one of the agents it lists.
+    assert "The AI agents and teams in this room answer you directly" in welcome_message
+    assert "routing assistant" not in welcome_message
 
 
 @pytest.mark.asyncio
