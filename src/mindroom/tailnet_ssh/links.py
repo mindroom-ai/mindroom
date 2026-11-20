@@ -67,7 +67,7 @@ _NO_SSH_PORT = (
 _NO_SHELL = "This agent has no shell tool."
 
 
-@dataclass
+@dataclass(frozen=True)
 class LinkStatus:
     """What the gateway last reported of one link's node, and the worker of that link."""
 
@@ -82,13 +82,24 @@ class LinkStatus:
     worker_key: str
 
 
-@dataclass
-class GatewayStatus:
-    """The gateway's last report, when it came (monotonic), and when an operator key's links were last added."""
+@dataclass(frozen=True)
+class GatewayReport:
+    """One report of the gateway, whole: how its nodes enrol, when it came (monotonic), and each link's node."""
 
     enrollment: Literal["login", "auth_key"] | None = None
     received_at: float = 0.0
-    links: dict[str, LinkStatus] = field(default_factory=dict)
+    links: Mapping[str, LinkStatus] = field(default_factory=dict)
+
+
+@dataclass
+class GatewayStatus:
+    """The gateway's last report, and when an operator key's links were last added.
+
+    A report comes in on a worker thread while the event loop reads the last one. So ``report`` is replaced whole and
+    never changed, and whoever reads more than one of its fields takes it once.
+    """
+
+    report: GatewayReport = field(default_factory=GatewayReport)
     operator_sync_at: float = 0.0
 
 
@@ -116,12 +127,12 @@ def resolve_target(
     return resolve_agent_execution(agent_name, config, runtime_paths, execution_identity=identity).worker_target
 
 
-def _allowed_login(config: Config, status: GatewayStatus, link: Link) -> str | None:
+def _allowed_login(config: Config, enrollment: Literal["login", "auth_key"] | None, link: Link) -> str | None:
     """Return the one Tailscale login the link admits, or None when it admits nobody.
 
     With an operator key that is the login the config names for the person, else the login that enrolled the node.
     """
-    if status.enrollment == "auth_key":
+    if enrollment == "auth_key":
         return config.tailnet_ssh.logins.get(link.requester_id)
     return link.enrolled_login
 
@@ -186,7 +197,9 @@ def desired_links(
     ``off`` is a link, so it is not added again.
     """
     workers: list[WorkerHandle] = []
-    if status.enrollment == "auth_key" and now - status.operator_sync_at >= _OPERATOR_SYNC_SECONDS:
+    # Every row is answered by one report, also when another comes in meanwhile.
+    enrollment = status.report.enrollment
+    if enrollment == "auth_key" and now - status.operator_sync_at >= _OPERATOR_SYNC_SECONDS:
         status.operator_sync_at = now
         workers = _listed_workers(runtime_paths)
     agent_names: dict[str, str | None] = {}
@@ -215,7 +228,7 @@ def desired_links(
                 "id": link.id,
                 "hostname": link.hostname,
                 "desired": verdicts.get(link.id, "removing"),
-                "allowed_login": _allowed_login(config, status, link),
+                "allowed_login": _allowed_login(config, enrollment, link),
                 "closed_before": link.closed_before,
                 "login_after": link.login_after,
             }
@@ -234,7 +247,7 @@ def record_status(
     now: float,
     monotonic: float,
 ) -> None:
-    """Keep the gateway's ``POST /status`` report in ``status``, and store what it settles. Blocking.
+    """Keep the gateway's ``POST /status`` report in ``status``, whole and at once, and store what it settles. Blocking.
 
     A node reported ``removed`` ends its link's removal. The first ``running`` report enrols a link: the login that
     signed in is the one it admits from then on, whoever signs in later. A node an operator key enrolled pins no
@@ -267,9 +280,7 @@ def record_status(
             )
         return reported
 
-    status.links = update_links(runtime_paths, settle)
-    status.enrollment = payload["enrollment"]
-    status.received_at = monotonic
+    status.report = GatewayReport(payload["enrollment"], monotonic, update_links(runtime_paths, settle))
 
 
 def link_state(link: Link, status: LinkStatus | None, *, suspended: bool) -> str:
@@ -361,7 +372,7 @@ def _admit(
 ) -> tuple[WorkerSshEndpoint, WorkerCall]:
     """Check a connection, wake the link's worker, and write sshd's files; all that precedes starting sshd. Blocking."""
     link = _on_link(read_links(runtime_paths), link_id)
-    allowed_login = _allowed_login(config, status, link)
+    allowed_login = _allowed_login(config, status.report.enrollment, link)
     if allowed_login is None or peer_login != allowed_login:
         raise ConnectRefused(403, "This link admits another Tailscale login.")
     ineligible = link_ineligibility(
@@ -469,6 +480,7 @@ def refresh_projections(config: Config, runtime_paths: RuntimePaths, requester_i
 
 def active_worker_keys(status: GatewayStatus, *, monotonic: float) -> frozenset[str]:
     """Return the workers with an open SSH connection, by the gateway's last report unless it is too old."""
-    if monotonic - status.received_at > _STATUS_SECONDS:
+    report = status.report
+    if monotonic - report.received_at > _STATUS_SECONDS:
         return frozenset()
-    return frozenset(link.worker_key for link in status.links.values() if link.open_connections > 0)
+    return frozenset(link.worker_key for link in report.links.values() if link.open_connections > 0)

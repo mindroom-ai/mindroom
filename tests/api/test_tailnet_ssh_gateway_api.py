@@ -46,11 +46,13 @@ from mindroom.runtime_env_policy import (
     sandbox_runner_startup_process_env,
     worker_extra_env,
 )
-from mindroom.tailnet_ssh.links import ConnectRefused, GatewayStatus, LinkStatus, resolve_target
+from mindroom.tailnet_ssh.links import ConnectRefused, GatewayReport, GatewayStatus, LinkStatus, resolve_target
 from mindroom.tailnet_ssh.store import Link, new_link, update_links
+from mindroom.worker_computer.sessions import ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerMaintenanceResult
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.test_computer_sessions import authorized_target
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -66,6 +68,14 @@ CALLS: list[tuple[str, str, dict[str, object] | None]] = [
     ("POST", "/links/abc/connect", PEER),
 ]
 ROUTES = [(method, path) for method, path, _body in CALLS]
+LOGIN_URL = "https://login.tailscale.com/a/1c0ffee"
+BAD_BODY = "The request body is not what the gateway contract describes."
+# Bodies neither POST route takes: not JSON, not an object, and an object without the route's fields.
+BAD_BODIES = [
+    (path, body)
+    for path in ("/status", "/links/abc/connect")
+    for body in (b"", b"not json", b"[]", b"{}", b'{"peer_login": 7, "peer_node": "laptop", "enrollment": "oauth"}')
+]
 _DATA: dict[str, Any] = {
     "models": {"default": {"provider": "openai", "id": "m"}},
     "agents": {
@@ -232,9 +242,9 @@ def test_status_is_stored_and_answers_204(
     assert on_event_loop == [False]
     status = tailnet_ssh_status(api_app)
     assert status is not None
-    assert status.enrollment == "login"
-    assert status.links[link.id].state == "running"
-    assert status.links[link.id].open_connections == 2
+    assert status.report.enrollment == "login"
+    assert status.report.links[link.id].state == "running"
+    assert status.report.links[link.id].open_connections == 2
     assert active_tailnet_ssh_worker_keys(api_app) == {link.worker_key}
 
 
@@ -250,13 +260,31 @@ def test_status_is_stored_and_answers_204(
 def test_status_outside_the_contract_is_refused_and_changes_nothing(
     api_app: FastAPI,
     client: TestClient,
-    body: dict[str, object],
+    body: dict[str, Any],
 ) -> None:
-    """A report the contract does not describe answers 422 and leaves the last report as it was."""
+    """A report the contract does not describe answers 422, repeats nothing it carried, and changes nothing.
+
+    The report holds login URLs, which leave the primary only for a link's owner.
+    """
+    body = {**body, "links": {**body["links"], "def": _report(login_url=LOGIN_URL)}}
+
     response = client.post("/status", headers=AUTH, json=body)
 
-    assert response.status_code == 422
+    assert (response.status_code, response.json()) == (422, {"detail": BAD_BODY})
+    assert LOGIN_URL not in response.text
     assert tailnet_ssh_status(api_app) == GatewayStatus()
+
+
+@pytest.mark.parametrize(("path", "body"), BAD_BODIES)
+def test_a_body_that_is_not_the_contracts_answers_422_without_repeating_it(
+    client: TestClient,
+    path: str,
+    body: bytes,
+) -> None:
+    """Whatever a POST carries that is not its route's JSON document, the answer is one sentence."""
+    response = client.post(path, headers=AUTH, content=body)
+
+    assert (response.status_code, response.json()) == (422, {"detail": BAD_BODY})
 
 
 def test_connect_answers_endpoint_or_refusal_detail(
@@ -310,6 +338,23 @@ def test_config_not_loaded_answers_503(
 
     assert (response.status_code, response.json()) == (503, {"detail": "MindRoom's configuration is not loaded."})
     assert tailnet_ssh_status(api_app) == GatewayStatus()
+
+
+@pytest.mark.parametrize(("path", "body"), BAD_BODIES)
+def test_an_unready_primary_answers_503_before_it_reads_a_body(
+    api_app: FastAPI,
+    client: TestClient,
+    path: str,
+    body: bytes,
+) -> None:
+    """A primary that cannot serve the gateway says so whatever the request carries, as it does for a good one."""
+    _unload_config(api_app)
+    unloaded = client.post(path, headers=AUTH, content=body)
+    config_lifecycle.app_state(api_app).tailnet_ssh_status = None
+    off = client.post(path, headers=AUTH, content=body)
+
+    assert (unloaded.status_code, unloaded.json()) == (503, {"detail": "MindRoom's configuration is not loaded."})
+    assert (off.status_code, off.json()) == (503, {"detail": "Tailnet SSH is off."})
 
 
 @pytest.mark.parametrize(("method", "path", "body"), CALLS)
@@ -430,11 +475,11 @@ def test_only_a_fresh_report_with_open_connections_holds_a_worker(api_app: FastA
     """A link without connections holds nothing, and a report older than 90 seconds says nothing."""
     status = tailnet_ssh_status(api_app)
     assert status is not None
-    status.links = {"busy": _link_status("worker-busy", 1), "quiet": _link_status("worker-quiet", 0)}
+    links = {"busy": _link_status("worker-busy", 1), "quiet": _link_status("worker-quiet", 0)}
 
-    status.received_at = time.monotonic()
+    status.report = GatewayReport("login", time.monotonic(), links)
     assert active_tailnet_ssh_worker_keys(api_app) == {"worker-busy"}
-    status.received_at = time.monotonic() - 91
+    status.report = GatewayReport("login", time.monotonic() - 91, links)
     assert active_tailnet_ssh_worker_keys(api_app) == frozenset()
 
 
@@ -444,11 +489,18 @@ def _link_status(worker_key: str, open_connections: int) -> LinkStatus:
 
 @pytest.mark.asyncio
 async def test_both_maintenance_paths_touch_ssh_workers(api_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A worker with an open SSH connection is touched by the background cleanup and by the cleanup route."""
+    """Both the background cleanup and the cleanup route touch a worker with an open SSH connection.
+
+    They touch the worker a Computer viewer holds as before.
+    """
     status = tailnet_ssh_status(api_app)
     assert status is not None
-    status.links = {"abc": _link_status("worker-ssh", 1)}
-    status.received_at = time.monotonic()
+    status.report = GatewayReport("login", time.monotonic(), {"abc": _link_status("worker-ssh", 1)})
+    computer_sessions = ComputerSessionStore()
+    # A viewer whose stream is open holds its worker, which `authorized_target` names "worker".
+    computer_sessions.create(authorized_target()).stream = asyncio.Event()
+    config_lifecycle.app_state(api_app).computer_sessions = computer_sessions
+    held = ["touch:worker", "touch:worker-ssh"]
     actions: list[str] = []
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -471,9 +523,9 @@ async def test_both_maintenance_paths_touch_ssh_workers(api_app: FastAPI, monkey
         api_main._worker_cleanup_loop(stop_event, api_app, touch_live_workers=lambda _manager: None),
         timeout=SETTLE_TIMEOUT_SECONDS,
     )
-    assert actions == ["touch:worker-ssh", "maintain"]
+    assert (sorted(actions[:-1]), actions[-1]) == (held, "maintain")
 
     actions.clear()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://primary") as http:
         assert (await http.post("/api/workers/cleanup")).status_code == 200
-    assert actions == ["touch:worker-ssh", "maintain"]
+    assert (sorted(actions[:-1]), actions[-1]) == (held, "maintain")

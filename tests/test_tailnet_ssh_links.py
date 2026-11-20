@@ -6,8 +6,9 @@ import asyncio
 import json
 import threading
 from copy import deepcopy
+from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import pytest
 from aiohttp import web
@@ -21,6 +22,7 @@ from mindroom.shared_directories.store import add_shared_directory_member, creat
 from mindroom.tailnet_ssh import links, store
 from mindroom.tailnet_ssh.links import (
     ConnectRefused,
+    GatewayReport,
     GatewayStatus,
     LinkStatus,
     active_worker_keys,
@@ -126,6 +128,11 @@ def _store(paths: RuntimePaths, *stored: Link) -> None:
 
 def _stored(paths: RuntimePaths, link: Link) -> Link | None:
     return read_links(paths).by_id(link.id)
+
+
+def _operator_status(*, operator_sync_at: float = 0.0) -> GatewayStatus:
+    """What is known of a gateway that reported once and enrols with an operator's key."""
+    return GatewayStatus(GatewayReport("auth_key"), operator_sync_at)
 
 
 def _rows(
@@ -258,7 +265,7 @@ async def _connect(
         config,
         paths,
         AgentReplyMembershipIndex(),
-        status or GatewayStatus(enrollment="login"),
+        status or GatewayStatus(GatewayReport("login")),
         link_id,
         peer_login,
         "alice-laptop",
@@ -343,7 +350,7 @@ def test_removed_report_drops_or_parks(config: Config, paths: RuntimePaths) -> N
 
     book = read_links(paths)
     assert [(link.id, link.desired, link.enrolled_login) for link in book.links] == [(parked.id, "off", None)]
-    assert status.links == {}
+    assert status.report.links == {}
     assert _rows(config, paths, status) == []
 
 
@@ -363,7 +370,7 @@ def test_first_running_report_pins_enrolled_login(paths: RuntimePaths) -> None:
 
     _post(paths, status, {link.id: _report(login_name="eve@github")}, now=NOW + 3)
     assert _stored(paths, link) == pinned
-    assert status.links[link.id].login_name == "eve@github"
+    assert status.report.links[link.id].login_name == "eve@github"
 
 
 def test_operator_key_enrolment_pins_no_login(config: Config, paths: RuntimePaths) -> None:
@@ -377,21 +384,20 @@ def test_operator_key_enrolment_pins_no_login(config: Config, paths: RuntimePath
     assert stored is not None
     assert (stored.enrolled_login, stored.enrolled_at) == (None, NOW)
     assert [row["allowed_login"] for row in _rows(config, paths)] == [None]
-    assert [row["allowed_login"] for row in _rows(config, paths, GatewayStatus(enrollment="auth_key"))] == [
-        "alice@github",
-    ]
+    assert [row["allowed_login"] for row in _rows(config, paths, _operator_status())] == ["alice@github"]
 
 
 def test_status_records_the_workers_of_stored_links_only(paths: RuntimePaths) -> None:
     """A report is kept with its link's worker key, and one for a link the store does not hold is ignored."""
     link = _enrolled()
     _store(paths, link)
-    status = GatewayStatus(links={"stale": LinkStatus("running", None, None, None, None, None, 1, None, "key")})
+    stale = GatewayReport(links={"stale": LinkStatus("running", None, None, None, None, None, 1, None, "key")})
+    status = GatewayStatus(stale)
 
     _post(paths, status, {link.id: _report(open_connections=2), "f" * 16: _report()}, monotonic=42.0)
 
-    assert (status.enrollment, status.received_at) == ("login", 42.0)
-    assert status.links == {
+    assert (status.report.enrollment, status.report.received_at) == ("login", 42.0)
+    assert status.report.links == {
         link.id: LinkStatus(
             state="running",
             login_url=None,
@@ -413,7 +419,7 @@ def test_enrolled_link_without_status_stays_listed_and_enrolled(config: Config, 
     status = GatewayStatus()
 
     assert [(row["id"], row["desired"]) for row in _rows(config, paths, status)] == [(link.id, "on")]
-    assert link_state(link, status.links.get(link.id), suspended=False) == "enrolled"
+    assert link_state(link, status.report.links.get(link.id), suspended=False) == "enrolled"
     assert _stored(paths, link) == link
 
 
@@ -451,7 +457,7 @@ def test_operator_mode_adds_links_once_a_minute(
         _handle(_key(ALICE, "gone"), tmp_path / "gone"),
         _handle(_key(BOB, "mine"), tmp_path / "bob"),
     )
-    status = GatewayStatus(enrollment="auth_key")
+    status = _operator_status()
 
     rows = _rows(config, paths, status)
 
@@ -489,7 +495,7 @@ def test_operator_mode_adds_a_link_that_is_suspended_for_now(
     add_shared_directory_member(paths, owner="other", name="specs", member="mine")
     _manager(monkeypatch, _handle(_key(ALICE, "mine"), tmp_path / "mine"))
 
-    rows = _rows(config, paths, GatewayStatus(enrollment="auth_key"))
+    rows = _rows(config, paths, _operator_status())
 
     added = read_links(paths).link(ALICE, "mine")
     assert added is not None
@@ -508,7 +514,7 @@ def test_operator_mode_adds_no_link_for_a_key_two_agents_share(
     config = Config.validate_with_runtime(data, paths)
     _manager(monkeypatch, _handle(_key(ALICE, "mine"), tmp_path / "mine"))
 
-    assert _rows(config, paths, GatewayStatus(enrollment="auth_key")) == []
+    assert _rows(config, paths, _operator_status()) == []
     assert read_links(paths).links == []
 
 
@@ -524,7 +530,7 @@ def test_a_steady_gateway_rewrites_nothing(config: Config, paths: RuntimePaths) 
     _post(paths, status, {link.id: _report(open_connections=1)})
     _rows(config, paths, status, now=NOW + 5)
 
-    assert status.links[link.id].open_connections == 1
+    assert status.report.links[link.id].open_connections == 1
     assert (path.stat().st_ino, path.stat().st_mtime_ns) == (stored.st_ino, stored.st_mtime_ns)
 
 
@@ -536,7 +542,7 @@ def test_login_mode_adds_no_links(
 ) -> None:
     """Without an operator's key a link exists only once its person asked for it."""
     manager = _manager(monkeypatch, _handle(_key(ALICE, "mine"), tmp_path / "mine"))
-    assert _rows(config, paths, GatewayStatus(enrollment="login")) == []
+    assert _rows(config, paths, GatewayStatus(GatewayReport("login"))) == []
     assert _rows(config, paths, GatewayStatus()) == []
     assert manager.calls == []
 
@@ -556,7 +562,7 @@ def test_operator_mode_lists_links_while_the_backend_fails(
 
     monkeypatch.setattr(links, "lease_configured_primary_worker_manager", fail)
     with capture_logs():
-        rows = _rows(config, paths, GatewayStatus(enrollment="auth_key"))
+        rows = _rows(config, paths, _operator_status())
     assert [(row["id"], row["desired"]) for row in rows] == [(link.id, "on")]
 
 
@@ -572,7 +578,7 @@ async def test_operator_link_without_login_refuses_everyone(
     link = _enrolled()
     _store(paths, link)
     manager = _wire_connect(monkeypatch, tmp_path, link)
-    status = GatewayStatus(enrollment="auth_key", operator_sync_at=NOW)
+    status = _operator_status(operator_sync_at=NOW)
 
     assert [row["allowed_login"] for row in _rows(config, paths, status)] == [None]
     for peer_login in ("alice@github", "", "None"):
@@ -851,7 +857,7 @@ async def test_connect_logs_peer_but_never_a_login_url(
 
     with capture_logs() as logs:
         _post(paths, status, {link.id: _report(login_url=LOGIN_URL)})
-        assert status.links[link.id].login_url == LOGIN_URL
+        assert status.report.links[link.id].login_url == LOGIN_URL
         _rows(config, paths, status)
         await _connect(config, paths, link.id, status=status)
         with pytest.raises(ConnectRefused):
@@ -957,6 +963,68 @@ def test_active_worker_keys_window(paths: RuntimePaths) -> None:
 
     assert active_worker_keys(status, monotonic=1089.0) == frozenset({busy.worker_key})
     assert active_worker_keys(status, monotonic=1091.0) == frozenset()
+
+
+class _ChangingStatus:
+    """A status whose report is replaced, as a gateway's post replaces it, after each time it is read."""
+
+    def __init__(self, *reports: GatewayReport) -> None:
+        self.reports = list(reports)
+        self.reads = 0
+        self.operator_sync_at = NOW
+
+    @property
+    def report(self) -> GatewayReport:
+        self.reads += 1
+        return self.reports[min(self.reads, len(self.reports)) - 1]
+
+
+def test_a_report_is_published_whole_and_never_changed(paths: RuntimePaths) -> None:
+    """A post replaces the last report in one step, so no reader finds the links of one report with the age of another."""
+    link = _enrolled()
+    _store(paths, link)
+    assigned: list[str] = []
+
+    class Recorded(GatewayStatus):
+        def __setattr__(self, name: str, value: object) -> None:
+            assigned.append(name)
+            super().__setattr__(name, value)
+
+    status = Recorded()
+    _post(paths, status, {link.id: _report(open_connections=1)}, monotonic=10.0)
+    first, kept = status.report, deepcopy(status.report)
+    assigned.clear()
+
+    _post(paths, status, {link.id: _report()}, enrollment="auth_key", monotonic=20.0)
+
+    assert assigned == ["report"]
+    assert first == kept
+    assert status.report == GatewayReport("auth_key", 20.0, {link.id: replace(kept.links[link.id], open_connections=0)})
+    with pytest.raises(FrozenInstanceError):
+        status.report.received_at = 30.0  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        status.report.links[link.id].open_connections = 1  # type: ignore[misc]
+
+
+def test_active_worker_keys_reads_one_report() -> None:
+    """A report that comes in while the workers in use are read does not lend its age to the last one's links."""
+    held = {"abc": LinkStatus("running", None, None, None, None, None, 1, None, "worker")}
+    status = _ChangingStatus(GatewayReport("login", 1000.0, {}), GatewayReport("login", 0.0, held))
+
+    keys = active_worker_keys(cast("GatewayStatus", status), monotonic=1001.0)
+
+    assert (keys, status.reads) == (frozenset(), 1)
+
+
+def test_desired_rows_come_from_one_report(config: Config, paths: RuntimePaths) -> None:
+    """Every row of one answer names the login its link admits under the same enrolment, whatever is posted meanwhile."""
+    pinned = {"enrolled_login": "pinned@github", "enrolled_at": NOW}
+    _store(paths, _link(**pinned), _link(agent="mind", **pinned))
+    status = _ChangingStatus(GatewayReport("auth_key"), GatewayReport("login"))
+
+    rows = desired_links(config, paths, AgentReplyMembershipIndex(), cast("GatewayStatus", status), now=NOW)
+
+    assert ([row["allowed_login"] for row in rows], status.reads) == (["alice@github", "alice@github"], 1)
 
 
 def test_key_change_rewrites_projection_of_running_workers_only(

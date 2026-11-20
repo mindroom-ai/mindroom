@@ -14,8 +14,8 @@ import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Literal
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, ValidationError
 from starlette.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
@@ -125,8 +125,24 @@ def _link_service(api_app: FastAPI) -> tuple[Config, RuntimePaths, AgentReplyMem
     return config, runtime_paths, state.runtime.agent_reply_memberships, status
 
 
+async def _body[T: BaseModel](request: Request, model: type[T]) -> T:
+    """Return the request's JSON body as ``model``, or answer 422 with one sentence.
+
+    Pydantic's errors repeat what they reject, and a status report carries login URLs, so none of them is answered.
+    """
+    try:
+        return model.model_validate_json(await request.body())
+    except ValidationError:
+        detail = "The request body is not what the gateway contract describes."
+        raise HTTPException(status_code=422, detail=detail) from None
+
+
 def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
-    """Return the app the gateway alone talks to: the link service of the primary serving ``api_app``."""
+    """Return the app the gateway alone talks to: the link service of the primary serving ``api_app``.
+
+    Each route answers 503 for a primary that cannot serve it before it reads the request's body, which is why the
+    routes read their bodies themselves: FastAPI would parse a declared body, and answer for it, first.
+    """
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     app.add_middleware(_TokenGate, token=token)
 
@@ -136,8 +152,9 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
         return await asyncio.to_thread(desired_links, config, runtime_paths, memberships, status, now=time.time())
 
     @app.post("/status", status_code=204)
-    async def post_status(report: _StatusReport) -> None:
+    async def post_status(request: Request) -> None:
         _config, runtime_paths, _memberships, status = _link_service(api_app)
+        report = await _body(request, _StatusReport)
         await asyncio.to_thread(
             record_status,
             runtime_paths,
@@ -148,8 +165,9 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
         )
 
     @app.post("/links/{link_id}/connect")
-    async def connect_link(link_id: str, peer: _Peer) -> dict[str, str | int]:
+    async def connect_link(link_id: str, request: Request) -> dict[str, str | int]:
         config, runtime_paths, memberships, status = _link_service(api_app)
+        peer = await _body(request, _Peer)
         try:
             host, port = await connect(
                 config,
