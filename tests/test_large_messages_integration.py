@@ -55,6 +55,7 @@ class MockClient:
         self.messages_sent = []
         self.uploads: list[BinaryIO] = []
         self.olm = None
+        self.user_id = "@mindroom_test:server"
         self.device_id = "DEVICE"
 
     async def room_send(

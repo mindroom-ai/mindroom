@@ -147,7 +147,9 @@ async def _send_prepared_room_message(  # noqa: PLR0911
     try:
         if write_allowed is not None and not write_allowed():
             return None
-        content_sent = tool_markers_out_of_text(content_sent)
+        # MindRoom Chat puts the markers back for an account with such a username and for no other.
+        if str(client.user_id).lower().startswith("@mindroom_"):
+            content_sent = tool_markers_out_of_text(content_sent)
         if cache_bypass:
             access_token = client.access_token
             if not access_token:

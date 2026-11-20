@@ -204,9 +204,8 @@ def test_plan_copies_only_allowlisted_keys() -> None:
         assert copy.content["m.mentions"] == {}
         assert copy.content[COPIED_MENTIONS_KEY] == [CODE_ID]
     assert set(own.content) == {*TEXT_KEYS, SKIP_MENTIONS_KEY, "m.mentions", COPIED_MENTIONS_KEY}
-    # Only MindRoom's own posts carry tool calls, so the router relays no one else's trace as its own.
     assert set(relayed.content) == {
-        *TEXT_KEYS - {TOOL_TRACE_CONTENT_KEY},
+        *TEXT_KEYS,
         SKIP_MENTIONS_KEY,
         "m.mentions",
         COPIED_MENTIONS_KEY,
@@ -744,6 +743,23 @@ async def test_move_thread_copies_tags_posts_notice_and_resolves_source(tmp_path
 _SHELL_CALL = {"type": "tool_call_completed", "tool_name": "shell"}
 
 
+def _real_sends() -> tuple[AsyncMock, AsyncMock]:
+    """Return a Matrix client and a send that goes through the real one to it, so a copy is what Matrix gets."""
+    client = make_matrix_client_mock()
+    event_ids = iter(f"$copy{index}:localhost" for index in range(100))
+    client.room_send = AsyncMock(side_effect=lambda **_kwargs: nio.RoomSendResponse(next(event_ids), TARGET_ROOM_ID))
+
+    async def send(
+        _client: object,
+        room_id: str,
+        content: dict[str, Any],
+        **kwargs: bool,
+    ) -> DeliveredMatrixEvent | None:
+        return await send_message_result(client, room_id, content, **kwargs)
+
+    return client, AsyncMock(side_effect=send)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("events", [[_SHELL_CALL], [None, _SHELL_CALL], ["shell"]])
 async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_path: Path, events: list[Any]) -> None:
@@ -760,19 +776,9 @@ async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_
     history = _thread(move)
     history[1] = _message(move.ids["code"], with_calls, "$code:localhost")
     history[2] = _message(move.ids["research"], with_calls, "$research:localhost")
-    client = make_matrix_client_mock()
-    event_ids = iter(f"$copy{index}:localhost" for index in range(100))
-    client.room_send = AsyncMock(side_effect=lambda **_kwargs: nio.RoomSendResponse(next(event_ids), TARGET_ROOM_ID))
+    client, send = _real_sends()
 
-    async def send(
-        _client: object,
-        room_id: str,
-        content: dict[str, Any],
-        **kwargs: bool,
-    ) -> DeliveredMatrixEvent | None:
-        return await send_message_result(client, room_id, content, **kwargs)
-
-    with _matrix(move, history, send=AsyncMock(side_effect=send)) as mocks:
+    with _matrix(move, history, send=send) as mocks:
         payload = await _run()
 
     assert payload["status"] == "ok"
@@ -786,6 +792,45 @@ async def test_move_thread_sends_each_copy_of_a_reply_with_tool_calls_whole(tmp_
     )
     assert [tool_markers_in_text(copy) for copy in sent] == planned
     assert mocks.set_tag.await_args_list[-1].args[1:] == (SOURCE_ROOM_ID, ROOT_ID, RESOLVED_THREAD_TAG)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held_without_markers", [False, True])
+async def test_move_thread_relays_the_reply_of_an_agent_that_is_no_longer_configured(
+    tmp_path: Path,
+    held_without_markers: bool,
+) -> None:
+    """An agent taken out of the config is no entity any more, so the router relays what it said.
+
+    Its reply from before markers left the text keeps its calls, as it always did. Its reply that Matrix holds
+    without its markers is read as anyone's message, whose positions nobody vouches for, so the copy shows no call.
+    """
+    move = _move(tmp_path)
+    gone = "@mindroom_gone:localhost"
+    reply = "Checking.\n\n🔧 `shell` [1]\n\nDone."
+    built = {
+        "msgtype": "m.text",
+        "body": reply,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(reply),
+        TOOL_TRACE_CONTENT_KEY: {"version": 2, "events": [_SHELL_CALL]},
+    }
+    held = tool_markers_out_of_text(built)
+    assert held["body"] == "Checking.\n\nDone."
+    history = _thread(move)
+    history[2] = _message(gone, held if held_without_markers else built, "$gone:localhost")
+    client, send = _real_sends()
+
+    with _matrix(move, history, send=send) as mocks:
+        payload = await _run()
+
+    assert payload["status"] == "ok"
+    planned = mocks.send.await_args_list[2].args[2]
+    sent = client.room_send.await_args_list[2].kwargs["content"]
+    assert planned["body"] == f"{gone}: {held['body'] if held_without_markers else reply}"
+    assert (TOOL_TRACE_CONTENT_KEY in planned) is not held_without_markers
+    assert sent["body"] == f"{gone}: Checking.\n\nDone."
+    assert tool_markers_in_text(sent) == planned
 
 
 @pytest.mark.asyncio

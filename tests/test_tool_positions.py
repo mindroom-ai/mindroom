@@ -470,6 +470,37 @@ async def test_no_way_into_the_backend_puts_markers_in_a_message_that_is_no_agen
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("user_id", "markers_leave"),
+    [
+        ("@mindroom_code:localhost", True),
+        ("@Mindroom_code:localhost", True),
+        ("@helper:localhost", False),
+        ("", False),
+        (None, False),
+    ],
+)
+async def test_only_an_account_mindroom_chat_takes_for_an_agent_sends_its_reply_without_markers(
+    user_id: str | None,
+    markers_leave: bool,
+) -> None:
+    """MindRoom Chat puts markers back for a ``mindroom_`` username alone, so any other account's reply keeps them.
+
+    An agent may have any username, and its reply of calls alone would be empty to everyone who reads it there.
+    A client that names no account is in doubt, and in doubt the reply goes out as it was built.
+    """
+    sent = _sent(_case("a reply of calls alone"))
+    client = _client()
+    client.user_id = user_id
+
+    await send_message_result(client, _ROOM, sent)
+
+    wire = _on_the_wire(client)
+    assert (wire["body"] == "") is markers_leave
+    assert wire is sent or markers_leave
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("edit", [False, True])
 async def test_recovery_finds_in_the_room_the_reply_an_earlier_device_sent(edit: bool) -> None:
     """Recovery looks in the room for the exact content of an outbox row, which Matrix got without its markers."""

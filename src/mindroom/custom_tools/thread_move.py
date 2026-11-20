@@ -103,9 +103,10 @@ def _plan_thread_copy(
             # The copy keeps counting them as mentioned earlier in the thread, so a team the thread formed carries on.
             content[COPIED_MENTIONS_KEY] = mentioned
         entity = entity_name_for_sender(message.sender)
-        if entity is None:
-            # Only MindRoom's own posts carry tool calls; the router relays nobody else's as its own.
-            content.pop(TOOL_TRACE_CONTENT_KEY, None)
+        trace = content.get(TOOL_TRACE_CONTENT_KEY)
+        if entity is None and isinstance(trace, dict) and trace.get("version") == 3:
+            # Nobody vouches for where this trace puts its calls, and the router would send them as its own.
+            del content[TOOL_TRACE_CONTENT_KEY]
         speaks_for = message.content.get(ORIGINAL_SENDER_KEY)
         if entity is not None and isinstance(speaks_for, str) and speaks_for:
             # MindRoom's own posts on someone's behalf (voice transcripts,
