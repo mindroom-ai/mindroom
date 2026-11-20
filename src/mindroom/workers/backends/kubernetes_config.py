@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from types import UnionType
+from typing import TYPE_CHECKING, Literal, TypedDict, Union, cast, get_args, get_origin
+
+import pydantic
 
 from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
@@ -44,6 +48,8 @@ from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from pydantic_core import ErrorDetails
 
     from mindroom.constants import RuntimePaths
 
@@ -120,6 +126,26 @@ _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
 )
 _EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
 _EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
+# Where the allowed keys can carry a Kubernetes quantity; "*" is every list item or mapping value,
+# and "a|b" names the wire and Python spellings the client accepts for one field.
+_EXTRA_CONTAINER_QUANTITY_PATHS = (
+    ("resources", "requests", "*"),
+    ("resources", "limits", "*"),
+    ("env", "*", "valueFrom|value_from", "resourceFieldRef|resource_field_ref", "divisor"),
+)
+_EXTRA_VOLUME_QUANTITY_PATHS = (
+    ("emptyDir", "sizeLimit|size_limit"),
+    (
+        "projected",
+        "sources",
+        "*",
+        "downwardAPI|downward_api",
+        "items",
+        "*",
+        "resourceFieldRef|resource_field_ref",
+        "divisor",
+    ),
+)
 _DNS_SUBDOMAIN_RE = re.compile(
     r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*",
 )
@@ -293,18 +319,103 @@ def _validate_unique_names(
         seen_names.add(name)
 
 
+def _with_string_quantity(value: object, path: tuple[str, ...], location: str) -> object:
+    """Return ``value`` with the quantity at ``path`` as a string: the API server takes a JSON number, the client not."""
+    if not path:
+        if isinstance(value, bool):
+            msg = f"{location}: quantities must be strings or numbers such as 1, 0.5, or 512Mi."
+            raise WorkerBackendError(msg)
+        return str(value) if isinstance(value, int | float) else value
+    key, rest = path[0], path[1:]
+    if key == "*" and isinstance(value, list):
+        return [_with_string_quantity(item, rest, f"{location}[{index}]") for index, item in enumerate(value)]
+    if key == "*" and isinstance(value, dict):
+        # The location stops at the map: its keys are user input and may be pasted credentials.
+        return {name: _with_string_quantity(item, rest, location) for name, item in value.items()}
+    for name in key.split("|"):
+        if isinstance(value, dict) and name in value:
+            value = {**value, name: _with_string_quantity(value[name], rest, f"{location}.{name}")}
+    return value
+
+
+def _schema_error(model_class: type, error: ErrorDetails) -> str:
+    """Describe one validation error by schema field names and list indices only, never by a user-supplied key."""
+    path: list[str] = []
+    annotation: object = model_class
+    for segment in error["loc"]:
+        while get_origin(annotation) in {Union, UnionType}:
+            annotation = next(arg for arg in get_args(annotation) if arg is not type(None))
+        fields = _field_annotations(annotation)
+        if isinstance(segment, int) and get_origin(annotation) is list:
+            annotation = get_args(annotation)[0]
+        elif segment in fields:
+            annotation = fields[segment]
+        else:
+            # An unknown key or a free-form map key is user input and can be a pasted credential.
+            return f"{'.'.join(path) or 'top level'}: invalid value ({error['type']})"
+        path.append(str(segment))
+    return f"{'.'.join(path)}: {error['msg']}"
+
+
+def _field_annotations(annotation: object) -> dict[object, object]:
+    """Map every name a model accepts for one of its fields, wire or Python, to that field's type."""
+    if not (isinstance(annotation, type) and issubclass(annotation, pydantic.BaseModel)):
+        return {}
+    return {
+        name: field.annotation
+        for python_name, field in annotation.model_fields.items()
+        for name in (python_name, field.alias, *getattr(field.validation_alias, "choices", [field.validation_alias]))
+    }
+
+
+def validated_kubernetes_object(model_name: str, value: dict[str, object], *, what: str) -> dict[str, object]:
+    """Return ``value`` in the wire form the installed client sends, naming each field it rejects but no values."""
+    try:
+        kubernetes_client = importlib.import_module("kubernetes.client")
+    except ModuleNotFoundError as exc:
+        msg = "The Kubernetes worker backend needs the 'kubernetes' package: install mindroom[kubernetes]."
+        raise WorkerBackendError(msg) from exc
+    model_class = getattr(kubernetes_client, model_name)
+    try:
+        model = model_class.model_validate(value)
+    except pydantic.ValidationError as exc:
+        errors = exc.errors(include_input=False, include_url=False)
+    else:
+        # Unlike the client's own serialization, this keeps explicit nulls, which clear fields in a patch.
+        return model.model_dump(mode="json", by_alias=True, exclude_unset=True)
+    # Raised outside the handler, so no chained exception carries the rejected values into logs.
+    fields = "; ".join(_schema_error(model_class, error) for error in errors)
+    msg = f"{what} is not a valid Kubernetes {model_name.removeprefix('V1')}: {fields}"
+    raise WorkerBackendError(msg)
+
+
+def _canonical_manifests(
+    items: tuple[dict[str, object], ...],
+    quantity_paths: tuple[tuple[str, ...], ...],
+    model_name: str,
+    env_name: str,
+) -> tuple[dict[str, object], ...]:
+    """Return ``items`` as the client's wire form, so typed creates and untyped patches send the same manifest."""
+    canonical: list[dict[str, object]] = []
+    for index, item in enumerate(items):
+        location = f"{env_name}[{index}]"
+        for path in quantity_paths:
+            item = cast("dict[str, object]", _with_string_quantity(item, path, location))  # noqa: PLW2901
+        canonical.append(validated_kubernetes_object(model_name, item, what=location))
+    return tuple(canonical)
+
+
 def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
     containers = read_json_object_list_env(env, _EXTRA_CONTAINERS_JSON_ENV)
     for index, container in enumerate(containers):
-        unknown_keys = sorted(set(container) - _EXTRA_CONTAINER_ALLOWED_KEYS)
-        if unknown_keys:
-            unknown_keys_text = ", ".join(unknown_keys)
-            msg = f"{_EXTRA_CONTAINERS_JSON_ENV}[{index}] has unsupported keys: {unknown_keys_text}."
+        if not set(container) <= _EXTRA_CONTAINER_ALLOWED_KEYS:
+            allowed = ", ".join(sorted(_EXTRA_CONTAINER_ALLOWED_KEYS))
+            msg = f"{_EXTRA_CONTAINERS_JSON_ENV}[{index}]: unknown field; allowed: {allowed}."
             raise WorkerBackendError(msg)
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "name")
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "image")
     _validate_unique_names(containers, _EXTRA_CONTAINERS_JSON_ENV, RESERVED_EXTRA_CONTAINER_NAMES)
-    return containers
+    return _canonical_manifests(containers, _EXTRA_CONTAINER_QUANTITY_PATHS, "V1Container", _EXTRA_CONTAINERS_JSON_ENV)
 
 
 def _read_image_pull_secrets_env(env: Mapping[str, str]) -> tuple[str, ...]:
@@ -322,10 +433,9 @@ def _read_image_pull_secrets_env(env: Mapping[str, str]) -> tuple[str, ...]:
 def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
     volumes = read_json_object_list_env(env, _EXTRA_VOLUMES_JSON_ENV)
     for index, volume in enumerate(volumes):
-        unknown_keys = sorted(set(volume) - _EXTRA_VOLUME_ALLOWED_KEYS)
-        if unknown_keys:
-            unknown_keys_text = ", ".join(unknown_keys)
-            msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] has unsupported keys: {unknown_keys_text}."
+        if not set(volume) <= _EXTRA_VOLUME_ALLOWED_KEYS:
+            allowed = ", ".join(sorted(_EXTRA_VOLUME_ALLOWED_KEYS))
+            msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}]: unknown field; allowed: {allowed}."
             raise WorkerBackendError(msg)
         _validate_required_string(volume, _EXTRA_VOLUMES_JSON_ENV, index, "name")
         source_keys = [key for key in _EXTRA_VOLUME_SOURCE_KEYS if key in volume]
@@ -333,7 +443,7 @@ def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], 
             msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] must set exactly one of secret, configMap, emptyDir, projected."
             raise WorkerBackendError(msg)
     _validate_unique_names(volumes, _EXTRA_VOLUMES_JSON_ENV, RESERVED_EXTRA_VOLUME_NAMES)
-    return volumes
+    return _canonical_manifests(volumes, _EXTRA_VOLUME_QUANTITY_PATHS, "V1Volume", _EXTRA_VOLUMES_JSON_ENV)
 
 
 @dataclass(frozen=True, slots=True)
