@@ -262,7 +262,7 @@ class StewardDuties:
         current = await asyncio.gather(
             reconcile_room_thread_mode(client, runtime.config, runtime.runtime_paths, room_id),
             reconcile_room_accounts(client, runtime.config, runtime.runtime_paths, room_id),
-            reconcile_room_router_binding(client, runtime.config, runtime.runtime_paths, room_id),
+            reconcile_room_router_binding(client, room_id),
         )
         return all(current)
 

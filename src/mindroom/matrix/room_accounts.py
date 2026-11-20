@@ -66,12 +66,7 @@ async def reconcile_room_accounts(
         return False
 
 
-async def reconcile_room_router_binding(
-    client: nio.AsyncClient,
-    config: Config,  # noqa: ARG001 - shares the room-state reconciler signature
-    runtime_paths: RuntimePaths,  # noqa: ARG001
-    room_id: str,
-) -> bool:
+async def reconcile_room_router_binding(client: nio.AsyncClient, room_id: str) -> bool:
     """Name this account, the room's steward, in the `io.mindroom.router` binding where no valid one exists.
 
     Returns whether nothing is left to do. The binding keeps the name today's clients read: the privileged MindRoom
