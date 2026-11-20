@@ -521,13 +521,12 @@ def replace_unsendable_images(text: str) -> str:
     env: dict[str, list[tuple[int, int, Token]]] = {}
     cursors = dict(enumerate([0, *(newline.end() for newline in re.finditer("\n", text))]))
     edits: list[tuple[int, int, str]] = []
-    for block in (block for block in _IMAGE_SCANNER.parse(text, env) if block.type == "inline" and block.map):
+    for block in _IMAGE_SCANNER.parse(text, env):
         # The inline text starts on its first source line, after any quote, list, or table-cell markup before it.
-        first_line = block.content.split("\n", 1)[0]
-        base = text.find(first_line, cursors.get(block.map[0], 0))
-        if base < 0:
+        row, first_line = (block.map or [0])[0], block.content.split("\n", 1)[0]
+        if block.type != "inline" or (base := text.find(first_line, cursors.get(row, 0))) < 0:
             continue
-        cursors[block.map[0]] = base + len(first_line)
+        cursors[row] = base + len(first_line)
         for start, end, token in env.get("images", []):
             if any(child is token for child in block.children or ()) and _unloadable(token):
                 source, skip = block.content[start:end], block.content.count(block.content[start:end], 0, start)
