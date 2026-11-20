@@ -48,7 +48,6 @@ def _bot(name: str, *, device: str | None = None) -> MagicMock:
         agent_name=name,
         running=True,
         client=client,
-        approval_room_ids=frozenset(),
         latest_thread_event_id_if_needed=AsyncMock(return_value=None),
     )
 

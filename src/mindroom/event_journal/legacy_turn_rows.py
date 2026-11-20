@@ -178,7 +178,6 @@ def _decode(raw: object) -> _Decoded | None:
     raw_prompts = _mapping(stored.get("source_event_prompts")) or {}
     raw_voice = _mapping(stored.get("prepared_voice_sources")) or {}
     replay, redacted_revisions, summary_revisions = _revision_replay(stored.get("revision_replay"))
-    echo = canonical_optional_string(stored.get("visible_echo_event_id"))
     record = TurnRecord.create(
         sources,
         discovery_event_ids=aliases,
@@ -217,7 +216,7 @@ def _decode(raw: object) -> _Decoded | None:
         redacted_revisions=redacted_revisions,
         deleted=frozenset(redacted) | redacted_sources,
         summary_revisions=MappingProxyType(dict(summary_revisions)),
-        echo=echo,
+        echo=canonical_optional_string(stored.get("visible_echo_event_id")),
         timestamp=float(timestamp),
     )
 

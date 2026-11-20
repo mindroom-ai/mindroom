@@ -291,7 +291,7 @@ _OFFERING_CARDS = """
     SELECT cards.delivery_id, cards.room_id, cards.thread_id,
            cards.owner_id, cards.generation, cards.tool_call_id,
            scope.scope_key, scope.operation, scope.requester_id, scope.entity_name, scope.invoking_agent,
-           scope.responder_principal_id, scope.responder_epoch, scope.consent_epoch
+           scope.responder_principal_id, scope.responder_epoch
     FROM approval_cards AS cards
     JOIN approval_card_scopes AS scope
       ON scope.principal_id = cards.principal_id AND scope.delivery_id = cards.delivery_id
