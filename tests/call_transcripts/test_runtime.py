@@ -640,6 +640,23 @@ async def test_an_agent_call_cannot_be_read_while_its_agent_is_not_ready(tmp_pat
     assert refused.value.code == "unavailable"
 
 
+@pytest.mark.asyncio
+async def test_nobody_is_a_member_of_a_room_the_calls_agent_is_not_in(tmp_path: Path) -> None:
+    """A room missing from the agent's own rooms is answered at once, without asking the homeserver for its state."""
+    agent = _calls_agent(_FakeCallManager({ROOM, OTHER_ROOM}))
+    coordinator = _coordinator(
+        test_runtime_paths(tmp_path), lambda: _config(enabled=False), _Sleeps(), {"helper": agent}
+    )
+
+    left = coordinator.agent_call_room(OTHER_ROOM)
+
+    assert left is not None
+    assert await left.room.is_member(OTHER_ROOM, ANN) is False
+    assert await left.room.display_names(OTHER_ROOM, [ANN]) is None
+    agent.client.room_get_state.assert_not_awaited()
+    assert await left.room.is_member(ROOM, ANN) is True
+
+
 # Wiring in the orchestrator
 
 

@@ -102,10 +102,16 @@ class CallTranscriptsRuntimeCoordinator:
     def _agent_room(self, agent_name: str) -> CallRoom:
         room = self._agent_rooms.get(agent_name)
         if room is None:
+
+            def reader(room_id: str) -> nio.AsyncClient | None:
+                """Return the agent's client for a room it is in: nobody is a member of a room it left."""
+                client = _synced_client(self.bots().get(agent_name))
+                return client if client is not None and room_id in client.rooms else None
+
             # Only who is in the room and their names are read through it; an agent's view never posts or retitles.
             room = CallRoom(
                 ready=lambda _room_id: _synced_client(self.bots().get(agent_name)) is not None,
-                reader=lambda _room_id: _synced_client(self.bots().get(agent_name)),
+                reader=reader,
                 poster=lambda *_: None,
                 retitle=lambda *_: None,
             )
