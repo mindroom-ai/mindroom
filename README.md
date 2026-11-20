@@ -398,6 +398,7 @@ Every command also works with `!` instead of `/` (`!help`), including in clients
 - `/config <operation>` - Manage configuration
 - `/desktop [setup|status|confirm|rotate|disconnect]` - Manage your Desktop target
 - `/mode <agent> minimal|standard|show|reset` - Switch one agent between standard tools and a Bash-only interface
+- `/compact [agent_or_team]` - Compact the agents' context before their next reply in this conversation
 - `/model [name|name@level|list|reset]` - Show or switch the model used in the current thread
 - `/room_model [name|name@level|list|reset]` - Show the room model default or switch it (set/reset require a room admin)
 - `/thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)

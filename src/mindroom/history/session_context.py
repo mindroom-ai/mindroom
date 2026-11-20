@@ -10,7 +10,11 @@ from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.agent_storage import (
+    agent_session_database_path,
+    create_session_storage,
+    create_state_storage,
+)
 from mindroom.session_storage.schema import TableNames
 
 if TYPE_CHECKING:
@@ -146,13 +150,27 @@ def create_scope_session_storage(
     if scope.kind == "agent":
         return create_session_storage(scope.scope_id, config, runtime_paths, execution_identity=execution_identity)
     storage_name = TableNames.of_team(scope).storage_name
-    return create_state_storage(
-        storage_name,
-        resolve_session_state_root(
-            _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
-            runtime_paths,
-        ),
-        scope,
+    return create_state_storage(storage_name, _team_session_state_root(storage_name, runtime_paths), scope)
+
+
+def scope_session_database_path(
+    *,
+    scope: HistoryScope,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> Path:
+    """Return the database file ``create_scope_session_storage`` opens, resolved without creating anything."""
+    if scope.kind == "agent":
+        return agent_session_database_path(scope.scope_id, config, runtime_paths, execution_identity)
+    names = TableNames.of_team(scope)
+    return names.database_path(_team_session_state_root(names.storage_name, runtime_paths))
+
+
+def _team_session_state_root(storage_name: str, runtime_paths: RuntimePaths) -> Path:
+    return resolve_session_state_root(
+        _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
+        runtime_paths,
     )
 
 

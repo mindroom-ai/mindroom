@@ -10,6 +10,7 @@ from mindroom.authorization import (
 )
 from mindroom.commands import config_confirmation
 from mindroom.commands.auto_approve_commands import handle_auto_approve_command
+from mindroom.commands.compact_commands import handle_compact_command
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.desktop_commands import (
     DesktopCommandScope,
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
@@ -202,6 +204,7 @@ class CommandHandlerContext:
     room_state_response: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]]
     # Whether the room's steward holds the power to write one state event type: (room_id, event_type).
     steward_may_write_state: Callable[[str, str], bool]
+    budget_monitor: BudgetMonitor | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config, tools: ToolRegistry) -> str:
@@ -422,6 +425,21 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             ),
             requester_id=requester_user_id,
             membership_index=context.agent_reply_memberships,
+        )
+
+    elif command.type == CommandType.COMPACT:
+        response_text = await handle_compact_command(
+            command.args.get("args_text", ""),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            target=MessageTarget.resolve(
+                room.room_id,
+                context.stable_target.source_thread_id or EventInfo.from_event(event.source).thread_id,
+                event.event_id,
+            ),
+            requester_id=requester_user_id,
+            membership_index=context.agent_reply_memberships,
+            budget_monitor=context.budget_monitor,
         )
 
     elif command.type == CommandType.HI:
