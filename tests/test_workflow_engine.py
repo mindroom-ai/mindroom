@@ -730,6 +730,38 @@ async def test_workflow_store_error_never_fails_the_script_runtime_pass(
 
 
 @pytest.mark.asyncio
+async def test_waiter_returns_when_the_pass_that_ended_its_run_timed_out_at_the_commit(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pass is cancelled while its last write is in a thread: the run ends there, and nobody is left to wake `wait`."""
+    script_runtime = SimpleNamespace(after_reconcile=None, retention_seconds=3600.0, pass_timeout_seconds=0.4)
+    lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
+    await lifecycle.start()
+    at_commit, commit = threading.Event(), threading.Event()
+    update_run = stack.store.update_run
+
+    def held(run_id: str, **changes: Any) -> WorkflowRun:  # noqa: ANN401
+        if "state" in changes:
+            at_commit.set()
+            commit.wait(SETTLE_TIMEOUT_SECONDS)
+        return update_run(run_id, **changes)
+
+    monkeypatch.setattr(stack.store, "update_run", held)
+    waiter = asyncio.create_task(stack.engine.wait(stack.run_id))
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.EXITED)
+
+    await script_runtime.after_reconcile()
+    assert at_commit.is_set()
+    commit.set()
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.FAILED)
+    await script_runtime.after_reconcile()
+
+    run = await asyncio.wait_for(waiter, SETTLE_TIMEOUT_SECONDS)
+    assert run.state is WorkflowRunState.FAILED
+
+
+@pytest.mark.asyncio
 async def test_store_writes_wait_for_the_database_lock_off_the_event_loop(stack: WorkflowStack) -> None:
     """Another writer holding the database delays a log line and a node, and never the loop that serves every run."""
     other_writer = sqlite3.connect(stack.store.database_path, isolation_level=None, check_same_thread=False)

@@ -56,6 +56,8 @@ _ERROR_TAIL_BYTES = 4096
 _NO_RETURN = "The script ended without returning from main(args)."
 _ATTEMPT_GONE = "The record of the run's attempt is gone."
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
+# How long a waiter sleeps before it reads the store again, with or without a wake.
+_RECHECK_SECONDS = 1.0
 # How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
 
@@ -145,7 +147,9 @@ class WorkflowEngine:
         condition = self._condition(run_id)
         async with condition:
             while (run := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
-                await condition.wait()
+                # The saved run decides: a wake only shortens the wait, since a writer cancelled at its commit sends none.
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(condition.wait(), _RECHECK_SECONDS)
         return run
 
     def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
@@ -251,7 +255,7 @@ class WorkflowEngine:
                 if node.state not in _UNSETTLED_NODE_STATES or remaining <= 0:
                     return _receipt(node)
                 with suppress(TimeoutError):
-                    await asyncio.wait_for(condition.wait(), remaining)
+                    await asyncio.wait_for(condition.wait(), min(remaining, _RECHECK_SECONDS))
 
     async def node(self, attempt: ScriptRunRecord, node_id: str) -> WorkflowNode:
         """Return one node of the attempt's run, for its whole result."""
