@@ -911,6 +911,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.preload_cap",
     "mindroom.knowledge.search",
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.delegation.personas",
@@ -3923,6 +3924,7 @@ visibility = ["mindroom.memory", "mindroom.memory.functions"]
 [[modules]]
 path = "mindroom.memory.functions"
 depends_on = [
+    "mindroom.preload_cap",
     "mindroom.memory._backend",
     "mindroom.memory._entrypoint_snapshots",
     "mindroom.memory._file_backend",
@@ -4028,6 +4030,15 @@ visibility = [
     "mindroom.memory._file_backend",
     "mindroom.memory._mem0_backend",
     "mindroom.memory.auto_flush",
+    "mindroom.memory.functions",
+]
+
+[[modules]]
+path = "mindroom.preload_cap"
+depends_on = []
+visibility = [
+    "mindroom.agents",
+    "mindroom.automations.prompt_curation",
     "mindroom.memory.functions",
 ]
 
@@ -7098,8 +7109,6 @@ expose = [
     "conversation_entrypoint_preamble",
     "delete_agent_memory",
     "entrypoint_snapshot_path",
-    "entrypoint_tokens",
-    "entrypoint_withholds_lines",
     "get_agent_memory",
     "list_all_agent_memories",
     "read_scope_memory_files",
@@ -10031,6 +10040,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.automations.prompt_curation"
 depends_on = [
+    "mindroom.preload_cap",
     "mindroom.automations.registry",
     "mindroom.automations.steps",
     "mindroom.config.automations",

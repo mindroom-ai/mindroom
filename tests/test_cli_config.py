@@ -728,7 +728,7 @@ class TestConfigInit:
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
         assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
-        assert config["memory"]["file"]["max_entrypoint_lines"] == 200
+        assert "file" not in config["memory"]
         assert config["memory"]["search"] == {
             "mode": "semantic",
             "include": ["memory/**/*.md"],

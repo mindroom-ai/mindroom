@@ -2,7 +2,7 @@
 
 The check measures `MEMORY.md` and the always-loaded context files in the workspace it maintains (`private.context_files`
 for a private agent) with the agent's model's token counter.
-When they exceed the trigger, or `MEMORY.md` has more lines than the preload keeps, the prompt asks the agent for a
+When they exceed the trigger, or any of them is over the preload's per-file limit, the prompt asks the agent for a
 bounded cut in a normal visible run.
 Agents told to "clean up" tend to cut most of a file, so verify measures the files again once the run ends and, when
 the result is outside the bounds, asks the agent once to re-check its change.
@@ -22,8 +22,9 @@ from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_c
 from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomation
 from mindroom.config.resolution import entity_model_name
 from mindroom.logging_config import get_logger
-from mindroom.memory import entrypoint_tokens, entrypoint_withholds_lines, read_scope_memory_files
+from mindroom.memory import read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
+from mindroom.preload_cap import cap_preload_text
 from mindroom.providers.registry import model_token_counter
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import finish_loading
@@ -54,12 +55,9 @@ class _CurationPlan:
     # Every memory/ topic file the scan read at fire time, so verify can tell detail moved from detail deleted.
     memory_tokens: int
     curated: Mapping[str, int]
-    # MEMORY.md lines and tokens at fire time, the tokens as the preload counts them; the preload withholds lines beyond
-    # either memory.file.max_entrypoint_* cap.
-    memory_lines: int
-    entrypoint_tokens: int
-    max_entrypoint_lines: int
-    max_entrypoint_tokens: int
+    # The files whose end the preload left out at fire time, cut at defaults.max_preload_file_chars characters.
+    over_limit: tuple[str, ...]
+    max_file_chars: int
     upper_tokens: int
     floor_tokens: int
     # How the agent's model counts tokens; verify measures the files again with it.
@@ -104,6 +102,11 @@ def _memory_dir_tokens(root: Path, exclude: Iterable[str], counter: TokenCounter
     )
 
 
+def _over_limit(payload: bytes, max_chars: int) -> bool:
+    """Return whether the preload leaves out part of the file ``payload``, judged as a reply's preload judges it."""
+    return cap_preload_text(payload.decode("utf-8"), max_chars)[1]
+
+
 def _curated_paths(config: Config, agent_name: str) -> list[str]:
     return list(dict.fromkeys([_ENTRYPOINT, *workspace_context_files(config, agent_name)]))
 
@@ -124,10 +127,10 @@ def _plan_curation(
     }
     curated = {path: _tokens(counter, payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
-    memory_text = curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8")
-    memory_lines = len(memory_text.splitlines())
-    # Lines the preload withholds never reach the prompt, at any token count; judged as a reply's preload judges them.
-    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config, counter):
+    max_file_chars = config.defaults.max_preload_file_chars
+    # What the preload leaves out never reaches the prompt, at any token count.
+    over_limit = tuple(path for path, payload in curated_payloads.items() if _over_limit(payload, max_file_chars))
+    if measured <= settings.trigger_tokens and not over_limit:
         return None
     return _CurationPlan(
         agent_name=agent_name,
@@ -136,10 +139,8 @@ def _plan_curation(
         snapshot=curated_payloads,
         memory_tokens=_memory_dir_tokens(root, curated_payloads, counter),
         curated=curated,
-        memory_lines=memory_lines,
-        entrypoint_tokens=entrypoint_tokens(memory_text, counter),
-        max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
-        max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
+        over_limit=over_limit,
+        max_file_chars=max_file_chars,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
         counter=counter,
@@ -152,10 +153,8 @@ def _curation_prompt(config: Config, plan: _CurationPlan) -> str:
         "PROMPT_CURATION_PROMPT_TEMPLATE",
         measured_tokens=plan.measured_tokens,
         trigger_tokens=plan.settings.trigger_tokens,
-        memory_lines=plan.memory_lines,
-        entrypoint_tokens=plan.entrypoint_tokens,
-        max_entrypoint_lines=plan.max_entrypoint_lines,
-        max_entrypoint_tokens=plan.max_entrypoint_tokens,
+        max_file_chars=plan.max_file_chars,
+        over_limit_files=", ".join(plan.over_limit) or "none",
         file_sizes=", ".join(f"{path} ({tokens} tokens)" for path, tokens in plan.curated.items()),
         upper_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,
@@ -201,13 +200,12 @@ def _findings(
         findings.append(f"the files total {total} tokens, below the floor of {plan.floor_tokens}")
     if total >= plan.measured_tokens:
         findings.append(f"the files did not shrink ({total} tokens)")
-    memory_after = after_run.get(_ENTRYPOINT)
-    lines_after = len(memory_after.decode("utf-8").splitlines()) if isinstance(memory_after, bytes) else 0
-    # Shorter lines alone keep the same lines out of the prompt, so a pass over the line cap must remove some.
-    if plan.memory_lines > plan.max_entrypoint_lines and lines_after >= plan.memory_lines:
-        findings.append(
-            f"MEMORY.md still has {lines_after} lines, more than the {plan.max_entrypoint_lines} that reach your prompt",
-        )
+    # A file over the limit left as long as it was keeps the same text out of the prompt; one pass may not fit it.
+    for path in plan.over_limit:
+        payload = after_run[path]
+        chars_after = len(payload.decode("utf-8")) if isinstance(payload, bytes) else 0
+        if chars_after >= len(plan.snapshot[path].decode("utf-8")):
+            findings.append(f"{path} is over the {plan.max_file_chars}-character prompt limit and did not get shorter")
     if loss := _content_loss(plan, total):
         findings.append(loss)
     return total, findings
@@ -280,7 +278,7 @@ def check_curation(ctx: AutomationContext) -> Ask | None:
         agent=agent_name,
         # A field named only "tokens" is redacted as a credential.
         file_tokens=plan.measured_tokens,
-        memory_lines=plan.memory_lines,
+        over_limit=list(plan.over_limit),
         target_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,
     )

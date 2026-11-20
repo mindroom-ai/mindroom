@@ -1341,8 +1341,6 @@ memory:
     provider: sentence_transformers
     config:
       model: {SENTENCE_TRANSFORMERS_DEFAULT}
-  file:
-    max_entrypoint_lines: 200
   search:
     mode: semantic
     include:

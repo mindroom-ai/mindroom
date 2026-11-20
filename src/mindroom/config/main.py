@@ -53,7 +53,12 @@ from mindroom.config.legacy_access import (
     persist_access_migration,
     validate_access_migration_source,
 )
-from mindroom.config.legacy_fields import approval_rule_a_file_rename_escapes, rename_legacy_knowledge_reranker
+from mindroom.config.legacy_fields import (
+    RETIRED_PROMPT_NAMES,
+    approval_rule_a_file_rename_escapes,
+    drop_retired_fields,
+    rename_legacy_knowledge_reranker,
+)
 from mindroom.config.matrix import (
     EventJournalConfig,
     MatrixSpaceConfig,
@@ -595,6 +600,12 @@ class Config(BaseModel):
         if not isinstance(value, list):
             return value
         return [{"path": plugin_entry} if isinstance(plugin_entry, str) else plugin_entry for plugin_entry in value]
+
+    @field_validator("prompts", mode="before")
+    @classmethod
+    def drop_retired_prompt_overrides(cls, value: object) -> object:
+        """Drop overrides of retired prompts, before unknown names are rejected."""
+        return drop_retired_fields(value, RETIRED_PROMPT_NAMES)
 
     @field_validator("prompts")
     @classmethod

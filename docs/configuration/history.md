@@ -47,7 +47,7 @@ defaults:
 
 ### How tokens are counted
 
-Every token limit, including `context_window`, the compaction thresholds, and `memory.file.max_entrypoint_tokens`, is counted as the model that receives the text counts tokens.
+Every token limit, including `context_window` and the compaction thresholds, is counted as the model that receives the text counts tokens.
 OpenAI models with a known tokenizer, such as GPT-4o, count exactly on OpenAI's own endpoints, Codex, and OpenRouter, and on Azure when the deployment is named after the model.
 Other models use an estimate that is deliberately high, by up to about three quarters for Claude and two thirds for Gemini, so limits act early rather than late.
 Each request to the model, including the first one after an approval, is sized from the request size the provider reported for the latest answer it continues; without one, such as after a history limit dropped older messages, another model answered, or the agent's system prompt or tools changed (including on the first reply of each day, because the system prompt names the date), or right after native compaction condensed the history, it uses the estimate.

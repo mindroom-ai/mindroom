@@ -187,10 +187,10 @@ How a private agent behaves:
 - Missing files are skipped with a warning in the logs.
 - Edits take effect on the next reply without a restart.
 
-`defaults.max_preload_chars` (default `50000`) caps the section.
-When it is exceeded, MindRoom drops whole files from the start of the list first and then trims the last remaining file from its end.
-Each affected file keeps its path and a marker with the omitted character count, so the agent can open the file for the rest.
-A cap too small to hold the headings and markers fails with `max_preload_chars=<n> cannot fit required context headings and omission markers`.
+`defaults.max_preload_file_chars` (default `30000`, at most `200000`) limits each file on its own, and the same limit applies to an inlined [`MEMORY.md`](../memory.md#backend-file).
+A longer file keeps its first whole lines that fit the limit, counted as they are in the file (only a line feed ends a line); only a first line longer than the limit keeps its first characters.
+A marker naming the file follows the kept text, says the rest is left out, and asks the agent to condense the file without losing information.
+One file growing never shortens or drops another, and the marker holds no count, so lines added past the cut leave the prompt unchanged.
 
 ## Listening
 
@@ -316,7 +316,7 @@ defaults:
   max_tool_calls_per_turn: 200
   worker_tools: [shell, filesystem, python]
   enable_streaming: true
-  max_preload_chars: 50000
+  max_preload_file_chars: 30000
 ```
 
 These defaults apply to each agent that leaves the same field unset:
@@ -352,7 +352,7 @@ These settings are global-only:
 | `coalescing.debounce_ms` | `1000` | Milliseconds (>= 0) to wait after unmarked media for more attachments or a trailing caption before replying; text replies immediately, and [marked submissions](../attachments.md#files-sent-with-text) use their own bound |
 | `show_stop_button` | `true` | Add a 🛑 reaction while an agent responds; see [Stop Button](../chat-commands.md#stop-button) |
 | `max_consecutive_agent_replies` | `50` | Consecutive agent or team messages (>= 1) before agents stop waking each other; see [Agents mentioning other agents](../authorization.md#agents-mentioning-other-agents) |
-| `max_preload_chars` | `50000` | Cap (>= 1) on preloaded context files; see [File-Based Context Loading](#file-based-context-loading) |
+| `max_preload_file_chars` | `30000` | Characters (1 to 200000) of each file inlined into the prompt, context files and `MEMORY.md` alike; see [File-Based Context Loading](#file-based-context-loading) |
 | `tool_output_auto_save_threshold_bytes` | `51200` | Larger tool outputs are saved to the workspace; see [Workspace and tool output files](../tools/execution-and-coding.md#workspace-and-tool-output-files) |
 | `allow_shell_without_worker` | `false` | Let the [`shell`](../tools/execution-and-coding.md#shell) tool run commands in the MindRoom process for agents whose `shell` does not run in a worker; when `false`, each such call is refused with a message naming this setting. `mindroom config init` sets it to `true` |
 | `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services, `google_vertex_adc`, and `slack_app` cannot be granted. See [Credential leases](../deployment/sandbox-proxy.md#credential-leases) |
