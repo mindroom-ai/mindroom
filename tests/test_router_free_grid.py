@@ -282,7 +282,7 @@ async def test_a_gated_tool_call_shows_one_card_from_the_agent_whose_turn_asks(
         grant_operation=None,
     )
     assert card is not None
-    transport = _transport(bots, {"card-1": card.sender_principal_id})
+    transport = _transport(bots, card.sender_principal_id)
     send, _resolve, _device_id = await transport.pinned_delivery("card-1")
     await send(_delivery(edits_event_id=edits_event_id))
 

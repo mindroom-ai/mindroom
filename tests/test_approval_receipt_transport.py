@@ -52,12 +52,16 @@ def _bot(name: str, *, device: str | None = None) -> MagicMock:
     )
 
 
-def _transport(bots: dict[str, MagicMock], cards: ApprovalDeliveryView | None = None) -> ApprovalMatrixTransport:
-    """Return the transport over these bots, reading card senders from ``cards`` or else knowing one card of code's."""
+def _transport(
+    bots: dict[str, MagicMock],
+    sender: str | None = _CODE,
+    cards: ApprovalDeliveryView | None = None,
+) -> ApprovalMatrixTransport:
+    """Return the transport over these bots, reading card senders from ``cards``, or knowing one card ``sender`` sent."""
     if cards is None:
         cards = MagicMock(principal_id=_BOOKS)
         cards.approvals.approval_card_sender = AsyncMock(
-            side_effect=lambda *, delivery_id: (_CODE, _ROOM) if delivery_id == "card-1" else None,
+            side_effect=lambda *, delivery_id: (sender, _ROOM) if delivery_id == "card-1" else None,
         )
     return ApprovalMatrixTransport(
         bots=lambda: bots,
