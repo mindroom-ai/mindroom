@@ -252,10 +252,7 @@ def _format_welcome_message(
             entity_entry += f": {description}"
         entity_list.append(entity_entry)
 
-    welcome_msg = (
-        "🎉 **Welcome to MindRoom!**\n\n"
-        "The AI agents and teams in this room answer you directly. 🤖\n\n"
-    )
+    welcome_msg = "🎉 **Welcome to MindRoom!**\n\nThe AI agents and teams in this room answer you directly. 🤖\n\n"
 
     if entity_list:
         welcome_msg += "🧠 **Available agents and teams in this room:**\n"
