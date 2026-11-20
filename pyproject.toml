@@ -493,8 +493,8 @@ zendesk = [
   "requests",
 ]
 zep = [
-  # Agno 3.2.1 ZepTools calls user.add, which zep-cloud 4 removed.
-  "zep-cloud>=3.3,<4",
+  # zep-cloud 4 renamed the SDK calls Agno 3.2.1 ZepTools makes; MindRoom's shim targets 4.1.
+  "zep-cloud>=4.1",
 ]
 zoom = [
   "requests",

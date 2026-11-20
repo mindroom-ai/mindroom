@@ -134,7 +134,7 @@ OFFLINE_CLIENTS = {
     "jira": "agno.tools.jira.JIRA",
     "mem0": "agno.tools.mem0.MemoryClient",
     "neo4j": "agno.tools.neo4j.GraphDatabase",
-    "zep": "agno.tools.zep.Zep",
+    "zep": "mindroom.tools.agno_compat_zep.Zep",
 }
 # HTTP requests a toolkit sends while constructed, refused before they dial; the goldens record the refused outcome.
 REFUSED_REQUESTS = {
