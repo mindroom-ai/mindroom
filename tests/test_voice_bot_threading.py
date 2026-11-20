@@ -14,6 +14,7 @@ import pytest
 
 from mindroom import inbound_turn_normalizer
 from mindroom.attachments.storage import _attachment_id_for_event, load_attachment
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.coalescing.gate import CoalescingGate
 from mindroom.config.main import Config
@@ -697,6 +698,8 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
         if turn_active:
             queued_signal.finish_response_turn()
 
+    # Wait out background settles, so a second edit attempt would show up here.
+    assert await wait_for_background_tasks(timeout=5, owner=bot._visible_voice_echo.deps.runtime)
     assert echo_failures == [echo_error]
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.has_pending_human_messages()
