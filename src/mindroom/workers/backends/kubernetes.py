@@ -300,12 +300,11 @@ class KubernetesWorkerBackend:
             # the cache keeps these mounts to notice a workspace that appears after planning.
             workspace_mounts = self._plan_workspace_mounts(spec, launch, create_shared=True)
             shared_directory_mounts = self._plan_shared_directory_mounts(spec, launch)
-            ssh = self._ssh_marked(spec, launch, shared_directory_mounts)
             self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
             auth_secret_applied = True
             replacing_stale_worker = False
             while True:
-                recreated = self._resources.apply_deployment(
+                applied = self._resources.apply_deployment(
                     worker_key=worker_key,
                     worker_id=worker_id,
                     state_subpath=state_subpath,
@@ -317,6 +316,7 @@ class KubernetesWorkerBackend:
                     resource_profile=spec.resource_profile,
                     recreate=replacing_stale_worker,
                 )
+                recreated = applied.recreated
                 startup_triggered = should_restart or recreated
                 destructive_failure_allowed = destructive_failure_allowed or startup_triggered
                 if startup_triggered and reporter is None:
@@ -330,7 +330,8 @@ class KubernetesWorkerBackend:
                     )
                     self._resources.patch_deployment(worker_id, annotations=annotations)
                 self._sync_shared_credentials(spec, launch)
-                self._resources.apply_service(worker_id, ssh=ssh)
+                # The Service follows the mark of the template just rendered, never a second reading of the plan.
+                self._resources.apply_service(worker_id, ssh=applied.ssh)
                 deployment = self._resources.wait_for_ready(
                     worker_id,
                     timeout_seconds=self.config.ready_timeout_seconds,

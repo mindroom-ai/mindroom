@@ -24,7 +24,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import httpx
 
@@ -191,6 +191,14 @@ class KubernetesDeployment(Protocol):
     def status(self) -> _KubernetesDeploymentStatus: ...  # noqa: D102
 
 
+@dataclass(frozen=True, slots=True)
+class AppliedDeployment:
+    """What applying one worker Deployment did; ``ssh`` says the template it rendered has the tailnet SSH mark."""
+
+    recreated: bool
+    ssh: bool
+
+
 @dataclass(slots=True)
 class _DeploymentMetadataSnapshot:
     name: str
@@ -294,8 +302,6 @@ class _CoreApiProtocol(Protocol):
     def read_namespaced_service(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
-
-    def patch_namespaced_service(self, name: str, namespace: str, body: dict[str, object]) -> object: ...
 
     def delete_namespaced_service(self, name: str, namespace: str) -> None: ...
 
@@ -712,11 +718,15 @@ class KubernetesResourceManager:
             raise
 
     def apply_service(self, worker_id: str, *, ssh: bool) -> None:
-        """Create-or-patch one worker Service, with the sshd port when the worker has the tailnet SSH mark."""
+        """Create-or-patch one worker Service, with the sshd port when the worker has the tailnet SSH mark.
+
+        The patch is a JSON merge patch, which replaces the port list.
+        The client's default strategic merge keeps a port the manifest no longer names, such as a lost mark's 2222.
+        """
         self._apply_object(
             read_fn=self._core.read_namespaced_service,
             create_fn=self._core.create_namespaced_service,
-            patch_fn=self._core.patch_namespaced_service,
+            patch_fn=lambda name, _namespace, body: self._merge_patch("services", name, body),
             resource_name=worker_id,
             manifest=self._service_manifest(worker_id, ssh=ssh),
         )
@@ -758,10 +768,11 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
         recreate: bool = False,
-    ) -> bool:
+    ) -> AppliedDeployment:
         """Create-or-patch one worker Deployment, recreating it for pod-template drift or when asked.
 
-        Returns whether the Deployment was recreated.
+        Returns whether the Deployment was recreated, and the tailnet SSH mark of the template rendered for it,
+        which the worker's Service follows.
         """
         manifest = self._deployment_manifest(
             worker_key=worker_key,
@@ -774,17 +785,18 @@ class KubernetesResourceManager:
             state_scope_worker_key=state_scope_worker_key,
             resource_profile=resource_profile,
         )
+        desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
+        ssh = cast("dict[str, str]", desired_metadata["labels"]).get(LABEL_TAILNET_SSH) == "true"
         existing = self.read_deployment(worker_id)
         if existing is not None:
             existing_annotations = existing.metadata.annotations or {}
-            desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
             desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
             if (
                 recreate
                 or existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]
             ):
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
-                return True
+                return AppliedDeployment(recreated=True, ssh=ssh)
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -792,7 +804,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
-        return False
+        return AppliedDeployment(recreated=False, ssh=ssh)
 
     def patch_deployment(
         self,
@@ -920,11 +932,15 @@ class KubernetesResourceManager:
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
+        self._merge_patch("secrets", secret_name, body)
+
+    def _merge_patch(self, resource: Literal["secrets", "services"], name: str, body: dict[str, object]) -> None:
+        """Send one JSON merge patch (RFC 7386), under which a list in ``body`` replaces the stored one."""
         api_client = self._core.api_client
         api_client.call_api(
-            "/api/v1/namespaces/{namespace}/secrets/{name}",
+            f"/api/v1/namespaces/{{namespace}}/{resource}/{{name}}",
             "PATCH",
-            {"name": secret_name, "namespace": self.config.namespace},
+            {"name": name, "namespace": self.config.namespace},
             [],
             {
                 "Accept": api_client.select_header_accept(
@@ -935,7 +951,7 @@ class KubernetesResourceManager:
             body=body,
             post_params=[],
             files={},
-            response_type="V1Secret",
+            response_type={"secrets": "V1Secret", "services": "V1Service"}[resource],
             auth_settings=["BearerToken"],
             _return_http_data_only=True,
             _preload_content=True,

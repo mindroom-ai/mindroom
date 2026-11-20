@@ -37,6 +37,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
 )
 from mindroom.workers.backends._lifecycle import DEFAULT_IDLE_TIMEOUT_SECONDS
 from mindroom.workers.backends.worker_security import docker_worker_security_policy_signature
+from mindroom.workers.models import LABEL_TAILNET_SSH
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -121,6 +122,8 @@ _DOCKER_RESERVED_LABEL_NAMES = frozenset(
         LABEL_IMAGE_REFERENCE,
         LABEL_RUNTIME_NAMESPACE,
         LABEL_STORAGE_LAYOUT,
+        # Only a launch that passed the tailnet SSH rule carries the mark.
+        LABEL_TAILNET_SSH,
     },
 )
 

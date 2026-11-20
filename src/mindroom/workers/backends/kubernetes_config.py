@@ -40,7 +40,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     RESERVED_EXTRA_CONTAINER_NAMES,
     RESERVED_EXTRA_VOLUME_NAMES,
 )
-from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.models import LABEL_TAILNET_SSH, SCRIPT_RESOURCE_PROFILE_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -375,7 +375,11 @@ class KubernetesWorkerBackendConfig:
     image_pull_secrets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """Reject storage prefixes that are not strict relative descendants."""
+        """Reject storage prefixes that are not strict relative descendants, and the label only MindRoom may set."""
+        if LABEL_TAILNET_SSH in self.extra_labels:
+            # The label is the tailnet SSH mark, which only a launch that passed the eligibility rule carries.
+            msg = f"{_EXTRA_LABELS_JSON_ENV} must not set {LABEL_TAILNET_SSH}; MindRoom sets it on eligible workers."
+            raise WorkerBackendError(msg)
         parts = self.storage_subpath_prefix.split("/")
         if (
             not self.storage_subpath_prefix

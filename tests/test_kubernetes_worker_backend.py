@@ -17,7 +17,7 @@ from dataclasses import asdict, replace
 from functools import cache
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -184,6 +184,29 @@ _MAPPING_KEYS = {"annotations", "labels", "matchLabels", "selector", "stringData
 
 def _encoded_secret_data(values: dict[str, str]) -> dict[str, str]:
     return {key: base64.b64encode(value.encode("utf-8")).decode("ascii") for key, value in values.items()}
+
+
+def _json_merge_patch(target: object, patch: object) -> object:
+    """Apply an RFC 7386 merge patch, as the API server does for ``application/merge-patch+json``: lists are replaced."""
+    if not isinstance(patch, dict):
+        return deepcopy(patch)
+    merged = dict(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = _json_merge_patch(merged.get(key), value)
+    return merged
+
+
+def _strategic_merge_service(target: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """Apply a strategic merge patch to a Service, whose ``spec.ports`` merge by ``port``: an omitted port stays."""
+    merged = cast("dict[str, Any]", _json_merge_patch(target, patch))
+    ports = {port["port"]: port for port in target["spec"]["ports"]}
+    for port in patch["spec"]["ports"]:
+        ports[port["port"]] = {**ports.get(port["port"], {}), **port}
+    merged["spec"]["ports"] = list(ports.values())
+    return merged
 
 
 def _to_namespace(value: object, *, key: str | None = None) -> object:
@@ -355,6 +378,8 @@ def _absence_inventory(items: dict[str, object], namespace: str, **kwargs: objec
 class _FakeCoreApi:
     def __init__(self) -> None:
         self.services: dict[str, object] = {}
+        # Each Service as the API server stores it, which a patch merges into under its content type's rules.
+        self._service_bodies: dict[str, dict[str, Any]] = {}
         self.secrets: dict[str, object] = {}
         self.pods: dict[str, object] = {}
         self.read_service_names: list[str] = []
@@ -379,19 +404,29 @@ class _FakeCoreApi:
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object:
         _ = namespace
         self.created_bodies.append(body)
-        service = _to_namespace(body)
-        self.services[service.metadata.name] = service
-        return service
+        return self._store_service(body["metadata"]["name"], deepcopy(body))
 
-    def patch_namespaced_service(self, name: str, namespace: str, body: dict[str, object]) -> object:
+    def patch_namespaced_service(self, name: str, namespace: str, body: dict[str, Any]) -> object:
+        """Patch as the generated client does for a mapping body: a strategic merge patch.
+
+        The backend sends a merge patch instead; this is what a Service would keep if it used the client's method.
+        """
         _ = namespace
-        service = _to_namespace(body)
-        self.services[name] = service
-        return service
+        return self._store_service(name, _strategic_merge_service(self._service_bodies[name], body))
+
+    def merge_patch_namespaced_service(self, name: str, namespace: str, body: object) -> object:
+        _ = namespace
+        return self._store_service(name, cast("dict[str, Any]", _json_merge_patch(self._service_bodies[name], body)))
+
+    def _store_service(self, name: str, body: dict[str, Any]) -> object:
+        self._service_bodies[name] = body
+        self.services[name] = _to_namespace(body)
+        return self.services[name]
 
     def delete_namespaced_service(self, name: str, namespace: str) -> None:
         _ = namespace
         self.services.pop(name, None)
+        self._service_bodies.pop(name, None)
 
     def read_namespaced_secret(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -459,7 +494,7 @@ class _FakeApiClient:
 
     def call_api(
         self,
-        _resource_path: str,
+        resource_path: str,
         _method: str,
         path_params: dict[str, str],
         _query_params: list[object],
@@ -471,6 +506,9 @@ class _FakeApiClient:
         assert header_params["Content-Type"] == "application/merge-patch+json"
         name = path_params["name"]
         namespace = path_params["namespace"]
+        if resource_path == "/api/v1/namespaces/{namespace}/services/{name}":
+            return self._core_api.merge_patch_namespaced_service(name, namespace, body)
+        assert resource_path == "/api/v1/namespaces/{namespace}/secrets/{name}"
         return self._core_api.patch_namespaced_secret(name, namespace, body)
 
 
@@ -488,7 +526,7 @@ def test_kubernetes_deployment_snapshot_tolerates_missing_status() -> None:
 
 
 def test_kubernetes_deployment_snapshot_tolerates_missing_labels() -> None:
-    """Labels are carried but never read; their absence must not fail the pass."""
+    """A Deployment listed without labels carries no mark; their absence must not fail the pass."""
     payload = {
         "metadata": {"name": "mindroom-worker"},
         "spec": {"replicas": 1},
@@ -6203,6 +6241,66 @@ def test_kubernetes_handle_endpoint_follows_the_deployment_label(tmp_path: Path)
     assert [handle.ssh_endpoint for handle in backend.list_workers(now=13.0)] == [None]
 
 
+def test_kubernetes_service_ports_follow_the_mark_in_both_directions(tmp_path: Path) -> None:
+    """Re-applying a Service replaces its ports, so one that loses the mark no longer exposes 2222."""
+    backend, _apps_api, core_api, _runtime_paths = _ssh_backend(tmp_path)
+
+    def applied_ports() -> list[str]:
+        return [port.name for port in core_api.services["worker"].spec.ports]
+
+    backend._resources.apply_service("worker", ssh=True)
+    assert applied_ports() == ["api", "ssh"]
+    backend._resources.apply_service("worker", ssh=False)
+    assert applied_ports() == ["api"]
+    backend._resources.apply_service("worker", ssh=True)
+    assert applied_ports() == ["api", "ssh"]
+
+
+def test_kubernetes_service_follows_the_mark_the_pod_was_rendered_with(tmp_path: Path) -> None:
+    """A membership change during provisioning cannot leave the Service and the pod disagreeing about SSH."""
+    backend, apps_api, core_api, runtime_paths = _ssh_backend(tmp_path)
+    create_shared_directory(runtime_paths, owner="code", name="report")
+    plan_for_cache = backend._plan_shared_directory_mounts
+
+    def plan_then_join(spec: WorkerSpec, launch: WorkerLaunchConfig) -> object:
+        mounts = plan_for_cache(spec, launch)
+        if not mounts:
+            add_shared_directory_member(runtime_paths, owner="code", name="report", member="mine")
+        return mounts
+
+    backend._plan_shared_directory_mounts = plan_then_join  # type: ignore[method-assign]
+
+    handle = backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+
+    [body] = apps_api.created_bodies
+    assert _share_mounts(body)[0]["readOnly"] is True
+    assert _SSH_LABEL not in body["spec"]["template"]["metadata"]["labels"]
+    assert core_api.created_bodies[0]["spec"]["ports"] == [_API_PORT]
+    assert handle.ssh_endpoint is None
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_kubernetes_config_reserves_the_tailnet_ssh_label(tmp_path: Path, value: str) -> None:
+    """An operator label cannot mark a worker, because only an eligible launch sets the tailnet SSH label."""
+    backend, _apps_api, _core_api, _runtime_paths = _ssh_backend(tmp_path)
+    with pytest.raises(WorkerBackendError, match=r"must not set mindroom\.ai/tailnet-ssh"):
+        replace(backend.config, extra_labels={"mindroom.ai/tenant": "test", _SSH_LABEL: value})
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "MINDROOM_WORKER_BACKEND=kubernetes\n"
+        "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+        f"MINDROOM_KUBERNETES_WORKER_LABELS_JSON={json.dumps({_SSH_LABEL: value})}",
+        encoding="utf-8",
+    )
+    with pytest.raises(WorkerBackendError, match=r"must not set mindroom\.ai/tailnet-ssh"):
+        KubernetesWorkerBackendConfig.from_runtime(resolve_primary_runtime_paths(config_path=config_path))
+
+
 def test_kubernetes_ready_cache_rechecks_the_ssh_mark(tmp_path: Path) -> None:
     """Opting an agent in or out leaves the launch digest alone, so the ready cache compares the mark itself."""
     backend, apps_api, _core_api, _runtime_paths = _ssh_backend(tmp_path)
@@ -6251,7 +6349,7 @@ def test_joining_a_directory_removes_the_kubernetes_mark(tmp_path: Path) -> None
     assert _SSH_LABEL not in joined["metadata"]["labels"]
     assert _SSH_LABEL not in joined["spec"]["template"]["metadata"]["labels"]
     assert _container_ports(joined) == [{"containerPort": 8766, "name": "api"}]
-    # The fake keeps the last Service manifest applied, which again names the runner port alone.
+    # The running worker's Service is patched, not recreated, and the patch replaces its ports.
     assert [port.name for port in core_api.services[first.worker_id].spec.ports] == ["api"]
     assert second.ssh_endpoint is None
     assert cached.ssh_endpoint is None

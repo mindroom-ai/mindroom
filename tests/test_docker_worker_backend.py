@@ -1471,6 +1471,8 @@ def test_docker_worker_config_allows_explicit_endpoint_host_with_wildcard_publis
         "mindroom.ai/component",
         # An operator override would make startup remove every container as one from an older release.
         "mindroom.ai/storage-layout",
+        # Only an eligible launch sets the mark.
+        "mindroom.ai/tailnet-ssh",
     ],
 )
 def test_docker_worker_backend_rejects_reserved_extra_labels(
@@ -1502,6 +1504,7 @@ def test_docker_worker_backend_rejects_reserved_extra_labels(
         "mindroom.ai/launch-config-hash",
         "mindroom.ai/worker-key",
         "mindroom.ai/component",
+        "mindroom.ai/tailnet-ssh",
     ],
 )
 def test_docker_worker_config_rejects_reserved_extra_labels_from_env(
