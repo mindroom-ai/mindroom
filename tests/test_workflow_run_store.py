@@ -244,6 +244,36 @@ def test_concurrent_writers_reserve_one_run_and_number_nodes_without_gaps(tmp_pa
     assert sorted(node.seq for node in nodes) == list(range(1, 17))
 
 
+def test_reserve_counts_the_owners_live_top_level_runs_in_the_write_that_stores_the_intent(tmp_path: Path) -> None:
+    """Racing starts at the limit store exactly the limit; ended and nested runs and other owners take no slot."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    store.reserve_run(_run(_RUN_A, origin_job_id="job-a"))
+    store.reserve_run(_run(_RUN_B, parent_run_id=_RUN_A, parent_node_key="@0"))
+    store.reserve_run(_run(_RUN_C, owner_user_id="@other:example.org"))
+    store.update_run(store.reserve_run(_run("wf-" + "d" * 32))[0].run_id, state=WorkflowRunState.COMPLETED)
+
+    def reserve(number: int) -> str:
+        try:
+            return str(store.reserve_run(_run(f"wf-{number:032x}"), max_active=3)[1])
+        except WorkflowRunStoreError as refusal:
+            return str(refusal)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        answers = list(pool.map(reserve, range(8)))
+
+    limit = "You have 3 workflow runs in progress, the limit. Wait for one to end or cancel one."
+    assert sorted(answers) == ["True"] * 2 + [limit] * 6
+    assert (
+        len(store.list_runs(owner_user_id="@requester:example.org", top_level_only=True, include_finished=False)) == 3
+    )
+    # The call that reserved a run finds it again at the limit, and a refused start left no row.
+    assert store.reserve_run(_run("wf-" + "e" * 32, origin_job_id="job-a"), max_active=3) == (
+        store.get_run(_RUN_A),
+        False,
+    )
+    assert len(store.list_runs()) == 6
+
+
 def test_delete_intent_removes_only_a_run_that_never_started(tmp_path: Path) -> None:
     """An intent is a starting run with attempt 0; anything further along stays."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")

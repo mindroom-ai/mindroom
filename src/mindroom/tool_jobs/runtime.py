@@ -10,8 +10,9 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.receipt_readers import without_approval_receipt
@@ -101,7 +102,9 @@ class JobSpec:
     ``tool_name`` and ``kind`` are what people and models see: a tool's job is named by its function, a subagent's
     (``kind="delegation"``) by the agent it runs. ``adapter`` is the exact mapping the runtime admits, saves, and hands
     to cleanup. ``cancel`` settles the job's own work after a cancellation or shutdown in this process, before the
-    runtime's cleanup for its kind.
+    runtime's cleanup for its kind. ``refused`` undoes what preparing the job wrote when the runtime refuses the job
+    and holds none with its ID, and ``handle`` words what a call that stops waiting for the job returns, the job's
+    summary when None.
     """
 
     tool_name: str
@@ -110,6 +113,24 @@ class JobSpec:
     adapter: dict[str, Any]
     operation: _Operation
     cancel: _Cleanup | None = None
+    refused: Callable[[], Awaitable[object]] | None = None
+    handle: Callable[[BackgroundJob], str] | None = None
+
+
+@runtime_checkable
+class ManagedJobToolkit(Protocol):
+    """A toolkit that prepares the job a managed call of one of its functions runs as."""
+
+    async def managed_job(
+        self,
+        function_name: str,
+        arguments: dict[str, Any],
+        *,
+        job_id: str,
+        runtime: ToolJobRuntime,
+    ) -> JobSpec | str | None:
+        """Return the job, the sentence that refuses the call, or None for a function that runs as any tool does."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -392,6 +413,7 @@ class ToolJobRuntime:
         # Jobs are keyed by their recipient, room, thread, and requester.
         self._by_conversation: dict[tuple[str, str | None, str | None, str | None], dict[str, _Entry]] = {}
         self._lock = asyncio.Lock()
+        self._admissions: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._closed = False
         self._shutdown_task: asyncio.Task[None] | None = None
         self.changed = asyncio.Event()
@@ -711,6 +733,13 @@ class ToolJobRuntime:
             await self._request_cancel(entry)
             return
         entry.task = asyncio.create_task(self._run(entry, operation), name=f"tool-job:{entry.job.job_id}")
+
+    def admission(self, job_id: str) -> asyncio.Lock:
+        """Return the lock one delivery of a call holds from preparing its job until the runtime answered its start.
+
+        Deliveries of the same call take turns, so what a refused one takes back was prepared by no other.
+        """
+        return self._admissions.setdefault(job_id, asyncio.Lock())
 
     def owns_execution(self, job_id: str, adapter: dict[str, Any]) -> bool:
         """Recognize exact accepted adapter ownership even if its former waiter was cancelled."""

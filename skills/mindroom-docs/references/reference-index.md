@@ -56,6 +56,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Tools | Dynamic Tools | `tools/dynamic-tools.md` | `tools/dynamic-tools/index.md` | `page__tools__dynamic-tools__index.md` |
 | Tools | Minimal Agent Mode | `tools/agent-cli.md` | `tools/agent-cli/index.md` | `page__tools__agent-cli__index.md` |
 | Tools | Background Python Scripts | `tools/background-scripts.md` | `tools/background-scripts/index.md` | `page__tools__background-scripts__index.md` |
+| Tools | Workflows | `tools/workflows.md` | `tools/workflows/index.md` | `page__tools__workflows__index.md` |
 | Tools | Worker Computer | `tools/worker-computer.md` | `tools/worker-computer/index.md` | `page__tools__worker-computer__index.md` |
 | Tools | Desktop Bridge | `tools/desktop.md` | `tools/desktop/index.md` | `page__tools__desktop__index.md` |
 | Tools > Tool Catalog | Execution & Coding | `tools/execution-and-coding.md` | `tools/execution-and-coding/index.md` | `page__tools__execution-and-coding__index.md` |

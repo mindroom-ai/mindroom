@@ -25,7 +25,7 @@ from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals
-from mindroom.tool_jobs.authorization import locally_allowed
+from mindroom.tool_jobs.authorization import locally_allowed, toolkit_offered
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_jobs, held_jobs, held_notice, next_follow_up_id
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
@@ -227,6 +227,7 @@ class ToolJobRuntimeCoordinator:
         if owner.agent_name not in config.agents:
             return "denied"
         entities = _accessed_entities(config, owner.recipient, owner.agent_name)
+        tools = config_plugins(config, self.runtime_paths).tools
         if job.kind == "delegation":
             child = delegation_child(job)
             child_name = child.child_agent_name
@@ -237,15 +238,20 @@ class ToolJobRuntimeCoordinator:
             ):
                 return "denied"
             entities.add(child_name)
-        elif not locally_allowed(
-            config,
-            owner,
-            tools=config_plugins(config, self.runtime_paths).tools,
-            tool_name=job.tool_name,
-            toolkit_name=job.toolkit_name,
-            origin=job.adapter.get("origin", {}),
-            depth=job.depth,
-            authority=job.adapter.get("authority", {}),
+        elif not (
+            # A run's job answers for the run, not for one call: its agent must still have the toolkit.
+            toolkit_offered(config, owner, tools=tools, name="workflow", depth=job.depth)
+            if job.kind == "workflow"
+            else locally_allowed(
+                config,
+                owner,
+                tools=tools,
+                tool_name=job.tool_name,
+                toolkit_name=job.toolkit_name,
+                origin=job.adapter.get("origin", {}),
+                depth=job.depth,
+                authority=job.adapter.get("authority", {}),
+            )
         ):
             return "denied"
         if not _transport_allows_actor(config, owner.recipient, owner.agent_name):

@@ -164,6 +164,7 @@ if TYPE_CHECKING:
     from .event_journal import EventJournalStore
     from .orchestration.config_updates import ConfigUpdatePlan
     from .orchestration.services import RuntimeService
+    from .workflow_runs.engine import WorkflowEngine
 logger = get_logger(__name__)
 
 
@@ -512,6 +513,11 @@ class _MultiAgentOrchestrator:
     def script_runtime(self) -> ScriptRuntimeLifecycle:
         """Return the process-local background-script lifecycle collaborator."""
         return self._script_runtime
+
+    @property
+    def workflow_engine(self) -> WorkflowEngine:
+        """Return the process-local workflow engine."""
+        return self._workflow_runtime.engine
 
     def active_call_identities(self) -> list[ActiveResponseIdentity]:
         """Return one identity per voice call that any bot has joined or is joining."""

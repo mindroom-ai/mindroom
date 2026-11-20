@@ -1,0 +1,1135 @@
+"""Tests for the `workflow` toolkit: the run's job, its admission, the inline path, ownership and cancellation.
+
+Level: engine harness (`WorkflowStack`): the real stores, broker, engine and job runtime; the test plays the script.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import sqlite3
+import threading
+from dataclasses import asdict, replace
+from functools import partial
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+import pytest
+import pytest_asyncio
+
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agents import apply_tool_approval_capability
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
+from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
+from mindroom.custom_tools.workflow import WorkflowTools
+from mindroom.delegation import lifecycle
+from mindroom.delegation.state import SubagentPersona
+from mindroom.hooks import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
+    HookRegistry,
+    hook,
+)
+from mindroom.llm.runs import RunStatus
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.script_runs import manager as manager_module
+from mindroom.script_runs.manager import ScriptRunManagerError
+from mindroom.script_runs.models import ScriptRunState
+from mindroom.tool_jobs.execution import assembled_job_tools
+from mindroom.tool_jobs.publication import _job_state
+from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.runtime import BackgroundJob
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_names
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
+from mindroom.workflow_runs.engine import WorkflowLimits
+from mindroom.workflow_runs.models import WorkflowRunState
+from tests.access_schema_support import with_responder_access
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.test_tool_hooks import _plugin
+from tests.tool_job_helpers import (
+    job_actor,
+    resume_job_turn,
+    run_job_turn,
+    tool_job_journal,
+    wait_for_status,
+)
+from tests.workflow_helpers import CallFailed, NodeFailed, WorkflowStack, tool_args, workflow_stack
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+    from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, ToolEnvironmentContext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+SCRIPT = "def main(args):\n    return 'counted'\n"
+_UNKNOWN = "No workflow run {} in your runs."
+
+
+@pytest.fixture(autouse=True)
+def _scripts_can_run_here(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the placement check pass on every platform; the stack starts no process."""
+    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
+
+
+@pytest_asyncio.fixture
+async def stack(tmp_path: Path) -> AsyncIterator[WorkflowStack]:
+    """The engine harness with the `workflow` toolkit for its owner and the real job runtime."""
+    with workflow_stack(tmp_path, extra_tools=("workflow",)) as stack:
+        await stack.open_jobs()
+        yield stack
+        await stack.close()
+
+
+def _other_requester(stack: WorkflowStack) -> ToolRuntimeContext:
+    return replace(stack.context, requester_id="@bob:example.test")
+
+
+async def _started(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
+    """Start a run as its job and return the handle, once its first attempt runs."""
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT, **arguments))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+    return handle
+
+
+async def _inline(stack: WorkflowStack, runs: int = 1, **options: object) -> asyncio.Task[str]:
+    """Start a run as a delegated child's call, which waits for it; return the waiting call once the run runs."""
+    call = asyncio.create_task(stack.call("start_workflow", depth=1, source=SCRIPT, **options))
+    await stack.until(
+        lambda: [run.state for run in stack.store.list_runs()].count(WorkflowRunState.RUNNING) == runs,
+    )
+    return call
+
+
+async def _waits_for_admission(stack: WorkflowStack) -> None:
+    """Wait until a start has written its intent and waits for the job runtime, whose lock the test holds."""
+    await stack.until(lambda: stack.store.list_runs() and stack.jobs._lock._waiters)
+
+
+def _job_id(stack: WorkflowStack, call_id: str) -> str:
+    """Return the ID of the job a managed call of the stack's owner with *call_id* runs as."""
+    identity = {"owner": asdict(stack.context.execution_identity), "run_id": "run", "tool_call_id": call_id}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+async def _refused(stack: WorkflowStack, name: str, **options: object) -> str:
+    """Return the sentence a refused call fails with."""
+    with pytest.raises(CallFailed) as refusal:
+        await stack.call(name, **options)
+    return str(refusal.value)
+
+
+async def _ended_job(stack: WorkflowStack, job_id: str) -> BackgroundJob:
+    owner = stack.context.execution_identity
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        return (await stack.jobs.wait(job_id, owner=owner, depth=0)).job
+
+
+@pytest.mark.asyncio
+async def test_start_returns_a_handle_and_its_job_delivers_the_whole_report(stack: WorkflowStack) -> None:
+    """The call returns at once with the run's ID, and the job ends with the report in full, not a summary."""
+    handle = await _started(stack, title="Count things")
+
+    assert handle.keys() == {"job_id", "run_id", "status", "title"}
+    assert handle["run_id"].startswith("wf-")
+    assert (handle["status"], handle["title"]) == ("running", "Count things")
+    await stack.finish_attempt(result="x" * 20_000)
+    job = await _ended_job(stack, handle["job_id"])
+
+    assert (job.kind, job.tool_name, job.status) == ("workflow", "workflow", "completed")
+    assert job.adapter == {"workflow_job": handle["job_id"], "workflow": handle["run_id"]}
+    assert len(str(await stack.collect(job))) == 20_000
+    assert stack.store.get_run(handle["run_id"]).job_id == handle["job_id"]
+
+
+@pytest.mark.asyncio
+async def test_a_report_that_is_not_text_is_delivered_as_indented_json(stack: WorkflowStack) -> None:
+    """A JSON report reaches the agent as JSON it can read."""
+    handle = await _started(stack)
+    await stack.finish_attempt(result={"counted": 3})
+
+    assert await stack.collect(await _ended_job(stack, handle["job_id"])) == '{\n  "counted": 3\n}'
+
+
+@pytest.mark.asyncio
+async def test_refused_admission_starts_no_process_and_reserves_no_run(stack: WorkflowStack) -> None:
+    """A job the runtime does not admit leaves nothing behind: the intent is deleted and no script starts."""
+    stack.refuse_admission()
+
+    with pytest.raises(CallFailed, match="not available"):
+        await stack.call("start_workflow", source=SCRIPT)
+
+    assert stack.scripts.launched == []
+    assert stack.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_before_its_job_is_admitted_starts_nothing_and_frees_its_run_slot(
+    stack: WorkflowStack,
+) -> None:
+    """A call cancelled while its job waits for the runtime has no job, so its intent goes at once; a retry starts anew."""
+    async with stack.jobs._lock:
+        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await _waits_for_admission(stack)
+        first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert stack.store.list_runs() == []
+    assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0) == []
+    await _started(stack, call_id="call-1")
+    assert len(stack.store.list_runs()) == 1
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_while_it_reserves_its_run_takes_the_intent_back(stack: WorkflowStack) -> None:
+    """The write of a cancelled call still ends, and the call then deletes the intent no job will ever own."""
+    writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        call = asyncio.create_task(stack.call("start_workflow", source=SCRIPT))
+        await asyncio.sleep(0.1)
+        call.cancel()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    # Long enough for a write that the call did not wait for to land.
+    await asyncio.sleep(0.3)
+
+    assert stack.store.list_runs() == []
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_a_redelivery_cancelled_while_it_finds_its_run_takes_nothing_from_the_admitted_job(
+    stack: WorkflowStack,
+) -> None:
+    """A cancelled call takes back only an intent it wrote itself, never the run an earlier delivery was admitted with."""
+    stack.scripts.hold_launch = asyncio.Event()
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    await stack.until(lambda: stack.scripts.launched)
+    writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        again = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await asyncio.sleep(0.1)
+        again.cancel()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    with pytest.raises(asyncio.CancelledError):
+        await again
+
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.STARTING
+    stack.scripts.hold_launch.set()
+    await stack.until(lambda: stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_retry_takes_back_an_intent_that_no_job_owns(stack: WorkflowStack) -> None:
+    """An intent an earlier delivery left without a job is taken back by the delivery the runtime refuses."""
+    leftover = await WorkflowTools(stack.context.config)._reserve(
+        stack.engine,
+        stack.context,
+        _job_id(stack, "call-1"),
+        {"source": SCRIPT, "args": None, "title": None, "max_concurrent": 16, "resource_profile": None},
+    )
+    stack.refuse_admission()
+
+    with pytest.raises(CallFailed, match="not available"):
+        await stack.call("start_workflow", source=SCRIPT, call_id="call-1")
+
+    assert leftover[1]
+    assert stack.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_redelivery_takes_nothing_from_the_job_that_was_admitted(stack: WorkflowStack) -> None:
+    """A delivery refused while the call's job exists leaves that job's intent, which its launch is about to use."""
+    stack.scripts.hold_launch = asyncio.Event()
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    await stack.until(lambda: stack.scripts.launched)
+    stack.refuse_admission()
+
+    with pytest.raises(CallFailed):
+        await stack.call("start_workflow", source=SCRIPT, call_id="call-1")
+
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.STARTING
+    stack.admission = "allowed"
+    stack.scripts.hold_launch.set()
+    await stack.until(lambda: stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_start_cancelled_while_it_takes_its_intent_back_finishes_before_the_next_delivery(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The intent of a refused start is gone before the next delivery of the call prepares, so that one keeps its run."""
+    grants = iter(["denied"])
+    stack.jobs._grant = lambda _job: next(grants, "allowed")
+    deleting, release = threading.Event(), threading.Event()
+    delete_intent = stack.store.delete_intent
+
+    def held(run_id: str) -> bool:
+        deleting.set()
+        release.wait(SETTLE_TIMEOUT_SECONDS)
+        return delete_intent(run_id)
+
+    monkeypatch.setattr(stack.store, "delete_intent", held)
+    stack.scripts.hold_launch = asyncio.Event()
+    first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    await stack.until(deleting.is_set)
+    first.cancel()
+    second = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    await asyncio.sleep(0.2)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    stack.scripts.hold_launch.set()
+    handle = json.loads(await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+
+    assert [run.run_id for run in stack.store.list_runs()] == [handle["run_id"]]
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_delivery_takes_no_run_from_the_delivery_admitted_beside_it(stack: WorkflowStack) -> None:
+    """Two deliveries of one call wait for admission and the first is cancelled: the other gets one run, one attempt."""
+    async with stack.jobs._lock:
+        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await _waits_for_admission(stack)
+        second = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await asyncio.sleep(0.05)
+        first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    handle = json.loads(await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+    await stack.finish_attempt(result="the report")
+
+    assert (await _ended_job(stack, handle["job_id"])).status == "completed"
+    assert [run.run_id for run in stack.store.list_runs()] == [handle["run_id"]]
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refused_delivery_takes_back_only_its_own_intent(stack: WorkflowStack) -> None:
+    """Deliveries of one call take turns: the next one prepares its job only after a refused one took its intent back."""
+    grants = iter(["denied"])
+    stack.jobs._grant = lambda _job: next(grants, "allowed")
+    async with stack.jobs._lock:
+        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await _waits_for_admission(stack)
+        second = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        await asyncio.sleep(0.05)
+    with pytest.raises(CallFailed, match="not available"):
+        await first
+    handle = json.loads(await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+
+    assert [run.run_id for run in stack.store.list_runs()] == [handle["run_id"]]
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_zero_wait_handle_names_the_run_before_the_first_attempt_exists(stack: WorkflowStack) -> None:
+    """The handle holds the run's ID while the script's process is still starting."""
+    stack.scripts.hold_launch = asyncio.Event()
+
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    run = stack.store.get_run(handle["run_id"])
+
+    assert (run.state, run.attempt, run.script_run_id) == (WorkflowRunState.STARTING, 0, None)
+    assert run.origin_job_id == handle["job_id"]
+    stack.scripts.hold_launch.set()
+    await stack.until(lambda: stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING)
+    assert stack.store.get_run(handle["run_id"]).attempt == 1
+
+
+@pytest.mark.asyncio
+async def test_redelivered_call_reattaches_and_launches_once(stack: WorkflowStack) -> None:
+    """The same call delivered twice is one job and one run with one process."""
+    first = await _started(stack, call_id="call-1")
+    second = json.loads(await stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+
+    assert first["run_id"] == second["run_id"]
+    assert first["job_id"] == second["job_id"]
+    assert len(stack.scripts.launched) == 1
+    assert len(stack.store.list_runs()) == 1
+
+
+@pytest.mark.asyncio
+async def test_require_approval_rule_launches_only_after_the_user_approves(tmp_path: Path) -> None:
+    """An operator's approval rule gates the call like any other: no intent and no process before the approval."""
+    with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=("start_workflow",)) as stack:
+        await stack.open_jobs()
+        context = stack.context
+        toolkit = WorkflowTools(context.config)
+        offered = apply_tool_approval_capability(
+            adapt_toolkit(toolkit, key="workflow"),
+            toolkit,
+            context.config,
+            tools=context.plugins.tools,
+            registered_tool_name="workflow",
+            resumable=True,
+            approvals_as_jobs=True,
+        )
+        tools = assembled_job_tools(((toolkit, function) for function in offered.functions), {})
+        actor = job_actor(*tools.values(), name=context.agent_name)
+        session_id = context.execution_identity.session_id or "session"
+        async with execution_resources():
+            with tool_runtime_context(context):
+                model = ScriptedModel([calls(tool_call("start_workflow", "call-1", source=SCRIPT))])
+                paused = await run_job_turn(actor, model, session_id=session_id)
+
+                # The reply pauses for the approval, so the toolkit's job hook has not been asked yet.
+                assert tools["start_workflow"].function.gate is ToolGate.POLICY
+                assert paused.status is RunStatus.paused
+                assert stack.scripts.launched == []
+                assert stack.store.list_runs() == []
+
+                resumed = await resume_job_turn(actor, ScriptedModel([answer("Started.")]), paused)
+
+        assert resumed.status is RunStatus.completed
+        await stack.until(lambda: [run.state for run in stack.store.list_runs()] == [WorkflowRunState.RUNNING])
+        assert len(stack.scripts.launched) == 1
+        await stack.close()
+
+
+def _with_hooks(stack: WorkflowStack, *hooks: object) -> ToolRuntimeContext:
+    registry = HookRegistry.from_plugins([_plugin("policy", list(hooks))])
+    return replace(stack.context, hooks=replace(stack.context.hooks, registry=registry))
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_hook_that_declines_the_start_leaves_no_intent_job_or_process(stack: WorkflowStack) -> None:
+    """A start that becomes a job passes the plugins' `tool:before_call` hooks as any call does; a decline starts nothing."""
+    seen: list[tuple[str, object]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def decline(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.arguments["source"]))
+        ctx.decline("workflows are paused")
+
+    refusal = await _refused(stack, "start_workflow", context=_with_hooks(stack, decline), source=SCRIPT)
+
+    assert "Reason: workflows are paused" in refusal
+    assert seen == [("start_workflow", SCRIPT)]
+    assert stack.store.list_runs() == []
+    assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0) == []
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_an_environment_hook_that_declines_the_start_leaves_no_intent_job_or_process(
+    stack: WorkflowStack,
+) -> None:
+    """A `tool:environment` hook may decline any call, a start that becomes a job too; after-call hooks see the decline."""
+    seen: list[object] = []
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def decline(ctx: ToolEnvironmentContext) -> None:
+        seen.append((ctx.function_name, ctx.registered_toolkit))
+        ctx.decline("no token for workflows")
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append(ctx.blocked)
+
+    refusal = await _refused(stack, "start_workflow", context=_with_hooks(stack, decline, after), source=SCRIPT)
+
+    assert "Reason: no token for workflows" in refusal
+    assert seen == [("start_workflow", "workflow"), True]
+    assert stack.store.list_runs() == []
+    assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0) == []
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_plugin_hooks_see_a_start_that_runs_once_before_it_and_once_with_its_report(stack: WorkflowStack) -> None:
+    """The hooks of a start that becomes a job run as for any call: before anything is reserved, and after the run ended."""
+    seen: list[object] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, stack.store.list_runs()))
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.result, ctx.blocked))
+
+    handle = json.loads(await stack.call("start_workflow", context=_with_hooks(stack, before, after), source=SCRIPT))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+    await stack.finish_attempt(result="the report")
+    await _ended_job(stack, handle["job_id"])
+
+    assert seen == [("start_workflow", []), ("start_workflow", "the report", False)]
+
+
+@pytest.mark.asyncio
+async def test_a_child_agent_gets_the_report_inline(stack: WorkflowStack) -> None:
+    """A delegated child cannot start a job, so its call waits and returns the report itself."""
+    call = await _inline(stack)
+    [run] = stack.store.list_runs()
+    stack.run_id = run.run_id
+    await stack.finish_attempt(result="the report")
+
+    assert await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS) == "the report"
+    assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=1) == []
+    assert run.origin_job_id is not None
+    assert run.origin_job_id.startswith("inline:")
+    assert stack.store.get_run(run.run_id).job_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_narrowed_childs_run_calls_the_tools_its_persona_keeps_and_no_other(tmp_path: Path) -> None:
+    """A run has the tools of the turn that started it: a child narrowed to some tools gets no other tool of its agent.
+
+    The child's turn is a real one (`running_child_id`), so its call waits for the run even with background jobs off.
+    """
+    with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
+        stack.context.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=False)
+        persona = SubagentPersona("inline", "counter", "Count.", tools=("workflow", "counter.text"))
+        child = SimpleNamespace(delegation_id="child-1")
+        token = lifecycle._CHILD_RUN.set(lifecycle.ChildRunObservation(child, None))  # type: ignore[arg-type]
+        try:
+            call = asyncio.create_task(
+                stack.call("start_workflow", context=replace(stack.context, persona=persona), source=SCRIPT),
+            )
+            await stack.until(lambda: [run.state for run in stack.store.list_runs()] == [WorkflowRunState.RUNNING])
+        finally:
+            lifecycle._CHILD_RUN.reset(token)
+        [run] = stack.store.list_runs()
+        stack.run_id = run.run_id
+
+        assert run.persona is not None
+        assert run.persona["tools"] == ["workflow", "counter.text"]
+        assert await stack.result("@0", "tool", tool_args("counter", "text", size=3)) == "xxx"
+        with pytest.raises(NodeFailed, match=r"counter\.append is not a tool of the agent that started this run"):
+            await stack.result("@1", "tool", tool_args("counter", "append", line="outside the persona"))
+        assert stack.counting_tool.lines == []
+        assert stack.counting_tool.calls == 1
+        await stack.finish_attempt(result="the report")
+        assert await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS) == "the report"
+        await stack.engine.close()
+
+
+@pytest.mark.asyncio
+async def test_two_requesters_with_the_same_tool_call_id_get_their_own_runs_and_reports(stack: WorkflowStack) -> None:
+    """A provider's call ID alone is no key: the same ID from two requesters reserves two runs."""
+    alice = await _inline(stack, call_id="call-1")
+    bob = await _inline(stack, runs=2, call_id="call-1", context=_other_requester(stack))
+    runs = {run.owner_user_id: run for run in stack.store.list_runs()}
+
+    assert len(runs) == 2
+    for requester, report in (("@alice:example.test", "for Alice"), ("@bob:example.test", "for Bob")):
+        stack.run_id = runs[requester].run_id
+        await stack.finish_attempt(result=report)
+    assert await asyncio.wait_for(alice, SETTLE_TIMEOUT_SECONDS) == "for Alice"
+    assert await asyncio.wait_for(bob, SETTLE_TIMEOUT_SECONDS) == "for Bob"
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_inline_call_waits_for_the_run_the_first_one_started(stack: WorkflowStack) -> None:
+    """The same call of the same model run, delivered again, finds its run: one process, and both get the report."""
+    first = await _inline(stack, call_id="call-1")
+    second = await _inline(stack, call_id="call-1")
+    [run] = stack.store.list_runs()
+    stack.run_id = run.run_id
+    await stack.finish_attempt(result="the report")
+
+    assert await asyncio.wait_for(first, SETTLE_TIMEOUT_SECONDS) == "the report"
+    assert await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS) == "the report"
+    assert await stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT) == "the report"
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_inline_call_with_another_script_is_refused_and_tells_nothing_of_the_run(
+    stack: WorkflowStack,
+) -> None:
+    """A reservation hit must match the script and arguments; a mismatch returns nothing of the run it hit."""
+    first = await _inline(stack, call_id="call-1")
+    [run] = stack.store.list_runs()
+
+    other = await _refused(stack, "start_workflow", depth=1, call_id="call-1", source=SCRIPT + "# changed\n")
+
+    assert other == "This call already started a workflow run with another owner, script or arguments."
+    assert len(stack.scripts.launched) == 1
+    stack.run_id = run.run_id
+    await stack.finish_attempt(result="the first report")
+    assert "the first report" not in other
+    assert await asyncio.wait_for(first, SETTLE_TIMEOUT_SECONDS) == "the first report"
+
+
+@pytest.mark.asyncio
+async def test_an_inline_call_that_is_cancelled_cancels_its_run(stack: WorkflowStack) -> None:
+    """Nobody would receive the report of a run whose waiting call went away, so the run stops with it."""
+    call = await _inline(stack)
+    [run] = stack.store.list_runs()
+
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert stack.store.get_run(run.run_id).state is WorkflowRunState.CANCELLED
+    assert stack.script_store.get_run(stack.scripts.launched[0].run_id).state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_inline_call_leaves_the_run_to_the_call_that_still_waits_for_it(stack: WorkflowStack) -> None:
+    """The same call delivered twice waits twice; the run stops with its last waiter, not its first."""
+    first = await _inline(stack, call_id="call-1")
+    second = await _inline(stack, call_id="call-1")
+    [run] = stack.store.list_runs()
+    await asyncio.sleep(0.05)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert stack.store.get_run(run.run_id).state is WorkflowRunState.RUNNING
+    stack.run_id = run.run_id
+    await stack.finish_attempt(result="the report")
+    assert await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS) == "the report"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_retry_that_outlives_the_last_inline_caller_leaves_no_run_without_a_caller(
+    stack: WorkflowStack,
+) -> None:
+    """A retry still reading its script when the last caller is cancelled is refused afterwards: the run then stops."""
+    first = await _inline(stack, call_id="call-1")
+    [run] = stack.store.list_runs()
+    read, resolve_source = asyncio.Event(), stack.scripts.resolve_source
+
+    async def held(context: ToolRuntimeContext, **options: str | None) -> bytes:
+        await read.wait()
+        return await resolve_source(context, **options)
+
+    stack.scripts.resolve_source = held
+    retry = asyncio.create_task(
+        stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT + "# changed\n"),
+    )
+    await asyncio.sleep(0.05)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert stack.store.get_run(run.run_id).state is WorkflowRunState.RUNNING
+
+    read.set()
+    with pytest.raises(CallFailed, match="another owner, script or arguments"):
+        await retry
+
+    assert stack.store.get_run(run.run_id).state is WorkflowRunState.CANCELLED
+    assert stack.script_store.get_run(stack.scripts.launched[0].run_id).state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_an_inline_call_cancelled_because_mindroom_stops_does_not_cancel_its_run(stack: WorkflowStack) -> None:
+    """A stopping MindRoom cancels its calls, which is no cancel of their runs: the restart judges those."""
+    call = await _inline(stack)
+    [run] = stack.store.list_runs()
+    stack.context.orchestrator.running = False
+
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert stack.store.get_run(run.run_id).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_while_the_run_launches_leaves_the_run_to_the_other_delivery(
+    stack: WorkflowStack,
+) -> None:
+    """Calls count as waiting from before the launch, so one of two cancelled during it does not stop the run."""
+    stack.scripts.hold_launch = asyncio.Event()
+    first = asyncio.create_task(stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT))
+    second = asyncio.create_task(stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT))
+    await stack.until(lambda: stack.scripts.launched)
+    await asyncio.sleep(0.05)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    stack.scripts.hold_launch.set()
+    [run] = stack.store.list_runs()
+    stack.run_id = run.run_id
+    await stack.until(lambda: stack.store.get_run(run.run_id).state is WorkflowRunState.RUNNING)
+    await stack.finish_attempt(result="the report")
+
+    assert await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS) == "the report"
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_inline_call_cancelled_while_it_reserves_its_run_frees_the_run_slot(stack: WorkflowStack) -> None:
+    """The reservation of a cancelled call still ends, and with nobody left to wait the engine cancels the run."""
+    writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        call = asyncio.create_task(stack.call("start_workflow", depth=1, source=SCRIPT))
+        await asyncio.sleep(0.1)
+        call.cancel()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    [run] = stack.store.list_runs()
+    assert (run.state, run.attempt) == (WorkflowRunState.CANCELLED, 0)
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_background_jobs_off_is_refused_in_one_sentence(tmp_path: Path) -> None:
+    """A top-level call needs the job runtime: with it off, or with `workflow` excluded, the call says what to set."""
+    refusal = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
+    with workflow_stack(tmp_path, extra_tools=("workflow",)) as stack:
+        stack.context.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=False)
+        assert await _refused(stack, "start_workflow", source=SCRIPT) == refusal
+
+        stack.context.config.background_tool_jobs = BackgroundToolJobsConfig(
+            enabled=True,
+            exclude_toolkits=["workflow"],
+        )
+        await stack.open_jobs()
+        assert await _refused(stack, "start_workflow", source=SCRIPT) == refusal
+
+        assert stack.store.list_runs() == []
+        assert stack.scripts.launched == []
+        await stack.close()
+
+
+@pytest.mark.asyncio
+async def test_another_requesters_run_id_reads_as_unknown(stack: WorkflowStack) -> None:
+    """Another requester's run answers exactly like an ID that does not exist, and is not cancelled."""
+    handle = await _started(stack)
+    bob = _other_requester(stack)
+    unknown = _UNKNOWN.format(handle["run_id"])
+
+    assert await _refused(stack, "get_workflow", context=bob, run_id=handle["run_id"]) == unknown
+    assert await _refused(stack, "cancel_workflow", context=bob, run_id=handle["run_id"]) == unknown
+    missing = "wf-" + "0" * 32
+    assert await _refused(stack, "get_workflow", run_id=missing) == _UNKNOWN.format(missing)
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_another_agents_run_id_reads_as_unknown(stack: WorkflowStack) -> None:
+    """A run belongs to the agent that started it, for the same requester too."""
+    handle = await _started(stack)
+    other_agent = replace(stack.context, agent_name="reviewer")
+    unknown = _UNKNOWN.format(handle["run_id"])
+
+    assert await _refused(stack, "get_workflow", context=other_agent, run_id=handle["run_id"]) == unknown
+    assert await _refused(stack, "cancel_workflow", context=other_agent, run_id=handle["run_id"]) == unknown
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_a_long_title_is_kept_whole_on_the_run_and_stays_out_of_the_jobs_state(stack: WorkflowStack) -> None:
+    """The run keeps the title as given, since only a frame that shows it shortens it; the job's room state has none."""
+    title = "Count every placeholder thing in the invented inventory, twice, " * 4
+    handle = await _started(stack, title=title)
+    job = stack.jobs.retained_jobs()[0]
+
+    assert len(title) > 200
+    assert stack.store.get_run(handle["run_id"]).title == title
+    assert handle["title"] == title
+    assert title[:20] not in json.dumps([job.adapter, _job_state(job)])
+
+
+def test_jobs_state_names_the_run_and_carries_no_title(stack: WorkflowStack) -> None:
+    """Room state is not encrypted: a workflow job's entry holds IDs only."""
+    run_id = "wf-" + "c" * 32
+    job = BackgroundJob(
+        job_id="job-1",
+        owner=stack.context.execution_identity,
+        tool_name="workflow",
+        depth=0,
+        kind="workflow",
+        toolkit_name="workflow",
+        adapter={"workflow_job": "job-1", "workflow": run_id},
+    )
+
+    assert _job_state(job) == {
+        "job_id": "job-1",
+        "thread_id": "$thread:example.test",
+        "kind": "workflow",
+        "tool": "workflow",
+        "status": "running",
+        "started_at": job.created_at,
+        "workflow": run_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_start_needs_exactly_one_source(stack: WorkflowStack) -> None:
+    """Neither or both of `source` and `path` start nothing."""
+    one = "Give exactly one of source or path."
+
+    assert await _refused(stack, "start_workflow") == one
+    assert await _refused(stack, "start_workflow", source=SCRIPT, path="count.py") == one
+    assert await _refused(stack, "start_workflow", depth=1, source=SCRIPT, path="count.py") == one
+    assert stack.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_path_reads_a_workspace_file_and_nothing_outside_the_workspace(stack: WorkflowStack) -> None:
+    """`path` names a file in the agent's workspace, read as script sources are."""
+    workspace = stack.context.agent_workspace_root(create=True)
+    (workspace / "count.py").write_text(SCRIPT, encoding="utf-8")
+
+    handle = json.loads(await stack.call("start_workflow", path="count.py"))
+    outside = await _refused(stack, "start_workflow", path="../count.py")
+
+    assert stack.store.get_run(handle["run_id"]).source == SCRIPT
+    assert "within the workspace" in outside
+    assert len(stack.store.list_runs()) == 1
+
+
+@pytest.mark.asyncio
+async def test_start_is_refused_where_the_operator_lets_no_code_run(stack: WorkflowStack) -> None:
+    """Without a worker and without the operator's switch for shell on this machine, no run is reserved."""
+    stack.context.config.defaults.allow_shell_without_worker = False
+
+    refusal = await _refused(stack, "start_workflow", source=SCRIPT)
+
+    assert refusal.startswith("Workflows run code. Route this agent to a worker")
+    assert stack.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_job_cancels_the_run(stack: WorkflowStack) -> None:
+    """Every cancel path of a job reaches the run: its attempt is revoked and the run ends cancelled."""
+    handle = await _started(stack)
+    owner = stack.context.execution_identity
+
+    await stack.jobs.cancel(handle["job_id"], owner=owner, depth=0)
+    await wait_for_status(stack.jobs, handle["job_id"], "cancelled")
+
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.CANCELLED
+    assert stack.script_store.get_run(stack.scripts.launched[0].run_id).state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_job_whose_grant_is_revoked_stops_its_run(stack: WorkflowStack) -> None:
+    """A run must stop acting for someone who lost access: the revoked job is cancelled, and its run with it."""
+    handle = await _started(stack)
+
+    stack.refuse_admission()
+    await stack.jobs.cancel_revoked()
+    await stack.until(lambda: stack.store.get_run(handle["run_id"]).state is WorkflowRunState.CANCELLED)
+
+    assert stack.script_store.get_run(stack.scripts.launched[0].run_id).state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_stop_of_the_reply_that_started_the_run_does_not_reach_its_job(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run's job names no reply, so it outlives the one that started it and a later Stop of that reply."""
+    span = SimpleNamespace(reply_id="reply-1", reply=SimpleNamespace(stop_receipt_order=3), stopped=lambda: False)
+    monkeypatch.setattr("mindroom.tool_jobs.execution.current_span", lambda: span)
+
+    handle = await _started(stack)
+    await stack.jobs.cancel_stopped_reply("reply-1")
+    [job] = await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0)
+
+    assert (job.job_id, job.reply_id, job.reply_stop_order) == (handle["job_id"], None, None)
+    assert job.status == "running"
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_a_job_cancelled_while_its_attempt_launches_leaves_no_running_attempt(stack: WorkflowStack) -> None:
+    """A launch in progress is finished, not dropped, so the cancel finds the attempt and stops it."""
+    stack.scripts.hold_launch = asyncio.Event()
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    await stack.until(lambda: len(stack.scripts.launched) == 1)
+    owner = stack.context.execution_identity
+
+    await stack.jobs.cancel(handle["job_id"], owner=owner, depth=0)
+    stack.scripts.hold_launch.set()
+    await wait_for_status(stack.jobs, handle["job_id"], "cancelled")
+
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.CANCELLED
+    assert stack.script_store.get_run(stack.scripts.launched[0].run_id).state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_cancel_workflow_ends_the_run_and_its_job(stack: WorkflowStack) -> None:
+    """The agent's own cancel ends the run, and the run's job ends cancelled with it."""
+    handle = await _started(stack)
+
+    answer_text = json.loads(await stack.call("cancel_workflow", run_id=handle["run_id"]))
+    job = await _ended_job(stack, handle["job_id"])
+
+    assert answer_text == {"run_id": handle["run_id"], "status": "cancelled"}
+    assert job.status == "cancelled"
+    assert stack.script_store.get_run(stack.scripts.launched[0].run_id).state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_interrupts_the_job_and_does_not_cancel_the_run(stack: WorkflowStack) -> None:
+    """A stopping primary is no cancel: the job ends interrupted and the run is left for the restart to judge."""
+    handle = await _started(stack)
+
+    await stack.jobs.quiesce()
+
+    job = await _ended_job(stack, handle["job_id"])
+    assert job.status == "interrupted"
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING
+    assert stack.attempt.cancel_requested_at is None
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_while_the_first_attempt_starts_interrupts_the_run_and_its_job(stack: WorkflowStack) -> None:
+    """The engine stops before the jobs do: a launch it stops ends its run, so no run stays `starting` with a dead job."""
+    stack.scripts.hold_launch = asyncio.Event()
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    await stack.until(lambda: stack.scripts.launched)
+
+    await stack.engine.close()
+    await stack.jobs.quiesce()
+
+    job = await _ended_job(stack, handle["job_id"])
+    run = stack.store.get_run(handle["run_id"])
+    assert (run.state, run.attempt, run.error) == (
+        WorkflowRunState.INTERRUPTED,
+        0,
+        "MindRoom stopped while the run was starting.",
+    )
+    assert run.finished_at is not None
+    assert job.status == "interrupted"
+    assert await stack.collect(job) == "MindRoom stopped while the run was starting."
+
+
+@pytest.mark.asyncio
+async def test_a_start_after_the_engine_stopped_interrupts_its_run(stack: WorkflowStack) -> None:
+    """A start admitted between the engine's stop and the job runtime's launches nothing and ends its run interrupted."""
+    await stack.engine.close()
+
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    job = await _ended_job(stack, handle["job_id"])
+
+    assert job.status == "interrupted"
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.INTERRUPTED
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
+async def test_failed_run_delivers_the_error_tail(stack: WorkflowStack) -> None:
+    """A failed run's job fails with the end of the script's traceback, so the agent can fix the script."""
+    handle = await _started(stack)
+    traceback = "Traceback (most recent call last):\n" + "x" * 6000 + "\nKeyError: 'tide'"
+
+    await stack.end_attempt(ScriptRunState.FAILED, output=traceback)
+    job = await _ended_job(stack, handle["job_id"])
+
+    delivered = str(await stack.collect(job))
+    assert job.status == "failed"
+    assert delivered.endswith("KeyError: 'tide'")
+    assert len(delivered.encode()) == 4096
+
+
+@pytest.mark.asyncio
+async def test_a_launch_that_is_refused_fails_the_run_and_its_job_with_the_reason(stack: WorkflowStack) -> None:
+    """An admitted job whose script cannot start ends failed with why, and its run is not left starting."""
+    stack.scripts.refuse_launch = ScriptRunManagerError("The worker backend refused the script.")
+
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    job = await _ended_job(stack, handle["job_id"])
+    run = stack.store.get_run(handle["run_id"])
+
+    assert job.status == "failed"
+    assert await stack.collect(job) == "The worker backend refused the script."
+    assert (run.state, run.attempt, run.error) == (WorkflowRunState.FAILED, 0, "The worker backend refused the script.")
+
+
+@pytest.mark.asyncio
+async def test_ninth_top_level_run_is_refused_and_nested_runs_do_not_count(stack: WorkflowStack) -> None:
+    """Eight live top-level runs of one requester and agent are the limit; a run inside another is not one of them."""
+    for _ in range(7):
+        await _started(stack)
+    nested = await _inline(stack, runs=8)
+    [inline] = [run for run in stack.store.list_runs() if (run.origin_job_id or "").startswith("inline:")]
+    stack.store.update_run(inline.run_id, parent_run_id=stack.run_id, parent_node_key="@0")
+
+    eighth = await _started(stack)
+    ninth = await _refused(stack, "start_workflow", source=SCRIPT)
+
+    assert ninth == "You have 8 workflow runs in progress, the limit. Wait for one to end or cancel one."
+    assert len(stack.scripts.launched) == 9
+    await stack.call("cancel_workflow", run_id=eighth["run_id"])
+    assert json.loads(await stack.call("start_workflow", source=SCRIPT))["run_id"].startswith("wf-")
+    nested.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_start_waits_for_the_stores_writer_off_the_event_loop(stack: WorkflowStack) -> None:
+    """While another write holds the database, the start waits on a thread and the loop goes on serving others."""
+    loop = asyncio.get_running_loop()
+    writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        began = loop.time()
+        call = asyncio.create_task(stack.call("start_workflow", source=SCRIPT))
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+        waited = loop.time() - began
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+    assert waited < 1
+    assert json.loads(await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS))["run_id"].startswith("wf-")
+
+
+@pytest.mark.asyncio
+async def test_get_workflow_reports_the_state_counts_failed_calls_and_nodes(stack: WorkflowStack) -> None:
+    """One read tells the agent where the run stands and which calls failed, and `nodes` picks which calls it lists."""
+    handle = await _started(stack, title="Count things")
+    await stack.result("@0", "tool", tool_args("counter", "text", size=3))
+    with pytest.raises(Exception, match="The counter failed"):
+        await stack.result("@1", "tool", tool_args("counter", "fail"))
+
+    status = json.loads(await stack.call("get_workflow", run_id=handle["run_id"]))
+    everything = json.loads(await stack.call("get_workflow", run_id=handle["run_id"], nodes="all"))
+    failed = json.loads(await stack.call("get_workflow", run_id=handle["run_id"], nodes="failed"))
+
+    assert status.keys() == {"run_id", "title", "status", "attempt", "counts", "usage", "waiting", "failed", "nodes"}
+    assert (status["title"], status["status"], status["attempt"]) == ("Count things", "running", 1)
+    assert status["counts"] == {"completed": 1, "failed": 1}
+    assert status["waiting"] == []
+    assert status["nodes"] == []
+    [failure] = status["failed"]
+    assert (failure["id"], failure["label"], failure["error"]["kind"]) == ("n2", "counter.fail", "failed")
+    assert [(node["id"], node["kind"], node["status"]) for node in everything["nodes"]] == [
+        ("n1", "tool", "completed"),
+        ("n2", "tool", "failed"),
+    ]
+    assert [node["id"] for node in failed["nodes"]] == ["n2"]
+
+
+@pytest.mark.usefixtures("enforce_turn_authorization")
+def test_a_workflow_job_is_granted_while_the_agent_has_the_toolkit_and_the_requester_has_access(
+    stack: WorkflowStack,
+) -> None:
+    """The job kind's own check: the owner agent still has `workflow`, and the requester may still talk to it."""
+    config = with_responder_access(stack.context.config, "watcher", users=["@alice:example.test"])
+    paths = stack.context.runtime_paths
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _name: None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
+    )
+    job = BackgroundJob(
+        job_id="job-1",
+        owner=stack.context.execution_identity,
+        tool_name="workflow",
+        depth=0,
+        kind="workflow",
+        toolkit_name="workflow",
+        adapter={"workflow_job": "job-1", "workflow": "wf-" + "c" * 32},
+    )
+
+    assert coordinator._grant(job) == "allowed"
+    assert coordinator._grant(replace(job, owner=replace(job.owner, requester_id="@bob:example.test"))) == "denied"
+    config.agents["watcher"].tools = ["counter", "shell"]
+    assert coordinator._grant(job) == "denied"
+
+
+_OFFERED_DESCRIPTION = """\
+Run a workflow: a Python script that runs your tools and shell commands in the background.
+
+Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
+The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
+
+    from mindroom.workflow import shell, tool, phase, log
+
+- shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
+  shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
+- phase(title) groups the calls that follow; log(text) shows a progress line.
+
+Every tool and shell call is saved with its result.
+The call returns {run_id, job_id, status, title} at once, and you receive the run's report in full when it ends.
+Where the call cannot be a background job, it waits and returns the report itself.
+
+Models: haiku, opus (add an effort as in opus@high)."""
+
+
+def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
+    """The offered description names the four calls a script has now, how the report arrives, and the models.
+
+    It promises nothing a later release adds: no agents, no resume, no graph.
+    """
+    config = stack.context.config
+    levels = {"levels": ["low", "high"], "default": "low"}
+    config.models = {
+        "opus": ModelConfig(provider="anthropic", id="test-opus", reasoning=levels),
+        "haiku": ModelConfig(provider="anthropic", id="test-haiku"),
+    }
+    toolkit = WorkflowTools(config)
+    functions = {function.name: function for function in adapt_toolkit(toolkit, key="workflow").functions}
+    description = functions["start_workflow"].description or ""
+
+    assert description == _OFFERED_DESCRIPTION
+    assert set(functions["start_workflow"].parameters["properties"]) == {
+        "source",
+        "path",
+        "args",
+        "title",
+        "max_concurrent",
+        "resource_profile",
+    }
+    assert "Stop a run" in (functions["cancel_workflow"].description or "")
+
+
+def test_the_registered_toolkit_takes_its_limits_from_the_agents_tool_entry(stack: WorkflowStack) -> None:
+    """An agent's `workflow` entry sets the limits, and `get_workflow` can write its answer to a workspace file."""
+    context = stack.context
+    toolkit = get_tool_by_name(
+        "workflow",
+        context.runtime_paths,
+        tools=context.plugins.tools,
+        runtime_config=context.config,
+        tool_config_overrides={"max_concurrent_runs": 2, "max_runtime_hours": 0},
+        tool_output_workspace_root=context.agent_workspace_root(create=True),
+        worker_target=None,
+    )
+    functions = {function.name: function for function in adapt_toolkit(toolkit, key="workflow").functions}
+
+    assert isinstance(toolkit, WorkflowTools)
+    assert toolkit.limits == WorkflowLimits(max_concurrent_runs=2, max_runtime_hours=0)
+    assert "Models: default." in (functions["start_workflow"].description or "")
+    assert "mindroom_output_path" in functions["get_workflow"].parameters["properties"]
+
+
+def test_no_function_name_is_shared_with_dynamic_workflow(stack: WorkflowStack) -> None:
+    """An agent can hold both toolkits while it migrates."""
+    names = set(toolkit_function_names(WorkflowTools(stack.context.config)))
+
+    assert names == {"start_workflow", "get_workflow", "cancel_workflow"}
+    assert names.isdisjoint(toolkit_function_names(DynamicWorkflowTools()))

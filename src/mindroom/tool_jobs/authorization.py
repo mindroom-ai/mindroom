@@ -45,6 +45,27 @@ def toolkit_authority(snapshot: Mapping[str, Any], toolkit: AnyToolkit) -> dict[
     }
 
 
+def toolkit_offered(
+    config: Config,
+    owner: ToolExecutionIdentity,
+    *,
+    tools: ToolRegistry,
+    name: str,
+    depth: int,
+) -> bool:
+    """Whether the owner's agent is still offered the registered toolkit ``name``, which a job of that toolkit's own needs."""
+    if owner.agent_name not in config.agents:
+        return False
+    room_tools, matrix_room_tools = turn_room_flags(owner)
+    candidates = resolve_agent_tools(config, owner.agent_name, tools).candidates(
+        depth=depth,
+        room_tools=room_tools,
+        matrix_room_tools=matrix_room_tools,
+        portable_search=True,
+    )
+    return any(item.name == name for item in candidates)
+
+
 def locally_allowed(
     config: Config,
     owner: ToolExecutionIdentity,

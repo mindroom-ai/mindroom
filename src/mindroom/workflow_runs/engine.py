@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
@@ -10,6 +11,8 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import NAMESPACE_OID, uuid5
 from weakref import WeakValueDictionary
 
+from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
+from mindroom.delegation.personas import persona_allows
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.manager import ScriptRunLimits
@@ -35,7 +38,7 @@ from mindroom.workflow_runs.replay import node_digest, split_key
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
     from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.script_runs.manager import ScriptResourceProfileName, ScriptRunManager
@@ -54,6 +57,8 @@ _MAX_LABEL_CHARS = 80
 _ADMISSIONS = "admissions"
 _ERROR_TAIL_BYTES = 4096
 _NO_RETURN = "The script ended without returning from main(args)."
+_STOPPED_STARTING = "MindRoom stopped while the run was starting."
+_ABANDONED = "The call that waited was cancelled."
 _ATTEMPT_GONE = "The record of the run's attempt is gone."
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
 # How long a waiter sleeps before it reads the store again, with or without a wake.
@@ -88,6 +93,10 @@ class WorkflowEngine:
         # One per run with a waiter or a launch in progress: polls and `wait` sleep on it, a launch holds its lock.
         self._changed: WeakValueDictionary[str, asyncio.Condition] = WeakValueDictionary()
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
+        self._attending: Counter[object] = Counter()
+        self._inline_runs: dict[object, str] = {}
+        self._closed = False
+        self._launching: dict[asyncio.Task[WorkflowRun], str] = {}
 
     async def launch(
         self,
@@ -95,37 +104,70 @@ class WorkflowEngine:
         context: ToolRuntimeContext,
         limits: WorkflowLimits | None = None,
     ) -> WorkflowRun:
-        """Start the next attempt of a reserved run."""
-        limits = limits or WorkflowLimits()
+        """Start the next attempt of a reserved run; a script that cannot start ends the run failed with the reason.
+
+        The engine owns a launch once it began: a caller that goes away leaves no process its run does not name, and
+        only the engine's stop ends a launch, which ends its run interrupted.
+        """
+        if self._closed:
+            return await asyncio.to_thread(self._stop_starting, run_id)
+        launch = self._spawn(_ADMISSIONS, self._launch(run_id, context, limits or WorkflowLimits()))
+        self._launching[launch] = run_id
+        launch.add_done_callback(self._launching.pop)
+        try:
+            return await asyncio.shield(launch)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if not launch.cancelled() or (caller is not None and caller.cancelling()):
+                raise
+            # The stopping engine ended the run and then the launch; the caller reads the run as any ended run.
+            return self.store.get_run(run_id)
+
+    def _stop_starting(self, run_id: str) -> WorkflowRun:
+        """End a run that names no attempt yet as interrupted, for the engine's stop; any other run stays as it is."""
+        return self.store.update_run(
+            run_id,
+            when={WorkflowRunState.STARTING},
+            state=WorkflowRunState.INTERRUPTED,
+            error=_STOPPED_STARTING,
+            finished_at=utc_timestamp(),
+        )
+
+    async def _launch(self, run_id: str, context: ToolRuntimeContext, limits: WorkflowLimits) -> WorkflowRun:
         # Held until the run names the attempt, so the new process's first request waits instead of being refused.
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
-            if run.state is not WorkflowRunState.STARTING:
-                # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none.
+            if run.state is not WorkflowRunState.STARTING or self._closed:
+                # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none,
+                # and a stopping engine starts none.
                 return run
-            attempt = await self.scripts.run(
-                context,
-                source=run.source,
-                workflow_run_id=run_id,
-                resource_profile=cast("ScriptResourceProfileName | None", run.resource_profile),
-                limits=ScriptRunLimits(
-                    max_concurrent_runs=limits.max_concurrent_runs,
-                    max_tool_calls_per_minute=limits.max_tool_calls_per_minute,
-                ),
-            )
-            launched = await asyncio.to_thread(
-                self.store.update_run,
-                run_id,
-                when={WorkflowRunState.STARTING},
-                state=WorkflowRunState.RUNNING,
-                attempt=run.attempt + 1,
-                script_run_id=attempt.run_id,
-            )
-            if launched.script_run_id != attempt.run_id:
-                # The run ended while its process started, so nothing names this attempt: stop it.
-                await self.scripts.revoke(attempt.run_id, reason=launched.error or launched.state.value)
-                await self.scripts.reconcile_durable(run_id=attempt.run_id)
-            return launched
+            try:
+                attempt = await self.scripts.run(
+                    context,
+                    source=run.source,
+                    workflow_run_id=run_id,
+                    resource_profile=cast("ScriptResourceProfileName | None", run.resource_profile),
+                    limits=ScriptRunLimits(max_tool_calls_per_minute=limits.max_tool_calls_per_minute),
+                )
+            except Exception as exc:
+                logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
+                attempt, refusal = None, str(exc)
+            if attempt is not None:
+                launched = await asyncio.to_thread(
+                    self.store.update_run,
+                    run_id,
+                    when={WorkflowRunState.STARTING},
+                    state=WorkflowRunState.RUNNING,
+                    attempt=run.attempt + 1,
+                    script_run_id=attempt.run_id,
+                )
+                if launched.script_run_id != attempt.run_id:
+                    # The run ended while its process started, so nothing names this attempt: stop it.
+                    await self.scripts.revoke(attempt.run_id, reason=launched.error or launched.state.value)
+                    await self.scripts.reconcile_durable(run_id=attempt.run_id)
+                return launched
+        # The gate is free again, which ending a run takes.
+        return await self._end_run(run, WorkflowRunState.FAILED, refusal)
 
     async def cancel(self, run_id: str, *, reason: str) -> WorkflowRun:
         """Revoke the run's attempt, end its process and end the run cancelled; completed nodes stay saved."""
@@ -152,6 +194,35 @@ class WorkflowEngine:
                     await asyncio.wait_for(condition.wait(), _RECHECK_SECONDS)
         return run
 
+    async def attend(
+        self,
+        origin: str | None,
+        reserve: Callable[[], Awaitable[tuple[WorkflowRun, bool]]],
+        context: ToolRuntimeContext,
+        limits: WorkflowLimits,
+    ) -> WorkflowRun:
+        """Reserve, launch and wait for a run that is no job, as one of the calls of *origin* that wait for it.
+
+        A cancelled call only stops waiting, and its reservation still ends. Whenever a call leaves, however it ends,
+        and no other call of *origin* is left while MindRoom is not stopping, nobody can receive the report, so the
+        engine cancels the run. A call whose reservation is refused holds the run only until that refusal.
+        """
+        key: object = origin or object()
+        self._attending[key] += 1
+        reserving = asyncio.ensure_future(reserve())
+        try:
+            run, _ = await wait_for_future_until_complete(reserving)
+            await self.launch(run.run_id, context, limits)
+            return await self.wait(run.run_id)
+        finally:
+            if not reserving.cancelled() and not reserving.exception():
+                self._inline_runs[key] = reserving.result()[0].run_id
+            self._attending -= Counter({key: 1})
+            stopping = self._closed or context.orchestrator is None or not context.orchestrator.running
+            if not self._attending[key] and (run_id := self._inline_runs.pop(key, None)) and not stopping:
+                # A run that ended is left as it ended.
+                await run_coroutine_until_complete(self.cancel(run_id, reason=_ABANDONED))
+
     def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
         """Return the run and its current nodes."""
         return self.store.get_run(run_id), self.store.nodes(run_id)
@@ -172,7 +243,11 @@ class WorkflowEngine:
                 logger.exception("workflow_run_reconcile_failed", run_id=run.run_id)
 
     async def close(self) -> None:
-        """Stop the engine's own tasks; unsettled nodes keep their handles for the next start to read."""
+        """Stop the engine's own tasks and start no more; unsettled nodes keep their handles for the next start."""
+        self._closed = True
+        # Before its launches stop, so a run one of them was starting ends here even if its task never ran a step.
+        stops = [asyncio.to_thread(self._stop_starting, run_id) for run_id in set(self._launching.values())]
+        await asyncio.gather(*stops, return_exceptions=True)
         tasks = [task for run_tasks in self._tasks.values() for task in run_tasks]
         self._tasks.clear()
         for task in tasks:
@@ -238,7 +313,8 @@ class WorkflowEngine:
                 started_at=utc_timestamp(),
             ),
         )
-        call = self._run_tool_node(attempt, node, call_id, grant, cast("dict[str, object]", arguments))
+        kept = cast("list[str] | None", (run.persona or {}).get("tools"))
+        call = self._run_tool_node(attempt, node, call_id, grant, cast("dict[str, object]", arguments), kept)
         self._spawn(run.run_id, call)
         return _receipt(node)
 
@@ -345,8 +421,11 @@ class WorkflowEngine:
         call_id: str,
         grant: ScriptToolGrant,
         arguments: dict[str, object],
+        kept: list[str] | None,
     ) -> None:
+        """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run."""
         try:
+            _require_kept(kept, grant)
             call = await self.broker.execute_for_workflow(attempt, call_id=call_id, grant=grant, arguments=arguments)
             state, result, error = _call_outcome(node, call)
         except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
@@ -389,6 +468,13 @@ class WorkflowEngine:
             )
             condition.notify_all()
         return ended
+
+
+def _require_kept(kept: list[str] | None, grant: ScriptToolGrant) -> None:
+    """Refuse a tool outside *kept*; checked at every call beside the owner's live tools, so a run never has more."""
+    if kept is not None and not persona_allows(tuple(kept), grant.toolkit_name, grant.function_name):
+        msg = f"{grant.toolkit_name}.{grant.function_name} is not a tool of the agent that started this run."
+        raise ScriptRunStoreError(msg)
 
 
 def _receipt(node: WorkflowNode) -> NodeReceipt:

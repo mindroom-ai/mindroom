@@ -130,6 +130,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
 - [Background Python Scripts](https://docs.mindroom.chat/tools/background-scripts/) - Long-running Python scripts that call the agent's tools and wake it when something changes.
+- [Workflows](https://docs.mindroom.chat/tools/workflows/) - Python scripts that run in the background, call the agent's tools, and return one report.
 - [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) - A visible browser in the agent's worker that the user can watch and control.
 - [Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) - Operate allowlisted apps, read selected folders, and run approved commands on a local computer.
 - [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/) - One Bash tool instead of full tool schemas, to cut tokens per request.
