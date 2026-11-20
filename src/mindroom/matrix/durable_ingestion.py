@@ -1,6 +1,7 @@
 """Convert trusted nio batches and commit application effects before acknowledgement."""
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Protocol
@@ -12,7 +13,10 @@ import mindroom.event_journal as ej
 from mindroom.event_journal.views import IngestionBatchAdmissionView
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.room_membership import invalidate_membership_lookups
+from mindroom.logging_config import get_logger
 from mindroom.matrix.transport_progress import is_transport_progress_source
+
+_rfs = get_logger("mindroom.rfs_timing")
 
 __all__ = ["consume_one_ingestion_batch", "run_ingestion_pump", "validate_ingestion_batch"]
 
@@ -137,6 +141,7 @@ async def consume_one_ingestion_batch(
     batch = await session.next_batch()
     if batch is None:
         return None
+    t0 = time.monotonic()
     converted = validate_ingestion_batch(
         batch,
         account_id=account_id,
@@ -146,10 +151,15 @@ async def consume_one_ingestion_batch(
     if before_admission is not None:
         for record, converted_record in zip(batch.records, converted.records, strict=True):
             before_admission(converted_record, record.provenance)
+    t1 = time.monotonic()
     result = await admission.admit_ingestion_batch(converted)
+    t2 = time.monotonic()
+    after_admission_s = aux_s = 0.0
     for record, converted_record, facts in zip(batch.records, converted.records, result.record_facts, strict=True):
         if after_admission is not None:
+            ta = time.monotonic()
             await after_admission(converted_record, facts, record.provenance)
+            after_admission_s += time.monotonic() - ta
         if (
             record.kind is RecordKind.TIMELINE
             and record.clear is None
@@ -159,10 +169,32 @@ async def consume_one_ingestion_batch(
                 on_decryption_failure(record)
             continue
         if converted_record.disposition is ej.IngestionRecordDisposition.COMPATIBILITY_ONLY:
+            ta = time.monotonic()
             await _dispatch_auxiliary_record(session, record, account_id)
+            aux_s += time.monotonic() - ta
+    t3 = time.monotonic()
     if batch.completes_sync and after_sync is not None:
         await after_sync(result.receipt_new)
+    t4 = time.monotonic()
     await session.ack(batch)
+    t5 = time.monotonic()
+    _rfs.warning(
+        "rfs_batch",
+        account=account_id,
+        sequence=batch.sequence,
+        records=len(batch.records),
+        kinds=sorted({r.kind.name for r in batch.records}),
+        completes_sync=batch.completes_sync,
+        receipt_new=result.receipt_new,
+        semantic_event_new=result.semantic_event_new,
+        validate_s=round(t1 - t0, 3),
+        admit_s=round(t2 - t1, 3),
+        after_admission_s=round(after_admission_s, 3),
+        aux_dispatch_s=round(aux_s, 3),
+        after_sync_s=round(t4 - t3, 3),
+        ack_s=round(t5 - t4, 3),
+        total_s=round(t5 - t0, 3),
+    )
     return result
 
 
@@ -235,8 +267,10 @@ async def run_ingestion_pump(
             # schedules the recheck. One left behind when the pump stops costs a
             # spare wake at most, which a stopped dispatcher ignores.
             if facts.semantic_event_new or not facts.receipt_new:
+                _rfs.warning("rfs_wake_now", account=account_id)
                 wake_now()
             elif recheck is None:
+                _rfs.warning("rfs_wake_recheck", account=account_id, in_s=round(last_wake + _RECHECK_SECONDS - loop.time(), 3))
                 recheck = loop.call_at(last_wake + _RECHECK_SECONDS, wake_now)
             if after_ack is not None:
                 after_ack()

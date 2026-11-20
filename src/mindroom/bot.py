@@ -1380,17 +1380,26 @@ class AgentBot:
         first_sync_response: bool,
     ) -> None:
         """Run side effects that do not own raw sync checkpoint safety."""
+        _t = time.monotonic()
         if self._router is not None:
             await self._router.refresh_memberships_if_needed()
+            self.logger.warning("rfs_frame", step="refresh_memberships_if_needed", s=round(time.monotonic() - _t, 3))
+            _t = time.monotonic()
+            _n = len(self._router._joined_room_ids)
             await self._router.publish_joined_room_state()
+            self.logger.warning("rfs_frame", step="publish_joined_room_state", s=round(time.monotonic() - _t, 3), rooms=_n)
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
+            _t = time.monotonic()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
+            self.logger.warning("rfs_frame", step="emit_bot_ready", s=round(time.monotonic() - _t, 3))
         self._personal_room_lifecycle.schedule_reconciliation()
 
         if self._first_sync_done and not self._orchestrator_ready_handled:
+            _t = time.monotonic()
             await self.orchestrator.handle_bot_ready(self)
+            self.logger.warning("rfs_frame", step="handle_bot_ready", s=round(time.monotonic() - _t, 3))
             self._orchestrator_ready_handled = True
 
     def _before_ingestion_admission(
@@ -1524,8 +1533,10 @@ class AgentBot:
         if not self._accepting_work:
             return
         client = self.client
+        _t = time.monotonic()
         if client is not None:
             await self._room_lifecycle.observe_trusted_sync_rooms(client.rooms)
+        self.logger.warning("rfs_frame", step="observe_trusted_sync_rooms", s=round(time.monotonic() - _t, 3), first=first_sync_response, receipt_new=receipt_new)
         self._first_sync_done = self._first_sync_done or receipt_new
         await self._run_sync_response_side_effects(
             first_sync_response=first_sync_response,
