@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.manual import schedule_compaction_before_next_reply, scope_has_session
 from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
@@ -44,7 +43,7 @@ async def handle_compact_command(
         names = (name,)
         empty_reply = f"`{name}` has nothing to compact here yet."
     else:
-        names = tuple(name for name in (*config.agents, *config.teams) if name != ROUTER_AGENT_NAME)
+        names = (*config.agents, *config.teams)
         empty_reply = "Nothing to compact here."
     replies = []
     pending_reply = None
