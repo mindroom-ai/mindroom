@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 # How the SDK's ``ValueError`` begins when a Gemini API client has no API key at all.
 _NO_API_KEY_ERROR = "No API key was provided."
+_GEMINI_API_VERSION = "v1beta"
 # The generation a Gemini model id names, as in ``gemini-3.1-pro-preview`` or ``models/gemini-4-pro``; an alias
 # such as ``gemini-flash-latest`` names none.
 _GEMINI_GENERATION = re.compile(r"gemini-(\d+)(?:[.-]|$)")
@@ -298,7 +299,14 @@ class GeminiProvider:
         # The request pipeline retries a failed request, so one attempt overrides any SDK retries ``client_params``
         # authors, for the Files API calls of an attachment too large to inline as for generation. google-genai still
         # retries an upload's transfer a fixed number of times, which no option turns off.
-        params["http_options"] = {**(params.get("http_options") or {}), "retry_options": {"attempts": 1}}
+        # google-genai 3 sends the Gemini API to v1, which lacks the -latest aliases, preview models, and caches, so the
+        # Gemini API keeps v1beta unless ``client_params`` authors another version. Vertex AI keeps its own default.
+        api_version = {} if settings.vertexai else {"api_version": _GEMINI_API_VERSION}
+        params["http_options"] = {
+            **api_version,
+            **(params.get("http_options") or {}),
+            "retry_options": {"attempts": 1},
+        }
         return params
 
 

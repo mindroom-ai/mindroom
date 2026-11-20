@@ -404,8 +404,20 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
     assert adapter._client_params() == {
         "api_key": "test-key",
         "vertexai": False,
-        "http_options": {"timeout": 12500, "retry_options": {"attempts": 1}},
+        "http_options": {"api_version": "v1beta", "timeout": 12500, "retry_options": {"attempts": 1}},
     }
+
+
+def test_gemini_api_keeps_v1beta_unless_the_config_authors_a_version(tmp_path: Path) -> None:
+    """google-genai 3 defaults the Gemini API to v1; the client stays on v1beta unless ``http_options`` names one."""
+    default = gemini_adapter.build_provider(ModelConfig(**_config(GEMINI)), runtime_paths_for(tmp_path))
+    authored = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI, client_params={"http_options": {"api_version": "v1"}})),
+        runtime_paths_for(tmp_path),
+    )
+
+    assert default._sdk_client()._api_client._http_options.api_version == "v1beta"
+    assert authored._sdk_client()._api_client._http_options.api_version == "v1"
 
 
 @pytest.mark.asyncio
