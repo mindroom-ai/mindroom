@@ -16,6 +16,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle, tailnet_ssh_gateway
@@ -305,6 +306,26 @@ def test_status_outside_the_contract_is_refused_and_changes_nothing(
     assert (response.status_code, response.json()) == (422, {"detail": BAD_BODY})
     assert LOGIN_URL not in response.text
     assert tailnet_ssh_status(api_app) == GatewayStatus()
+
+
+def test_a_refused_body_logs_where_and_why_but_never_what(client: TestClient) -> None:
+    """The operator reads which fields broke the contract, and how, without any value the gateway sent."""
+    body = {"enrollment": "oauth", "links": {"abc": _report(state="sleeping", login_url=LOGIN_URL)}}
+
+    with capture_logs() as logs:
+        response = client.post("/status", headers=AUTH, json=body)
+
+    assert response.status_code == 422
+    refused = [log for log in logs if log["event"] == "tailnet_ssh_gateway_body_refused"]
+    assert [(log["log_level"], log["model"], log["errors"]) for log in refused] == [
+        (
+            "warning",
+            "StatusReport",
+            [{"loc": "enrollment", "type": "literal_error"}, {"loc": "links.abc.state", "type": "literal_error"}],
+        ),
+    ]
+    assert "oauth" not in repr(logs)
+    assert LOGIN_URL not in repr(logs)
 
 
 @pytest.mark.parametrize(("path", "body"), BAD_BODIES)

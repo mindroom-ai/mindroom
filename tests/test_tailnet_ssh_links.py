@@ -25,6 +25,7 @@ from mindroom.tailnet_ssh.links import (
     GatewayReport,
     GatewayStatus,
     LinkStatus,
+    StatusReport,
     active_worker_keys,
     connect,
     desired_links,
@@ -191,7 +192,8 @@ def _post(
     now: float = NOW,
     monotonic: float = 100.0,
 ) -> None:
-    record_status(paths, status, {"enrollment": enrollment, "links": reports}, now=now, monotonic=monotonic)
+    report = StatusReport.model_validate({"enrollment": enrollment, "links": reports})
+    record_status(paths, status, report, now=now, monotonic=monotonic)
 
 
 def _handle(worker_key: str, ssh_dir: Path | None, *, status: str = "ready") -> WorkerHandle:

@@ -12,7 +12,7 @@ import asyncio
 import secrets
 import time
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ValidationError
@@ -20,9 +20,11 @@ from starlette.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
 from mindroom.api.script_gateway import SCRIPT_GATEWAY_PORT_ENV, listener_port, serve_listener
+from mindroom.logging_config import get_logger
 from mindroom.tailnet_ssh.links import (
     ConnectRefused,
     GatewayStatus,
+    StatusReport,
     active_worker_keys,
     connect,
     desired_links,
@@ -48,29 +50,11 @@ __all__ = [
     "tailnet_ssh_status",
 ]
 
+logger = get_logger(__name__)
+
 TOKEN_ENV = "MINDROOM_TAILNET_SSH_GATEWAY_TOKEN"  # noqa: S105 - the variable's name
 PORT_ENV = "MINDROOM_TAILNET_SSH_PORT"
 DEFAULT_PORT = 8769
-
-
-class _LinkReport(BaseModel):
-    """What the gateway sees of one link's node."""
-
-    state: Literal["needs_login", "needs_approval", "running", "removed"]
-    login_url: str | None = None
-    tailnet: str | None = None
-    dns_name: str | None = None
-    login_name: str | None = None
-    key_expiry: str | None = None
-    open_connections: int = 0
-    last_error: str | None = None
-
-
-class _StatusReport(BaseModel):
-    """The gateway's ``POST /status`` body: how its nodes enrol, and every node it holds by link id."""
-
-    enrollment: Literal["login", "auth_key"]
-    links: dict[str, _LinkReport]
 
 
 class _Peer(BaseModel):
@@ -128,13 +112,15 @@ def _link_service(api_app: FastAPI) -> tuple[Config, RuntimePaths, AgentReplyMem
 async def _body[T: BaseModel](request: Request, model: type[T]) -> T:
     """Return the request's JSON body as ``model``, or answer 422 with one sentence.
 
-    Pydantic's errors repeat what they reject, and a status report carries login URLs, so none of them is answered.
+    Pydantic's errors repeat what they reject, and a status report carries login URLs, so none of them is answered;
+    the log names each error's location and type only.
     """
     try:
         return model.model_validate_json(await request.body())
-    except ValidationError:
-        detail = "The request body is not what the gateway contract describes."
-        raise HTTPException(status_code=422, detail=detail) from None
+    except ValidationError as error:
+        errors = [{"loc": ".".join(map(str, item["loc"])), "type": item["type"]} for item in error.errors()]
+    logger.warning("tailnet_ssh_gateway_body_refused", model=model.__name__, errors=errors)
+    raise HTTPException(status_code=422, detail="The request body is not what the gateway contract describes.")
 
 
 def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
@@ -154,12 +140,12 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
     @app.post("/status", status_code=204)
     async def post_status(request: Request) -> None:
         _config, runtime_paths, _memberships, status = _link_service(api_app)
-        report = await _body(request, _StatusReport)
+        report = await _body(request, StatusReport)
         await asyncio.to_thread(
             record_status,
             runtime_paths,
             status,
-            report.model_dump(),
+            report,
             now=time.time(),
             monotonic=time.monotonic(),
         )

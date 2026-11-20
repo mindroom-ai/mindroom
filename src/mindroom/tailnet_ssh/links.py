@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 import aiohttp
+from pydantic import BaseModel
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION, unbound_agent_cli_shell_env
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
@@ -66,6 +67,26 @@ _NO_SSH_PORT = (
 )
 _NO_SHELL = "This agent has no shell tool."
 _MEMBERSHIP_PENDING = "Whether you may use this agent is not known yet; try again in a few seconds."
+
+
+class LinkReport(BaseModel):
+    """What the gateway sees of one link's node, as its ``POST /status`` says it."""
+
+    state: Literal["needs_login", "needs_approval", "running", "removed"]
+    login_url: str | None = None
+    tailnet: str | None = None
+    dns_name: str | None = None
+    login_name: str | None = None
+    key_expiry: str | None = None
+    open_connections: int = 0
+    last_error: str | None = None
+
+
+class StatusReport(BaseModel):
+    """The gateway's ``POST /status`` body: how its nodes enrol, and every node it holds by link id."""
+
+    enrollment: Literal["login", "auth_key"]
+    links: dict[str, LinkReport]
 
 
 @dataclass(frozen=True)
@@ -244,7 +265,7 @@ def desired_links(
 def record_status(
     runtime_paths: RuntimePaths,
     status: GatewayStatus,
-    payload: Mapping[str, Any],
+    payload: StatusReport,
     *,
     now: float,
     monotonic: float,
@@ -255,34 +276,34 @@ def record_status(
     signed in is the one it admits from then on, whoever signs in later. A node an operator key enrolled pins no
     login, so it admits nobody except through the config. A report for a link the store does not hold is ignored.
     """
-    operator = payload["enrollment"] == "auth_key"
+    operator = payload.enrollment == "auth_key"
 
     def settle(book: LinkBook) -> dict[str, LinkStatus]:
         reported: dict[str, LinkStatus] = {}
-        for link_id, report in payload["links"].items():
+        for link_id, report in payload.links.items():
             link = book.by_id(link_id)
             if link is None:
                 continue
-            if report["state"] == "removed":
+            if report.state == "removed":
                 finish_removal(book, link_id)
                 continue
-            login = None if operator else report.get("login_name")
-            if report["state"] == "running" and link.enrolled_at is None and (operator or login):
+            login = None if operator else report.login_name
+            if report.state == "running" and link.enrolled_at is None and (operator or login):
                 link.enrolled_login, link.enrolled_at = login, now
             reported[link_id] = LinkStatus(
-                state=report["state"],
-                login_url=report.get("login_url"),
-                tailnet=report.get("tailnet"),
-                dns_name=report.get("dns_name"),
-                login_name=report.get("login_name"),
-                key_expiry=report.get("key_expiry"),
-                open_connections=report.get("open_connections", 0),
-                last_error=report.get("last_error"),
+                state=report.state,
+                login_url=report.login_url,
+                tailnet=report.tailnet,
+                dns_name=report.dns_name,
+                login_name=report.login_name,
+                key_expiry=report.key_expiry,
+                open_connections=report.open_connections,
+                last_error=report.last_error,
                 worker_key=link.worker_key,
             )
         return reported
 
-    status.report = GatewayReport(payload["enrollment"], monotonic, update_links(runtime_paths, settle))
+    status.report = GatewayReport(payload.enrollment, monotonic, update_links(runtime_paths, settle))
 
 
 def link_state(link: Link, status: LinkStatus | None, *, suspended: bool) -> str:
