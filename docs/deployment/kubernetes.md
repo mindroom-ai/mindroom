@@ -170,7 +170,7 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | `workers.kubernetes.extraEnv` | `MINDROOM_KUBERNETES_WORKER_ENV_JSON` | `{}` | Extra environment variables for worker pods |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` | `1Gi` | Size of each worker's `/tmp` |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` | `{}` | Per-requester worker resources |
-| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_IDLE_TIMEOUT_SECONDS` | `600` | Time without a running command after which a [named worker](../tools/execution-and-coding.md#named-workers) is removed |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_IDLE_TIMEOUT_SECONDS` | `600` | Time without a running command after which a [named worker](../tools/execution-and-coding.md#named-workers) is removed, at most the worker idle timeout |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKER_MAX_AGE_SECONDS` | `14400` | Time after its start at which a named worker is removed, whatever runs in it |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` | `16` | Most named workers that may run at once for all agents and requesters together |
 

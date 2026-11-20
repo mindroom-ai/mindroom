@@ -211,7 +211,7 @@ def _agent_limit(agent_name: str | None, config: Config | None) -> int:
 def named_workers_refusal(agent_name: str | None, config: Config | None, runtime_paths: RuntimePaths) -> str | None:
     """Return why ``agent_name``'s calls cannot run in named workers, or None when they can."""
     if _agent_limit(agent_name, config) < 1:
-        return "Named workers are off for this agent; `extra_workers` in its config allows them."
+        return "Named workers are off for this agent; extra_workers in its config allows them."
     if worker_backend_kind(runtime_paths) is not WorkerBackendKind.KUBERNETES or not idle_worker_cleanup_runs(
         runtime_paths,
     ):

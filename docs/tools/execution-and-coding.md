@@ -202,7 +202,7 @@ run_shell_command("bash e2e/shard.sh 1 2", worker="e2e-1", resource_profile="lar
 - `resource_profile` is `small`, `standard`, or `large`, the [background script profiles](../deployment/kubernetes.md#worker-settings), and sizes the worker when its name is first used; omitting it gives the worker the normal worker resources.
   A later call that asks for another size fails.
 - The result starts with `[worker: <name>]`, or `[worker: <name>, started]` when the call ran in a newly started worker, where nothing from earlier commands is running.
-- A named worker has its own processes, network ports, and `/tmp`, and cannot connect to other workers.
+- A named worker has its own processes, network ports, and `/tmp`.
   It sees the same workspace, shared directories, and knowledge as the agent's normal worker, with the same leased tool settings and shared credentials, but not the packages installed into the normal worker's environment or its package caches.
 - Workers share the workspace, so give each one its own output directory, and its own git worktree when it changes a checkout, and build or install what all of them need once before starting them.
 
@@ -219,7 +219,7 @@ Only calls of a reply in a Matrix conversation can name a worker, so [background
 
 Errors:
 
-- `Named workers are off for this agent; `extra_workers` in its config allows them.` - set `extra_workers` on the agent.
+- `Named workers are off for this agent; extra_workers in its config allows them.` - set `extra_workers` on the agent.
 - `Named workers need the kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use the Kubernetes worker backend, run the API server, and set the cleanup interval.
 - `Cannot start worker '<name>': <n> of the <n> named workers this agent may run for you are running.` - run the command in a worker that already runs, wait until an idle one is removed, or raise `extra_workers`.
 - `Cannot start worker '<name>': this deployment runs its limit of <n> named workers.` - try again later, or raise `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX`.

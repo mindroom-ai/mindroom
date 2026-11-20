@@ -758,6 +758,31 @@ async def test_a_shell_outside_a_worker_refuses_to_name_one(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_the_shell_in_a_worker_runs_the_command_of_a_call_that_names_it(tmp_path: Path) -> None:
+    """The call reaches its worker with its arguments as sent, and the worker's shell runs it like any other."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+    )
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=False,
+        worker_target=None,
+    )
+
+    result = await _offered_entrypoint(shell, "run_shell_command")(
+        ["echo", "ran here"],
+        worker="e2e-0",
+        resource_profile="large",
+    )
+
+    assert result == "ran here"
+
+
+@pytest.mark.asyncio
 async def test_a_response_turn_owns_the_named_workers_of_its_calls(
     runtime_paths: RuntimePaths,
     backend: _FakeBackend,
