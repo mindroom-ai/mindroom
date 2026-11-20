@@ -535,9 +535,8 @@ dev = [
   "requests>=2.32.4",
   "ruff>=0.12.5",
   "tach>=0.34.1",
-  # Freezes main's ty 0.0.32. The latest (0.0.107) renames rules this config ignores and reports about 1,700 new
-  # errors; upgrade ty on its own.
-  "ty>=0.0.17,<0.0.33",
+  # 0.0.107 renamed the rules the [tool.ty] overrides and ignore comments use.
+  "ty>=0.0.107",
   "vulture>=2.16",
   "zensical",
 ]
@@ -675,7 +674,7 @@ python-version = "3.13"
 # arguments).
 [[tool.ty.overrides]]
 include = [ "tests/" ]
-rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-return-type = "ignore", no-matching-overload = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unresolved-attribute = "ignore", unsupported-operator = "ignore" }
+rules = { invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-explicit-return = "ignore", invalid-implicit-return = "ignore", missing-attribute = "ignore", missing-union-attribute = "ignore", no-matching-overload = "ignore", not-callable = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unsupported-operator = "ignore" }
 
 # The macOS accessibility backend imports pyobjc, declared
 # `sys_platform=='darwin'` and so genuinely absent everywhere else. Checking on
@@ -690,7 +689,7 @@ rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invali
 # directives deleted.
 [[tool.ty.overrides]]
 include = [ "src/mindroom/desktop/" ]
-rules = { unresolved-import = "ignore", unused-ignore-comment = "ignore" }
+rules = { import-not-found = "ignore", unused-ignore-comment = "ignore" }
 [tool.ty.rules]
 deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
 [tool.ty.src]

@@ -1026,7 +1026,7 @@ class ModelTable(dict[str, ModelConfig]):
         model = self._at_level(reference)
         return super().__getitem__(reference) if model is None else model
 
-    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # ty: ignore[invalid-method-override]
+    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # ty: ignore[incompatible-method-override]
         """Return the model ``reference`` names, at its level for ``name@level``, or ``default``."""
         model = self._at_level(reference)
         return super().get(reference, default) if model is None else model

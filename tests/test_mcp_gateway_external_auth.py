@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import replace
 from functools import partial
-from json.scanner import py_make_scanner  # ty: ignore[unresolved-import] -- stdlib Python scanner is absent from stubs
+from json.scanner import py_make_scanner  # ty: ignore[import-not-found] -- stdlib Python scanner is absent from stubs
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
