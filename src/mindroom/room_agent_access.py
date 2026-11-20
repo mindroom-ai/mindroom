@@ -260,7 +260,7 @@ def _toolkit_host(
     return "scratch_worker"
 
 
-def _offered_functions(
+def offered_functions(
     metadata: ToolMetadata,
     settings: Mapping[str, object],
 ) -> tuple[frozenset[str] | None, bool]:
@@ -334,7 +334,7 @@ def _workspace(
             tool_config_overrides=entry.tool_config_overrides,
         )
         # A toolkit whose functions only its build could tell offers what it builds.
-        functions, writes = _offered_functions(metadata, settings.values)
+        functions, writes = offered_functions(metadata, settings.values)
         if functions is not None and not functions:
             continue
         # On a runner that sees only its own storage, a toolkit writes there, not in the workspace.
