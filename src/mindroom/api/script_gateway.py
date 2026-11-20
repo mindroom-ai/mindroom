@@ -15,6 +15,8 @@ from uvicorn.protocols.http.auto import AutoHTTPProtocol
 
 from mindroom.api.agent_cli import bind_agent_cli_registry
 from mindroom.api.agent_cli import router as agent_cli_router
+from mindroom.api.workflow_gateway import bind_workflow_engine
+from mindroom.api.workflow_gateway import router as workflow_gateway_router
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.json_utils import has_only_finite_numbers
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.constants import RuntimePaths
+    from mindroom.workflow_runs.engine import WorkflowEngine
 
 __all__ = [
     "SCRIPT_GATEWAY_PORT_ENV",
@@ -323,11 +326,12 @@ async def serve_script_gateway_listener(
     broker: _ScriptGatewayBroker | None,
     log_level: str,
     agent_cli_registry: TurnToolRegistry | None,
+    workflow_engine: WorkflowEngine | None,
 ) -> AsyncIterator[None]:
     """Serve only worker-facing capability routes on `MINDROOM_SCRIPT_GATEWAY_PORT` while the primary API runs.
 
-    The listener's app contains nothing but the script gateway and Agent CLI
-    routers, both authenticated by short-lived capabilities, so a network path
+    The listener's app contains nothing but the script gateway, workflow gateway and Agent CLI
+    routers, all authenticated by short-lived capabilities, so a network path
     that reaches only this port cannot reach any other primary API route.
     """
     port = listener_port(runtime_paths, SCRIPT_GATEWAY_PORT_ENV)
@@ -336,8 +340,10 @@ async def serve_script_gateway_listener(
         return
     gateway_app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     gateway_app.include_router(router)
+    gateway_app.include_router(workflow_gateway_router)
     gateway_app.include_router(agent_cli_router)
     bind_script_tool_broker(gateway_app, broker)
+    bind_workflow_engine(gateway_app, workflow_engine)
     bind_agent_cli_registry(gateway_app, agent_cli_registry)
     async with serve_listener(
         gateway_app,

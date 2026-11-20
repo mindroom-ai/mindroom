@@ -1,20 +1,70 @@
-"""Shared helpers for the workflow tests: a fake gateway the SDK talks to over real HTTP."""
+"""Shared helpers for the workflow tests.
+
+`FakeWorkflowGateway` answers the SDK over real HTTP (pure level).
+`WorkflowStack` is the engine harness: the real workflow store, script store, broker and engine, with a fake script
+manager, so a test plays the script by calling the engine's gateway methods.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import threading
+from contextlib import contextmanager
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING, Self
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, Self
+from uuid import uuid4
+
+import httpx
+from agno.tools import Toolkit
+from fastapi import FastAPI
 
 import mindroom.workflow as sdk
+from mindroom.api.workflow_gateway import bind_workflow_engine
+from mindroom.api.workflow_gateway import router as workflow_router
+from mindroom.approval.tool_approval import ToolApprovalDecision
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.constants import RuntimePaths
+from mindroom.message_target import MessageTarget
+from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
 from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TOKEN_PATH_ENV
+from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunRecord, ScriptRunState
+from mindroom.script_runs.reasons import PROCESS_EXIT_OBSERVED
+from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.workflow_runs.engine import WorkflowEngine
+from mindroom.workflow_runs.models import (
+    NodeReceipt,
+    NodeRequest,
+    WorkflowRun,
+    new_workflow_run_id,
+)
+from mindroom.workflow_runs.store import WorkflowRunStore
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+)
+from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     import pytest
+
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.script_runs.manager import ScriptRunLimits
+    from mindroom.script_runs.models import ScriptToolGrant
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 SCRIPT_RUN_ID = "script-" + "a" * 32
 TOKEN = "invented-capability"  # noqa: S105 - an invented placeholder, not a credential.
@@ -136,3 +186,371 @@ def sdk_env(monkeypatch: pytest.MonkeyPatch, gateway: FakeWorkflowGateway) -> No
     monkeypatch.setenv(TOKEN_PATH_ENV, str(gateway.token_path))
     monkeypatch.setattr(sdk, "_RETRY_SECONDS", 0.0)
     sdk._gateway.cache_clear()
+
+
+_SETTLED_STATES = frozenset({"completed", "failed", "cancelled", "indeterminate"})
+
+
+def tool_args(toolkit: str, function: str, **arguments: object) -> dict[str, object]:
+    """Return the arguments of a `tool` node, as the SDK's `tool()` sends them."""
+    return {"toolkit": toolkit, "function": function, "arguments": arguments}
+
+
+class NodeFailed(Exception):  # noqa: N818 - named as the plan's tests name it.
+    """A node that ended without a result, as the SDK would raise it."""
+
+    def __init__(self, receipt: NodeReceipt) -> None:
+        error = receipt.error or {}
+        super().__init__(str(error.get("message")))
+        self.kind = str(error.get("kind"))
+        self.receipt = receipt
+
+
+class CountingTool:
+    """State of the stack's `counter` toolkit, whose effect is one line appended to a file."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.calls = 0
+        self.before_effect: Callable[[], object] | None = None
+
+    @property
+    def lines(self) -> list[str]:
+        """The lines the tool has appended so far."""
+        return self.path.read_text(encoding="utf-8").splitlines() if self.path.exists() else []
+
+    def toolkit(self) -> type[Toolkit]:
+        """Return the toolkit class to register as `counter`."""
+        counter = self
+
+        class CounterTools(Toolkit):
+            def __init__(self) -> None:
+                super().__init__(name="counter", tools=[self.append, self.fail, self.text])
+
+            def append(self, line: str) -> str:
+                """Append one line to the file."""
+                counter.calls += 1
+                if counter.before_effect is not None:
+                    counter.before_effect()
+                with counter.path.open("a", encoding="utf-8") as file:
+                    file.write(f"{line}\n")
+                return "appended"
+
+            def fail(self) -> str:
+                """Raise."""
+                counter.calls += 1
+                msg = "The counter failed."
+                raise RuntimeError(msg)
+
+            def text(self, size: int) -> str:
+                """Return a text of *size* characters."""
+                counter.calls += 1
+                return "x" * size
+
+        return CounterTools
+
+
+class _StackResolver:
+    """The live runtime of the stack's one owner; approvals answer at once unless a test holds them."""
+
+    def __init__(self, context: ToolRuntimeContext) -> None:
+        self.context = context
+        self.asks: list[str] = []
+        self.hold_approvals: asyncio.Event | None = None
+        self.decision = ToolApprovalDecision(approved=True)
+
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
+        del run, config
+        return True
+
+    def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
+        del run
+        return replace(self.context, correlation_id=correlation_id)
+
+    def resolve_worker_authority(
+        self,
+        run: ScriptRunRecord,
+        *,
+        context: ToolRuntimeContext,
+    ) -> ScriptRuntimeWorkerAuthority:
+        return ScriptRuntimeWorkerAuthority(
+            worker_id=run.worker_id,
+            local_unsafe=True,
+            worker_target=context.resolve_worker_target(),
+        )
+
+    async def request_approval(
+        self,
+        *,
+        origin: BackgroundScriptToolOrigin,
+        context: ToolRuntimeContext,
+        grant: ScriptToolGrant,
+        arguments: dict[str, object],
+        timeout_seconds: float,
+    ) -> ToolApprovalDecision:
+        del origin, context, arguments, timeout_seconds
+        self.asks.append(f"{grant.toolkit_name}.{grant.function_name}")
+        if self.hold_approvals is not None:
+            await self.hold_approvals.wait()
+        return self.decision
+
+    async def settle_approval(self, origin: BackgroundScriptToolOrigin, *, reason: str) -> None:
+        del origin, reason
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        del run_id, reason
+
+
+class FakeScripts:
+    """The script manager as the engine uses it, with no process: real attempt records that the test ends."""
+
+    def __init__(self, store: ScriptRunStore, broker: ScriptToolBroker) -> None:
+        self.store = store
+        self.broker = broker
+        self.launched: list[ScriptRunRecord] = []
+        self.limits: list[ScriptRunLimits | None] = []
+        self.tokens: dict[str, str] = {}
+
+    async def run(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        source: str,
+        workflow_run_id: str,
+        resource_profile: str | None = None,
+        limits: ScriptRunLimits | None = None,
+    ) -> ScriptRunRecord:
+        """Record one running attempt of *workflow_run_id* and keep its capability token."""
+        token, token_hash = mint_script_capability()
+        attempt = self.store.create_run(
+            ScriptRunRecord(
+                run_id=f"script-{uuid4().hex}",
+                agent_name=context.agent_name,
+                owner_user_id=context.requester_id,
+                room_id=context.room_id,
+                thread_root_event_id=context.resolved_thread_id,
+                execution_identity=serialize_tool_execution_identity(context.execution_identity),
+                source_digest=hashlib.sha256(source.encode()).hexdigest(),
+                # Empty, so a call that runs proves the broker reads the owner's live tools and no launch snapshot.
+                grants=(),
+                token_hash=token_hash,
+                workflow_run_id=workflow_run_id,
+                resource_profile=resource_profile,
+                local_unsafe=True,
+                max_tool_calls_per_minute=600 if limits is None else limits.max_tool_calls_per_minute,
+            ),
+        )
+        self.tokens[attempt.run_id] = token
+        self.limits.append(limits)
+        self.launched.append(self.store.transition_run(attempt.run_id, state=ScriptRunState.RUNNING))
+        return self.launched[-1]
+
+    async def revoke(self, run_id: str, *, reason: str) -> ScriptRunRecord:
+        """Revoke the attempt's capability and the broker's work for it."""
+        revoked = self.store.request_cancel(run_id, reason=reason)
+        await self.broker.cancel_run(run_id)
+        return revoked
+
+    async def reconcile_durable(self, *, run_id: str) -> ScriptRunRecord:
+        """End a revoked attempt as cancelled, as the manager does once its process is confirmed dead."""
+        attempt = self.store.get_run(run_id)
+        if attempt.state in TERMINAL_SCRIPT_RUN_STATES or attempt.cancel_requested_at is None:
+            return attempt
+        return await self.end(run_id, ScriptRunState.CANCELLED)
+
+    async def end(
+        self,
+        run_id: str,
+        state: ScriptRunState,
+        *,
+        reason: str = PROCESS_EXIT_OBSERVED,
+        output: str = "",
+    ) -> ScriptRunRecord:
+        """End the attempt's process as the manager records it: the exit, the broker's calls, the terminal state."""
+        exit_code = 0 if state is ScriptRunState.EXITED else 1
+        self.store.record_process_exit(
+            run_id,
+            exit_code=exit_code,
+            error=None,
+            output=output,
+            cancellation_reason=reason,
+        )
+        await self.broker.cancel_run(run_id)
+        return self.store.finalize_cleaned_run(run_id, state=state)
+
+
+def owner_context(
+    tmp_path: Path,
+    *,
+    extra_tools: tuple[str, ...] = (),
+    auto_save_threshold_bytes: int | None = None,
+) -> ToolRuntimeContext:
+    """Return the tool context of the stack's owner: the agent `watcher` with `counter` and `shell`, for Alice.
+
+    The operator allows shell on this machine and approves by default; only `append` asks first.
+    With *auto_save_threshold_bytes* the operator raised the size above which a tool result moves to a workspace file.
+    """
+    defaults = DefaultsConfig(tools=[], allow_shell_without_worker=True)
+    if auto_save_threshold_bytes is not None:
+        defaults = defaults.model_copy(update={"tool_output_auto_save_threshold_bytes": auto_save_threshold_bytes})
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "storage",
+        control_state_root=tmp_path / "control",
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={"watcher": AgentConfig(display_name="Watcher", tools=["counter", "shell", *extra_tools])},
+            defaults=defaults,
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"default": "auto_approve", "rules": [{"match": "append", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    return make_test_tool_runtime_context(
+        agent_name="watcher",
+        target=MessageTarget.resolve(
+            room_id="!room:example.test",
+            thread_id="$thread:example.test",
+            reply_to_event_id=None,
+        ),
+        requester_id="@alice:example.test",
+        client=SimpleNamespace(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        storage_path=runtime_paths.storage_root,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+
+
+class WorkflowStack:
+    """The engine harness: real stores, broker and engine around a fake script manager (see the module docstring)."""
+
+    def __init__(self, tmp_path: Path, counting_tool: CountingTool, **owner_options: Any) -> None:  # noqa: ANN401
+        self.tmp_path = tmp_path
+        self.counting_tool = counting_tool
+        self.owner_options = owner_options
+        self.run_id = ""
+        self.tokens: dict[str, str] = {}
+        self._open()
+
+    def _open(self) -> None:
+        """Build the runtimes on the stack's databases, as a starting primary does."""
+        self.context = owner_context(self.tmp_path, **self.owner_options)
+        self.script_store = ScriptRunStore(self.context.runtime_paths)
+        self.store = WorkflowRunStore(self.tmp_path / "control" / "workflow_runs" / "workflow_runs.sqlite3")
+        self.resolver = _StackResolver(self.context)
+        self.broker = ScriptToolBroker(store=self.script_store, runtime_resolver=self.resolver)
+        self.broker.open_call_admission()
+        self.scripts = FakeScripts(self.script_store, self.broker)
+        self.scripts.tokens = self.tokens
+        self.engine = WorkflowEngine(self.store, self.scripts, self.broker)  # type: ignore[arg-type]
+
+    @property
+    def attempt(self) -> ScriptRunRecord:
+        """The live record of the run's current attempt."""
+        script_run_id = self.store.get_run(self.run_id).script_run_id
+        assert script_run_id is not None
+        return self.script_store.get_run(script_run_id)
+
+    @property
+    def token(self) -> str:
+        """The capability token of the run's current attempt."""
+        return self.tokens[self.attempt.run_id]
+
+    async def start(self, source: str = "", args: object = None, **options: object) -> WorkflowRun:
+        """Reserve a run for the owner and launch its first attempt."""
+        context = self.context
+        run = WorkflowRun(
+            run_id=new_workflow_run_id(),
+            agent_name=context.agent_name,
+            owner_user_id=context.requester_id,
+            room_id=context.room_id,
+            thread_root_event_id=context.resolved_thread_id,
+            execution_identity=serialize_tool_execution_identity(context.execution_identity),
+            persona=None,
+            title=None,
+            source=source,
+            source_digest=hashlib.sha256(source.encode()).hexdigest(),
+            args=args,
+            max_concurrent=16,
+            max_cost_usd=None,
+            resource_profile=None,
+            runtime_seconds_left=None,
+            origin_job_id=None,
+        )
+        self.store.reserve_run(replace(run, **options))
+        self.run_id = run.run_id
+        return await self.engine.launch(run.run_id, context)
+
+    async def submit(
+        self,
+        key: str,
+        kind: str,
+        args: dict[str, object],
+        meta: dict[str, object] | None = None,
+    ) -> NodeReceipt:
+        """Submit one node as the attempt's script would."""
+        return await self.engine.submit_node(self.attempt, NodeRequest(key, kind, args, meta or {}))
+
+    async def result(
+        self,
+        key: str,
+        kind: str,
+        args: dict[str, object],
+        meta: dict[str, object] | None = None,
+    ) -> object:
+        """Submit one node, wait until it settles, and return its result or raise `NodeFailed`."""
+        receipt = await self.submit(key, kind, args, meta)
+        while receipt.state not in _SETTLED_STATES:
+            receipt = await self.engine.node_receipt(self.attempt, receipt.id, wait=SETTLE_TIMEOUT_SECONDS)
+        if receipt.state != "completed":
+            raise NodeFailed(receipt)
+        return receipt.result
+
+    async def end_attempt(self, state: ScriptRunState, reason: str | None = None, *, output: str = "") -> None:
+        """End the attempt's process in *state* and let the engine see it."""
+        await self.scripts.end(self.attempt.run_id, state, reason=reason or PROCESS_EXIT_OBSERVED, output=output)
+        await self.engine.reconcile()
+
+    async def restart(self) -> WorkflowStack:
+        """Close the runtimes and reopen them on the same databases, as a primary restart does."""
+        await self.engine.close()
+        self._open()
+        return self
+
+    async def until(self, predicate: Callable[[], object]) -> None:
+        """Wait until *predicate* holds."""
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not predicate():  # noqa: ASYNC110 - the predicate reads state no event announces.
+                await asyncio.sleep(0.01)
+
+    def app(self) -> FastAPI:
+        """Return an app that serves the workflow routes from the stack's engine."""
+        app = FastAPI()
+        app.include_router(workflow_router)
+        bind_workflow_engine(app, self.engine)
+        return app
+
+    def http(self, token: str | None = None) -> httpx.AsyncClient:
+        """Return a client of the current attempt's workflow routes, as the SDK in that attempt's process is."""
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app()),
+            base_url=f"http://gateway.test/api/script-gateway/workflow/{self.attempt.run_id}/",
+            headers={"Authorization": f"Bearer {self.token if token is None else token}"},
+        )
+
+
+@contextmanager
+def workflow_stack(
+    tmp_path: Path,
+    stack_type: type[WorkflowStack] = WorkflowStack,
+    **owner_options: Any,  # noqa: ANN401 - the options of `owner_context`.
+) -> Iterator[WorkflowStack]:
+    """Build the engine harness with its `counter` toolkit registered for the block."""
+    counting_tool = CountingTool(tmp_path / "counter.txt")
+    with registered_toolkit("counter", counting_tool.toolkit()):
+        yield stack_type(tmp_path, counting_tool, **owner_options)

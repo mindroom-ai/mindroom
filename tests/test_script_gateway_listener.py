@@ -99,6 +99,7 @@ def _listener(
         broker=broker,
         log_level="INFO",
         agent_cli_registry=cast("TurnToolRegistry", agent_cli_registry),
+        workflow_engine=None,
     )
 
 
@@ -272,6 +273,7 @@ async def test_listener_is_absent_without_a_configured_port(tmp_path: Path) -> N
             broker=None,
             log_level="INFO",
             agent_cli_registry=None,
+            workflow_engine=None,
         ):
             pass
 
@@ -291,6 +293,7 @@ async def test_listener_rejects_invalid_port(tmp_path: Path, raw_port: str) -> N
             broker=None,
             log_level="INFO",
             agent_cli_registry=None,
+            workflow_engine=None,
         ):
             pass
 

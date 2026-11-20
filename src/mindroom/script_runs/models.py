@@ -92,6 +92,13 @@ class ScriptRunRecord:
         """What the shim does with the source: run it as `__main__`, or hand it to the workflow SDK."""
         return "script" if self.workflow_run_id is None else "workflow"
 
+    def launch_allows(self, grant: ScriptToolGrant) -> bool:
+        """Whether the launch lets the run call *grant*; the owner's live tools are checked at every call besides.
+
+        A plain script may call only its launch snapshot; a workflow attempt answers to the live tools alone.
+        """
+        return self.workflow_run_id is not None or grant in self.grants
+
     @property
     def accepts_calls(self) -> bool:
         """Whether the run may still start tool calls: neither revoked nor finished."""
@@ -110,6 +117,10 @@ class ScriptCallRecord:
     created_at: str
     result: object | None = None
     error: object | None = None
+    effect_started_at: str | None = None
+    """Set after hooks and approval, right before the tool is invoked; unset, the call provably never ran."""
+    metadata: dict[str, object] | None = None
+    """Structured facts the tool reported about its result, such as a command's `exit_code`."""
 
 
 @dataclass(frozen=True, slots=True)

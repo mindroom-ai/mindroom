@@ -40,7 +40,7 @@ from mindroom.tool_system.output_files import (
     current_tool_output_file_request,
     current_tool_workdir,
 )
-from mindroom.tool_system.progress import report_tool_progress
+from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_schema import closed_parameters
@@ -570,6 +570,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     output_destination=output_destination,
                 )
             message = result.message
+            if result.return_code is not None:
+                report_tool_metadata(exit_code=result.return_code)
             if result.output_file_handled:
                 return ToolOutputFileHandled(message)
             if cwd is None:

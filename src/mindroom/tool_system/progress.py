@@ -4,6 +4,7 @@ A dispatched call masks its tool's latest report and shows it in live reply fram
 the agent; a sandbox runner forwards it to the primary. Reports reach tool code through the call's context, which
 tool offloading copies into its threads; a thread a tool starts itself must capture ``report_tool_progress`` from
 that context.
+A call reports structured facts about its result, such as a command's exit status, the same way.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ _SHOWN_PROGRESS_CHARS = 1000
 _REPORT_WINDOW_CHARS = 8000
 
 _REPORTER: ContextVar[Callable[[str], None] | None] = ContextVar("tool_progress_reporter", default=None)
+_RESULT_METADATA: ContextVar[dict[str, object] | None] = ContextVar("tool_result_metadata", default=None)
 
 
 def cap_progress(text: str) -> str:
@@ -91,3 +93,21 @@ def tool_progress_reporter(reporter: Callable[[str], None], *, forward: bool = F
         yield
     finally:
         _REPORTER.reset(token)
+
+
+def report_tool_metadata(**metadata: object) -> None:
+    """Report structured facts about the call's result; nothing happens when nobody collects them."""
+    collected = _RESULT_METADATA.get()
+    if collected is not None:
+        collected.update(metadata)
+
+
+@contextmanager
+def collected_tool_metadata() -> Iterator[dict[str, object]]:
+    """Collect what the tool calls run in this context report with ``report_tool_metadata``."""
+    collected: dict[str, object] = {}
+    token = _RESULT_METADATA.set(collected)
+    try:
+        yield collected
+    finally:
+        _RESULT_METADATA.reset(token)

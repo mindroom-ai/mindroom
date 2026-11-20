@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CurrentScriptTool",
-    "live_workflow_grant",
     "resolve_current_script_tool",
     "resolve_script_launch_grants",
     "resolve_script_launch_toolkit_names",
@@ -115,12 +114,6 @@ def resolve_current_script_tool(
             rejected_toolkit_cleanup(toolkit)
         return None
     return CurrentScriptTool(toolkit, function)
-
-
-def live_workflow_grant(context: ToolRuntimeContext, toolkit_name: str, function_name: str) -> ScriptToolGrant | None:
-    """Return the grant for a workflow's call when the owner's live tools offer that function now, else None."""
-    grant = ScriptToolGrant(toolkit_name, function_name)
-    return None if resolve_current_script_tool(context, grant, workflow=True) is None else grant
 
 
 def _visible_script_tool_entries(

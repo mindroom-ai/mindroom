@@ -1,0 +1,37 @@
+"""Build the workflow engine on the script runtime and tie its life to the orchestrator's."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from mindroom.workflow_runs.engine import WorkflowEngine
+from mindroom.workflow_runs.store import WorkflowRunStore
+
+if TYPE_CHECKING:
+    from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
+
+
+@dataclass(slots=True)
+class WorkflowRuntimeLifecycle:
+    """The one process-local workflow engine, and when it follows the script runtime's passes."""
+
+    engine: WorkflowEngine
+    script_runtime: ScriptRuntimeLifecycle
+
+    async def start(self) -> None:
+        """End runs from each pass of the script runtime, which records the attempts that ended."""
+        self.script_runtime.after_reconcile = self.engine.reconcile
+
+    async def shutdown(self) -> None:
+        """Stop following the script runtime and stop the engine's tasks; saved handles keep what was in flight."""
+        self.script_runtime.after_reconcile = None
+        await self.engine.close()
+
+
+def build_workflow_runtime(script_runtime: ScriptRuntimeLifecycle) -> WorkflowRuntimeLifecycle:
+    """Construct the workflow store, beside the script store, and the engine on the script runtime's manager and broker."""
+    control_root = script_runtime.store.database_path.parents[1]
+    store = WorkflowRunStore(control_root / "workflow_runs" / "workflow_runs.sqlite3")
+    engine = WorkflowEngine(store, script_runtime.manager, script_runtime.broker)
+    return WorkflowRuntimeLifecycle(engine=engine, script_runtime=script_runtime)

@@ -26,7 +26,7 @@ from mindroom.script_runs.manager import (
     workflow_placement,
 )
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
-from mindroom.script_runs.policy import live_workflow_grant, resolve_script_launch_grants
+from mindroom.script_runs.policy import resolve_current_script_tool, resolve_script_launch_grants
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from tests.conftest import bound_worker_launch_config
 from tests.test_script_run_manager import _config, _context, _fake_local_supervisor, _manager, _runtime_paths, _started
@@ -339,18 +339,22 @@ def test_grants_include_memory_and_delegate_but_not_compact_context(tmp_path: Pa
 
 
 def test_tool_removed_after_launch_is_refused_at_the_call(tmp_path: Path) -> None:
-    """The grant is resolved from the owner's live tools at every call, in both directions."""
+    """A workflow's call is resolved from the owner's live tools at every call, in both directions."""
+
+    def offered(context: ToolRuntimeContext, toolkit: str, function: str) -> bool:
+        return resolve_current_script_tool(context, ScriptToolGrant(toolkit, function), workflow=True) is not None
+
     context = _owner_context(tmp_path, ["calculator"])
-    assert live_workflow_grant(context, "calculator", "add") == ScriptToolGrant("calculator", "add")
-    assert live_workflow_grant(context, "memory", "add_memory") is None
-    assert live_workflow_grant(context, "calculator", "no_such_function") is None
+    assert offered(context, "calculator", "add")
+    assert not offered(context, "memory", "add_memory")
+    assert not offered(context, "calculator", "no_such_function")
 
     live = _owner_context(tmp_path, ["memory"])
     reloaded = replace(context, config_provider=lambda: live.config)
 
-    assert live_workflow_grant(reloaded, "calculator", "add") is None
-    assert live_workflow_grant(reloaded, "memory", "add_memory") == ScriptToolGrant("memory", "add_memory")
-    assert live_workflow_grant(reloaded, "compact_context", "compact_context") is None
+    assert not offered(reloaded, "calculator", "add")
+    assert offered(reloaded, "memory", "add_memory")
+    assert not offered(reloaded, "compact_context", "compact_context")
 
 
 @pytest.mark.asyncio

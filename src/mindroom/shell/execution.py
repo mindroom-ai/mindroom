@@ -202,6 +202,8 @@ class ShellRunResult:
     message: str
     handle: str | None = None
     output_file_handled: bool = False
+    return_code: int | None = None
+    """The exit status of a command that ended within the call; None when it did not start or still runs."""
 
 
 def shell_call_timeout(timeout: float | None) -> float | None:
@@ -444,6 +446,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
                 message=capture.publish(return_code),
                 handle=finished_handle,
                 output_file_handled=True,
+                return_code=return_code,
             )
         finally:
             capture.close()
@@ -455,8 +458,9 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
                 return_code=return_code,
             ),
             handle=finished_handle,
+            return_code=return_code,
         )
-    return ShellRunResult(message=stdout_buf.render(tail=tail), handle=finished_handle)
+    return ShellRunResult(message=stdout_buf.render(tail=tail), handle=finished_handle, return_code=return_code)
 
 
 async def _stop_timed_out_process(
@@ -480,11 +484,15 @@ async def _stop_timed_out_process(
         lines += ["Stderr:", errors]
     message = "\n".join(lines)
     if output_capture is None:
-        return ShellRunResult(message=message)
+        return ShellRunResult(message=message, return_code=process.returncode)
     output_capture.incomplete = True
     output_capture.interruption = message
     try:
-        return ShellRunResult(message=output_capture.publish(process.returncode), output_file_handled=True)
+        return ShellRunResult(
+            message=output_capture.publish(process.returncode),
+            output_file_handled=True,
+            return_code=process.returncode,
+        )
     finally:
         output_capture.close()
 
