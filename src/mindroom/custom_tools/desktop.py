@@ -92,7 +92,10 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
         "request_id": {"type": "string", "description": "Original request ID to recover with request_status."},
         "app": {
             "type": "string",
-            "description": "Exact application ID returned by list_apps.",
+            "description": (
+                "Exact application ID returned by list_apps; while status reports control_scope computer, "
+                "any installed app's bundle ID also works."
+            ),
         },
         "state_id": {
             "type": "string",

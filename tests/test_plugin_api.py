@@ -48,6 +48,7 @@ _EXPORTS = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "EVENT_TOOL_RESULT_TRANSFORM",
     "EVENT_TURN_ENDED",
     "EVENT_TURN_PAUSED",
     "EVENT_TURN_RESUMED",
@@ -116,6 +117,7 @@ _EXPORTS = [
     "ToolExecutionTarget",
     "ToolFileAccess",
     "ToolManagedInitArg",
+    "ToolResultTransformContext",
     "ToolRuntimeContext",
     "ToolStatus",
     "ToolTraceEntry",
@@ -289,6 +291,10 @@ _SIGNATURES = {
         f"({_TOOL_HOOK}, function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, "
         "message_received_depth, declined, decline_reason)"
     ),
+    "ToolResultTransformContext": (
+        f"({_TOOL_HOOK}, tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, result, "
+        "message_received_depth, shown)"
+    ),
     "ToolRuntimeContext": (
         "(agent_name, target, requester_id, client, config, runtime_paths, plugins, conversation_reader, relations, "
         "agent_reply_memberships, transport_agent_name, active_model_name, room, storage_path, attachment_ids, "
@@ -327,7 +333,7 @@ _SIGNATURES = {
         "(tool_name, runtime_paths, *, tools, runs_in_worker, credential_overrides, credentials_manager, "
         "runtime_config, tool_config_overrides, tool_init_overrides, runtime_overrides, "
         "allowed_shared_services, tool_output_workspace_root, agent_state_root, "
-        "tool_output_auto_save_threshold_bytes, workspace_in_worker, worker_target)"
+        "tool_output_auto_save_threshold_bytes, workspace_in_worker, in_sandbox_request, worker_target)"
     ),
     "get_tool_runtime_context": "()",
     "google_cloud_oauth_provider": "()",
@@ -401,6 +407,7 @@ _ENUM_MEMBERS = {
         "FILE_ACCESS",
         "AGENT_STATE_ROOT",
         "SHARED_DIRECTORY_ROOTS",
+        "IN_SANDBOX_REQUEST",
     ],
     "ToolStatus": ["AVAILABLE", "REQUIRES_CONFIG"],
     "TurnIntent": [
@@ -569,6 +576,7 @@ _CONSTANTS = {
     "EVENT_TOOL_AFTER_CALL": "tool:after_call",
     "EVENT_TOOL_BEFORE_CALL": "tool:before_call",
     "EVENT_TOOL_ENVIRONMENT": "tool:environment",
+    "EVENT_TOOL_RESULT_TRANSFORM": "tool:result_transform",
     "EVENT_TURN_ENDED": "turn:ended",
     "EVENT_TURN_PAUSED": "turn:paused",
     "EVENT_TURN_RESUMED": "turn:resumed",
@@ -659,7 +667,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 31), "38182bbbe3d8681cf4e987629f50f0ed1fc3c0cd9dac5d15d1b6e7abbb89e589")
+_PINNED_VERSION = ((1, 33), "08f4429016d50edf41a21ae9e7a02680dd8c257f0a943963e856fd1d5c051499")
 
 
 def _is_enum(obj: object) -> bool:

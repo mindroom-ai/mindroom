@@ -10,13 +10,13 @@ import nio
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
+from mindroom.config.models import ModelTable, split_model_reference
 from mindroom.entity_resolution import resolve_room_scoped_value
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.provider import RequestOverrides
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.providers import registry as provider_registry
-from mindroom.thread_summary.state import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name
 from mindroom.timing import timed
 from mindroom.tool_system.events import body_without_tool_markers
@@ -33,6 +33,9 @@ _MAX_INITIAL_TAGS = 3
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
 _TRUNCATION_SAMPLE_SIZE = 3
 _ROOM_INSTRUCTIONS_MAX_LENGTH = 2000
+# New generated titles are cut to these after normalization; a person's pin may use ``THREAD_SUMMARY_MAX_LENGTH``.
+GENERATED_TITLE_MAX_LENGTH = 80
+GENERATED_TITLE_MAX_WORDS = 6
 
 logger = get_logger(__name__)
 
@@ -40,9 +43,11 @@ logger = get_logger(__name__)
 class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
-    summary: str = Field(
-        max_length=THREAD_SUMMARY_MAX_LENGTH,
-        description="One-line summary of the thread conversation",
+    summary: str = Field(description="Short one-line title of the thread conversation")
+    # ``default_factory``: strict OpenAI schemas refuse a ``default`` keyword.
+    keep_current: bool = Field(
+        default_factory=bool,
+        description="True to keep the thread's current title, when one is shown",
     )
 
 
@@ -62,6 +67,21 @@ class GeneratedSummary:
 
     summary: str
     tags: tuple[str, ...] = ()
+    keep_current: bool = False
+
+
+def clamp_generated_title(title: str) -> str:
+    """Cut a normalized title to 6 words and 80 characters at a word boundary; emoji and dashes are not words."""
+    tokens: list[str] = []
+    words = 0
+    for token in title.split():
+        tokens.append(token)
+        words += any(char.isalnum() for char in token)
+        if words == GENERATED_TITLE_MAX_WORDS:
+            break
+    while len(" ".join(tokens)) > GENERATED_TITLE_MAX_LENGTH and any(c.isalnum() for t in tokens[:-1] for c in t):
+        tokens.pop()
+    return " ".join(tokens)[:GENERATED_TITLE_MAX_LENGTH].rstrip()
 
 
 def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
@@ -71,10 +91,14 @@ def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: s
     the route keeps its provider's sampling default. Ollama authors sampling in ``options`` instead: it sends the
     value as ``options.temperature``, and keeps an authored ``options.temperature`` when the value is None.
     """
-    model_config = config.models.get(model_name)
+    # ``name@level`` runs ``name``, so the temperature comes off ``name`` and the table keeps reading the reference.
+    base_name, _level = split_model_reference(model_name)
+    model_config = config.models.get(base_name)
     if model_config is not None and model_config.extra_kwargs and "temperature" in model_config.extra_kwargs:
         extra_kwargs = {key: value for key, value in model_config.extra_kwargs.items() if key != "temperature"}
-        models = {**config.models, model_name: model_config.model_copy(update={"extra_kwargs": extra_kwargs})}
+        models = ModelTable(
+            {**config.models, base_name: model_config.model_copy(update={"extra_kwargs": extra_kwargs})},
+        )
         config = config.model_copy(update={"models": models})
     return provider_registry.build_model_provider(config, runtime_paths, model_name)
 
@@ -144,10 +168,12 @@ async def generate_summary(
     model_name: str,
     tag_vocabulary: str | None,
     room_instructions: str | None = None,
+    current_title: str | None = None,
 ) -> GeneratedSummary | None:
     """Summarize a thread's ordinary messages with ``model_name``, plus one-shot tags from ``tag_vocabulary`` when given.
 
     ``room_instructions`` are the room admins' extra title rules, appended to the summary instructions.
+    ``current_title`` is shown after the thread, and the system rules let the model keep it unless the topic changed.
     """
     provider = _summary_provider(config, runtime_paths, model_name)
     prompt = config.render_prompt(
@@ -159,25 +185,33 @@ async def generate_summary(
             else "(tags are not requested for this summary refresh)"
         ),
     )
+    instructions = [
+        config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS")
+        if room_instructions is None
+        else config.render_prompt(
+            "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
+            instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS"),
+            room_instructions=room_instructions,
+        ),
+    ]
+    if current_title is not None:
+        # Appended in code, so a user prompt override without the placeholder keeps working.
+        current = config.render_prompt("THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE", current_title=escape(current_title))
+        prompt = f"{prompt}\n\n{current}"
+        instructions.append(config.get_prompt("THREAD_SUMMARY_KEEP_INSTRUCTIONS"))
     response = await complete_prompt(
         provider,
         prompt,
-        instructions=[
-            config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS")
-            if room_instructions is None
-            else config.render_prompt(
-                "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
-                instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS"),
-                room_instructions=room_instructions,
-            ),
-        ],
+        instructions=instructions,
         schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
         overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
     )
     await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="thread_summary")
     content = response.content
     if tag_vocabulary is None:
-        return GeneratedSummary(summary=content.summary) if isinstance(content, _ThreadSummary) else None
+        if not isinstance(content, _ThreadSummary):
+            return None
+        return GeneratedSummary(summary=content.summary, keep_current=content.keep_current)
     if not isinstance(content, _ThreadEnrichment):
         return None
     tags: list[str] = []
@@ -185,4 +219,4 @@ async def generate_summary(
         tag = coerce_tag_name(raw_tag)
         if tag is not None and tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS and tag not in tags:
             tags.append(tag)
-    return GeneratedSummary(summary=content.summary, tags=tuple(tags))
+    return GeneratedSummary(summary=content.summary, tags=tuple(tags), keep_current=content.keep_current)

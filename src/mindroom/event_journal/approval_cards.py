@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.tool_approval_grants import ApprovalGrantScope
 
-from . import approval_calls, approval_continuations, approval_grants, membership_state, outbox
+from . import approval_calls, approval_continuations, approval_grants, approval_signals, membership_state, outbox
 from .identity import decode_thread_id, encode_thread_id
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 
@@ -893,7 +893,7 @@ def deny_for_departed_card_owner(
     A card never attempted is deleted outright; an attempted one keeps its
     terminal-edit debt, as the ledger that holds it never leaves a room.
     """
-    transaction.execute(
+    failed = transaction.fetchall(
         """
         UPDATE approval_continuations
         SET state = 'failing', failure_kind = 'error', failure_detail = ?, runtime_generation = NULL
@@ -909,9 +909,13 @@ def deny_for_departed_card_owner(
                 AND calls.owner_kind = 'reply' AND calls.owner_id = approval_continuations.approval_id
                 AND calls.decision IS NULL
           )
+        RETURNING principal_id, approval_id
         """,
         (reason, sender_principal_id, room_id),
     )
+    # A failing reply's sources are runnable again, and its own principal is not the one writing this.
+    for row in failed:
+        approval_signals.freed(transaction, str(row["principal_id"]), str(row["approval_id"]))
     rows = transaction.fetchall(
         """
         SELECT cards.principal_id, cards.delivery_id, cards.owner_id, cards.generation, cards.tool_call_id,

@@ -191,6 +191,8 @@ class CommandHandlerContext:
     scheduled_tasks: ScheduledTaskRuntime
     # Writes one room state event through the room's steward: (room_id, event_type, content, state_key=...).
     put_room_state: Callable[..., Awaitable[bool | None]]
+    # The same write, returning the homeserver's answer (None without a steward) so a refusal can be quoted.
+    room_state_response: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]]
 
 
 def _format_agent_description(agent_name: str, config: Config, tools: ToolRegistry) -> str:
@@ -514,14 +516,16 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 command_event_id=event.event_id,
             )
         else:
-            response_text = handle_model_command(
+            response_text, result_extra_content = handle_model_command(
                 command.args.get("args_text", ""),
+                client=context.client,
                 config=context.config,
                 runtime_paths=context.runtime_paths,
                 membership_index=context.agent_reply_memberships,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
                 requester_user_id=requester_user_id,
+                command_event_id=event.event_id,
             )
 
     elif command.type == CommandType.ROOM_MODEL:
@@ -556,6 +560,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             requester_user_id=requester_user_id,
             sender_user_id=_room_admin_sender(context, event, requester_user_id),
+            put_state=context.room_state_response,
         )
 
     elif command.type == CommandType.AUTO_APPROVE:
@@ -578,7 +583,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             requester_user_id=requester_user_id,
             sender_user_id=_room_admin_sender(context, event, requester_user_id),
-            put_state=context.put_room_state,
+            put_state=context.room_state_response,
         )
 
     elif command.type == CommandType.E2EE:

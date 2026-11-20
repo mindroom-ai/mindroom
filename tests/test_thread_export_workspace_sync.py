@@ -183,6 +183,23 @@ async def test_activity_marks_coalesce_into_one_exact_room_pass(tmp_path: Path) 
     ]
 
 
+async def test_an_agent_keeps_what_its_passes_wrote_for_the_next_pass(tmp_path: Path) -> None:
+    """Every pass hands an agent's source the same record of what that agent's earlier passes wrote."""
+    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    write_thread_export_matrix_state(tmp_path)
+    runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost")))
+    export = _export_mock()
+
+    with patch(EXPORT_PATH, new=export):
+        for _ in range(2):
+            runner.mark_room_activity("!lobby:localhost")
+            await runner._run_pass_once()
+
+    (first,), (second,) = (call.kwargs["sources"] for call in export.await_args_list)
+    assert first.exported is not None
+    assert second.exported is first.exported
+
+
 async def test_partial_pass_queries_only_agents_related_to_dirty_rooms(tmp_path: Path) -> None:
     """A partial pass avoids joined-room lookups for unrelated agents."""
     config = _config(

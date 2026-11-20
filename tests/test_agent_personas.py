@@ -86,7 +86,7 @@ def _code_config(tmp_path: Path, tools: list[str], **env: str) -> Config:
 
 
 def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
-    return {"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}
+    return {"MINDROOM_EGRESS_BROKER_PORT": "8768" if broker_on else "off"}
 
 
 class _Index:

@@ -17,14 +17,18 @@ import httpx2
 import nio
 import pytest
 from google.oauth2.credentials import Credentials
-from pydantic import BaseModel, ValidationError
 from structlog.testing import capture_logs
 
 from mindroom import timing
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY, resolve_runtime_paths
+from mindroom.constants import (
+    FORK_CONTENT_KEY,
+    THREAD_SUMMARY_CONTENT_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+    resolve_runtime_paths,
+)
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.llm.errors import ProviderError
@@ -38,14 +42,17 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.thread_summary import automatic
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _TRUNCATION_SAMPLE_SIZE,
+    GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
     _ThreadEnrichment,
     _ThreadSummary,
+    clamp_generated_title,
     generate_summary,
     resolve_thread_summary_model_name,
     room_summary_instructions,
@@ -87,8 +94,10 @@ from tests.test_thread_export_projected_history import admit_live, prompt_reader
 from tests.test_thread_export_projected_history import raw as _projection_raw
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
     from types import ModuleType
+
+    from pydantic import BaseModel
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore, PrincipalStore
@@ -174,9 +183,9 @@ def _make_summary_notice_message(
     sender: str = _ROUTER,
     pinned: bool | None = None,
     generated_at: str = "2026-01-01T00:00:00+00:00",
+    summary: str = "🧵 Existing thread summary",
 ) -> ResolvedVisibleMessage:
     """Build a synthetic thread summary notice for history-counting regressions."""
-    summary = "🧵 Existing thread summary"
     summary_metadata: dict[str, object] = {
         "version": 1,
         "summary": summary,
@@ -265,8 +274,8 @@ def serve_source_thread(
 class _RoomState:
     """The thread-tag state one room keeps, read and written through a client the way the homeserver serves it.
 
-    ``failing_reads`` names which room-state reads fail, counted from 1 in the order the pass makes them: the
-    vocabulary rebuild reads first, then the resolved check, then each tag write.
+    ``failing_reads`` names which tag-state reads, of the whole room state or of one tag, fail, counted from 1 in the
+    order the pass makes them: the vocabulary rebuild reads first, then the resolved check, then each tag write.
     """
 
     user_id: str
@@ -297,12 +306,19 @@ class _RoomState:
         keys = [(json.loads(key), content) for key, content in self.events.items()]
         return [tag for (root, tag), content in keys if root == thread_id and content]
 
-    async def room_get_state(self, room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+    def _count_read(self) -> nio.RoomGetStateError | None:
+        """Count one tag-state read; raise its failure, or return it when it is an error response."""
         self.reads += 1
-        if self.reads in self.failing_reads:
-            if isinstance(self.read_failure, Exception):
-                raise self.read_failure
-            return self.read_failure
+        if self.reads not in self.failing_reads:
+            return None
+        if isinstance(self.read_failure, Exception):
+            raise self.read_failure
+        return self.read_failure
+
+    async def room_get_state(self, room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        failure = self._count_read()
+        if failure is not None:
+            return failure
         events = [
             {"type": THREAD_TAGS_EVENT_TYPE, "state_key": key, "content": content}
             for key, content in self.events.items()
@@ -325,10 +341,21 @@ class _RoomState:
             if isinstance(rules, nio.RoomGetStateEventError):
                 return rules
             return nio.RoomGetStateEventResponse(rules, event_type, state_key, room_id)
+        if event_type == THREAD_TAGS_EVENT_TYPE:
+            return self._tag_event(room_id, state_key)
         if event_type == "m.room.create":
             return nio.RoomGetStateEventResponse({"room_version": "10"}, event_type, state_key, room_id)
         content = {"users": {self.user_id: self.power_level}, "state_default": 50}
         return nio.RoomGetStateEventResponse(content, event_type, state_key, room_id)
+
+    def _tag_event(self, room_id: str, state_key: str) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        failure = self._count_read()
+        if failure is not None:
+            return nio.RoomGetStateEventError(failure.message)
+        content = self.events.get(state_key)
+        if content is None:
+            return nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        return nio.RoomGetStateEventResponse(content, THREAD_TAGS_EVENT_TYPE, state_key, room_id)
 
     async def room_put_state(
         self,
@@ -422,10 +449,65 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 # -- model validation --
 
 
-def test_thread_summary_model_rejects_overlong_summary() -> None:
-    """Structured summary responses should reject content beyond the hard length limit."""
-    with pytest.raises(ValidationError):
-        _ThreadSummary(summary="x" * (THREAD_SUMMARY_MAX_LENGTH + 1))
+_EIGHTY_CHARACTER_TITLE = "🧵 " + " ".join(["a" * 15] * 4 + ["b" * 14])
+
+
+@pytest.mark.parametrize("schema", [_ThreadSummary, _ThreadEnrichment])
+def test_title_schemas_are_valid_strict_openai_schemas(schema: type[BaseModel]) -> None:
+    """Strict OpenAI schemas refuse a ``default`` keyword, so ``keep_current`` must not emit one."""
+    emitted = strict_response_schema(schema)
+
+    assert '"default"' not in json.dumps(emitted)
+    assert "keep_current" in emitted["required"]
+    assert schema.model_validate({"summary": "🧵 Trip", "tags": ["x"]}).keep_current is False
+
+
+def test_thread_summary_model_accepts_a_long_answer_for_the_cut() -> None:
+    """An overlong answer parses, so the cut after normalization shortens it instead of losing the title."""
+    assert GENERATED_TITLE_MAX_LENGTH < THREAD_SUMMARY_MAX_LENGTH
+    assert _ThreadSummary(summary="x" * (THREAD_SUMMARY_MAX_LENGTH + 1)).keep_current is False
+
+
+@pytest.mark.parametrize(
+    ("title", "clamped"),
+    [
+        ("🛠 Plan migration for all backend service instances", "🛠 Plan migration for all backend service"),
+        ("🧪 ISSUE-148 cache-refetch live test — done", "🧪 ISSUE-148 cache-refetch live test — done"),
+        ("🧵 " + "foo " * 3 + "x" * 70, "🧵 foo foo foo"),
+        ("讨论" * 50, "讨论" * 40),
+        ("🧵 Short " + "x" * 80, "🧵 Short"),
+        ("🧵 " + "x" * 90, "🧵 " + "x" * 78),
+        (_EIGHTY_CHARACTER_TITLE, _EIGHTY_CHARACTER_TITLE),
+    ],
+    ids=[
+        "seven-words",
+        "emoji-dash-and-ids-free",
+        "word-boundary",
+        "unspaced-cjk",
+        "drop-overlong-second-word",
+        "only-one-word",
+        "exactly-eighty",
+    ],
+)
+def test_generated_titles_are_cut_to_six_words_and_80_characters(title: str, clamped: str) -> None:
+    """The cut counts only tokens with letters or digits, and drops whole words to fit 80 characters."""
+    assert clamp_generated_title(title) == clamped
+
+
+@pytest.mark.parametrize(
+    ("title", "keepable"),
+    [
+        ("🧵 Login failure investigation", True),
+        ("🧪 ISSUE-148 cache refetch live test now", True),
+        ("🧪 ISSUE-148 cache refetch live test (forked)", True),
+        ("🧵 Review of PR #548 session persistence hooks", False),
+        ("x" * (GENERATED_TITLE_MAX_LENGTH + 1), False),
+    ],
+)
+def test_only_a_title_within_the_short_rule_may_be_kept(title: str, keepable: bool) -> None:
+    """A refresh offers to keep a title of at most 6 words after the emoji, so a long legacy title is rewritten once."""
+    assert (automatic._keepable_title(title, retitle=False) == title) is keepable
+    assert automatic._keepable_title(title, retitle=True) is None
 
 
 def test_normalize_thread_summary_text_strips_common_markdown_syntax() -> None:
@@ -784,6 +866,7 @@ class TestMaybeGenerateThreadSummary:
         self.room_state.serve(self.client)
         self.models: dict[str, ModelProvider] = {}
         install_model_providers(monkeypatch, self.models)
+        self.monkeypatch = monkeypatch
 
     def _history(self, messages: Sequence[ResolvedVisibleMessage]) -> None:
         serve_conversation_reader(self.conversation_reader, messages, room_id=_ROOM, thread_id=_THREAD)
@@ -800,15 +883,23 @@ class TestMaybeGenerateThreadSummary:
     def _count(self) -> int:
         return self.baselines.count(_ROOM, _THREAD)
 
-    async def _provisional(self, prompt: str | None = "Plan a trip", *, config: Config | None = None) -> None:
+    async def _provisional(
+        self,
+        prompt: str | None = "Plan a trip",
+        *,
+        config: Config | None = None,
+        prompt_event_ids: tuple[str, ...] = ("$event0",),
+        prompt_as_shown: bool = False,
+    ) -> None:
         await automatic.maybe_generate_prompt_summary(
             self.client,
             _ROOM,
             _THREAD,
             config or _mock_config(),
             self.rp,
-            prompt_event_id="$event0",
+            prompt_event_ids=prompt_event_ids,
             prompt=prompt,
+            prompt_as_shown=prompt_as_shown,
             conversation_reader=self.conversation_reader,
             entity_name="router",
             membership_index=AgentReplyMembershipIndex(),
@@ -819,11 +910,181 @@ class TestMaybeGenerateThreadSummary:
         model = self._summarizer(_title("Trip plan"))
         self._history(_make_thread_history(1))
 
-        await self._provisional(None)
+        await self._provisional(None, prompt_as_shown=True)
 
         assert "Message 0" in _prompt(model.requests[0])
         (sent,) = _sent_summaries(self.client)
         assert sent["summary"] == "Trip plan"
+
+    def _fork_of_thread(self, parent: Sequence[ResolvedVisibleMessage], fork: Sequence[ResolvedVisibleMessage]) -> None:
+        """Serve the parent thread ``_THREAD`` and its fork ``$fork``, whose root ``fork`` starts."""
+        pages = {}
+        for thread_id, messages in ((_THREAD, parent), ("$fork", fork)):
+            serve_conversation_reader(self.conversation_reader, messages, room_id=_ROOM, thread_id=thread_id)
+            pages[thread_id] = self.conversation_reader.read_strict.return_value
+
+        async def read(*, thread_id: str, **_kwargs: object) -> object:
+            return pages[thread_id]
+
+        self.conversation_reader.read.side_effect = read
+        self.conversation_reader.read_strict.side_effect = read
+
+    @staticmethod
+    def _fork_root() -> ResolvedVisibleMessage:
+        return ResolvedVisibleMessage.synthetic(
+            sender="@user0:localhost",
+            body="carry on",
+            timestamp=1700000000,
+            event_id="$fork",
+            content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": _THREAD, "event_id": "$event1"}},
+        )
+
+    @pytest.mark.parametrize(
+        ("parent_title", "fork_title"),
+        [
+            ("Trip plan", "Trip plan (forked)"),
+            ("Trip plan (forked)", "Trip plan (forked)"),
+            (None, "Prompt title (forked)"),
+            ("A" * 300, "A" * 80 + " (forked)"),
+        ],
+        ids=["parent-title", "fork-of-a-fork", "untitled-parent", "longest-parent-title"],
+    )
+    async def test_a_forks_first_title_is_its_parents_title_marked_forked(
+        self,
+        parent_title: str | None,
+        fork_title: str,
+    ) -> None:
+        """A fork's provisional title copies its parent's, without a model; an untitled parent's fork titles its prompt."""
+        model = self._summarizer(_title("Prompt title"))
+        parent = _make_thread_history(2)
+        if parent_title is not None:
+            parent.append(_make_summary_notice_message(_THREAD, message_count=2, summary=parent_title))
+        self._fork_of_thread(parent, [self._fork_root()])
+
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            "$fork",
+            _mock_config(),
+            self.rp,
+            prompt_event_ids=("$fork",),
+            prompt="carry on",
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == fork_title
+        assert sent["message_count"] == 0
+        assert len(model.requests) == (parent_title is None)
+
+    @pytest.mark.parametrize("parent_title", ["Trip plan", None], ids=["parent-title", "untitled-parent"])
+    async def test_a_batch_starting_a_fork_gets_only_its_parents_title(self, parent_title: str | None) -> None:
+        """Without a prompt (a coalesced first turn), a fork takes its parent's title and an untitled parent's gets none."""
+        model = self._summarizer(_title("Prompt title"))
+        parent = _make_thread_history(2)
+        if parent_title is not None:
+            parent.append(_make_summary_notice_message(_THREAD, message_count=2, summary=parent_title))
+        follow_up = ResolvedVisibleMessage.synthetic(
+            sender="@user0:localhost",
+            body="and more",
+            timestamp=1700000001,
+            event_id="$next",
+            thread_id="$fork",
+        )
+        self._fork_of_thread(parent, [self._fork_root(), follow_up])
+
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            "$fork",
+            _mock_config(),
+            self.rp,
+            prompt_event_ids=("$fork", "$next"),
+            prompt=None,
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+
+        sent = _sent_summaries(self.client)
+        assert [summary["summary"] for summary in sent] == ([] if parent_title is None else ["Trip plan (forked)"])
+        assert model.requests == []
+
+    async def test_a_batch_starting_a_fork_needs_its_root_to_survive(self) -> None:
+        """A fork root deleted while its parent's title is read leaves no title, even with the batch's follow-up still there."""
+        parent = _make_thread_history(2)
+        parent.append(_make_summary_notice_message(_THREAD, message_count=2, summary="Trip plan"))
+        follow_up = ResolvedVisibleMessage.synthetic(
+            sender="@user0:localhost",
+            body="and more",
+            timestamp=1700000001,
+            event_id="$next",
+            thread_id="$fork",
+        )
+        self._fork_of_thread(parent, [self._fork_root(), follow_up])
+        walks = 0
+
+        async def walk(**_kwargs: object) -> bool:
+            nonlocal walks
+            walks += 1
+            if walks == 2:
+                self._fork_of_thread(parent, [follow_up])
+            return True
+
+        self.conversation_reader.hydrator.rewalk = AsyncMock(side_effect=walk)
+
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            "$fork",
+            _mock_config(),
+            self.rp,
+            prompt_event_ids=("$fork",),
+            prompt=None,
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+
+        assert walks == 2
+        assert not _sent_summaries(self.client)
+
+    @pytest.mark.parametrize("generated", ["Fork answer", "Fork answer (forked)"])
+    async def test_a_forks_later_summaries_stay_marked_forked(self, generated: str) -> None:
+        """The marker survives every automatic summary of a fork, and is never doubled."""
+        self._summarizer(_title(generated))
+        reply = ResolvedVisibleMessage.synthetic(
+            sender="@bot:localhost",
+            body="answer",
+            timestamp=1700001000,
+            event_id="$fork-reply",
+            thread_id="$fork",
+        )
+        self._fork_of_thread(_make_thread_history(2), [self._fork_root(), reply])
+
+        await _summary_pass(
+            self.client,
+            _mock_config(first_threshold=2),
+            self.rp,
+            self.conversation_reader,
+            thread_id="$fork",
+            delivered_response=DeliveredResponse(event_id="$fork-reply", body="answer"),
+        )
+
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "Fork answer (forked)"
+
+    async def test_provisional_title_is_cut_to_six_words(self) -> None:
+        """A prompt title the model wrote too long is shortened, not dropped."""
+        self._summarizer(_title("🛠 Plan migration for all backend service instances"))
+        self._history(_make_thread_history(1))
+
+        await self._provisional(config=_mock_config(first_threshold=2))
+
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🛠 Plan migration for all backend service"
 
     async def test_provisional_title_uses_prompt_and_keeps_first_threshold(self) -> None:
         """A provisional title must not consume the first post-reply summary or request tags."""
@@ -871,7 +1132,7 @@ class TestMaybeGenerateThreadSummary:
             instructions = request.messages[0].get_content_string()
             assert instructions.startswith(THREAD_SUMMARY_INSTRUCTIONS)
             assert "ROOM RULES:" in instructions
-            assert instructions.endswith("\n\nUse at most 4 words")
+            assert "\n\nUse at most 4 words" in instructions
 
     @pytest.mark.parametrize(
         "rules",
@@ -947,6 +1208,38 @@ class TestMaybeGenerateThreadSummary:
         assert not model.requests
         assert not _sent_summaries(self.client)
         assert self._count() == 0
+
+    @pytest.mark.parametrize("third_human", [False, True])
+    async def test_provisional_title_covers_every_message_of_a_coalesced_first_turn(self, third_human: bool) -> None:
+        """An attachment and the text sent with it are one first turn; a person's message outside it is a reply."""
+        model = self._summarizer(*([] if third_human else [_title("Video summary")]))
+        self._history(_make_thread_history(3 if third_human else 2))
+
+        await self._provisional("[Attached video]\nSummarize this video", prompt_event_ids=("$event0", "$event1"))
+
+        assert len(model.requests) == int(not third_human)
+        if not third_human:
+            assert "[Attached video]\nSummarize this video" in _prompt(model.requests[0])
+            assert _sent_summaries(self.client)[0]["summary"] == "Video summary"
+        else:
+            assert not _sent_summaries(self.client)
+
+    async def test_provisional_title_sees_an_edit_of_a_non_root_source_the_walk_missed(self) -> None:
+        """A recursive walk can page out the text reply's edit; only a direct lookup of each source finds it."""
+        model = self._summarizer(_title("Video summary"))
+        edited = _make_thread_history(2)
+        edited[1].apply_edit(body="Edited request", timestamp=1700001500, latest_event_id="$edit", content=None)
+
+        async def walk(*, edits_of: Collection[str] = (), **_kwargs: object) -> bool:
+            self._history(edited if "$event1" in edits_of else _make_thread_history(2))
+            return True
+
+        self.conversation_reader.hydrator.rewalk = AsyncMock(side_effect=walk)
+
+        await self._provisional("[Attached video]\nSummarize this video", prompt_event_ids=("$event0", "$event1"))
+
+        assert not model.requests
+        assert not _sent_summaries(self.client)
 
     async def test_provisional_title_once_across_runtimes_before_sync_echo(
         self,
@@ -1085,7 +1378,7 @@ class TestMaybeGenerateThreadSummary:
             other_thread,
             config,
             self.rp,
-            prompt_event_id="$event0",
+            prompt_event_ids=("$event0",),
             prompt="Plan a trip",
             conversation_reader=self.conversation_reader,
             entity_name="router",
@@ -1245,6 +1538,35 @@ class TestMaybeGenerateThreadSummary:
 
         assert len(model.requests) == 1
 
+    @pytest.mark.parametrize(
+        ("content", "resolved"),
+        [
+            (None, False),
+            ({"set_by": "@user:localhost", "set_at": "2026-03-21T19:02:03+00:00", "data": {}}, True),
+            ({}, False),
+            ({"set_by": "", "set_at": "not a time"}, False),
+        ],
+        ids=["absent", "set", "removed", "malformed"],
+    )
+    async def test_resolved_check_reads_only_the_resolved_tag_event(
+        self,
+        content: dict[str, object] | None,
+        resolved: bool,
+    ) -> None:
+        """The resolved check reads the one state event of the thread's resolved tag, never the room's whole state."""
+        self.room_state.tag(_THREAD, "bug")
+        if content is not None:
+            self.room_state.tag(_THREAD, "resolved", content=content)
+
+        assert await automatic._thread_is_resolved(self.client, _ROOM, _THREAD) is resolved
+
+        self.client.room_get_state.assert_not_awaited()
+        self.client.room_get_state_event.assert_awaited_once_with(
+            _ROOM,
+            THREAD_TAGS_EVENT_TYPE,
+            json.dumps([_THREAD, "resolved"], separators=(",", ":")),
+        )
+
     async def test_resolved_thread_skips_generation(self) -> None:
         """A resolved thread should stop burning LLM calls on re-titling."""
         model = self._summarizer()
@@ -1265,7 +1587,7 @@ class TestMaybeGenerateThreadSummary:
         """The tag read fails open; a state blip must not suppress summaries.
 
         A raw transport error from the tag read must not abort the pass either. Letting it escape would skip the
-        baseline advance and re-run the full state and history reads on every turn.
+        baseline advance and re-run the tag and history reads on every turn.
         """
         self.room_state.failing_reads = frozenset({1, 2})
         self.room_state.read_failure = read_failure
@@ -1387,6 +1709,174 @@ class TestMaybeGenerateThreadSummary:
         # The vocabulary upkeep still ran, and nothing wrote tag state.
         assert load_tag_vocabulary_snapshot(self.rp, _ROOM) is not None
         self.client.room_put_state.assert_not_awaited()
+
+    def _refresh_due(self, summary: str = "🧵 Existing thread summary", count: int = 15) -> None:
+        """Serve a thread titled ``summary`` at 5 messages that has reached ``count``."""
+        self.baselines.record(_ROOM, _THREAD, 5)
+        self._history(
+            [*_make_thread_history(count), _make_summary_notice_message(_THREAD, message_count=5, summary=summary)],
+        )
+
+    def _restart(self) -> None:
+        """Start a fresh process: no in-memory baselines."""
+        self.baselines = fresh_thread_summary_baselines(self.monkeypatch)
+
+    async def test_refresh_that_keeps_the_title_sends_nothing_and_waits_a_full_interval(self) -> None:
+        """A kept title posts no notice, and this process checks again only a full interval later."""
+        model = self._summarizer(_title("🧵 existing thread  summary"), _title("🧵 Existing thread summary"))
+        self._refresh_due()
+
+        await self._maybe_generate(_mock_config())
+
+        (request,) = model.requests
+        assert "<current_title>\n🧵 Existing thread summary\n</current_title>" in _prompt(request)
+        assert "set keep_current to true" in request.messages[0].get_content_string()
+        assert _sent_summaries(self.client) == []
+        assert self._count() == 15
+
+        self._refresh_due(count=24)
+        await self._maybe_generate(_mock_config())
+        assert len(model.requests) == 1
+        self._refresh_due(count=25)
+        await self._maybe_generate(_mock_config())
+        assert len(model.requests) == 2
+
+    @pytest.mark.parametrize("redacted", [False, True], ids=["title-kept", "title-redacted"])
+    async def test_a_restart_after_a_keep_checks_once_more_and_titles_a_redacted_thread(self, redacted: bool) -> None:
+        """Nothing outside Matrix remembers a keep: a fresh process checks once, and a thread with no title gets one."""
+        model = self._summarizer(_title("🧵 Existing thread summary"), _title("🧵 Existing thread summary"))
+        self._refresh_due()
+        await self._maybe_generate(_mock_config())
+
+        self._restart()
+        if redacted:
+            self._history(_make_thread_history(16))
+        else:
+            self._refresh_due(count=16)
+        await self._maybe_generate(_mock_config())
+
+        assert len(model.requests) == 2
+        assert ("<current_title>" in _prompt(model.requests[1])) is not redacted
+        assert [sent["summary"] for sent in _sent_summaries(self.client)] == (
+            ["🧵 Existing thread summary"] if redacted else []
+        )
+
+    @pytest.mark.parametrize(
+        ("current", "answer"),
+        [
+            ("🧵 Q&A prep", _title("🧵 Q&amp;A prep")),
+            ("🧵 A&not B review", _title("🧵 A&not B review")),
+            ("🧵 Login failure investigation", _title("🧵 Login failure investigation.")),
+            ("🛠 Deploy fix", _title("🛠️ Deploy fix")),
+            ("🧵 Login failure investigation", _ThreadSummary(summary="🔧 Something else", keep_current=True)),
+            ("🧵 Trip plan (forked)", _title("🧵 Trip plan (forked).")),
+            (_EIGHTY_CHARACTER_TITLE, _title(f"{_EIGHTY_CHARACTER_TITLE}.")),
+        ],
+        ids=[
+            "escaped-echo",
+            "literal-echo",
+            "trailing-period",
+            "emoji-variation",
+            "keep-current",
+            "fork-echo-period",
+            "eighty-characters-period",
+        ],
+    )
+    async def test_a_cosmetic_echo_or_keep_current_keeps_the_title(self, current: str, answer: _ThreadSummary) -> None:
+        """An echo that differs only in escaping, end punctuation or emoji style keeps the title, as keep_current does."""
+        self._summarizer(answer)
+        self._refresh_due(summary=current)
+
+        await self._maybe_generate(_mock_config())
+
+        assert _sent_summaries(self.client) == []
+        assert self._count() == 15
+
+    async def test_a_forks_echo_with_a_trailing_period_keeps_its_title(self) -> None:
+        """In a forked thread, an echo of "X (forked)" ending in a period keeps the title, not "X (forked). (forked)"."""
+        self._summarizer(_title("🧵 Trip plan (forked)."))
+        root = ResolvedVisibleMessage.synthetic(
+            sender="@user0:localhost",
+            body="carry on",
+            timestamp=1699999999,
+            event_id=_THREAD,
+            content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": "$parent", "event_id": "$p1"}},
+        )
+        notice = _make_summary_notice_message(_THREAD, message_count=5, summary="🧵 Trip plan (forked)")
+        self.baselines.record(_ROOM, _THREAD, 5)
+        self._history([root, *_make_thread_history(14), notice])
+
+        await self._maybe_generate(_mock_config())
+
+        assert _sent_summaries(self.client) == []
+        assert self._count() == 15
+
+    async def test_refresh_on_a_changed_topic_sends_the_new_title(self) -> None:
+        """A different title still replaces the current one."""
+        self._summarizer(_title("🔧 Deploy pipeline migration"))
+        self._refresh_due()
+
+        await self._maybe_generate(_mock_config())
+
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🔧 Deploy pipeline migration"
+        assert sent["message_count"] == 15
+
+    @pytest.mark.parametrize("case", ["long-legacy-title", "retitle"])
+    async def test_keep_is_not_offered_for_a_long_title_or_a_retitle(self, case: str) -> None:
+        """A title past the 6-word rule is rewritten once, and a retitle asks for a new title outright."""
+        title = "🧵 Review of PR #548 session persistence hooks" if case == "long-legacy-title" else "🧵 Short title"
+        model = self._summarizer(_title(title))
+        self._refresh_due(summary=title)
+
+        await self._maybe_generate(_mock_config(), retitle=case == "retitle")
+
+        (request,) = model.requests
+        assert "<current_title>" not in _prompt(request)
+        assert "keep_current" not in request.messages[0].get_content_string()
+        (sent,) = _sent_summaries(self.client)
+        # A new title is cut to 6 words, even when the model repeats a longer one.
+        assert sent["summary"] == ("🧵 Review of PR #548 session persistence" if case == "long-legacy-title" else title)
+
+    async def test_kept_title_with_tags_posts_the_current_title_once(self) -> None:
+        """A keep on the tagging refresh posts the current title verbatim, which records the tags as done."""
+        model = self._summarizer(_ThreadEnrichment(summary="🔧 Other", tags=["bug"], keep_current=True))
+        self._history(_make_due_second_summary_history())
+
+        await self._maybe_generate(_mock_config(first_threshold=1))
+
+        assert model.requests[0].output_schema is _ThreadEnrichment
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🧵 Existing thread summary"
+        assert sent["message_count"] == 12
+        assert sent["initial_enrichment_complete"] is True
+        assert self.room_state.tags(_THREAD) == ["bug"]
+
+    async def test_kept_provisional_title_is_posted_again_so_the_next_refresh_tags(self) -> None:
+        """The first reply keeping its prompt title posts it unchanged, so its count schedules the tagging refresh."""
+        model = self._summarizer(
+            _title("🧵 Existing thread summary"),
+            _ThreadEnrichment(summary="🧵 Existing thread summary", tags=["bug"]),
+        )
+        provisional = _make_summary_notice_message(_THREAD, message_count=0, initial_enrichment_complete=None)
+        config = _mock_config(first_threshold=1)
+
+        self._history([*_make_thread_history(2), provisional])
+        await self._maybe_generate(config)
+        (sent,) = _sent_summaries(self.client)
+        assert (sent["summary"], sent["message_count"]) == ("🧵 Existing thread summary", 2)
+
+        first_reply = _make_summary_notice_message(
+            _THREAD,
+            message_count=2,
+            event_id="$first-reply-title",
+            initial_enrichment_complete=None,
+        )
+        self._history([*_make_thread_history(12), provisional, first_reply])
+        await self._maybe_generate(config)
+
+        assert [request.output_schema for request in model.requests] == [_ThreadSummary, _ThreadEnrichment]
+        assert self.room_state.tags(_THREAD) == ["bug"]
 
     async def test_vocabulary_and_summary_send_failures_do_not_block_initial_tags(self) -> None:
         """Background maintenance and Matrix summary failures should stay isolated from tag writes."""
@@ -2158,7 +2648,10 @@ class TestGenerateSummary:
         instructions = system.get_content_string()
         assert "DURABLE TOPIC" in instructions
         assert "It must remain accurate whether the thread has 5 messages or 50+." in instructions
-        assert "Prefer stable noun phrases" in instructions
+        assert "exactly one emoji for the topic category, then at most 6 words" in instructions
+        assert "Use sentence case" in instructions
+        assert "Keep a ticket, issue, or PR number exactly as written" in instructions
+        assert "Under 160 characters" not in instructions
         assert "Do NOT include transient state." in instructions
         assert 'Never return "resolved"' in instructions
         assert "approval or merge status" in instructions
@@ -2166,7 +2659,7 @@ class TestGenerateSummary:
         assert "test counts or pass/fail tallies" in instructions
         assert "progress markers like" in instructions
         assert "plain text only" in instructions
-        assert "NOVEL summary" in instructions
+        assert "Write the title in your own words" in instructions
         assert "Do NOT copy" in instructions
         assert "current status or outcome" not in instructions
 
@@ -2180,6 +2673,37 @@ class TestGenerateSummary:
             "Summarize the above thread and follow the response schema."
         )
         assert request.output_schema is _ThreadSummary
+
+    async def test_current_title_follows_an_overridden_user_prompt_escaped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A refresh's current title and keep rule come after the user prompt, which needs no new placeholder."""
+        model = self._summarizer(monkeypatch, _title("🧵 Q&A prep"))
+        config = Config(prompts={"THREAD_SUMMARY_USER_PROMPT_TEMPLATE": "{tag_vocabulary}|{conversation}"})
+
+        await generate_summary(
+            _make_thread_history(1),
+            config,
+            _mock_runtime_paths(),
+            model_name="default",
+            tag_vocabulary=None,
+            current_title="🧵 Q&A prep",
+        )
+
+        [request] = model.requests
+        prompt = _prompt(request)
+        assert prompt.startswith("(tags are not requested for this summary refresh)|@user0:localhost: Message 0\n\n")
+        assert prompt.endswith("<current_title>\n🧵 Q&amp;A prep\n</current_title>")
+        # The keep-or-replace policy is a system rule, after the base title rules.
+        assert (
+            request.messages[0]
+            .get_content_string()
+            .startswith(
+                f"{THREAD_SUMMARY_INSTRUCTIONS.strip()}\n\nCURRENT TITLE:\n",
+            )
+        )
+        assert "Keep it unless the thread's main topic has clearly changed" in request.messages[0].get_content_string()
 
     async def test_initial_enrichment_reuses_summary_model_call_and_escapes_input(
         self,
@@ -2352,7 +2876,14 @@ class TestGenerateSummary:
             ),
             *(
                 pytest.param({"provider": "google", "id": model_id}, False, id=f"google-{model_id}")
-                for model_id in ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
+                for model_id in (
+                    "gemini-4-carbon",
+                    "gemini-4-argon",
+                    "gemini-4-hydrogen",
+                    "gemini-3.8-flash",
+                    "gemini-3.6-flash",
+                    "gemini-3.5-flash-lite",
+                )
             ),
             pytest.param({"provider": "google", "id": "gemini-3.1-pro-preview"}, True, id="google-gemini-3.1-pro"),
         ],
@@ -2423,7 +2954,7 @@ class TestGenerateSummary:
 
         assert good_examples
         for example in good_examples:
-            assert len(example) <= THREAD_SUMMARY_MAX_LENGTH
+            assert automatic._keepable_title(example, retitle=False) == example
             assert not any(term in example.lower() for term in _TRANSIENT_STATUS_TERMS)
 
     async def test_summary_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.background_tasks import create_background_task
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_identity
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, child_execution_identity, display_title
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import ToolTraceEntry, format_tool_completed_event, format_tool_started_event
@@ -84,6 +84,14 @@ class SubagentSnapshot:
     result_preview: str | None
     # The ``model`` object of ``model_name`` that clients show, with its display name; the sink resolves it.
     model: Mapping[str, str] | None = None
+    # What the run has used so far: the ``input_tokens``, cached ones included, and ``output_tokens`` of its requests
+    # that ended, zero until the first did, the ``tool_calls`` it started, rows the caps removed included, and those tokens' ``cost_usd``,
+    # left out when no model they used is priced. A feed's snapshot always has it.
+    usage: Mapping[str, int | float] | None = None
+    # Set on the failed end a turn gets when a shutdown stops its attempt, which its job may continue with a later turn.
+    interrupted_by_restart: bool = False
+    # What the call that started the sub-agent named it, on one line of at most 80 characters, redacted; empty for none.
+    title: str = ""
 
 
 type SubagentSink = Callable[[SubagentSnapshot], None]
@@ -154,11 +162,20 @@ class _SubagentActivity:
     task: str
     thread_id: str | None
     started_at: float
+    title: str = ""
     status: _SubagentStatus = "running"
     ended_at: float | None = None
     result: str | None = None
+    interrupted_by_restart: bool = False
     items_dropped: int = 0
+    # What the run has used so far, as its snapshots report it (``SubagentSnapshot.usage``).
+    tool_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float | None = None
     _items: list[_SubagentItem] = field(default_factory=list)
+    # The IDs of the calls that started and have not completed, whether or not the cap kept their rows.
+    _running_calls: set[str] = field(default_factory=set)
     # How many characters of the redacted text the cap hides, kept from one cut to the next; None after the raw text
     # was cut, so the next snapshot cuts afresh.
     _hidden: int | None = 0
@@ -185,6 +202,8 @@ class _SubagentActivity:
             model_name=child.model_name,
             source="workflow" if is_workflow else "delegate",
             task=_clip(child.task, _MAX_TASK_CHARACTERS),
+            # The child may come from stored metadata a worker could write, so its title is sanitized here.
+            title=display_title(child.title),
             thread_id=identity.resolved_thread_id or identity.thread_id,
             started_at=now,
         )
@@ -205,13 +224,21 @@ class _SubagentActivity:
             self._hidden = None
 
     def tool_started(self, event: ToolStarted, *, now: float) -> None:
-        """Add a running tool row started at ``now``; a call announced again as it resumes keeps its row and start."""
+        """Add a running tool row started at ``now``; a call announced again as it resumes keeps its row and start.
+
+        Every other start counts as a call the run made, one under an ID a completed call had too.
+        """
         _, entry = format_tool_started_event(event.call)
-        self._set_tool(event.call.tool_call_id, _public_entry(entry), "running", started_at=now)
+        call_id = event.call.tool_call_id
+        if call_id not in self._running_calls:
+            self._running_calls.add(call_id)
+            self.tool_calls += 1
+        self._set_tool(call_id, _public_entry(entry), "running", started_at=now)
 
     def tool_completed(self, event: ToolCompleted) -> None:
         """Finish the row with the same call id, or append a finished row when none matches."""
         entry = _public_entry(format_tool_completed_event(event.call))
+        self._running_calls.discard(event.call.tool_call_id)
         self._set_tool(event.call.tool_call_id, entry, "error" if event.call.is_error else "done", started_at=None)
 
     def _set_tool(
@@ -236,9 +263,16 @@ class _SubagentActivity:
             del self._items[tools[0]]
             self.items_dropped += 1
 
-    def set_status(self, status: _SubagentStatus, now: float, *, result: str | None = None) -> None:
+    def set_status(
+        self,
+        status: _SubagentStatus,
+        now: float,
+        *,
+        result: str | None = None,
+        interrupted_by_restart: bool = False,
+    ) -> None:
         """Move to a status; terminal ones set `ended_at`, `running` clears it."""
-        self.status = status
+        self.status, self.interrupted_by_restart = status, interrupted_by_restart
         self.ended_at = now if status in TERMINAL_CHILD_STATUSES else None
         if result is not None:
             self.result = result
@@ -266,6 +300,7 @@ class _SubagentActivity:
             model_name=self.model_name,
             source=self.source,
             task=self.task,
+            title=self.title,
             thread_id=self.thread_id,
             status=self.status,
             started_at=self.started_at,
@@ -273,6 +308,13 @@ class _SubagentActivity:
             items=tuple(items),
             items_dropped=self.items_dropped + dropped,
             result_preview=None if self.result is None else _clip(self.result, _MAX_RESULT_CHARACTERS),
+            interrupted_by_restart=self.interrupted_by_restart,
+            usage={
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "tool_calls": self.tool_calls,
+                **({} if self.cost_usd is None else {"cost_usd": self.cost_usd}),
+            },
         )
 
 
@@ -348,9 +390,26 @@ class ActivityFeed:
         self._activity.model_name = model_name
         self._mark()
 
-    def status(self, status: _SubagentStatus, *, result: str | None = None) -> None:
+    def usage(self, tokens: tuple[int, int] | None, cost_usd: float | None) -> None:
+        """Set the input and output ``tokens`` the run's requests have used so far, unless None, and what they cost.
+
+        It goes out with the next window's snapshot.
+        """
+        activity = self._activity
+        if tokens is not None:
+            activity.input_tokens, activity.output_tokens = tokens
+        activity.cost_usd = cost_usd
+        self._mark()
+
+    def status(
+        self,
+        status: _SubagentStatus,
+        *,
+        result: str | None = None,
+        interrupted_by_restart: bool = False,
+    ) -> None:
         """Move to a status and publish it at once; a terminal status also forgets the feed."""
-        self._activity.set_status(status, time.time(), result=result)
+        self._activity.set_status(status, time.time(), result=result, interrupted_by_restart=interrupted_by_restart)
         self._mark(urgent=True)
         if status in TERMINAL_CHILD_STATUSES:
             _OPEN.pop(self._activity.delegation_id, None)

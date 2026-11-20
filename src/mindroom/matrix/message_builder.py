@@ -356,6 +356,12 @@ class _FormattedBodyHtmlSanitizer(HTMLParser):
     def get_html(self) -> str:
         return "".join(self._parts)
 
+    def set_cdata_mode(self, elem: str, *, escapable: bool = False) -> None:
+        """Parse on after a raw ``<title>``, ``<script>`` and the like, which it escapes as any disallowed tag.
+
+        ``HTMLParser`` would read all text after one as raw text, escaping the rest of the message.
+        """
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
         starttag_text = self.get_starttag_text() or ""

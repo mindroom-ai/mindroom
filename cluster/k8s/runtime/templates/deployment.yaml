@@ -387,6 +387,11 @@ spec:
               value: {{ default $fullname .Values.workers.kubernetes.ownerDeploymentName | quote }}
             {{- end }}
             {{- end }}
+            {{- if not .Values.egressBroker.enabled }}
+            # MindRoom runs a loopback broker unless told otherwise, on every worker backend.
+            - name: MINDROOM_EGRESS_BROKER_PORT
+              value: "off"
+            {{- end }}
             {{- if .Values.matrix.homeserverUrl }}
             - name: MATRIX_HOMESERVER
               value: {{ .Values.matrix.homeserverUrl | quote }}

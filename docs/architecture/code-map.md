@@ -208,10 +208,10 @@ Matrix sync callback
 | `egress_broker/key_access.py` | Who may use and manage an agent's Agent Keys, shared by the Agent Keys pages and secret requests |
 | `secret_requests.py` | In-memory registry of pending secret requests, the card content they post, and the store of temporary secrets requesters gave conversations (in memory, or also one private file each) |
 | `secret_request_cards.py` | The card a secret request posts and the wait for its answer, shared by `request_secret` and `request_temporary_secret` |
-| `api/secret_requests.py` | `POST /api/rooms/{room_id}/secret-requests/{request_id}`: stores the requester's key in the agent's scope, gives their temporary secret to the conversation that asked, or records a decline |
-| `api/github_requests.py` | `/api/github/request` and `/api/github/status`: sends a client session user's `/repos/<owner>/<repo>` or `/graphql` call to `api.github.com` with their own connected GitHub account, and reports that connection |
+| `api/secret_requests.py` | `POST /api/rooms/{room_id}/secret-requests/{request_id}`: stores the requester's key in the agent's scope (first adding the service the card proposed), gives their temporary secret to the conversation that asked, or records a decline |
+| `api/github_requests.py` | `/api/github/request`, `/api/github/status`, and `/api/github/token`: sends a client session user's `/repos/<owner>/<repo>` or `/graphql` call to `api.github.com` with their own saved personal access token or else their connected GitHub account, reports which, and saves or removes that token |
 | `custom_tools/temporary_secrets.py` | `temporary_secrets` agent tool: `request_temporary_secret` asks the requester for a secret that the conversation's shell commands receive as an environment variable |
-| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, where to add missing ones, and `request_secret`, which asks the requester for a key with a card |
+| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, where to add missing ones, and `request_secret`, which asks the requester for a key with a card, optionally for a new service of their own it proposes |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
 | `tool_jobs/runtime.py` | Accepted execution ownership, what a job runs and how it is known, durable outcomes, scoped discovery, and result claims |
 | `delegation/background.py` | A subagent call's job: the child it is known by, its saved snapshot, its outcome, and its cleanup inside the generic execution owner |
@@ -298,7 +298,7 @@ Matrix sync callback
 | `memory/` | Agent and team memory over Mem0 or Markdown files; an agent's lives at its state root or workspace, every team's Mem0 memory in one store at `team_memory/`, and each team's file memory at `team_memory/<team scope>/` |
 | `memory/_policy.py` | Memory scopes: the team scope ID, the team memory root and each team's file directory, the team scopes an agent reads, and the backend an agent or team uses |
 | `memory/legacy_team_memory.py` | One-time startup merge of the team memory copies earlier releases kept in every member's storage |
-| `memory/_entrypoint_snapshots.py` | In-process copy of each conversation's inlined `MEMORY.md`, reused while that copy only gains lines (not when a capped file drops its oldest kept entry) and that conversation's prompt cache may still be warm |
+| `memory/_entrypoint_snapshots.py` | Copy of each conversation's inlined `MEMORY.md`, one file per conversation under `memory_entrypoint_snapshots/` in the agent's state root (a private instance's own), reused while that copy only gains lines (not when a capped file drops its oldest kept entry) and less than an hour has passed since the last model request that sent it; any other change loads the file again, which a held prompt (`providers/pipeline/prompt_hold.py`) tells as an update when one can state it exactly, the old lines staying quoted until the hold starts over |
 | `memory/auto_flush.py` | Background passes that turn file-memory agents' new finished turns into daily notes, with per-conversation progress below `tracking/`, and the service that runs them while auto-flush is enabled |
 | `memory/legacy_auto_flush.py` | Auto-flush state earlier releases wrote: the reply path's queue file, removed once, and progress entries and note tags in creation order, read as log positions when auto-flush next reads the conversation |
 | `knowledge/file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
@@ -382,7 +382,7 @@ Matrix sync callback
 | `ai_runtime.py` | The queued-message notice a reply's loop appends after a tool batch, its mid-turn judgment, whether the request a model answered told it to pause, and the empty-response notice |
 | `providers/openai/` | OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses explicit cache breakpoint on the stable system message and ordered output replay, and the Responses route's request sizing (`replay_estimate.py`) |
 | `providers/openai/legacy_response_replay.py` | The hosted tool-search items that Responses replies stored without an ordered output kept apart, read for replay |
-| `providers/pipeline/` | Stages composed around a provider's `stream()`: portable deferred tool search (`llm/tool_search.py`), media fallback, downloads of the media URLs a route does not send (`remote_media.py`), the malformed tool-call guidance retry, stream retry with the idle limit, the typed safeguard refusal, and request logging |
+| `providers/pipeline/` | Stages composed around a provider's `stream()`: the system prompt a conversation holds while its prompt cache is warm, with later changes sent as system prompt updates, one file per conversation under `prompt_holds/` in the agent's state root (`prompt_hold.py`), portable deferred tool search (`llm/tool_search.py`), media fallback, downloads of the media URLs a route does not send (`remote_media.py`), the malformed tool-call guidance retry, stream retry with the idle limit, the typed safeguard refusal, and request logging |
 | `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `check_extra_kwargs` rejects, at config load and without loading a provider SDK, `extra_kwargs` keys the model's route does not accept |
 | `providers/gemini/` | Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, Google Search grounding, decision-request config, reply parsing, and the `extra_kwargs` a Gemini model accepts (`settings.py`, which loads no Google SDK) |
 | `providers/ollama/` | Ollama adapter over the native chat API, the `extra_kwargs` an Ollama model accepts (`settings.py`, which loads no ollama SDK), and the Ollama SDK's failures as normalized provider errors, which the adapter and the Ollama embedder share (`errors.py`) |
@@ -455,7 +455,7 @@ Matrix sync callback
 | `session_storage/preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool, skill, and knowledge subsets, `subagents/<name>.md` workspace profiles, and the caller tool, skill, and knowledge checks |
-| `delegation/activity.py` | The redacted, capped transcript and status of each running subagent (6,000 characters of text, 20 tool rows, 300-character previews), handed to its sink, which sends `io.mindroom.subagents` frames, at most every 250 ms off the child's path |
+| `delegation/activity.py` | The redacted, capped transcript, status, and usage of each running subagent (6,000 characters of text, 20 tool rows, 300-character previews), handed to its sink, which sends `io.mindroom.subagents` frames, at most every 250 ms off the child's path |
 | `delegation/cost.py` | What the subagent turns whose results a turn received cost, collected while the turn runs, which its reply publishes as `cost.subagents_usd` and a child's settlement adds to its own cost |
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
 | `delegation/targets.py` | Turning a `run_subagent` or `continue_subagent` call into the child it starts or continues, for both the direct tools and the native driver |
@@ -471,6 +471,7 @@ Matrix sync callback
 | `matrix/state.py` | `matrix_state.yaml` accounts, rooms, space, and server emoji room, changed only through `update_matrix_state` |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/server_features.py` | The unstable features a homeserver lists in `/_matrix/client/versions` |
+| `matrix/user_masquerade.py` | HTTP-only client that acts as one person through an application service's token and marks each message event, redaction, and state event it sends as the agent's |
 | `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
 | `matrix/durable_ingestion.py` | Owned Nio batch validation, journal admission, and acknowledgement |
 | `matrix/sync_continuity.py` | Durable pending join-fence persistence |
@@ -639,7 +640,7 @@ Matrix sync callback
 | `turn_model.py` | The model one turn runs: explicit choice, thread and room overrides, authored model, the team rule, then the budget fallback |
 | `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |
 | `room_model_overrides.py` | Durable per-room runtime model defaults backing `!room_model` |
-| `room_reply_modes.py` | Durable per-room reply mode overrides backing `!reply_mode` and plugin routes |
+| `room_reply_modes.py` | A room's reply mode override, its `reply_mode` room setting in room state, backing `!reply_mode`, plugin routes and clients |
 | `room_modes.py` | The one path `!thread_mode` and plugin routes take to change a room's thread mode override and republish it |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
@@ -660,6 +661,10 @@ Matrix sync callback
 | `knowledge/utils.py` | Resolves the knowledge bases an agent searches: published indexes, availability notices, and refresh scheduling |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
 | `custom_tools/react.py` | Reaction-only agent tool: reacts in the current room under `matrix_message`'s per-room rate limit |
+| `custom_tools/matrix_user.py` | The `matrix_user` toolkit: a personal agent reads Matrix as its owner, and writes as them, on a client created per call |
+| `custom_tools/matrix_user_authority.py` | Whom a `matrix_user` call acts as: the owner of the personal agent making it, decided by the call's identity and room alone |
+| `custom_tools/matrix_user_reads.py` | What `matrix_user_read` reads as the owner: rooms, messages, search, people, files, and read markers |
+| `custom_tools/matrix_user_writes.py` | What `matrix_user_write` does as the owner, one event per call: a message or a file, a reaction, an edit, or a redaction, each sent marked agent-authored, and joins, leaves, invitations, and new rooms, which carry no marker; a send to a person uses their existing DM and never makes one; logs one audit line per write |
 | `custom_tools/stop_reply.py` | Agent tool that stops another agent's reply with a 🛑 reaction relaying the caller's requester |
 | `custom_tools/shared_directories.py` | Agent tool that creates shared directories, invites agents at once on behalf of a user who may use them or as pending invitations otherwise, and accepts or declines invitations through the invited agent |
 | `shared_directories/` | The primary-only membership ledger and storage of shared directories, the paths agents see, and the share roots `file` and `coding` accept |

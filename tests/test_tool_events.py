@@ -21,6 +21,7 @@ from mindroom.tool_system.events import (
     ensure_visible_tool_marker_spacing,
     format_tool_combined,
     format_tool_completed_event,
+    message_tool_trace,
     serialize_tool_trace,
     with_stored_calls,
 )
@@ -694,7 +695,7 @@ def test_format_tool_completed_event_formats_its_trace() -> None:
 
 
 def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None:
-    """Restart state keeps exact call and member identity without exposing it to Matrix clients."""
+    """Restart state keeps exact call and member identity; Matrix clients see only the call's id."""
     trace = ToolTraceEntry(
         type="tool_call_started",
         tool_name="inspect",
@@ -718,10 +719,38 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
     )
     assert public is not None
     public_event = public[_TOOL_TRACE_KEY]["events"][0]
-    assert "tool_call_id" not in public_event
-    assert "member_id" not in public_event
+    assert public_event == {
+        "type": "tool_call_started",
+        "tool_name": "inspect",
+        "args_preview": "path=report.txt",
+        "tool_call_id": "call-1",
+    }
     assert restored[0].tool_call_id == "call-1"
     assert restored[0].member_id == "general"
+
+
+def test_public_tool_trace_marks_only_a_completed_call_that_did_not_succeed() -> None:
+    """Matrix clients read ``is_error``, which a call that worked or still runs never carries, and read it back."""
+    failed = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="schedule",
+        result_preview="Missing when",
+        is_error=True,
+    )
+    worked = ToolTraceEntry(type="tool_call_completed", tool_name="read_file", result_preview="notes")
+    running = ToolTraceEntry(type="tool_call_started", tool_name="shell", is_error=True)
+
+    payload = build_tool_trace_content([failed, worked, running])
+
+    assert payload is not None
+    events = payload[_TOOL_TRACE_KEY]["events"]
+    assert events[0]["is_error"] is True
+    assert "is_error" not in events[1]
+    assert "is_error" not in events[2]
+    assert [entry.is_error for entry in message_tool_trace(payload) or []] == [True, False, False]
+    assert serialize_tool_trace([worked]) == (
+        {"type": "tool_call_completed", "tool_name": "read_file", "result_preview": "notes"},
+    )
 
 
 @pytest.mark.parametrize(("scope_key", "member_id"), [("team", None), ("agent:code-review", "code-review")])
@@ -735,8 +764,8 @@ def test_a_trace_entry_stored_with_a_scope_key_reads_as_its_member(scope_key: st
     assert "scope_key" not in serialize_tool_trace([restored], include_internal=True)[0]
 
 
-def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
-    """Restart state keeps which call failed, Matrix clients never see it, and an entry stored without it did not fail."""
+def test_a_failed_calls_flag_reaches_restart_state_and_matrix_clients() -> None:
+    """Restart state and Matrix clients both see which call failed, and an entry stored without it did not fail."""
     failed = ToolTraceEntry(
         type="tool_call_completed",
         tool_name="fetch",
@@ -750,7 +779,7 @@ def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
 
     assert durable[0]["is_error"] is True
     assert public is not None
-    assert "is_error" not in public[_TOOL_TRACE_KEY]["events"][0]
+    assert public[_TOOL_TRACE_KEY]["events"][0]["is_error"] is True
     assert deserialize_tool_trace(durable)[0].is_error is True
     assert deserialize_tool_trace([{"type": "tool_call_completed", "tool_name": "fetch"}])[0].is_error is False
 

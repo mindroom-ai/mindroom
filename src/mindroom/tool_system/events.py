@@ -45,15 +45,18 @@ class ToolTraceEntry:
     args_preview: str | None = None
     result_preview: str | None = None
     truncated: bool = False
-    # Internal continuation identity; public Matrix metadata omits these fields.
+    # The call's id, which public Matrix metadata carries too, so a client draws a card that names its call (a secret
+    # request's) at the call's line.
     tool_call_id: str | None = field(default=None, compare=False)
+    # Internal continuation identity; public Matrix metadata omits these fields.
     # The team member whose slot shows the call, by config name; None for a team leader's call and any call outside a
     # team.
     member_id: str | None = field(default=None, compare=False)
     parent_bash_call_id: str | None = field(default=None, compare=False)
     toolkit_name: str | None = field(default=None, compare=False)
-    # Whether the completed call failed, as its run recorded it, so an interrupted replay can say so. Internal like
-    # the identity above: the reply's records keep it, and public Matrix metadata omits it.
+    # Whether the completed call did not succeed, as its run recorded it: it errored, was refused or denied, or was
+    # cancelled or interrupted. An interrupted replay and a client say so; the result preview says why. The reply's
+    # records keep it, and public Matrix metadata carries it as ``is_error: true`` on such a completed call only.
     is_error: bool = field(default=False, compare=False)
     # The call as its tool event reported it, with its full arguments and result, which an interrupted replay renders.
     # Never serialized, so Matrix metadata and the reply's records keep only the previews, and a restored entry has none.
@@ -263,6 +266,14 @@ class CollectedStreamPresentation:
             self.response_text += text
         elif self.response_text:
             self.separate_next_text = True
+
+    def visible_tool_count(self) -> int:
+        """Return how many tool calls the reply shows so far."""
+        return len(self.tool_trace) if self.show_tool_calls else 0
+
+    def has_progress(self) -> bool:
+        """Return whether the reply collected any text or tool call yet; a tracked hidden call counts."""
+        return bool(self.response_text or self.tool_trace)
 
     def show_tool_progress(self, tool_call_id: str, text: str) -> None:
         """Keep a running call's latest output for the live reply until the call completes."""
@@ -893,7 +904,7 @@ def serialize_tool_trace(
     *,
     include_internal: bool = False,
 ) -> tuple[dict[str, object], ...]:
-    """Serialize trace entries, optionally retaining restart-only identity and failure."""
+    """Serialize trace entries with their call ids and a completed call's failure, optionally with restart-only fields."""
     serialized: list[dict[str, object]] = []
     for entry in tool_trace:
         event: dict[str, object] = {
@@ -906,8 +917,12 @@ def serialize_tool_trace(
             event["result_preview"] = _redact_preview(entry.result_preview)
         if entry.truncated:
             event["truncated"] = True
+        if entry.is_error and entry.type == "tool_call_completed":
+            event["is_error"] = True
         if include_internal:
             event.update(_internal_fields(entry))
+        elif entry.tool_call_id is not None:
+            event["tool_call_id"] = entry.tool_call_id
         serialized.append(event)
     return tuple(serialized)
 

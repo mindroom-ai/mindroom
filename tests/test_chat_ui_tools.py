@@ -86,6 +86,7 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
         "inline",
         "raw",
         "width",
+        "libraries",
     )
     assert inspect.signature(ChatUITools.show_canvas).parameters["inline"].default is False
     assert inspect.signature(ChatUITools.show_canvas).parameters["raw"].default is False
@@ -95,6 +96,13 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     assert inspect.signature(ChatUITools.open_panel).parameters["panel"].default == "members"
     function = toolkit_offers(ChatUITools(), "open_panel")
     assert function.parameters["properties"]["panel"]["enum"] == ["members", "computer"]
+    libraries = toolkit_offers(ChatUITools(enable_show_canvas=True), "show_canvas").parameters["properties"][
+        "libraries"
+    ]
+    assert "chartjs" in json.dumps(libraries)
+    assert ["chartjs", "d3", "mermaid", "katex"] in [
+        schema.get("items", {}).get("enum") for schema in [libraries, *libraries.get("anyOf", [])]
+    ]
 
 
 def test_excluding_a_function_an_option_left_off_is_a_no_op(tmp_path: Path) -> None:
@@ -1437,6 +1445,8 @@ async def test_large_update_of_a_foreign_canvas_uploads_nothing(tmp_path: Path) 
         {"width": 1440},
         {"raw": True, "width": 320},
         {"raw": True, "width": 2560},
+        {"libraries": []},
+        {"libraries": ["mermaid", "chartjs", "mermaid"]},
     ],
 )
 async def test_canvas_page_presentation_fields(tmp_path: Path, uploaded: bool, options: dict[str, object]) -> None:
@@ -1456,6 +1466,8 @@ async def test_canvas_page_presentation_fields(tmp_path: Path, uploaded: bool, o
         expected["raw"] = True
     if options.get("width") is not None:
         expected["width"] = options["width"]
+    if options.get("libraries"):
+        expected["libraries"] = ["mermaid", "chartjs"]
     if uploaded:
         expected["document"] = {"mimetype": "text/html", "size": len(page), "url": "mxc://example.org/canvas"}
         context.client.upload.assert_awaited_once()
@@ -1494,9 +1506,28 @@ async def test_canvas_page_rejects_invalid_width_before_send_or_upload(tmp_path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("libraries", [["plotly"], "chartjs", [1], ["d3", None]])
+async def test_canvas_page_rejects_unknown_libraries_before_send_or_upload(tmp_path: Path, libraries: object) -> None:
+    """Only the libraries Chat serves can be named, so a page never waits for one that cannot load."""
+    context = _context(tmp_path)
+    _serve_upload(context)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Plans", html="x" * 26_000, libraries=libraries))  # type: ignore[arg-type]
+
+    assert result["status"] == "error"
+    assert result["message"] == "Canvas libraries must be a list of: chartjs, d3, mermaid, katex."
+    context.client.room_send.assert_not_awaited()
+    context.client.upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("uploaded", [False, True])
 @pytest.mark.parametrize("original_page_mode", [False, True])
-@pytest.mark.parametrize("options", [{}, {"raw": False, "width": None}, {"raw": True, "width": 390}])
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"raw": False, "width": None}, {"raw": True, "width": 390}, {"libraries": ["d3"]}],
+)
 async def test_canvas_page_update_presentation_is_revision_specific(
     tmp_path: Path,
     uploaded: bool,
@@ -1509,7 +1540,11 @@ async def test_canvas_page_update_presentation_is_revision_specific(
         context,
         inline=True,
         share_state=True,
-        canvas={"title": "Plans", "html": "<p>1</p>", **({"raw": True, "width": 1440} if original_page_mode else {})},
+        canvas={
+            "title": "Plans",
+            "html": "<p>1</p>",
+            **({"raw": True, "width": 1440, "libraries": ["katex"]} if original_page_mode else {}),
+        },
     )
     _serve_event(context, original)
     _serve_upload(context)
@@ -1528,6 +1563,7 @@ async def test_canvas_page_update_presentation_is_revision_specific(
     assert ("document" in canvas) is uploaded
     assert ("raw" in canvas) is bool(options.get("raw"))
     assert ("width" in canvas) is (options.get("width") is not None)
+    assert canvas.get("libraries") == options.get("libraries")
     if options.get("raw"):
         assert canvas["raw"] is True
         assert canvas["width"] == 390

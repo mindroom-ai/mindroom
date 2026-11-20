@@ -33,6 +33,7 @@ from mindroom.listening.markers import ListeningMarkers
 from mindroom.listening.turn import heard_within_window, run_silent_turn
 from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ModelSafeguardRefusal, ProviderError
 from mindroom.logging_config import get_logger
+from mindroom.matrix.agent_authored import carries_agent_authored_marker
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.conversation_reads import projected_visible_messages
 from mindroom.matrix.state import resolve_room_aliases
@@ -488,8 +489,9 @@ class ListeningService:
 
         Like a reply, a message is judged by whom it speaks for, as ingress classifies it: the person a trusted relay
         names rather than the relaying account. The agent's own messages and senders not allowed to reach it in the
-        room are left out. As for a reply, the agent's own view of the room lets a sender it has seen join wait for the
-        room's observer to apply the join.
+        room are left out, as is a message marked agent-authored that an unmanaged sender's account carries. As for a
+        reply, the agent's own view of the room lets a sender it has seen join wait for the room's observer to apply the
+        join.
 
         A message whose sender's membership is still pending, or a heard reply still being written, ends both lists
         before it, as a refetch ends a page, so it is judged, or heard whole, later. One sent before ``waited_out_ms``
@@ -501,6 +503,8 @@ class ListeningService:
             if message.sender == bot.matrix_id.full_id:
                 continue
             facts = bot.ingress_validator.classify_source(message.sender, {"content": message.content}, room_id=room_id)
+            if facts.sender_entity_name is None and carries_agent_authored_marker(message.content):
+                continue
             waited_out = message.timestamp <= waited_out_ms
             try:
                 allowed = is_sender_allowed_for_agent_reply_in_room(

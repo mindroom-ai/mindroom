@@ -83,8 +83,12 @@ Show or switch the reply mode of the current Matrix room.
 `!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 [Plugin routes](../plugins.md#http-routes) change the override as this command does, for room admins only.
-The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
-An agent or team in the room answers `!reply_mode`, so the command works in any room, such as a direct-message room with one agent.
+The override is the room's `reply_mode` setting: the `io.mindroom.room_settings` state event with state key `reply_mode` and content `{"value": "auto"}` or `{"value": "mentions"}`, where `{}` clears it.
+MindRoom Chat sets it from the room settings dialog, and any client may send the event; it falls under the room's `state_default` power level (normally 50), so moderators and admins can change it there.
+An agent or team in the room answers `!reply_mode`, so the command works in any room, such as a direct-message room with one agent; it answers that it needs moderator rights when the room lets no MindRoom account send that state.
+It lives in the room, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
+Agents take a change as soon as their sync shows it, and read the setting again at least every ten minutes.
+An override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
 
 ## Threading (MSC3440)
 
@@ -220,7 +224,7 @@ A model alias whose provider adds native tools that cannot be disabled is refuse
 For participation, a TypeSafe or OpenAI Decisions probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
 All backends get the same question and context, but their judgments can differ.
 
-At most eight judgments run at once across the process, including [router judgments](router.md#responder-selection-judgments), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
+At most eight judgments run at once across the process, including [router judgments](router.md#responder-selection-judgments) but not [reranking](../knowledge.md#judgment-rerankers), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
 Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe and OpenAI Decisions, without request text or credentials.
 
 #### Participation Context and Fallback

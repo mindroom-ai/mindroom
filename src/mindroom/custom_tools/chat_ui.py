@@ -9,7 +9,7 @@ import json
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, get_args
 
 import nio
 from nio.api import RelationshipType
@@ -48,6 +48,8 @@ _SettingsSection = Literal[
     "about",
 ]
 _SidePanel = Literal["members", "computer"]
+# The libraries MindRoom Chat serves to canvas pages itself.
+_CanvasLibrary = Literal["chartjs", "d3", "mermaid", "katex"]
 
 logger = get_logger(__name__)
 
@@ -98,11 +100,11 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
     "show_canvas": (
-        "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
+        "show_canvas(...) shows a canvas: a web page you write yourself, which cannot load any "
         "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
         "something in; their answer comes back as their next message. For a quick choice between a few "
-        "options, just ask in your reply. With inline=True the page appears in the conversation itself, "
-        "for mockups, diagrams and charts."
+        "options, just ask in your reply. Prefer inline=True, which shows the page in the conversation, "
+        "for anything the user should see or answer in the flow; use the panel for what stays open beside it."
     ),
     "read_canvas_state": (
         "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
@@ -121,8 +123,9 @@ _REAL_WEBSITE_HINT = (
 )
 # Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
 _CANVAS_LIBRARIES_HINT = (
-    "Canvas pages may load scripts, styles, and fonts from https://cdn.jsdelivr.net/npm/ at a pinned version, "
-    'such as <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>, '
+    "For packages show_canvas's libraries do not cover, canvas pages may load scripts, styles, and fonts from "
+    "https://cdn.jsdelivr.net/npm/ at a pinned version, "
+    'such as <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>, '
     "or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and "
     "code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked."
 )
@@ -160,6 +163,15 @@ def _canvas_title_is_valid(title: str) -> bool:
         and not any(unicodedata.category(char) in {"Cc", "Cs"} or char in "\u2028\u2029" for char in title)
         and len(title.encode("utf-16-le")) // 2 <= _CANVAS_TITLE_MAX_UNITS
     )
+
+
+def _canvas_presentation_error(width: int | None, libraries: list[_CanvasLibrary] | None) -> str | None:
+    if width is not None and (isinstance(width, bool) or not isinstance(width, int) or not 320 <= width <= 2560):
+        return "Canvas width must be an integer from 320 to 2560 (not a boolean)."
+    known = get_args(_CanvasLibrary)
+    if libraries is not None and (not isinstance(libraries, list) or any(name not in known for name in libraries)):
+        return f"Canvas libraries must be a list of: {', '.join(known)}."
+    return None
 
 
 class ChatUITools(Toolkit):
@@ -454,42 +466,43 @@ class ChatUITools(Toolkit):
         inline: bool = False,
         raw: bool = False,
         width: int | None = None,
+        libraries: list[_CanvasLibrary] | None = None,
     ) -> str:
-        """Show the user the Canvas panel: an interactive web page you wrote, beside this conversation.
+        """Show the user a canvas: an interactive web page you wrote, in this conversation or beside it.
 
-        Use a canvas when seeing or clicking beats reading or typing: dashboards,
-        reports, charts, slides, menus, forms, pickers, and multi-step flows. The page
-        cannot load any website, so it cannot show the user a real website. Pass the
-        page as ``html``, or as a workspace-relative ``path`` (e.g. ``slides/deck.html``)
-        to an HTML file, which suits pages you build and refine such as slides. Pages up
-        to 4 MB are supported. Only show pages you wrote: a canvas appears as yours and
-        whatever the user types into it could leave the panel.
+        Use a canvas when seeing or clicking beats reading or typing. The page cannot
+        load any website, so it cannot show the user a real website. Pass the page as
+        ``html``, or as a workspace-relative ``path`` to an HTML file (e.g.
+        ``slides/deck.html``) for pages you build and refine. Pages up to 4 MB are
+        supported. Only show pages you wrote: a canvas appears as yours and whatever
+        the user types into it could leave the page.
 
-        With ``inline=True`` the page appears in the conversation at the width of a
-        reply (about 700px on desktop, about 360px on phones) instead of the panel:
-        use it for mockups, diagrams, charts and previews the user should see in the
-        flow. Leave ``html`` and ``body`` without a background, outer card, title
-        banner or side padding; give charts fixed pixel heights; let content set the
-        height and do not use ``vh`` units or ``height:100%`` on ``html`` or ``body``.
-        An inline page cannot send answers or save state; for that, show a panel canvas.
+        Prefer ``inline=True``, which shows the page in the conversation at reply
+        width (about 700px on desktop, 360px on phones), for anything the user should
+        see or answer in the flow: charts, diagrams, mockups, pickers, short forms,
+        multi-step questions. Use the panel for what stays open beside the
+        conversation: dashboards, slides, long documents, pages the user returns to.
+        Inline, leave ``html`` and ``body`` without a background, card, title banner
+        or side padding; give charts fixed pixel heights; do not use ``vh`` units or
+        ``height:100%`` on ``html`` or ``body``. The page restarts when it scrolls out
+        of view, so give fields an ``id`` or ``name`` or call ``saveState``. For forms
+        use the themed mode, not ``raw`` or ``width``. Show the next step as a new
+        inline canvas or an update.
 
         To preview a website or app as it will really look, use ``inline=True`` with
-        ``raw=True``: Chat then adds no styles of its own, so browser defaults apply
-        until your CSS sets them, and the theme variables are not defined. Set
-        ``width`` to the viewport the design targets, such as 1440 for desktop or 390
-        for a phone: the page renders at that width and is scaled down to fit the
-        conversation. The layout rules above do not apply to such a preview: a page
-        with ``raw`` or ``width`` shows in a browser window at most 16:10 of its width
-        tall (568 to 1080px), ``vh`` units resolve against that window as in a
-        browser, and taller content scrolls inside it. The panel shows raw pages too,
-        at the panel's own width.
+        ``raw=True``: Chat adds no styles or theme variables, so browser defaults
+        apply until your CSS sets them. Set ``width`` to the viewport the design
+        targets, such as 1440 for desktop or 390 for a phone; the page renders at that
+        width, scaled down to fit. A page with ``raw`` or ``width`` ignores the inline
+        layout rules: it shows in a browser window at most 16:10 of its width tall
+        (568 to 1080px), where ``vh`` units work as in a browser and taller content
+        scrolls. The panel shows raw pages too, at the panel's own width.
 
-        Design it like a polished web app. Write self-contained HTML with inline CSS
-        and JavaScript. Fetch, XHR, and WebSocket requests are always blocked.
-        External images, scripts, styles, and fonts are blocked too unless your
-        instructions name a source that works; otherwise draw charts with inline SVG
-        and embed images as data: URLs.
-        The panel can be resized from narrow to full width, so use a responsive layout.
+        Design it like a polished web app. Fetch, XHR, and WebSockets are always
+        blocked. External images, scripts, styles, and fonts are blocked too
+        unless your instructions name a source that works; embed images as data: URLs.
+        For Chart.js, D3, Mermaid, or KaTeX, pass ``libraries``, never a CDN address.
+        The panel resizes from narrow to full width, so use a responsive layout.
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
         --mr-text-muted, --mr-accent, --mr-accent-text, --mr-success, --mr-warning,
@@ -545,7 +558,7 @@ class ChatUITools(Toolkit):
 
         Args:
             title: Short single-line panel title; when updating, omit it to keep the canvas's first title.
-            html: Self-contained HTML with inline CSS and JavaScript. Give html or path.
+            html: HTML with inline CSS and JavaScript. Give html or path.
             path: Workspace-relative path of an HTML file you wrote, shown instead of html.
             canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
             share_state: Let read_canvas_state read what the user does in this new canvas; updates keep the choice.
@@ -554,6 +567,7 @@ class ChatUITools(Toolkit):
             raw: Add no Chat styles or theme variables for this revision; updates must set it again.
             width: Target viewport width in CSS pixels (integer 320-2560) for this revision;
                 updates must set it again, and the panel uses its own width.
+            libraries: For this revision; updates must set them again.
 
         """
         validated = self._validated_context("show_canvas")
@@ -563,7 +577,7 @@ class ChatUITools(Toolkit):
         # Models often send an empty string for an omitted optional argument.
         canvas_event_id = canvas_event_id or None
         title = (title or "").strip()
-        input_error = self._canvas_input_error(title, html, path, canvas_event_id, width)
+        input_error = self._canvas_input_error(title, html, path, canvas_event_id, width, libraries)
         page = input_error or await self._read_canvas_page(html, path)
         if isinstance(page, str):
             return page
@@ -572,7 +586,17 @@ class ChatUITools(Toolkit):
             return target
         metadata, title = target
         body = f"Interactive panel: {title}. Open it in MindRoom Chat to respond."
-        canvas = await self._canvas_field(context, metadata, body, title, page, canvas_event_id, raw=raw, width=width)
+        canvas = await self._canvas_field(
+            context,
+            metadata,
+            body,
+            title,
+            page,
+            canvas_event_id,
+            raw=raw,
+            width=width,
+            libraries=libraries,
+        )
         if isinstance(canvas, str):
             return canvas
         if canvas_event_id is None:
@@ -687,9 +711,10 @@ class ChatUITools(Toolkit):
         path: str | None,
         canvas_event_id: str | None,
         width: int | None,
+        libraries: list[_CanvasLibrary] | None,
     ) -> str | None:
-        if width is not None and (isinstance(width, bool) or not isinstance(width, int) or not 320 <= width <= 2560):
-            return cls._canvas_error("Canvas width must be an integer from 320 to 2560 (not a boolean).")
+        if presentation_error := _canvas_presentation_error(width, libraries):
+            return cls._canvas_error(presentation_error)
         if canvas_event_id is not None and not canvas_event_id.startswith("$"):
             return cls._canvas_error(_CANVAS_EVENT_ID_ERROR, canvas_event_id=canvas_event_id)
         # An update may omit the title; it is checked once the canvas's own title is known.
@@ -773,6 +798,7 @@ class ChatUITools(Toolkit):
         *,
         raw: bool = False,
         width: int | None = None,
+        libraries: list[_CanvasLibrary] | None = None,
     ) -> dict[str, object] | str:
         """Carry a page inside the event when an edit of it fits, otherwise as uploaded media."""
         presentation: dict[str, object] = {}
@@ -780,6 +806,8 @@ class ChatUITools(Toolkit):
             presentation["raw"] = True
         if width is not None:
             presentation["width"] = width
+        if libraries:
+            presentation["libraries"] = list(dict.fromkeys(libraries))
         # Serialized JSON is never smaller than the UTF-8 page, so larger pages skip the measurement.
         if len(page) < EDIT_MESSAGE_SIZE_LIMIT:
             inline: dict[str, object] = {"title": title, "html": page.decode("utf-8"), **presentation}

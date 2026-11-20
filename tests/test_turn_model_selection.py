@@ -9,8 +9,14 @@ import pytest
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import set_thread_model_override
-from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models
+from mindroom.turn_model import (
+    ModelScope,
+    TeamTurnModelSelection,
+    resolve_inherited_model,
+    resolve_team_turn_models,
+)
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -89,3 +95,36 @@ def test_an_ad_hoc_team_runs_its_hosts_model_without_governing_members(tmp_path:
     config = _config(tmp_path)
     _override(config, "mx", "a")
     assert _team_models(config, entity="a") == ("mx", {"a": "mx", "b": "m2"})
+
+
+@pytest.mark.parametrize(
+    ("entity", "room_override", "room_model", "expected"),
+    [
+        pytest.param("a", None, None, ("m1", "agent"), id="agent"),
+        pytest.param("crew", None, None, ("mt", "agent"), id="team"),
+        pytest.param("a", None, "mx", ("mx", "room_config"), id="room-config"),
+        pytest.param("crew", None, "mx", ("mx", "room_config"), id="team-room-config"),
+        pytest.param("a", "my", "mx", ("my", "room"), id="room-override-beats-room-config"),
+        pytest.param("a", "gone", None, ("m1", "agent"), id="stale-room-override"),
+        pytest.param("a", "gone", "mx", ("mx", "room_config"), id="stale-room-override-room-config"),
+    ],
+)
+def test_resolve_inherited_model_names_what_chose_the_room_level_model(
+    tmp_path: Path,
+    entity: str,
+    room_override: str | None,
+    room_model: str | None,
+    expected: tuple[str, str],
+) -> None:
+    """The model and its source follow the turn's precedence below a thread choice, which they ignore."""
+    config = _config(tmp_path)
+    config.models["gone"] = ModelConfig(provider="openai", id="gone-id")
+    paths = runtime_paths_for(config)
+    if room_model is not None:
+        config.room_models[_ROOM] = room_model
+    if room_override is not None:
+        set_room_model_override(paths, room_id=_ROOM, model_name=room_override)
+    # A saved room model whose entry left the config no longer applies.
+    del config.models["gone"]
+    _override(config, "default", "a", "crew")
+    assert resolve_inherited_model(config, paths, entity, _ROOM) == expected

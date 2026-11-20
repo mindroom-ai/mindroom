@@ -5,7 +5,7 @@ smart truncation, fuzzy matching, and actionable pagination hints.
 
 Unlike the generic ``file`` tool (agno's FileTools), this toolkit is
 optimised for coding agents: line-numbered reads with pagination,
-search-and-replace edits with fuzzy matching, ripgrep-backed grep,
+search-and-replace edits (several per call) with fuzzy matching, ripgrep-backed grep,
 and gitignore-aware file discovery. Prefer this tool over ``file`` for
 coding-heavy agents; keep ``file`` for backward compatibility.
 """
@@ -14,16 +14,24 @@ from __future__ import annotations
 
 import bisect
 import difflib
+import itertools
 import json
+import os
 import re
 import shutil
 import subprocess
+import threading
 import unicodedata
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from glob import has_magic
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated, Any, Optional, cast
+from weakref import WeakValueDictionary
 
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation, TypeAdapter, ValidationError
+
+from mindroom.file_locks import wait_for_exclusive_lock
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.path_confinement import is_git_metadata_path
 from mindroom.path_safety import (
@@ -41,7 +49,7 @@ from mindroom.shared_directories.tool_roots import no_shared_directory_roots, sh
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from mindroom.config.models import FileAccess
     from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
@@ -52,7 +60,15 @@ _MAX_LINE_CHARS = 500  # Per-line truncation for grep output
 _DEFAULT_GREP_LIMIT = 100
 _DEFAULT_FIND_LIMIT = 1000
 _DEFAULT_LS_LIMIT = 500
-_DIFF_CONTEXT_LINES = 4
+_MAX_HINT_CHARS = 200
+_MAX_LISTED_RANGES = 10
+_EDITS_SHAPE = 'Pass edits=[{"old_text": "...", "new_text": "..."}].'
+_NO_CHANGES = "\nNo changes written."
+# The default of edit_file's edits, so a call that leaves them out differs from one that sends null.
+_OMITTED: Any = cast("Any", object())
+_WORKER_LOCK_TIMEOUT_SECONDS = 10.0
+_PRIMARY_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
+_PRIMARY_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass
@@ -292,7 +308,7 @@ def _find_all_matches(content: str, old_text: str) -> list[_MatchResult]:
             break
         norm_end = idx + len(norm_old)
         orig_start = _norm_to_orig_offset(idx, norm_offsets, orig_offsets, line_maps, len(content))
-        orig_end = _norm_to_orig_offset(norm_end, norm_offsets, orig_offsets, line_maps, len(content))
+        orig_end = _norm_to_orig_offset(norm_end, norm_offsets, orig_offsets, line_maps, len(content), end=True)
         matches.append(
             _MatchResult(
                 start=orig_start,
@@ -319,8 +335,10 @@ def _norm_to_orig_offset(
     orig_offsets: list[int],
     line_maps: list[_NormalizedLineMap],
     content_len: int,
+    *,
+    end: bool = False,
 ) -> int:
-    """Map a character offset in normalized text to the original text.
+    """Map a character offset in normalized text to the original text; an ``end`` at a line boundary stays there.
 
     Uses line boundaries and per-line maps that account for NFC normalization,
     quote/dash translation, BOM removal, and trailing-whitespace stripping.
@@ -332,6 +350,9 @@ def _norm_to_orig_offset(
     line_idx = max(0, min(line_idx, len(line_maps) - 1))
 
     char_in_norm_line = norm_offset - norm_offsets[line_idx]
+    if end and char_in_norm_line <= 0:
+        # An exclusive end at a line boundary must not take the stripped whitespace of the line it starts.
+        return orig_offsets[line_idx]
     line_map = line_maps[line_idx]
     char_in_norm_line = max(0, min(char_in_norm_line, line_map.norm_len))
     orig_in_line = line_map.norm_to_orig[char_in_norm_line]
@@ -339,21 +360,215 @@ def _norm_to_orig_offset(
     return min(orig_offsets[line_idx] + orig_in_line, content_len)
 
 
-def _make_diff(
-    old_content: str,
-    new_content: str,
-    context: int = _DIFF_CONTEXT_LINES,
-) -> str:
-    """Create a unified diff between old and new content."""
-    diff_lines = difflib.unified_diff(
-        old_content.splitlines(),
-        new_content.splitlines(),
-        fromfile="before",
-        tofile="after",
-        lineterm="",
-        n=context,
-    )
-    return "\n".join(diff_lines)
+def _model_facing_schema(schema: dict[str, Any]) -> None:
+    """Drop the titles and class docstring pydantic adds, which the model does not need."""
+    schema.pop("description", None)
+    for node in (schema, *schema["properties"].values()):
+        node.pop("title", None)
+
+
+class _Edit(BaseModel):
+    """One replacement of edit_file."""
+
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_model_facing_schema)
+
+    old_text: str = Field(description="Text to replace, copied exactly from the file.")
+    new_text: str = Field(description="Replacement text.")
+    replace_all: bool = Field(default=False, description="Replace every match, not just one.")
+
+
+# edit_file validates its edits itself, so a malformed call gets one short line rather than pydantic's report.
+_Edits = Annotated[list[_Edit], SkipValidation]
+_EDITS = TypeAdapter(list[_Edit])
+
+
+@contextmanager
+def _primary_file_lock(resolved: Path) -> Iterator[None]:
+    """Serialize the primary's writers of one resolved path in memory, never taking a lock worker code could hold."""
+    with _PRIMARY_LOCKS_GUARD:
+        # The local reference keeps the weakly held lock alive while this call waits on or holds it.
+        lock = _PRIMARY_LOCKS.setdefault(resolved, threading.Lock())
+    with lock:
+        yield
+
+
+@contextmanager
+def _directory_lock(resolved: Path) -> Iterator[None]:
+    """In a sandbox request, hold an exclusive lock on the nearest existing directory of ``resolved``.
+
+    Each call opens its own descriptor, so separate requests wait for each other, then fail before any read or write.
+    """
+    directory = resolved.parent
+    while not directory.is_dir():
+        directory = directory.parent
+    try:
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    except PermissionError:
+        # A directory the caller may enter but not read holds no lock; such a call runs unlocked, as before.
+        yield
+        return
+    try:
+        if not wait_for_exclusive_lock(descriptor, timeout_seconds=_WORKER_LOCK_TIMEOUT_SECONDS):
+            msg = f"another call is editing files in {directory}; try again"
+            raise TimeoutError(msg)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _line_ranges(text: str, spans: list[tuple[int, int]]) -> str:
+    """Name the lines of ``text`` the ordered ``spans`` cover, as read_file numbers them, merged and capped."""
+    lines = text.splitlines(keepends=True)
+    offsets = _cumulative_offsets(lines)
+    open_last_line = bool(lines) and lines[-1].splitlines() == [lines[-1]]
+
+    def line_at(offset: int) -> int | None:
+        line = bisect.bisect_right(offsets, offset)
+        return line if line < len(offsets) else (len(lines) if open_last_line else None)
+
+    merged: list[list[int | None]] = []
+    for start, end in spans:
+        first, last = line_at(start), line_at(max(start, end - 1))
+        previous = merged[-1][1] if merged else None
+        if first is not None and previous is not None and first <= previous + 1:
+            merged[-1][1] = max(previous, last or first)
+        elif first is not None or merged[-1:] != [[None, None]]:
+            merged.append([first, last])
+    words = [
+        "end of file" if first is None else str(first) if first == last else f"{first}-{last}"
+        for first, last in merged[:_MAX_LISTED_RANGES]
+    ]
+    if len(merged) > _MAX_LISTED_RANGES:
+        words.append(f"and {len(merged) - _MAX_LISTED_RANGES} more")
+    label = "" if words == ["end of file"] else "line " if len(words) == 1 and words[0].isdigit() else "lines "
+    return label + ", ".join(words)
+
+
+def _not_found_hint(content: str, edit: _Edit) -> str:
+    """Name the lines most like old_text's first non-blank line."""
+    first = next((line.strip() for line in edit.old_text.splitlines() if line.strip()), "")
+    lines = content.splitlines()
+    stripped = [line.strip() for line in lines]
+    close = difflib.get_close_matches(first, list(dict.fromkeys(stripped)), n=3, cutoff=0.6) if first else []
+    cut = _MAX_HINT_CHARS if len(close) == 1 else _MAX_HINT_CHARS // 2
+    hits = [f"{index + 1}: {lines[index].rstrip()[:cut]}" for index in sorted(map(stripped.index, close))]
+    return f"\nClosest lines: {' | '.join(hits)}" if len(hits) > 1 else f"\nClosest line {hits[0]}" if hits else ""
+
+
+def _edits_argument(edits: object, legacy: dict[str, object]) -> list[_Edit] | str:
+    """Return the edits a call asked for, a call in the old flat shape as one edit, or why not."""
+    if isinstance(edits, str) and edits.strip():
+        try:
+            edits = json.loads(edits)
+        except (ValueError, RecursionError):
+            return (
+                "edits must be a JSON array, but it arrived as a string that is not valid JSON "
+                f"(it starts {edits[:30]!r}). Send edits as an array: {_EDITS_SHAPE.removeprefix('Pass ')}"
+            )
+    if legacy:
+        # Calls written for the old flat shape send one old_text and new_text, which the schema no longer shows.
+        if edits is not _OMITTED or set(legacy) != {"old_text", "new_text"}:
+            return f"edit_file takes path and edits, not {', '.join(sorted(legacy))}. {_EDITS_SHAPE}"
+        edits = [legacy]
+    if not edits or edits is _OMITTED:
+        return f"edits is empty. {_EDITS_SHAPE}"
+    try:
+        return _EDITS.validate_python(edits)
+    except ValidationError as e:
+        error = e.errors()[0]
+        where = "".join(f"[{part}]" if isinstance(part, int) else f".{part}" for part in error["loc"])
+        return f"edits{where}: {error['msg']}. {_EDITS_SHAPE}"
+
+
+def _matched_spans(content: str, edits: list[_Edit]) -> list[tuple[_MatchResult, int]] | str:
+    """Match every edit against ``content`` and return its spans in file order, each with its edit's index, or why not."""
+    many = len(edits) > 1
+    spans: list[tuple[_MatchResult, int]] = []
+    for index, edit in enumerate(edits):
+        who = f"edits[{index}]" if many else "old_text"
+        if not edit.old_text:
+            return f"{f'edits[{index}].' if many else ''}old_text is empty."
+        matches = _find_all_matches(content, edit.old_text)
+        if not matches:
+            return f"{who} not found in the file.{_not_found_hint(content, edit)}"
+        if len(matches) > 1 and not edit.replace_all:
+            lines = _line_ranges(content, [(match.start, match.end) for match in matches])
+            return (
+                f"{who} matches {len(matches)} places ({lines}). "
+                "Add nearby lines to old_text to pick one, or set replace_all."
+            )
+        spans.extend((match, index) for match in matches)
+    spans.sort(key=lambda span: span[0].start)
+    for (first, first_index), (second, second_index) in itertools.pairwise(spans):
+        if second.start < first.end:
+            low, high = sorted((first_index, second_index))
+            covers = " (a replace_all edit replaces every match of its old_text)" * (
+                edits[low].replace_all or edits[high].replace_all
+            )
+            return (
+                f"edits[{low}] and edits[{high}] overlap at {_line_ranges(content, [(second.start, min(first.end, second.end))])}{covers}. "
+                "Merge them into one edit, or make old_text more specific."
+            )
+    return spans
+
+
+def _apply_edits(content: str, edits: list[_Edit]) -> tuple[str, int, str] | str:
+    """Apply every edit to ``content`` as it is, returning the new content, its replacements and their lines, or why not.
+
+    A match from byte zero of a file with a byte order mark takes the mark, and its replacement keeps it, once; any
+    other U+FEFF is text. A file whose every line ends in CRLF is edited with LF endings, which the edits may use
+    either way, and gets its CRLF back, unless an edit holds a lone CR; any other file is edited as it is.
+    """
+    bom = "\ufeff" if content.startswith("\ufeff") else ""
+    pieces = [content, *(edit.old_text for edit in edits), *(edit.new_text for edit in edits)]
+    crlf = content.count("\n") == content.count("\r\n") > 0 and all(p.count("\r") == p.count("\r\n") for p in pieces)
+    text = content.replace("\r\n", "\n") if crlf else content
+    for edit in edits:
+        if crlf:
+            edit.old_text, edit.new_text = edit.old_text.replace("\r\n", "\n"), edit.new_text.replace("\r\n", "\n")
+    spans = _matched_spans(text, edits)
+    if isinstance(spans, str):
+        return spans
+    parts: list[str] = []
+    landed: list[tuple[int, int]] = []
+    position = shift = 0
+    for match, index in spans:
+        new_text = edits[index].new_text
+        if bom and match.start == 0:
+            new_text = bom + new_text.removeprefix(bom)
+        parts += [text[position : match.start], new_text]
+        if new_text != text[match.start : match.end]:
+            landed.append((match.start + shift, match.start + shift + len(new_text)))
+        shift += len(new_text) - (match.end - match.start)
+        position = match.end
+    parts.append(text[position:])
+    edited = "".join(parts)
+    new_content = edited.replace("\n", "\r\n") if crlf else edited
+    if new_content == content:
+        return "the edits leave the file identical to what it was; new_text must differ from the text it replaces."
+
+    report = _line_ranges(edited, landed)
+    fuzzy = [f"edits[{index}]" for index in sorted({index for match, index in spans if match.was_fuzzy})]
+    if fuzzy:
+        report += f" ({', '.join(fuzzy) + ' ' if len(edits) > 1 else ''}matched after normalizing whitespace/quotes)"
+    return new_content, len(spans), report
+
+
+def _edit_resolved(base_dir: Path, resolved: Path, path: str, edits: list[_Edit]) -> str:
+    """Apply ``edits`` to the file at ``resolved``, which the caller holds locked, and return the result or the error."""
+    raw = _read_resolved(base_dir, resolved, path)
+    if isinstance(raw, str):
+        return raw + _NO_CHANGES
+    applied = _apply_edits(raw.decode("utf-8", errors="replace"), edits)
+    if isinstance(applied, str):
+        return f"Error: {applied}{_NO_CHANGES}"
+    new_content, replacements, report = applied
+    try:
+        write_resolved_file(base_dir, resolved, new_content.encode("utf-8"))
+    except OSError as e:
+        return f"Error writing file: {e}"
+    counted = f" ({replacements} replacements)" if replacements > len(edits) else ""
+    return f"Applied {len(edits)} edit{'s' if len(edits) > 1 else ''}{counted} to {path}: {report}."
 
 
 def _is_git_repo(base_dir: Path) -> bool:
@@ -519,28 +734,14 @@ def _find_files_in(
     return result
 
 
-def _resolve_and_read(
-    base_dir: Path,
-    path: str,
-    restrict_to_base_dir: bool = True,
-    *,
-    writable: bool = False,
-) -> tuple[Path, str] | str:
-    """Resolve path and read file content. Returns (resolved, content) or error string."""
-    try:
-        resolved = resolve_base_dir_path(base_dir, path, restrict_to_base_dir)
-    except ValueError as e:
-        return f"Error: {e}"
-    if writable and is_git_metadata_path(resolved):
-        return blocked_git_metadata_message("writing file", path)
-
+def _read_resolved(base_dir: Path, resolved: Path, path: str) -> bytes | str:
+    """Read the resolved file ``path`` names, or return the error."""
     if not resolved.exists():
         return f"Error: File not found: {path}"
     if not resolved.is_file():
         return f"Error: Not a file: {path}"
-
     try:
-        return resolved, read_resolved_file(base_dir, resolved).decode("utf-8", errors="replace")
+        return read_resolved_file(base_dir, resolved)
     except (OSError, ValueError) as e:
         return f"Error reading file: {e}"
 
@@ -557,12 +758,15 @@ class CodingTools(Toolkit):
         base_dir: str | None = None,
         file_access: FileAccess = "workspace",
         shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]] = no_shared_directory_roots,
+        *,
+        in_sandbox_request: bool = False,
     ) -> None:
         self.base_dir = resolve_tool_base_dir(base_dir)
         # Without a workspace the base dir is only the process working directory, which workspace access refuses.
         self.has_workspace = bool(base_dir)
         self.restrict_to_base_dir = file_access == "workspace"
         self.shared_directory_roots = shared_directory_roots
+        self.in_sandbox_request = in_sandbox_request
         super().__init__(
             name="coding",
             tools=[
@@ -574,6 +778,9 @@ class CodingTools(Toolkit):
                 self.ls,
             ],
         )
+
+    def _file_lock(self, resolved: Path) -> AbstractContextManager[None]:
+        return _directory_lock(resolved) if self.in_sandbox_request else _primary_file_lock(resolved)
 
     @shared_directory_aware("path", writes=False)
     def read_file(
@@ -593,53 +800,52 @@ class CodingTools(Toolkit):
             Line-numbered file content with pagination hints if truncated.
 
         """
-        result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir)
-        if isinstance(result, str):
-            return result
-        return _format_read_output(result[1], offset, limit)
+        try:
+            resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
+        except ValueError as e:
+            return f"Error: {e}"
+        raw = _read_resolved(self.base_dir, resolved, path)
+        if isinstance(raw, str):
+            return raw
+        return _format_read_output(raw.decode("utf-8", errors="replace"), offset, limit)
 
     @shared_directory_aware("path", writes=True)
-    def edit_file(self, path: str, old_text: str, new_text: str) -> str:
-        """Replace a specific text occurrence in a file. Uses fuzzy matching to handle whitespace/Unicode differences.
+    def edit_file(
+        self,
+        path: str,
+        edits: Optional[_Edits] = _OMITTED,  # noqa: UP045 - Optional, unlike `| None`, keeps null out of the schema.
+        **legacy: object,
+    ) -> str:
+        """Replace exact text in one file. Read it first.
 
-        The old_text must match exactly one location in the file. If it matches
-        zero or more than one location, an error is returned.
+        Copy each old_text from the current file; edits match the original, not each other's results.
+        Without replace_all, old_text must match one place. Whitespace/quote differences are tolerated.
+        Edits must not overlap, and a replace_all edit already covers every match; merge nearby ones.
+        If one fails, nothing is written.
 
         Args:
-            path: File path (relative to working directory or absolute).
-            old_text: The text to find and replace. Must be unique in the file.
-            new_text: The replacement text.
+            path: File path, relative to working directory or absolute.
+            edits: Non-empty list of replacements.
+            **legacy: The old flat shape's old_text and new_text, taken as one edit.
 
         Returns:
-            A diff showing the change, or an error message.
+            The lines each edit changed, or an error.
 
         """
-        if not old_text:
-            return "Error: old_text must be non-empty."
-
-        result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir, writable=True)
-        if isinstance(result, str):
-            return result
-        resolved, content = result
-
-        matches = _find_all_matches(content, old_text)
-        if len(matches) == 0:
-            return "Error: old_text not found in file."
-        if len(matches) > 1:
-            return f"Error: old_text matches {len(matches)} locations. Provide more context to make the match unique."
-
-        match = matches[0]
-        new_content = content[: match.start] + new_text + content[match.end :]
-
+        parsed = _edits_argument(edits, legacy)
+        if isinstance(parsed, str):
+            return f"Error: {parsed}{_NO_CHANGES}"
         try:
-            write_resolved_file(self.base_dir, resolved, new_content.encode("utf-8"))
+            resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
+        except ValueError as e:
+            return f"Error: {e}{_NO_CHANGES}"
+        if is_git_metadata_path(resolved):
+            return blocked_git_metadata_message("writing file", path)
+        try:
+            with self._file_lock(resolved):
+                return _edit_resolved(self.base_dir, resolved, path, parsed)
         except OSError as e:
-            return f"Error writing file: {e}"
-
-        diff = _make_diff(content, new_content)
-        fuzzy_note = " (fuzzy match: whitespace/Unicode normalized)" if match.was_fuzzy else ""
-        line_num = content[: match.start].count("\n") + 1
-        return f"Applied edit at line {line_num}{fuzzy_note}:\n\n{diff}"
+            return f"Error: {e}{_NO_CHANGES}"
 
     @shared_directory_aware("path", writes=True)
     def write_file(self, path: str, content: str) -> str:
@@ -661,7 +867,8 @@ class CodingTools(Toolkit):
             return blocked_git_metadata_message("writing file", path)
 
         try:
-            write_resolved_file(self.base_dir, resolved, content.encode("utf-8"))
+            with self._file_lock(resolved):
+                write_resolved_file(self.base_dir, resolved, content.encode("utf-8"))
         except OSError as e:
             return f"Error writing file: {e}"
 

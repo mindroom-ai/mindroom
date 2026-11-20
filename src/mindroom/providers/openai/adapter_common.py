@@ -4,17 +4,28 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection, Mapping
 
     from openai import AsyncOpenAI
 
     from mindroom.llm.provider import Capabilities, RequestOverrides
     from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 
-__all__ = ["SDKClients", "request_settings"]
+__all__ = ["SDKClients", "request_settings", "with_large_fields_untyped"]
+
+
+def with_large_fields_untyped(kwargs: Mapping[str, Any], large: Collection[str]) -> dict[str, Any]:
+    """Return SDK call arguments that send the ``large`` body fields through ``extra_body``, which the SDK sends as is.
+
+    The SDK walks each typed body field against its TypedDict annotations on the event loop, which for a long history
+    and many tools blocks the loop for tens of milliseconds and changes nothing in the plain JSON MindRoom builds.
+    Each typed field stays as an empty placeholder that ``extra_body`` replaces in place, so the body is unchanged.
+    """
+    moved = {key: kwargs[key] for key in large if key in kwargs}
+    return {**kwargs, **dict.fromkeys(moved, ()), "extra_body": {**moved, **(kwargs.get("extra_body") or {})}}
 
 
 @dataclass(frozen=True, slots=True)

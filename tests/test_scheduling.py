@@ -1490,6 +1490,37 @@ async def test_get_scheduled_tasks_for_room_skips_cancelled_without_workflow(tmp
 
 
 @pytest.mark.asyncio
+async def test_pending_task_reads_never_parse_finished_tasks(tmp_path: Path) -> None:
+    """A room keeps every finished task's state, so reads of its pending tasks skip the others before parsing them."""
+    client = AsyncMock()
+    stored = {"workflow": _pending_once_workflow().model_dump_json()}
+    serve_full_room_state(
+        client,
+        "!test:server",
+        [
+            scheduled_task_state_event("done", {**stored, "status": "completed"}),
+            scheduled_task_state_event("broken", {**stored, "status": "failed"}),
+            scheduled_task_state_event("stopped", {**stored, "status": "cancelled"}),
+            scheduled_task_state_event("next", {**stored, "status": "pending"}),
+        ],
+    )
+
+    with patch.object(
+        scheduling,
+        "_parse_scheduled_task_record",
+        wraps=scheduling._parse_scheduled_task_record,
+    ) as parse:
+        tasks = await get_scheduled_tasks_for_room(
+            client=client,
+            room_id="!test:server",
+            runtime_paths=schedule_runtime_paths(tmp_path),
+        )
+
+    assert [task.task_id for task in tasks] == ["next"]
+    assert [call.args[1] for call in parse.call_args_list] == ["next"]
+
+
+@pytest.mark.asyncio
 async def test_get_pending_schedule_thread_ids_excludes_new_threads_and_non_pending(tmp_path: Path) -> None:
     """Only pending schedules targeting an existing scope should suppress todo pokes."""
     client = AsyncMock()

@@ -68,6 +68,7 @@ from mindroom.orchestration.runtime import (
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.reply_turn.inbox import InboxResponses, _InboxResponseOwnership
 from mindroom.runtime_shutdown import (
+    CONFIG_RELOAD_SHUTDOWN,
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
     ORDERLY_SHUTDOWN,
@@ -2248,6 +2249,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     # This bot is hand-built with object.__new__, so it only has what the test
     # sets. stop() releases the journal lane, which a real bot always has.
     bot._journal_dispatcher = MagicMock(stop=AsyncMock())
+    bot._reply_runtime = MagicMock()
     bot._ingestion_session = None
     bot.storage_path = Path("/nonexistent/storage")
     bot.logger = MagicMock()
@@ -2260,6 +2262,8 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     assert bot.hook_registry is not active_hook_registry
+    # Only a config reload's replacement has its successor name a config change.
+    bot._reply_runtime.retire_for_config_change.assert_not_called()
     bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
     bot._response_runner.inbox.wait_for_source_owned_inbox_responses.assert_awaited_once_with()
 
@@ -2278,6 +2282,7 @@ async def test_restart_stop_reports_failed_release_over_reply_drain_timeout() ->
     )
     bot._runtime_view = MagicMock(client=None)
     bot._journal_dispatcher = MagicMock(stop=AsyncMock(side_effect=release_failure))
+    bot._reply_runtime = MagicMock()
     bot._ingestion_session = None
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock(side_effect=ResponseShutdownTimeoutError("reply outlived the drain"))
@@ -2950,8 +2955,8 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
         await fleet_sync.cancel_all()
 
     assert orchestrator.config_reload.status.status == "applied"
-    old_bots["general"].stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
-    old_bots["coach"].stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    old_bots["general"].stop.assert_awaited_once_with(shutdown_intent=CONFIG_RELOAD_SHUTDOWN)
+    old_bots["coach"].stop.assert_awaited_once_with(shutdown_intent=CONFIG_RELOAD_SHUTDOWN)
     assert created_configs == {"general": orchestrator.config, "coach": orchestrator.config}
     assert orchestrator.config.agents["general"].role == "New"
     for entity_name in ("general", "coach"):

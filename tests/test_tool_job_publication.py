@@ -14,6 +14,8 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration import tool_job_runtime as tool_job_runtime_module
@@ -123,6 +125,53 @@ def test_a_subagent_job_is_published_under_its_agents_name() -> None:
     jobs = content["jobs"]
     assert isinstance(jobs, list)
     assert (jobs[0]["kind"], jobs[0]["tool"]) == ("subagent", "worker")
+
+
+def test_job_state_names_the_subagent_and_run_of_a_delegation_job() -> None:
+    """A client finds a subagent job's live frames by the child's subagent ID and the run the frames name."""
+    job = replace(completed_delegation_job(), status="running")
+    job.adapter["child"] = {**job.adapter["child"], "subagent_id": "s1", "delegation_id": "d1"}
+    (state,) = _jobs_state_content([job])["jobs"]  # type: ignore[misc]
+    assert (state["subagent"], state["run"]) == ("s1", "d1")
+    assert "tool_call_id" not in state
+
+
+def test_job_state_names_the_tool_call_of_a_tool_job() -> None:
+    """A client finds a tool job's call in the reply's tool trace by its call ID; a job without one names none."""
+    job = _job("job_1")
+    job.adapter["tool_call_id"] = "call_1"
+    named, unnamed = _jobs_state_content([job, _job("job_2")])["jobs"]  # type: ignore[misc]
+    assert named["tool_call_id"] == "call_1"
+    assert "tool_call_id" not in unnamed
+    assert "subagent" not in named
+    assert "run" not in named
+
+
+@pytest.mark.parametrize("value", ["", None, 7, ["call_1"]])
+def test_job_state_leaves_out_a_join_key_that_is_not_a_non_empty_string(value: object) -> None:
+    """A join key a client cannot use is left out, so the client shows the job by its name alone."""
+    tool_job = _job("job_1")
+    tool_job.adapter["tool_call_id"] = value
+    subagent_job = replace(completed_delegation_job(), status="running")
+    subagent_job.adapter["child"] = {**subagent_job.adapter["child"], "subagent_id": value, "delegation_id": value}
+    for job in (tool_job, subagent_job):
+        (state,) = _jobs_state_content([job])["jobs"]  # type: ignore[misc]
+        assert set(state) == {"job_id", "thread_id", "kind", "tool", "status", "started_at"}
+
+
+def test_job_state_never_carries_arguments_or_progress() -> None:
+    """Room state is not encrypted: neither kind of job publishes its arguments, its task, or its progress."""
+    tool_job = replace(_job("job_1"), progress="read /secret/path")
+    tool_job.adapter["tool_call_id"] = "call_1"
+    subagent_job = replace(completed_delegation_job(), status="running", progress="Calling shell")
+    content = _jobs_state_content([tool_job, subagent_job])
+    allowed = {"job_id", "thread_id", "kind", "tool", "status", "started_at", "subagent", "run", "tool_call_id"}
+    for state in content["jobs"]:  # type: ignore[union-attr]
+        assert set(state) <= allowed
+    published = json.dumps(content)
+    assert "do not publish" not in published
+    assert "read /secret/path" not in published
+    assert "Inspect files" not in published
 
 
 def test_hundreds_of_live_jobs_with_the_longest_ids_fit_in_a_state_update_listing_the_newest() -> None:
@@ -316,24 +365,97 @@ async def test_recovered_interrupted_jobs_leave_the_published_state(tmp_path: Pa
         await runtime.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_an_orderly_shutdown_clears_the_published_jobs(tmp_path: Path) -> None:
-    """Jobs a shutdown interrupts leave the rooms' state at once, so no client lists them while MindRoom is down."""
-    runtime = await tool_job_runtime(tmp_path)
+async def _quiesce_kept_and_ended_jobs(tmp_path: Path, *, jobs_on: bool) -> tuple[dict[str, object], object]:
+    """Shut down with a listed subagent job it keeps for the next start and a listed tool job it ends.
+
+    ``jobs_on`` is the authored config's setting at shutdown. Returns the kept job's listing and the state written.
+    """
+    runtime = await tool_job_runtime(tmp_path, continues=tool_job_runtime_module._is_subagent_job)
     owner = job_owner()
     bot = _bot(owner.recipient)
     bot.client.rooms = {owner.room_id: MagicMock()}
     coordinator = job_coordinator(tmp_path, runtime, bot)
+    coordinator.config_provider = lambda: Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=jobs_on))
 
     async def forever() -> BackgroundOutcome:
         await asyncio.Event().wait()
         raise AssertionError
 
+    options = {"depth": 0, "owner": owner, "operation": forever}
     try:
-        await start_job(runtime, "job_1", tool_name="run_tests", depth=0, adapter={}, owner=owner, operation=forever)
+        adapter = completed_delegation_job().adapter
+        await start_job(runtime, "kept", tool_name="delegate", kind="delegation", adapter=adapter, **options)
+        await start_job(runtime, "ended", tool_name="run_tests", adapter={}, **options)
         await coordinator._publisher.publish(coordinator.bot_provider, runtime.retained_jobs())
-        assert bot.client.room_put_state.await_args.kwargs["content"]["jobs"]
+        listed = {job["job_id"]: job for job in bot.client.room_put_state.await_args.kwargs["content"]["jobs"]}
+        assert listed.keys() == {"kept", "ended"}
         await coordinator.quiesce()
+        assert {job.job_id: job.status for job in runtime.retained_jobs()} == {
+            "kept": "running",
+            "ended": "interrupted",
+        }
+        return listed["kept"], bot.client.room_put_state.await_args.kwargs["content"]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_orderly_shutdown_keeps_listed_only_the_jobs_the_next_start_continues(tmp_path: Path) -> None:
+    """Jobs a shutdown ends leave the rooms' state at once, so no client lists them while MindRoom is down.
+
+    A subagent job it keeps running in storage for the next start to continue stays listed as it was, so its thread
+    still shows work while MindRoom restarts.
+    """
+    kept, written = await _quiesce_kept_and_ended_jobs(tmp_path, jobs_on=True)
+    assert written == {"jobs": [kept], "total": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_after_jobs_were_turned_off_clears_the_kept_jobs_too(tmp_path: Path) -> None:
+    """A shutdown after the config turned jobs off clears the subagent jobs it keeps too.
+
+    The setting takes effect at the next start, which continues no job.
+    """
+    _kept, written = await _quiesce_kept_and_ended_jobs(tmp_path, jobs_on=False)
+    assert written == {"jobs": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_after_jobs_were_turned_off_clears_a_kept_job_an_earlier_process_listed(
+    tmp_path: Path,
+) -> None:
+    """A process that never listed a kept job it recovered still clears the listing an earlier process left of it."""
+    earlier = await tool_job_runtime(tmp_path, continues=tool_job_runtime_module._is_subagent_job)
+    owner = job_owner()
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    adapter = completed_delegation_job().adapter
+    await start_job(
+        earlier,
+        "kept",
+        tool_name="delegate",
+        kind="delegation",
+        depth=0,
+        adapter=adapter,
+        owner=owner,
+        operation=forever,
+    )
+    await earlier.shutdown()
+    runtime = await tool_job_runtime(tmp_path, continues=tool_job_runtime_module._is_subagent_job)
+    bot = _bot(owner.recipient)
+    bot.client.rooms = {owner.room_id: MagicMock()}
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    coordinator.config_provider = lambda: Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=False))
+    try:
+        await runtime.recover()
+        assert [job.job_id for job in runtime.awaiting_continuation()] == ["kept"]
+        await coordinator.quiesce()
+        assert [job.status for job in runtime.retained_jobs()] == ["running"]
+        assert bot.client.room_put_state.await_count == 1
+        assert bot.client.room_put_state.await_args.kwargs["room_id"] == owner.room_id
         assert bot.client.room_put_state.await_args.kwargs["content"] == {"jobs": [], "total": 0}
     finally:
         await runtime.shutdown()

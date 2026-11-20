@@ -27,7 +27,7 @@ from mindroom.agent_cli.delegation import approval_calls_for_cli_pause
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
-from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
+from mindroom.agent_cli.session import CONFIG_RELOAD_CALL, RELOAD_STOPPED, CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import PlannedCall
@@ -100,6 +100,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.config.main import Config
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -1073,6 +1074,7 @@ async def _checkpointed_batch(
     ("shell", "missing_shell_function", "nested", "preset"),
     [(shell, missing, None, False) for shell in (False, True) for missing in (None, "run_shell_command")]
     + [(True, None, "media", False), (True, None, "approval", False), (True, None, "suspend", False)]
+    + [(True, None, "reload", False), (True, None, "saved_stop", False)]
     + [(True, None, None, True)],
 )
 async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # noqa: C901 - checkpoint through real resumed provider
@@ -1099,6 +1101,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     effects = []
     shell_tokens = []
+    reloaded: list[Config] = []
 
     async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
         assert args in {"exact approved shell", "later model shell"}
@@ -1106,6 +1109,9 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         token = current_agent_cli_shell_env().token
         if token not in shell_tokens:
             shell_tokens.append(token)
+        if nested == "reload":
+            # The config reloads while the recovered command runs, before its CLI call.
+            reloaded.append(runtime.config.model_copy(update={"timezone": "Europe/Amsterdam"}))
         if nested:
             owner = shell_cli_owner(registry)
             queued = await owner.operation(
@@ -1120,7 +1126,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             )
             async with asyncio.timeout(5):
                 receipt = await settled_receipt(owner, queued["call_id"])
-            if nested != "suspend":
+            if nested not in {"suspend", "reload"}:
                 assert receipt["status"] == "completed"
         return "fresh shell result"
 
@@ -1164,6 +1170,9 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         runtime.execution_identity,
     )
     persisted, session = await _checkpointed_batch(runtime, store, sibling_image)
+    if nested == "saved_stop":
+        # A reload refused a sibling call of the paused command before the restart, which the saved run records.
+        persisted.metadata = {**(persisted.metadata or {}), CONFIG_RELOAD_CALL: RELOAD_STOPPED}
     continuation = approval_continuation(
         approval_id="approved",
         run_id="saved-run",
@@ -1235,7 +1244,11 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             ),
         )
 
-    runtime = replace(runtime, cli_approval_handler=approve)
+    runtime = replace(
+        runtime,
+        cli_approval_handler=approve,
+        config_provider=lambda: reloaded[-1] if reloaded else runtime.config,
+    )
     if missing_shell_function:
         runtime.config.agents["helper"].tools = [{"shell": {"exclude_tools": [missing_shell_function]}}]
     provider = ScriptedProvider(
@@ -1347,6 +1360,14 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         saved = store.get_run("saved-run")
         assert saved is not None
         assert any(item.get("id") == "old-bash" for message in saved.messages for item in message.tool_calls or ())
+        return
+    if nested in {"reload", "saved_stop"}:
+        # A call the reload refused, now or before the restart, ends the recovered turn with the reason: the model is
+        # not asked again.
+        assert RELOAD_STOPPED in result.response_text
+        assert provider.requests == []
+        assert responses == []
+        assert effects == ["exact approved shell", *(["nested media"] if nested == "saved_stop" else [])]
         return
     assert "finished" in result.response_text
     # Like a standard recovery, the hidden call and the fresh model text stream into the continued reply.

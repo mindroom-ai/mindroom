@@ -20,6 +20,7 @@ def _assert_page_preview(case: dict[str, object]) -> None:
     assert metadata["inline"] is True
     assert metadata["canvas"]["raw"] is True
     assert metadata["canvas"]["width"] == 1440
+    assert metadata["canvas"]["libraries"] == ["chartjs", "katex"]
     assert "replacement" not in case
 
 
@@ -82,6 +83,7 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
         else:
             assert "raw" not in metadata.get("canvas", {})
             assert "width" not in metadata.get("canvas", {})
+            assert "libraries" not in metadata.get("canvas", {})
         if case["id"].endswith("/show_canvas/update"):
             replacement = case["replacement"]["content"]
             assert replacement["m.relates_to"] == {"rel_type": "m.replace", "event_id": case["event"]["event_id"]}

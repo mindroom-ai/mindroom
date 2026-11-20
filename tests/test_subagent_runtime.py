@@ -9,9 +9,11 @@ from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
+from structlog.testing import capture_logs
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -23,6 +25,7 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ToolCo
 from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
+from mindroom.delegation.state import RESTART_INTERRUPTION_REASON
 from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.matrix import state as matrix_state
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
@@ -32,6 +35,7 @@ from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
+    BackgroundJob,
     BackgroundOutcome,
     JobAccessError,
     get_background_runtime,
@@ -49,6 +53,7 @@ from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    ResolvingMembership,
     admit_delegation_job,
     awaiting_approval,
     completed_delegation_job,
@@ -68,10 +73,8 @@ from tests.tool_job_helpers import (
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -112,41 +115,13 @@ def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path
     assert coordinator._grant(job) == "denied"
 
 
-class _ResolvingMembership(AgentReplyMembershipIndex):
-    """Room membership that is still resolving until a test proves it either way."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.state = "pending"
-
-    def is_current_room_member(
-        self,
-        sender_id: str,
-        room_id: str,
-        config: Config,
-        runtime_paths: RuntimePaths,
-    ) -> bool:
-        del sender_id, room_id, config, runtime_paths
-        return self.state == "member"
-
-    def grants_pending(
-        self,
-        config: Config,
-        *,
-        joined_rooms: Sequence[str],
-        current_room_id: str | None,
-    ) -> bool:
-        del config, joined_rooms, current_room_id
-        return self.state == "pending"
-
-
 @pytest.mark.asyncio
 async def test_revocation_waits_for_resolving_room_membership(tmp_path: Path) -> None:
     """Unresolved membership hides a job from access but cancels it only after a proven denial."""
     config = managed_team_config(tmp_path)
     for entity in (config.agents["lead"], config.agents["worker"], config.teams["team"]):
         entity.access = ResponderAccessConfig(current_room_members=True)
-    membership = _ResolvingMembership()
+    membership = ResolvingMembership()
     coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=test_runtime_paths(tmp_path),
         config_provider=lambda: config,
@@ -266,7 +241,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Shutdown owns detached tasks and removes the managed runtime lookup."""
+    """Shutdown owns detached tasks and removes the managed runtime lookup; a subagent's job stays to be continued."""
     monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
     coordinator = team_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.sync()
@@ -293,6 +268,10 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
     restored = team_coordinator(tmp_path, managed_team_config(tmp_path))
     await restored.initialize()
     await restored.runtime.recover()
+    job = await lookup(restored.runtime, fixture.job_id, owner=fixture.owner, depth=0)
+    assert job.status == "running"
+    assert [kept.job_id for kept in restored.runtime.awaiting_continuation()] == [fixture.job_id]
+    await restored.runtime.continue_stopped(fixture.job_id, None)
     job = await lookup(restored.runtime, fixture.job_id, owner=fixture.owner, depth=0)
     assert job.status == "interrupted"
     await restored.stop()
@@ -462,7 +441,7 @@ async def test_accepted_execution_continues_while_room_membership_resolves(tmp_p
     for entity in (config.agents["lead"], config.agents["worker"], config.teams["team"]):
         entity.access = ResponderAccessConfig(current_room_members=True)
     coordinator = team_coordinator(tmp_path, config)
-    membership = _ResolvingMembership()
+    membership = ResolvingMembership()
     coordinator.agent_reply_memberships = membership
     await coordinator.initialize()
     owner = replace(completed_delegation_job().owner, agent_name="worker", session_id="child_session")
@@ -687,6 +666,163 @@ async def test_a_disabled_instance_leaves_saved_jobs_untouched(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requester", ["member", "stranger"])
+async def test_a_stopped_subagent_job_continues_only_for_a_synced_bot_and_a_proven_requester(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requester: str,
+) -> None:
+    """The worker's pass reads the bot's first sync and the requester's real access before it continues a job.
+
+    While either is unresolved the job waits, still running; a requester proven gone has the job cancelled by the
+    pass's revocation step, which runs first, and never continued.
+    """
+    config = managed_team_config(tmp_path)
+    for entity in (config.agents["lead"], config.agents["worker"], config.teams["team"]):
+        entity.access = ResponderAccessConfig(current_room_members=True)
+    membership = ResolvingMembership()
+    job = replace(completed_delegation_job(), status="running", result=None)
+    bot = MagicMock(running=True, first_sync_complete=False, admit_job_follow_up=AsyncMock())
+    bot.client.rooms.__contains__.return_value = True
+    paths = test_runtime_paths(tmp_path)
+    bot.tool_runtime_support.build_context.return_value = _delegate_runtime_context(
+        config,
+        paths,
+        execution_identity=job.owner,
+    )
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _: bot,
+        agent_reply_memberships=membership,
+        journal_provider=partial(tool_job_journal, paths.storage_root),
+    )
+    coordinator._publisher = AsyncMock()
+    prepared: list[str] = []
+
+    async def decline(stopped: BackgroundJob, _runtime: object) -> str:
+        prepared.append(stopped.job_id)
+        return "declined by the test"
+
+    monkeypatch.setattr(runtime_module, "continued_subagent_job", decline)
+    monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
+    await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(job)))
+    coordinator._runtime = runtime = await tool_job_runtime(
+        tmp_path,
+        grant=coordinator._grant,
+        cancel=coordinator._interrupt,
+        continues=runtime_module._is_subagent_job,
+    )
+    try:
+        await runtime.recover()
+        # Membership resolves and the bot has not synced, then the bot synced and membership resolves again.
+        for synced, state in ((False, "pending"), (False, "member"), (True, "pending")):
+            bot.first_sync_complete, membership.state = synced, state
+            await coordinator._reconcile()
+            assert [waiting.job_id for waiting in runtime.awaiting_continuation()] == [job.job_id]
+        assert prepared == []
+        membership.state = requester
+        await coordinator._reconcile()
+        if requester == "member":
+            assert prepared == [job.job_id]
+            assert runtime._entries[job.job_id].job.status == "interrupted"
+        else:
+            await wait_for_status(runtime, job.job_id, "cancelled")
+            assert prepared == []
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_subagent_job_that_cannot_continue_leaves_the_published_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job the last shutdown kept saved stays listed while it waits, and leaves the listing once it cannot continue."""
+    job = replace(completed_delegation_job(), status="running", result=None)
+    paths = test_runtime_paths(tmp_path)
+    bot = MagicMock(running=True, first_sync_complete=False, admit_job_follow_up=AsyncMock())
+    bot.client.rooms.__contains__.return_value = True
+    bot.client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse(event_id="$s", room_id="!room:test"))
+    unavailable = False
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: managed_team_config(tmp_path),
+        bot_provider=lambda _: bot,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
+        entity_unavailable=lambda _: unavailable,
+    )
+    monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
+    await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(job)))
+    coordinator._runtime = runtime = await tool_job_runtime(
+        tmp_path,
+        cancel=coordinator._interrupt,
+        continues=runtime_module._is_subagent_job,
+    )
+    try:
+        await runtime.recover()
+        # Its bot has not synced yet, so the job waits, listed.
+        await coordinator._reconcile()
+        assert [listed["job_id"] for listed in bot.client.room_put_state.await_args.kwargs["content"]["jobs"]] == [
+            job.job_id,
+        ]
+        unavailable = True
+        await coordinator._reconcile()
+        assert runtime._entries[job.job_id].job.status == "interrupted"
+        assert bot.client.room_put_state.await_args.kwargs["content"] == {"jobs": [], "total": 0}
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_subagent_job_whose_requesters_access_stays_unresolved_ends_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Access that a synced bot's rooms never resolve ends the job after a bounded wait, without running it."""
+    config = managed_team_config(tmp_path)
+    for entity in (config.agents["lead"], config.agents["worker"], config.teams["team"]):
+        entity.access = ResponderAccessConfig(current_room_members=True)
+    job = replace(completed_delegation_job(), status="running", result=None)
+    paths = test_runtime_paths(tmp_path)
+    bot = MagicMock(running=True, first_sync_complete=True, admit_job_follow_up=AsyncMock())
+    bot.client.rooms.__contains__.return_value = True
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _: bot,
+        agent_reply_memberships=ResolvingMembership(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
+    )
+    coordinator._publisher = AsyncMock()
+    prepare = AsyncMock()
+    monkeypatch.setattr(runtime_module, "continued_subagent_job", prepare)
+    monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
+    await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(job)))
+    coordinator._runtime = runtime = await tool_job_runtime(
+        tmp_path,
+        grant=coordinator._grant,
+        cancel=coordinator._interrupt,
+        continues=runtime_module._is_subagent_job,
+    )
+    try:
+        await runtime.recover()
+        await coordinator._reconcile()
+        assert [waiting.job_id for waiting in runtime.awaiting_continuation()] == [job.job_id]
+        monkeypatch.setattr(runtime_module, "_ACCESS_WAIT_SECONDS", 0)
+        with capture_logs() as logs:
+            await coordinator._reconcile()
+        assert runtime._entries[job.job_id].job.status == "interrupted"
+        assert [log["reason"] for log in logs if "reason" in log] == [
+            "its requester's access stayed unresolved after the bot's first sync",
+        ]
+        prepare.assert_not_awaited()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_a_delegation_a_restart_interrupted_denies_its_cards_without_an_approval_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -722,7 +858,7 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
     tmp_path: Path,
     restart: bool,
 ) -> None:
-    """A crash-interrupted child reads like any restart interruption; a cancelled recovered child stays cancelled."""
+    """A crash-interrupted child interrupts its job like any restart; a cancelled recovered child stays cancelled."""
     coordinator = ToolJobRuntimeCoordinator(
         test_runtime_paths(tmp_path),
         lambda: managed_team_config(tmp_path),
@@ -747,8 +883,8 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
         await coordinator.runtime.shutdown()
     assert outcome is not None
     assert recorded == [
-        ("Subagent turn was interrupted by a restart. Send a follow-up to continue its history.", "failed")
+        (RESTART_INTERRUPTION_REASON, "failed")
         if restart
         else ("Background execution was cancelled; tools were not replayed.", "cancelled"),
     ]
-    assert outcome.status == ("failed" if restart else "cancelled")
+    assert outcome.status == ("interrupted" if restart else "cancelled")

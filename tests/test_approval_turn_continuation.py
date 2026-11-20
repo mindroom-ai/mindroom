@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +32,8 @@ from mindroom.delegation.cost import SubagentCost
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.mid_turn_compaction import without_run_usage
+from mindroom.history.run_checkpoint import STOPPED_BY_USER_NOTE, is_recovered_run
+from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
@@ -58,7 +62,7 @@ from mindroom.tool_system.events import (
 )
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import current_execution_identity
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
 from tests.conftest import (
@@ -77,7 +81,7 @@ from tests.scripted_agent_helpers import stop_turn, stored_runs
 from tests.usage_helpers import counted_total, counted_usage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Collection
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -970,6 +974,40 @@ async def test_a_stopped_attempt_after_an_approved_run_records_none_of_the_pause
     )
 
 
+@pytest.mark.asyncio
+async def test_a_stopped_attempt_after_an_approved_run_is_stored_as_its_own_messages_linked_to_its_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user's Stop of the attempt that continues an approved run keeps that attempt's run, linked to its reply."""
+    paths, config = _usage_config(tmp_path)
+    identity = _identity("stopped-session")
+    script = [_add("approved", 10, 1), _continue_call("continue", usage(20, 2)), [TextDelta("The sum "), stop_turn()]]
+    install_model_providers(monkeypatch, {"default": _CheckedModel(script)})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    # The resume runs in the span of the reply it continues, which its user stopped.
+    monkeypatch.setattr(approval_execution_module, "current_span_stopped", lambda: True)
+    monkeypatch.setattr(approval_execution_module, "current_reply_event_id", lambda: "$reply")
+
+    with pytest.raises(asyncio.CancelledError):
+        await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+
+    resumed, stopped = stored_runs(config, paths, identity.session_id)
+    assert resumed.run_id == paused.run_id
+    assert is_recovered_run(stopped)
+    assert not is_interrupted_replay_run(stopped)
+    assert stopped.messages[-1].content == f"The sum\n\n{STOPPED_BY_USER_NOTE}"
+    storage = create_session_storage("general", config, paths, execution_identity=identity)
+    session = storage.load_session(identity.session_id)
+    assert session is not None
+
+    async def redacted(event_ids: Collection[str]) -> dict[str, None]:
+        return {"$reply": None} if "$reply" in event_ids else {}
+
+    assert await remove_history_of_redacted_events(storage, session, redacted) == ["$reply"]
+    assert [run.run_id for run in stored_runs(config, paths, identity.session_id)] == [paused.run_id]
+
+
 def _usage_config(tmp_path: Path) -> tuple[RuntimePaths, Config]:
     """Return where ``general`` runs and its config: it adds, each addition gated by an approval, and switches models."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
@@ -1158,6 +1196,51 @@ async def test_a_fresh_attempt_after_an_approved_run_sends_its_resume_s_system_e
     assert result.response_text.endswith("Done.")
     *_, fresh = model.requests
     assert instruction.text in system_text(fresh.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_resume_leaves_its_conversation_s_memory_copy_s_idle_time_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed run sends the system prompt it paused with, which may hold a MEMORY.md copy a later turn replaced.
+
+    Its requests therefore warm no cache of the copy the conversation keeps now, and touch no copy file: the reply
+    after it loads MEMORY.md again once that copy's own cache is gone.
+    """
+    paths, config = _usage_config(tmp_path)
+    config.memory.backend = "file"
+    memory = agent_workspace_root_path(paths.storage_root, "general") / "MEMORY.md"
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text("# Memory\nFact one.\n", encoding="utf-8")
+    identity = _identity("memory-session")
+    model = _CheckedModel([_add("approved", 10, 1), answer("Between."), answer("Done."), answer("Later.")])
+    install_model_providers(monkeypatch, {"default": model})
+
+    async def system_prompt_of_turn(prompt: str) -> str:
+        ctx = make_turn_context("general", session_id=identity.session_id, requester_id=identity.requester_id)
+        await ai_response(replace(ctx, prompt=prompt, execution_identity=identity), paths, config)
+        return system_text(model.requests[-1].messages)
+
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    # A turn while the run waits for its approval replaces the copy the paused run sent: an edited line loads at once.
+    memory.write_text("# Memory\nFact one, corrected.\n", encoding="utf-8")
+    replaced = await system_prompt_of_turn("Meanwhile?")
+    assert "Fact one, corrected." in replaced
+    [snapshot] = paths.storage_root.rglob("memory_entrypoint_snapshots/*.json")
+    cold = time.time() - 62 * 60
+    os.utime(snapshot, (cold, cold))
+    memory.write_text("# Memory\nFact one, corrected.\nFact two.\n", encoding="utf-8")
+
+    stamped: list[Path] = []
+    with monkeypatch.context() as resuming:
+        resuming.setattr("mindroom.loop_hooks.stamp_entrypoint_snapshot", lambda path, *, now: stamped.append(path))  # noqa: ARG005
+        result = await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert stamped == []
+    assert snapshot.stat().st_mtime == cold
+    assert "Fact two." in await system_prompt_of_turn("And now?")
 
 
 @pytest.mark.asyncio

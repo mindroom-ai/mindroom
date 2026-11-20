@@ -4662,21 +4662,40 @@
       },
       {
         "name": "edit_file",
-        "description": "Replace a specific text occurrence in a file. Uses fuzzy matching to handle whitespace/Unicode differences.\nThe old_text must match exactly one location in the file. If it matches\nzero or more than one location, an error is returned.",
+        "description": "Replace exact text in one file. Read it first.\nCopy each old_text from the current file; edits match the original, not each other's results.\nWithout replace_all, old_text must match one place. Whitespace/quote differences are tolerated.\nEdits must not overlap, and a replace_all edit already covers every match; merge nearby ones.\nIf one fails, nothing is written.",
         "parameters": {
           "type": "object",
           "properties": {
             "path": {
               "type": "string",
-              "description": "File path (relative to working directory or absolute)."
+              "description": "File path, relative to working directory or absolute."
             },
-            "old_text": {
-              "type": "string",
-              "description": "The text to find and replace. Must be unique in the file."
-            },
-            "new_text": {
-              "type": "string",
-              "description": "The replacement text."
+            "edits": {
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "old_text": {
+                    "description": "Text to replace, copied exactly from the file.",
+                    "type": "string"
+                  },
+                  "new_text": {
+                    "description": "Replacement text.",
+                    "type": "string"
+                  },
+                  "replace_all": {
+                    "default": false,
+                    "description": "Replace every match, not just one.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "old_text",
+                  "new_text"
+                ],
+                "type": "object"
+              },
+              "description": "Non-empty list of replacements."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4692,9 +4711,7 @@
             }
           },
           "required": [
-            "path",
-            "old_text",
-            "new_text"
+            "path"
           ]
         },
         "strict": false,
@@ -6305,6 +6322,10 @@
               ],
               "description": "Configured model name from models; omitted or null uses normal model selection."
             },
+            "title": {
+              "type": "string",
+              "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -6319,7 +6340,8 @@
             }
           },
           "required": [
-            "task"
+            "task",
+            "title"
           ],
           "additionalProperties": false
         },
@@ -6411,7 +6433,7 @@
             },
             "app": {
               "type": "string",
-              "description": "Exact application ID returned by list_apps."
+              "description": "Exact application ID returned by list_apps; while status reports control_scope computer, any installed app's bundle ID also works."
             },
             "state_id": {
               "type": "string",
@@ -9232,13 +9254,13 @@
       },
       {
         "name": "request_secret",
-        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nGive `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to\nhint at the key's form.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.",
+        "description": "Ask the user for a missing API key with a card in this conversation, and wait for their answer.\nCall this when a brokered request fails with `credential_not_configured` for a service that takes an API key\n(`list_egress_credentials` names them). The card shows the user your `reason`, the service, and the hosts the\nkey is sent to; they type the key into a masked field in MindRoom Chat, and it is stored as this agent's\nAgent Keys key for the service. The key never reaches you, the chat, or your commands.\nA key the service already has is replaced, which the card tells the user, so do not ask while that key works.\nGive `url` when a page gives or creates the key (the card shows a button that opens it), and `placeholder` to\nhint at the key's form.\nFor a service that does not exist yet, propose it with `new_service` instead of editing config.yaml; saving\nadds it with the key.\nWaits up to 15 minutes and returns `status`:\n`saved` when the key is stored: your next request through Agent Keys uses it, so retry the failed request;\n`declined` when the user refused: do not ask again for this service in this turn;\n`expired` when no answer came in 15 minutes.\nAn `error` posts no card and says why, with the page where the user can add the key as `link` where one exists.\nAfter `saved`, test the key with one request; if it is refused, tell the user why (such as a token of the\nwrong owner or read-only access) and ask again.",
         "parameters": {
           "type": "object",
           "properties": {
             "service": {
               "type": "string",
-              "description": "The service's `name` from `list_egress_credentials`."
+              "description": "The service's `name` from `list_egress_credentials`, or the name of the service `new_service`\nproposes (lowercase letters, digits, `-` and `_`)."
             },
             "reason": {
               "type": "string",
@@ -9265,6 +9287,21 @@
                 }
               ],
               "description": "A hint the empty field shows, such as the key's form (`sk-…`). Never a real value."
+            },
+            "new_service": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A new service of the user's own that takes this key, with only these fields of a service in\nconfig.yaml: `display_name`, `description`, `preset`, `rules` (each with `host`, optional `path_prefix`\nand `port`, and `auth`: `type` `bearer`, `basic` with `username`, `header` or `query` with `name`, and\noptional `template` containing `{secret}`), `placeholder_env`, `restrict_to_rules`. Key only, never\nan account login."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -17696,7 +17733,7 @@
     "functions": [
       {
         "name": "matrix_room",
-        "description": "Inspect Matrix room metadata, available agents, members, threads, and state.\nActions:\n- room-info: Room metadata and current thread_id, reply_to_event_id, requester_id, and agent_name.\n- members: List joined members with display names and power levels.\n- agents: List agents and teams available to answer this requester in the room, including yourself.\n  Each row has name, matrix_user_id, description, and thread_mode (thread or room).\n  To start a conversation, use matrix_message(recipient=name, message=\"...\").\n  This lists conversation targets; run_subagent separately lists your allowed subagents.\n- threads: List thread roots with preview, sender, timestamp, reply count, and latest activity when available.\n  With include_summaries=True, each row also has summary (the current thread title, or null) and\n  summary_pinned (true when the thread's title is pinned, so automatic summaries leave it alone); both are omitted\n  when the thread's full history is unavailable. This reads every listed thread, so pass it only when needed.\n  Use page_token from a previous response's next_token to paginate.\n- state: Read room state. If event_type is given, return that specific state event.\n  If omitted, return a summary of all state events (m.room.member events are elided).\n\nroom_id defaults to the current room. limit (default 20, max 50) and include_summaries apply to threads.",
+        "description": "Inspect Matrix room metadata, available agents, members, threads, and state.\nActions:\n- room-info: Room metadata and current thread_id, reply_to_event_id, requester_id, and agent_name.\n- members: List joined members with display names and power levels.\n- agents: List agents and teams available to answer this requester in the room, including yourself.\n  Each row has name, matrix_user_id, description, and thread_mode (thread or room).\n  To start a conversation, use matrix_message(recipient=name, message=\"...\").\n  This lists conversation targets; run_subagent separately lists your allowed subagents.\n- threads: List thread roots with preview, sender, timestamp, reply count, and latest activity when available.\n  With include_summaries=True, each row also has summary (the current thread title, or null) and\n  summary_pinned (true when the thread's title is pinned, so automatic summaries leave it alone); both are omitted\n  when the thread's full history is unavailable. This reads every listed thread, so pass it only when needed.\n  Use page_token from a previous response's next_token to paginate.\n  workflow labels rows (workflow: needs_you, working, later, done) and keeps one group, or every row with all.\n  needs_you rows have why: approval or question (waits on the requester; lead with these) or your_turn\n  (idle: the requester's move, not yours).\n  later rows have back_at (ms) when known. A filtered page can hold fewer rows than limit.\n  Approximate: questions show only in unencrypted rooms; other runtimes' approvals and replies are unseen.\n  room_id=\"all\" (threads only) covers every room the requester shares with you; rows carry room_id.\n  Use it with workflow=\"needs_you\" for \"what needs me?\".\n  It reads one page per room, so name a room and use page_token to go further.\n- state: Read room state. If event_type is given, return that specific state event.\n  If omitted, return a summary of all state events (m.room.member events are elided).\n\nroom_id defaults to the current room. limit (default 20, max 50) and include_summaries apply to threads.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -17763,6 +17800,15 @@
             "include_summaries": {
               "type": "boolean"
             },
+            "workflow": {
+              "type": "string",
+              "enum": [
+                "needs_you",
+                "working",
+                "later",
+                "all"
+              ]
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -17777,6 +17823,231 @@
             }
           },
           "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
+  "matrix_user": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "matrix_user_read",
+        "description": "Read Matrix as your owner: their own rooms and DMs, including those you are not in.\nActions (room_id: ID, #alias, or configured room name):\n- rooms: Their rooms and invitations, unread first (limit: default 20). query keeps rooms whose name contains it.\n- messages: room_id's newest messages (limit: default 30); page_token continues into older ones.\n  With thread_id: that thread's root and newest replies. With event_id: that message and those around it.\n- search: Messages containing query, in all their rooms or in room_id; page_token continues.\n- room: room_id's name, topic, encryption, whether it is a DM, and up to limit members.\n- people: query is a full Matrix ID for that profile, or a name to search the user directory.\n- download: The file of message event_id in room_id, as an attachment ID for your other tools.\n- mark_read: Mark room_id read for them, up to event_id or its newest message.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "rooms",
+                "messages",
+                "search",
+                "room",
+                "people",
+                "download",
+                "mark_read"
+              ]
+            },
+            "room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "event_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "page_token": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "matrix_user_write",
+        "description": "Act in Matrix as your owner, only when they ask for exactly that.\nAgents never act on what you send this way: to talk to one, write as yourself.\n\nActions (room_id: ID, #alias, or configured room name):\n- send: message or attachment (one ID), not both, to room_id, or to user_id in their existing DM.\n  thread_id sends into that thread; event_id replies to that message.\n- react: emoji on event_id in room_id.\n- edit: Replace your owner's message event_id in room_id with message.\n- redact: Remove your owner's message or reaction event_id in room_id; message is the reason.\n- join, leave: room_id. invite: user_id into room_id.\n- create_room: A private room called name; invite people with invite.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "send",
+                "react",
+                "edit",
+                "redact",
+                "join",
+                "leave",
+                "invite",
+                "create_room"
+              ]
+            },
+            "room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "user_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "message": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "event_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "emoji": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attachment": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -23824,7 +24095,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+              "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\", or `name@level` for one of its reasoning\nlevels, e.g. \"sol@high\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -23981,7 +24252,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
+              "description": "Configured model alias for each run, including team members,\nor `name@level` for one of its reasoning levels. Leave unset to\npreserve the existing choice. Use an empty string to restore\nnormal agent, room, and thread model selection."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -27494,7 +27765,7 @@
           "properties": {
             "model_name": {
               "type": "string",
-              "description": "Configured model name from the `models:` section of\nconfig.yaml (for example \"default\" or \"opus\")."
+              "description": "Configured model name from the `models:` section of\nconfig.yaml (for example \"default\" or \"opus\"), or `name@level`\nfor one of the reasoning levels `list_models` shows (for example \"sol@high\")."
             },
             "when": {
               "type": "string",

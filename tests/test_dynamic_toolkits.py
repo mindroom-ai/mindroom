@@ -62,6 +62,8 @@ def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
         process_env={
             "MATRIX_HOMESERVER": "http://localhost:8008",
             "MINDROOM_NAMESPACE": "",
+            # Agent Keys is off unless a test sets the broker port.
+            "MINDROOM_EGRESS_BROKER_PORT": "off",
             **env,
         },
     )
@@ -625,7 +627,7 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
 
 
 def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
-    return {"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}
+    return {"MINDROOM_EGRESS_BROKER_PORT": "8768" if broker_on else "off"}
 
 
 @pytest.mark.asyncio

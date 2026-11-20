@@ -1,0 +1,262 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "idle",
+      "now": 1000,
+      "status": {},
+      "expected": {
+        "workflow": "needs_you",
+        "why": "your_turn"
+      }
+    },
+    {
+      "name": "resolved",
+      "now": 1000,
+      "status": {
+        "is_resolved": true
+      },
+      "expected": {
+        "workflow": "done"
+      }
+    },
+    {
+      "name": "resolved beats snooze, work and schedule",
+      "now": 1000,
+      "status": {
+        "is_resolved": true,
+        "snoozed_until_ts": 2000,
+        "is_streaming": true,
+        "has_background_job": true,
+        "scheduled_task_count": 1
+      },
+      "expected": {
+        "workflow": "done"
+      }
+    },
+    {
+      "name": "resolved hides a background approval",
+      "now": 1000,
+      "status": {
+        "is_resolved": true,
+        "has_background_approval": true
+      },
+      "expected": {
+        "workflow": "done"
+      }
+    },
+    {
+      "name": "approval asked after the resolve",
+      "now": 1000,
+      "status": {
+        "is_resolved": true,
+        "pending_approval": true
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "approval"
+      }
+    },
+    {
+      "name": "question asked after the resolve",
+      "now": 1000,
+      "status": {
+        "is_resolved": true,
+        "pending_question": true
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "question"
+      }
+    },
+    {
+      "name": "active snooze",
+      "now": 1000,
+      "status": {
+        "snoozed_until_ts": 2000
+      },
+      "expected": {
+        "workflow": "later",
+        "back_at": 2000
+      }
+    },
+    {
+      "name": "snooze ending now",
+      "now": 1000,
+      "status": {
+        "snoozed_until_ts": 1000
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "your_turn"
+      }
+    },
+    {
+      "name": "expired snooze",
+      "now": 1000,
+      "status": {
+        "snoozed_until_ts": 999
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "your_turn"
+      }
+    },
+    {
+      "name": "snooze beats work and schedule",
+      "now": 1000,
+      "status": {
+        "snoozed_until_ts": 2000,
+        "is_streaming": true,
+        "has_background_job": true,
+        "scheduled_task_count": 1,
+        "next_scheduled_ts": 1500
+      },
+      "expected": {
+        "workflow": "later",
+        "back_at": 2000
+      }
+    },
+    {
+      "name": "background approval beats snooze",
+      "now": 1000,
+      "status": {
+        "snoozed_until_ts": 2000,
+        "has_background_approval": true
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "approval"
+      }
+    },
+    {
+      "name": "question beats snooze",
+      "now": 1000,
+      "status": {
+        "snoozed_until_ts": 2000,
+        "pending_question": true
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "question"
+      }
+    },
+    {
+      "name": "approval named before question",
+      "now": 1000,
+      "status": {
+        "pending_approval": true,
+        "pending_question": true
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "approval"
+      }
+    },
+    {
+      "name": "approval beats work",
+      "now": 1000,
+      "status": {
+        "pending_approval": true,
+        "is_streaming": true
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "approval"
+      }
+    },
+    {
+      "name": "background approval beats work and schedule",
+      "now": 1000,
+      "status": {
+        "has_background_approval": true,
+        "is_streaming": true,
+        "has_background_job": true,
+        "scheduled_task_count": 1
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "approval"
+      }
+    },
+    {
+      "name": "question beats work",
+      "now": 1000,
+      "status": {
+        "pending_question": true,
+        "has_background_job": true
+      },
+      "expected": {
+        "workflow": "needs_you",
+        "why": "question"
+      }
+    },
+    {
+      "name": "streaming reply",
+      "now": 1000,
+      "status": {
+        "is_streaming": true
+      },
+      "expected": {
+        "workflow": "working"
+      }
+    },
+    {
+      "name": "background job",
+      "now": 1000,
+      "status": {
+        "has_background_job": true
+      },
+      "expected": {
+        "workflow": "working"
+      }
+    },
+    {
+      "name": "work beats schedule",
+      "now": 1000,
+      "status": {
+        "is_streaming": true,
+        "scheduled_task_count": 1,
+        "next_scheduled_ts": 5000
+      },
+      "expected": {
+        "workflow": "working"
+      }
+    },
+    {
+      "name": "scheduled with a known time",
+      "now": 1000,
+      "status": {
+        "scheduled_task_count": 1,
+        "next_scheduled_ts": 5000
+      },
+      "expected": {
+        "workflow": "later",
+        "back_at": 5000
+      }
+    },
+    {
+      "name": "scheduled without a known time",
+      "now": 1000,
+      "status": {
+        "scheduled_task_count": 2
+      },
+      "expected": {
+        "workflow": "later"
+      }
+    },
+    {
+      "name": "expired snooze with a schedule",
+      "now": 1000,
+      "status": {
+        "snoozed_until_ts": 999,
+        "scheduled_task_count": 1,
+        "next_scheduled_ts": 5000
+      },
+      "expected": {
+        "workflow": "later",
+        "back_at": 5000
+      }
+    }
+  ]
+}

@@ -576,3 +576,31 @@ async def test_pending_card_listing_keeps_only_the_approvers_open_cards_in_one_t
         (6, "delivery-6"),
         (9, "delivery-9"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_threads_maps_each_conversation_to_its_newest_waiting_card(tmp_path: Path) -> None:
+    """Each conversation maps to its newest open card for the approvers, scheduled and deny-only cards included."""
+    page = (
+        _stored("$a1", created_at_ns=5_000_000),
+        _stored("$a2", created_at_ns=7_000_000),
+        _stored("$b", created_at_ns=6_000_000, thread_id="$other"),
+        _stored("$scheduled", created_at_ns=8_000_000, thread_id="$sched", owner_kind="scheduled"),
+        _stored("$deny-only", created_at_ns=9_000_000, thread_id="$large", approvable=False),
+        _stored("$alias", created_at_ns=10_000_000, thread_id="$alias-thread", approver="@alias:localhost"),
+        _stored("$other-approver", created_at_ns=11_000_000, thread_id="$x1", approver="@other:localhost"),
+        _stored("$answered", created_at_ns=12_000_000, thread_id="$x2", decided=True),
+        _stored(None, created_at_ns=13_000_000, thread_id="$x3"),
+        _stored("$call-gone", created_at_ns=14_000_000, thread_id="$x4", owner_kind=None),
+        _stored("$past-deadline", created_at_ns=15_000_000, thread_id="$x5", expires_in=timedelta(seconds=-1)),
+    )
+    cards = MagicMock()
+    cards.approvals.pending_approval_cards = AsyncMock(side_effect=[page])
+    manager = approval_manager_for_test(test_runtime_paths(tmp_path), send_approval_delivery=AsyncMock(), cards=cards)
+
+    try:
+        threads = await manager.pending_approval_threads(room_id=ROOM_ID, approver_user_ids={HUMAN, "@alias:localhost"})
+    finally:
+        await manager.shutdown()
+
+    assert threads == {THREAD_ID: 7, "$other": 6, "$sched": 8, "$large": 9, "$alias-thread": 10}

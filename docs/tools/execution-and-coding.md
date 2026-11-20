@@ -283,7 +283,17 @@ pip_install_package("rich")
 
 `coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`.
 `read_file()` returns line-numbered output with pagination hints when a file is truncated.
-`edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`.
+`edit_file()` applies a list of `edits` to one file, each an `old_text` copied from the file and its `new_text`.
+Every `old_text` matches the file as it was before the call, not the results of the other edits, and must match exactly one place unless its edit sets `replace_all`, which replaces every non-overlapping match from left to right, as Python's `str.replace` does; when it has no exact match, a match that differs only in whitespace and quotes is used.
+Edits must not overlap, so an edit must not also target text that a `replace_all` edit's `old_text` matches.
+When an edit fails validation, none is written: the error names the edit, lists the lines of an `old_text` that matches several places, and, for one that matches none, shows up to three distinct lines that come close, if any do.
+A failure while writing the file is reported as a write error instead.
+On success it returns the lines each edit changed in the new file, numbered as `read_file()` numbers them, not a diff; a match whose `new_text` equals the text it replaces is left out of those lines, though the edit still counts.
+In a file whose lines all end in CRLF, `old_text` and `new_text` may use LF or CRLF and the file keeps CRLF, unless the file or an edit holds a lone CR; then, as with mixed endings, the file is matched and edited with its line endings as they are.
+A byte order mark stays in the file once, also when an edit that starts at it copies it into `old_text` or `new_text`; any other U+FEFF is ordinary text.
+In the primary, `edit_file()` and `write_file()` calls on the same resolved path run one after another, so they never interleave; a later `write_file()` still replaces the whole file, an earlier edit included.
+In a worker, calls serialize only when they lock the same stable, readable directory; one that waits too long for that lock returns a busy error without changing the file, and a directory the agent may enter but not read cannot hold the lock, so calls there run unlocked.
+Primary and worker calls do not serialize with each other, with another primary, or with other writers such as shell commands.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
 Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
@@ -301,7 +311,13 @@ agents:
 read_file("src/app.py", offset=1, limit=120)
 grep("TODO", path="src")
 find_files("**/*.md", path="docs")
-edit_file("docs/example.md", "old text", "new text")
+edit_file(
+    "docs/example.md",
+    edits=[
+        {"old_text": "old text", "new_text": "new text"},
+        {"old_text": "draft", "new_text": "final", "replace_all": True},
+    ],
+)
 write_file("scratch/todo.txt", "first line\nsecond line\n")
 ls("src")
 ```

@@ -15,6 +15,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_SOURCE_EVENT_ID_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.delivery_gateway import SendTextRequest
@@ -83,6 +84,8 @@ class VisibleVoiceEchoLifecycle:
                     extra_content={
                         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                         VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+                        # The voice message this transcribes, so clients can fold the transcript into it.
+                        VOICE_SOURCE_EVENT_ID_KEY: source_event_id,
                         ORIGINAL_SENDER_KEY: transcript.sender,
                         **{key: content[key] for key in (ATTACHMENT_IDS_KEY, VOICE_TRANSCRIPT_KEY) if key in content},
                     },

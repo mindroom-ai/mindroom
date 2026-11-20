@@ -1596,6 +1596,37 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert stored.attempted
         assert stored.acknowledged_event_id is None
 
+    @pytest.mark.parametrize(
+        ("failure", "permanent"),
+        [
+            (
+                MatrixDeliveryFailure(
+                    MatrixDeliveryFailureKind.ENCRYPTION_REFUSED,
+                    "Encryption has been disabled",
+                    403,
+                ),
+                True,
+            ),
+            (MatrixDeliveryFailure(MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE, "forbidden", 403), False),
+        ],
+    )
+    async def test_a_homeserver_that_refuses_encryption_ends_the_delivery(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        failure: MatrixDeliveryFailure,
+        permanent: bool,
+    ) -> None:
+        """A refusal no resend can change is terminal; any other refusal stays for recovery to retry."""
+        gateway = _gateway(tmp_path, alice)
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=failure)):
+            await final_in_span(gateway, alice, self._final_request("the answer"))
+
+        stored = await _turn_row(alice, DeliveryStage.FINAL)
+        assert stored.acknowledged_event_id is None
+        assert stored.permanently_failed is permanent
+
     async def test_a_redacted_delivery_acknowledges_without_resurrecting_its_content(
         self,
         tmp_path: Path,

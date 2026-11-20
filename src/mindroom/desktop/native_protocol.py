@@ -32,7 +32,6 @@ NATIVE_ACTIONS = frozenset(
         "stop",
         "grant_control",
         "revoke_control",
-        "reset_emergency_stop",
         "decide_shell",
         "grant_shell",
         "revoke_shell",

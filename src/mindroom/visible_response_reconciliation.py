@@ -250,7 +250,7 @@ class VisibleResponseReconciler:
                 response_text=response_text,
                 # The answer edits this message, so clients show it working as they do a Thinking placeholder.
                 extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-                # It echoes the member's selected value, which may name agents.
+                # A placeholder mentions no one.
                 skip_mentions=True,
                 reply_write=await replies.acknowledgement(
                     pending=tuple(dict.fromkeys((delivery_turn_id, *handled_turn.source_event_ids))),

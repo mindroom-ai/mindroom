@@ -33,6 +33,7 @@ ROOM_ID = "!room:localhost"
 PERSON = "@alice:localhost"
 THREAD_MODE = "io.mindroom.thread_mode"
 ACCOUNTS = "io.mindroom.accounts"
+BINDING = "io.mindroom.router"
 
 
 class _Room:
@@ -135,7 +136,7 @@ async def test_only_steward_publishes_room_state(tmp_path: Path) -> None:
     for name in room.bots:
         await room.frame(name)
     owner = room.ids[ROUTER_AGENT_NAME]
-    assert sorted(room.writes) == [(owner, ACCOUNTS, owner), (owner, THREAD_MODE, "")]
+    assert sorted(room.writes) == [(owner, ACCOUNTS, owner), (owner, BINDING, ""), (owner, THREAD_MODE, "")]
 
 
 @pytest.mark.asyncio
@@ -185,7 +186,7 @@ async def test_sync_that_opens_publishes_every_stewarded_room(tmp_path: Path) ->
     assert room.writes == []
     await room.duties(ROUTER_AGENT_NAME).publish_joined_room_state(every_room=True)
     owner = room.ids[ROUTER_AGENT_NAME]
-    assert sorted(room.writes) == [(owner, ACCOUNTS, owner), (owner, THREAD_MODE, "")]
+    assert sorted(room.writes) == [(owner, ACCOUNTS, owner), (owner, BINDING, ""), (owner, THREAD_MODE, "")]
 
 
 @pytest.mark.asyncio
@@ -196,7 +197,7 @@ async def test_sweep_reconciles_each_held_room_once_through_its_steward(tmp_path
     install_bots(orchestrator, room.bots)
     await orchestrator.config_reload.after_reload()
     agent = room.ids["agent1"]
-    assert sorted(room.writes) == [(agent, ACCOUNTS, agent), (agent, THREAD_MODE, "")]
+    assert sorted(room.writes) == [(agent, ACCOUNTS, agent), (agent, BINDING, ""), (agent, THREAD_MODE, "")]
     # A reload that only changes the config republishes the thread mode of the room it already holds.
     room.config.agents["agent1"].thread_mode = "thread"
     await orchestrator.config_reload.after_reload()

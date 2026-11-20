@@ -20,6 +20,7 @@ from mindroom.event_journal import (
     thread_root,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.agent_authored import carries_agent_authored_marker
 from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE
 from mindroom.matrix.media import (
     MATRIX_MEDIA_EVENT_TYPES,
@@ -43,6 +44,10 @@ _RTC_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYP
 _MANAGED_SENDER_KINDS = frozenset({EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
+# Kinds a person sends to ask for something, the only ones the agent-authored marker demotes to context.
+_AGENT_AUTHORED_MARKER_KINDS = frozenset(
+    {EventKind.MESSAGE, EventKind.MEDIA, EventKind.REACTION, EventKind.APPROVAL, EventKind.JOB_CANCEL},
+)
 
 # What an `m.room.message` must have parsed to before MindRoom can treat it as
 # work: nio's base class for every msgtype that carries a textual body, which
@@ -145,7 +150,13 @@ def _happened_while_member(provenance: nio.TimelineEventProvenance) -> bool:
     return provenance is not nio.TimelineEventProvenance.HISTORY
 
 
-def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) -> EventClass:
+def _event_class_for(
+    provenance: nio.TimelineEventProvenance,
+    event: nio.Event,
+    kind: EventKind,
+    *,
+    sender_is_managed: Callable[[str], bool],
+) -> EventClass:
     """Return whether events with this provenance may start semantic work.
 
     Live and recovered events are both things that happened while this bot was
@@ -170,17 +181,38 @@ def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) 
     not the same mistake as enumerating msgtypes -- the set stays correct as
     Matrix grows -- and it still projects, so the conversation keeps the event.
 
-    A text message whose status says it will be revised again is the last one:
+    A text message whose status says it will be revised again is another:
     an agent's `pending` placeholder is `m.text`, and the turn engine never
     answers an unfinished reply, only its terminal edit. Every agent in a room
     receives every agent's placeholder, so admitting them as work queued each
     one in every agent's ordered room lane, ahead of the prompts behind it.
+
+    A message, media, reaction, approval or job cancel marked agent-authored,
+    from a sender MindRoom does not manage, is the last one. Such an account
+    acts for a person, and the marker says an agent wrote the event there, so
+    acting on it would let the agent speak for the person: answer its own
+    approval card, run a command with the person's rights, or stop a reply.
+    The marker can only take authority away, so its presence decides and its
+    value is never read. An entity's own account already speaks only for that
+    entity, so the marker takes nothing from it. A message or media event
+    still projects, so history keeps it as it is. Every other kind keeps the
+    class it would have unmarked: a membership, call or redaction event
+    changes the room itself, and its handlers must see that change whoever
+    wrote its content.
     """
     if not _happened_while_member(provenance):
         return EventClass.CONTEXT_ONLY
     if isinstance(event, nio.RoomMessageNotice | nio.RoomMessageUnknown):
         return EventClass.CONTEXT_ONLY
-    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and is_unfinished_reply(event.source.get("content") or {}):
+    content = event.source.get("content")
+    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and is_unfinished_reply(content or {}):
+        return EventClass.CONTEXT_ONLY
+    if (
+        kind in _AGENT_AUTHORED_MARKER_KINDS
+        and isinstance(content, dict)
+        and carries_agent_authored_marker(content)
+        and not sender_is_managed(event.sender)
+    ):
         return EventClass.CONTEXT_ONLY
     return EventClass.ACTIONABLE
 
@@ -317,7 +349,7 @@ def ingestion_timeline_views(
     kind = _ingested_kind(parsed, sender_is_managed)
     if kind is None:
         return None
-    event_class = _event_class_for(provenance, parsed)
+    event_class = _event_class_for(provenance, parsed, kind, sender_is_managed=sender_is_managed)
     return (
         _inbound_event(room_id, parsed, kind, event_class),
         _projected_event(room_id, parsed, kind, self_sender=self_sender),

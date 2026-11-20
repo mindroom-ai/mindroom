@@ -217,7 +217,7 @@ It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does
 A change that only adds to the API bumps the minor version, so a plugin written for an earlier minor of the same major keeps working.
 A breaking change, one that removes or changes anything a plugin uses, bumps the major version.
 Anything a major bump removes or changes is first deprecated for at least 30 days, announced in this section with the date from which it may go.
-The hook filter `agents=(ROUTER_AGENT_NAME,)` is deprecated since plugin API 1.31 and may go from 2027-01-01; a hook says [`scope="room"` or `scope="service"`](https://docs.mindroom.chat/hooks/#the-hook-decorator) instead.
+The hook filter `agents=(ROUTER_AGENT_NAME,)` is deprecated since plugin API 1.33 and may go from 2027-01-01; a hook says [`scope="room"` or `scope="service"`](https://docs.mindroom.chat/hooks/#the-hook-decorator) instead.
 
 A plugin states the version it needs as `mindroom_plugin_api` in its manifest, such as `"1.2"` for major 1 at minor 2 or later.
 MindRoom checks it before running any of the plugin's code and skips a plugin that needs another major or a later minor, logging `Failed to load plugin, skipping` with a reason such as `Plugin 'my-plugin' needs plugin API 1.3, but this MindRoom provides 1.2: upgrade MindRoom`.
@@ -250,7 +250,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "mindroom_plugin_api": "1.31",
+  "mindroom_plugin_api": "1.33",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -555,6 +555,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 | `SHARED_DIRECTORY_ROOTS` | `shared_directory_roots` | A function that returns the [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) the tool can reach where it runs, each with its `path` and whether it is `writable`: in the primary process the constructing agent's, or none when tools run in dedicated workers or through the sandbox proxy, and in a worker every directory it mounts (see [Access by deployment](https://docs.mindroom.chat/tools/execution-and-coding/#access-by-deployment)); call it on each use, since the agent can join or leave one while it replies |
+| `IN_SANDBOX_REQUEST` | `in_sandbox_request` | `True` only when a sandbox runner builds the tool for the request it executes, `False` everywhere else; a plugin that requests it states `"mindroom_plugin_api": "1.31"` |
 
 ```python
 from mindroom.plugin_api import (
@@ -1140,7 +1141,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
 | `await terminals(workspace, *, create=False)` | The agent's terminals for an `AgentWorkspace` that `agents()` or `agent()` returned, or `None` while its `terminal` is `none`; see [An agent's terminals](#an-agents-terminals) |
-| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
+| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply` (the room's `reply_mode` setting as the runtime last read it), each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 | `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
 

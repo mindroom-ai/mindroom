@@ -37,11 +37,22 @@ final class LoginItemController {
         }
     }
 
-    func toggle() throws {
-        if isEnabled {
-            try SMAppService.mainApp.unregister()
-        } else {
-            try SMAppService.mainApp.register()
-        }
+    /// Registers or unregisters MindRoom as a login item; macOS may still need the user's approval afterwards.
+    func setEnabled(_ enabled: Bool) throws {
+        if enabled, !isEnabled { try SMAppService.mainApp.register() }
+        if !enabled, SMAppService.mainApp.status != .notRegistered { try SMAppService.mainApp.unregister() }
     }
+
+    func toggle() throws { try setEnabled(!isEnabled) }
+}
+
+/// Reads and sets "open at login" for full control; tests replace the system login item.
+struct LoginItem {
+    var isEnabled: @MainActor () -> Bool
+    var setEnabled: @MainActor (Bool) throws -> Void
+
+    @MainActor static let system = LoginItem(
+        isEnabled: { LoginItemController.shared.isEnabled },
+        setEnabled: { try LoginItemController.shared.setEnabled($0) }
+    )
 }

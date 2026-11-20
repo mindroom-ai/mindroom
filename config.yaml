@@ -442,7 +442,7 @@ models:
     id: claude-haiku-5-5
     provider: anthropic
   fable:
-    id: claude-fable-5-1
+    id: claude-fable-5-2
     provider: anthropic
   opus:
     id: claude-opus-5-5
@@ -452,14 +452,14 @@ models:
     provider: anthropic
   # --- OpenAI ---
   astra:
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     provider: openai
   sol:
-    id: gpt-6.1-sol
+    id: gpt-6.2-sol
     provider: openai
   # --- Google ---
-  gemini_flash:
-    id: gemini-3.8-flash
+  gemini_hydrogen:
+    id: gemini-4-hydrogen
     provider: google
   # --- OpenRouter ---
   deepseek:
@@ -469,7 +469,7 @@ models:
     id: nvidia/nemotron-3.5-super-vl:free
     provider: openrouter
   tencent_hy4:
-    id: tencent/hy4-preview
+    id: tencent/hy4
     provider: openrouter
 plugins: []
 room_models:

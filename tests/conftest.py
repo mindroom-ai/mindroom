@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import warnings
+import zlib
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
@@ -69,15 +70,16 @@ import mindroom.live_frames.subagents as subagent_frames_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
-import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
 import mindroom.reply_turn.locked_turn as locked_turn_module
 import mindroom.reply_turn.request as reply_request_module
 import mindroom.response_runner as response_runner_module
 import mindroom.streaming as streaming_module
+import mindroom.tls_trust as tls_trust_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools.shell as shell_tool_module
 from mindroom import ai as mindroom_ai
+from mindroom import logging_config
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.approval.manager import (
@@ -223,6 +225,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
+    from _pytest.capture import CaptureResult
     from _typeshed import DataclassInstance
     from xdist.workermanage import WorkerController
 
@@ -3791,6 +3794,48 @@ def loop_runs_while_blocked(loop: asyncio.AbstractEventLoop) -> bool:
     return loop_ran.wait(timeout=SETTLE_TIMEOUT_SECONDS)
 
 
+def _flush_queued_stderr_records() -> None:
+    """Write the records `setup_logging` still holds for stderr, whose writer thread would add them later."""
+    for handler in logging.getLogger().handlers:
+        # The log file's handler is left alone, so a test can stall it while reading stderr.
+        if handler.name == "console":
+            handler.flush()
+
+
+def _flush_stderr_before_reads(
+    capture: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    read = capture.readouterr
+
+    def readouterr() -> "CaptureResult[str]":
+        _flush_queued_stderr_records()
+        return read()
+
+    monkeypatch.setattr(capture, "readouterr", readouterr)
+    yield capture
+    # Before the capture closes, so the writer thread never writes into its closed buffer.
+    _flush_queued_stderr_records()
+
+
+@pytest.fixture
+def capsys(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    """Capture stderr with every record logged before a read in that read."""
+    yield from _flush_stderr_before_reads(capsys, monkeypatch)
+
+
+@pytest.fixture
+def capfd(
+    capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[pytest.CaptureFixture[str]]:
+    """Capture file descriptors with every record logged before a read in that read."""
+    yield from _flush_stderr_before_reads(capfd, monkeypatch)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_structlog_configuration(
     monkeypatch: pytest.MonkeyPatch,
@@ -3798,6 +3843,8 @@ def _isolate_structlog_configuration(
 ) -> Generator[None]:
     """Silence incidental logs and prevent global logging configuration leaks."""
     _configure_quiet_structlog()
+    # A headless run turns on library logging for the whole process, which would hide every later test's logs.
+    monkeypatch.setattr(logging_config, "_library_logging", False)
     if request.node.path.name != "test_logging_config.py":
         monkeypatch.setattr(structlog, "configure", _configure_uncached_structlog)
     # `setup_logging` reroutes Agno's loggers; give later tests on this worker Agno's own setup back.
@@ -3810,6 +3857,10 @@ def _isolate_structlog_configuration(
     root_logger = logging.getLogger()
     root_handlers, root_level = root_logger.handlers[:], root_logger.level
     yield
+    for handler in set(root_logger.handlers).difference(root_handlers):
+        # Stops the writer threads of the handlers `setup_logging` added.
+        if handler.name in {"console", "file"}:
+            handler.close()
     root_logger.handlers[:] = root_handlers
     root_logger.setLevel(root_level)
     _configure_quiet_structlog()
@@ -3868,12 +3919,6 @@ def real_shell_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a conversation's kept MEMORY.md copy from leaking into later tests."""
-    monkeypatch.setattr(memory_entrypoint_snapshots_module, "_snapshots", {})
-
-
-@pytest.fixture(autouse=True)
 def _reset_livekit_service_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a LiveKit service URL one test discovered from answering a later test's discovery."""
     monkeypatch.setattr("mindroom.matrix_rtc.focus._discovered_service_urls", {})
@@ -3892,6 +3937,12 @@ def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None]:
     api_main = sys.modules.get("mindroom.api.main")
     if api_main is not None:
         api_main.unbind_embedded_runtime(api_main.app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_shared_tls_context() -> None:
+    """Build the shared TLS context anew in each test, so a test that patches CA loading sees its patch."""
+    tls_trust_module._shared_context.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -4178,6 +4229,34 @@ def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Ge
         pytest.fail(failure, pytrace=False)
 
 
+def ci_shard_from_env() -> tuple[int, int] | None:
+    """Read ``MINDROOM_TEST_SHARD="<index>/<total>"`` (1-based index, e.g. ``2/3``); unset runs every test file."""
+    value = os.environ.get("MINDROOM_TEST_SHARD", "").strip()
+    if not value:
+        return None
+    match = re.fullmatch(r"(\d+)/(\d+)", value)
+    if match is None or not 1 <= int(match[1]) <= int(match[2]):
+        msg = f"MINDROOM_TEST_SHARD must be '<index>/<total>' with 1 <= index <= total, got {value!r}"
+        raise pytest.UsageError(msg)
+    return int(match[1]), int(match[2])
+
+
+def ci_shard_of_test_file(relative_path: str, total: int) -> int:
+    """Return the 1-based CI shard of a test file, keyed by its repo-relative POSIX path so it never moves."""
+    return zlib.crc32(relative_path.encode()) % total + 1
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    """Skip test files that belong to another CI shard before pytest imports them."""
+    shard = ci_shard_from_env()
+    if shard is None or not collection_path.name.startswith("test_") or collection_path.suffix != ".py":
+        return None
+    if not collection_path.is_relative_to(config.rootpath):
+        return None
+    relative_path = collection_path.relative_to(config.rootpath).as_posix()
+    return True if ci_shard_of_test_file(relative_path, shard[1]) != shard[0] else None
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Keep Google client libraries and Git from acting as the developer.
 
@@ -4191,6 +4270,7 @@ def pytest_configure(config: pytest.Config) -> None:
     Git also ignores the developer's global and system config, so commits in test repositories never sign or run
     template hooks.
     """
+    ci_shard_from_env()  # Reject a malformed MINDROOM_TEST_SHARD before collection starts.
     gcloud_config = tempfile.mkdtemp(prefix="mindroom-test-gcloud-")
     config.add_cleanup(lambda: shutil.rmtree(gcloud_config, ignore_errors=True))
     hide_developer_google_credentials(os.environ, gcloud_config)

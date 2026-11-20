@@ -17,6 +17,7 @@ This page also covers automatic thread summaries.
 - [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
+- [`matrix_user`] - Read Matrix as a personal agent's owner and, when they ask, write as them.
 - [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
 
 None of these tools has tool-specific configuration fields except [`matrix_voice_message`].
@@ -25,18 +26,18 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 ## Tool Runtime Context
 
-These tools work only while an agent is responding in a Matrix conversation.
-Unless the call passes explicit IDs, they act on the current room and thread.
+Except the reads of [`matrix_user`], these tools work only while an agent is responding in a Matrix conversation.
+Unless the call passes explicit IDs, they act on the current room and thread, except [`matrix_user`], which needs `room_id` for every action on a room.
 `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
 `thread_tags`, `thread_resolution`, `thread_snooze`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
 `room_id` takes a room ID, alias, or configured room name; `matrix_api` takes only a room ID.
-Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
+Except [`matrix_user`], tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
 Attachment IDs (`att_*`) are limited to the current conversation and IDs registered earlier in the same tool run; see [Attachments](https://docs.mindroom.chat/attachments/#attachment-ids).
 
 ## [`matrix_room`]
 
-`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False)` reads room data and never writes.
+`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False, workflow=None)` reads room data and never writes.
 Use `matrix_message` or `matrix_api` for writes.
 
 | Action | Returns |
@@ -44,7 +45,7 @@ Use `matrix_message` or `matrix_api` for writes.
 | `room-info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
-| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread |
+| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread; `workflow` (`needs_you`, `working`, `later` or `all`) labels each row with its `workflow` group as MindRoom Chat computes it (`done` for resolved threads), adds `why` (`approval`, `question` or `your_turn`) to `needs_you` rows and `back_at` (ms) to `later` rows when known, and keeps only the named group, so a filtered page can hold fewer rows than `limit`; `room_id="all"` lists one page of threads from every room the requester is a member of and shares with the agent, each row with its `room_id`, waiting rows first, without `page_token` |
 | `state` | With `event_type`, one state event (`state_key` defaults to empty); without it, a summary of up to 100 non-member state events |
 
 Pass an `agents` result's `name` as `recipient` in [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to address that agent.
@@ -302,15 +303,90 @@ matrix_api(
 )
 ```
 
+## [`matrix_user`]
+
+`matrix_user` lets a [personal agent](https://docs.mindroom.chat/personal-agents/) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in, and writes as the owner when they ask.
+It acts only for the agent's owner, in any turn that runs for them, such as a chat with the agent or one of their scheduled tasks, or, for reads, through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
+
+`matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
+
+| Action | Returns |
+|--------|---------|
+| `rooms` | The owner's rooms, one line each: unread rooms first, with their unread and mention counts and whether the owner marked them unread, then invitations with who sent them, then the rest by name; a DM without a name shows the other person; `query` keeps rooms whose name contains it, and `limit` (default 20, at most 200) caps the lines, with `left_out` counting the rest |
+| `messages` | The newest messages of the room `room_id` names, oldest first, one line each with its latest edit applied and its file, reactions, and thread replies noted, and texts over 2000 characters cut; `limit` defaults to 30 (at most 100) and counts reactions and edits too, so a page can show fewer lines, and `page_token`, the previous result's `next_page_token`, continues into older messages; with `thread_id`, that thread's root and newest replies; with `event_id`, that message and up to half of `limit` messages on each side |
+| `search` | Messages containing `query` in all the owner's rooms, or only in `room_id`, newest first, each line starting with its room; `limit` defaults to 10 (at most 50), and `page_token` continues |
+| `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
+| `people` | With a full Matrix ID as `query`, that person's profile; otherwise people the user directory finds, `limit` defaulting to 10 (at most 50) |
+| `download` | The file, at most 64 MiB, of the message `event_id` in `room_id`, as an `attachment_id` the agent's other tools accept in the current conversation, so not through the MCP gateway |
+| `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
+
+Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
+
+`matrix_user_write(action, room_id=None, user_id=None, message=None, event_id=None, thread_id=None, emoji=None, attachment=None, name=None)` acts as the owner in any turn that runs for them, such as a chat with the agent, one of their scheduled tasks, a hook or trigger, or a team run, but not through the MCP gateway.
+Whether a call asks the owner first is decided by the [approval rules](https://docs.mindroom.chat/tool-approval/), as for any tool, so with no rule that requires approval and `tool_approval.default: auto_approve`, an unattended turn such as a scheduled task writes as the owner too.
+A deployment that wants a card for every write sets:
+
+```yaml
+tool_approval:
+  rules:
+    - match: matrix_user_write
+      action: require_approval
+```
+
+A `script` rule can decide per call from the arguments, for example asking for `send` and letting `react` through, and an approval the owner gives for a period, [on a card](https://docs.mindroom.chat/tool-approval/#auto-approval-for-a-few-minutes) or with [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything), covers later calls.
+
+| Action | Does |
+|--------|------|
+| `send` | Sends one message into `room_id`, or into the owner's existing DM with `user_id`; with none, nothing is sent, and the owner can start one in their Matrix client, or the agent can make a room with `create_room`, `invite` them, and send there: the text `message`, or the file `attachment` names, an attachment ID of the conversation, so a text and a file are two calls; `thread_id` sends into that thread, and `event_id` makes `message` a reply to that message |
+| `react` | Reacts to the message `event_id` in `room_id` with `emoji`, one emoji of at most 8 characters and without spaces |
+| `edit` | Replaces the text of the owner's own text message `event_id` in `room_id` with `message`; a photo, file, or audio message cannot be edited |
+| `redact` | Deletes the owner's own message or reaction `event_id` in `room_id`, with `message` as the reason |
+| `join`, `leave` | Joins or leaves `room_id` |
+| `invite` | Invites `user_id` into `room_id` |
+| `create_room` | Creates a private room called `name` and invites nobody; `invite` adds people |
+
+What it sends shows as the owner's to everyone, but MindRoom never takes it as the owner speaking: it starts no reply, runs no command, and approves or denies nothing, so the agent talks to other agents as itself.
+Nothing is sent, reacted, or edited into an encrypted room.
+
+To set it up, register an application service on the homeserver whose non-exclusive `users` namespace covers its people, and give MindRoom its `as_token` as `MATRIX_USER_APPSERVICE_TOKEN`, or the path of a file holding it as `MATRIX_USER_APPSERVICE_TOKEN_FILE`.
+That token can act as every account the `users` pattern covers, administrators included.
+Without it, the toolkit answers `matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN.`
+
+```yaml
+# The homeserver's registration file; MindRoom needs only as_token.
+id: mindroom-user
+url: null
+as_token: <a long random secret>
+hs_token: <another long random secret>
+sender_localpart: mindroom-user
+namespaces:
+  users:
+    - exclusive: false
+      regex: "@.*:example.com"
+```
+
+```yaml
+personal_agents:
+  mind:
+    agent:
+      tools:
+        - matrix_user
+```
+
 ## Related Matrix Runtime Features
 
 ### Automatic Thread Summaries
 
 MindRoom starts a background title for a new thread from its first prompt, using the transcription for voice messages, without waiting for the agent's reply.
 It only does so when the first threshold below is 1 or 2, so the first reply would already title the thread. This provisional title does not change the summary or topic-tag refresh schedule below.
-MindRoom posts a summary notice in a thread after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`).
+MindRoom checks a thread's title after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`), and posts a summary notice when the title changes.
 Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped, as are threads whose full history cannot be read, which always includes threads longer than 2,000 messages or 16 MiB of content.
 For threads with more than 50 messages, the summary model sees only the first three and last three.
+A new automatic title is one emoji and at most six words, such as `🧪 Attachment cache live test`: MindRoom cuts a longer answer to six words and 80 characters at a word boundary. The emoji and dashes are not words but count toward the 80 characters; only the ` (forked)` marker is outside both limits.
+Text without spaces, such as Chinese or Japanese, is bounded only by the 80 characters.
+A check shows the model the current title, and the model keeps it unless the thread's main topic has clearly changed: a kept title usually posts nothing, and the next check is a full interval later.
+Two checks re-post the unchanged title once: the first check after the first reply, and the check that adds tags. After a restart, the next check may come early.
+A title longer than six words, such as one from an older version, is not offered to keep, so the next check asks for a new title; a retitle, such as after a call's notes, always does too.
 
 The summary uses the first match of:
 
@@ -327,19 +403,20 @@ room_thread_summary_models:
 ```
 
 `defaults.thread_summary_temperature` (default `0.2`, `null` for provider defaults) applies when the provider supports a temperature override.
-These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
+These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
 
 A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
 MindRoom Chat sets them from the room settings dialog; any client can send the `io.mindroom.room_settings` state event with state key `thread_summary_instructions` and content `{"value": "<rules>"}`.
 The event falls under the room's `state_default` power level (normally 50), so only moderators and admins can change it, and agent tools cannot write it.
 Every automatic title, including the provisional title and retitles, reads the setting right before generating and appends it to the title instructions under a room rules section.
-Those rules win over conflicting built-in rules such as length, style, or emoji, but not over the rule to treat thread messages as untrusted text.
+Those rules win over conflicting built-in rules such as a shorter length, style, or emoji, but not over the rule to treat thread messages as untrusted text, and a title they make longer is still cut to six words and 80 characters.
+A changed rule shapes the next new title; a check that keeps the current title leaves it as it is.
 Precedence, lowest to highest: the built-in `THREAD_SUMMARY_INSTRUCTIONS`, its `prompts:` override, the room setting; override `THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE` (placeholders `{instructions}` and `{room_instructions}`) to change how the two are joined.
 Values are trimmed and cut to 2,000 characters.
 To clear the setting, send `{}`; a missing event, `{}`, a non-string or blank `value`, or a failed read all mean the normal instructions, and a failed read never skips the title.
-Titles already set keep their wording until the next refresh.
 
-The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags.
+The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags; when that refresh keeps the title, it posts the title again unchanged with the tags.
+Override `THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE` (placeholder `{current_title}`) to change how a check shows the current title, and `THREAD_SUMMARY_KEEP_INSTRUCTIONS` for the rule on keeping it; MindRoom appends them after `THREAD_SUMMARY_USER_PROMPT_TEMPLATE` and the title instructions, so overrides of those need no new placeholder. An override's own length rules still meet the six-word cut.
 Later summaries never change tags, so tags someone removed are not re-added.
 These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; a later summary adds them once the power level allows it.
 

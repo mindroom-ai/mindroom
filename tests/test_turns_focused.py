@@ -243,6 +243,8 @@ class _RecordingResponseRunner:
     answered: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
     # Whether a pending approval holds every conversation.
     held_for_approval: bool = False
+    # The queued messages whose edits ingress applied, which a restart's continued reply no longer covers.
+    edited_sources: list[str] = field(default_factory=list)
 
     @property
     def inbox(self) -> _RecordingResponseRunner:
@@ -254,6 +256,9 @@ class _RecordingResponseRunner:
 
     def is_held_for_approval(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return self.held_for_approval
+
+    def note_edited_source(self, source_event_id: str) -> None:
+        self.edited_sources.append(source_event_id)
 
     async def reserve_response_lifecycle(self, response_envelope: MessageEnvelope) -> _ImmediateLifecycleReservation:  # noqa: ARG002
         return _ImmediateLifecycleReservation()
@@ -6017,7 +6022,7 @@ async def test_command_replay_does_not_repeat_mutation_after_visible_response(co
     handled_turn = TurnRecord.create([event.event_id])
 
     with (
-        patch("mindroom.commands.handler.handle_model_command", return_value="✅ Model changed") as mutate,
+        patch("mindroom.commands.handler.handle_model_command", return_value=("✅ Model changed", None)) as mutate,
         patch.object(harness.turn_store, "record_responded_turn"),
     ):
         await harness.dispatcher.deps.command_executor.execute(
@@ -6100,7 +6105,7 @@ async def test_mutating_command_retries_checkpointed_result_without_reapplying(c
     async def fail_send(_request: SendTextRequest) -> None:
         return None
 
-    with patch("mindroom.commands.handler.handle_model_command", return_value="✅ Model changed") as mutate:
+    with patch("mindroom.commands.handler.handle_model_command", return_value=("✅ Model changed", None)) as mutate:
         with (
             patch.object(harness.gateway, "send_text", new=fail_send),
             pytest.raises(RuntimeError, match="did not return a Matrix event ID"),
@@ -6418,7 +6423,7 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert len(harness.gateway.sent) == 1
     ack_request = harness.gateway.sent[0]
-    assert ack_request.response_text.startswith("You selected: 🧭 Department head\n")
+    assert ack_request.response_text == "Thinking..."
     assert ack_request.target.resolved_thread_id == selection.thread_id
     assert ack_request.target.reply_to_event_id == selection.question_event_id
     assert ack_request.reply_write is not None
@@ -7573,6 +7578,8 @@ async def test_an_edit_before_the_turn_starts_changes_what_it_answers_unless_an_
 
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert regenerator.edit_event_ids == []
+    # A person's edit names the queued message it changed, so a restart's replay of it is news again.
+    assert harness.runner.edited_sources == ([] if by_agent else [original.event_id])
     (request,) = harness.runner.requests
     answered, replaced = ("2+2", "3+3") if by_agent else ("3+3", "2+2")
     assert f"what is {answered}?" in request.prompt
@@ -8145,8 +8152,9 @@ async def test_a_routed_responder_answers_the_persons_own_event_for_that_person(
 
     # The steward titles nothing, so the responder titles a new thread from the message the person wrote.
     if thread_id != _THREAD_ROOT:
-        assert early_title.call_args.kwargs["prompt_event_id"] == "$question:localhost"
+        assert early_title.call_args.kwargs["prompt_event_ids"] == ("$question:localhost",)
         assert early_title.call_args.kwargs["prompt"] is None
+        assert early_title.call_args.kwargs["prompt_as_shown"] is True
     else:
         early_title.assert_not_called()
     assert len(harness.runner.requests) == 1

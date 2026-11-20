@@ -15,17 +15,20 @@ Budgets need prices for the models you pay for and a `budgets` section:
 models:
   astra:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     pricing:
-      input: 5.0
-      output: 30.0
-      cache_read: 0.5
+      input: 8.0
+      output: 40.0
+      cache_read: 0.4
+      cache_write: 10.0
   luna:
     provider: openai
     id: gpt-6-luna
     pricing:
-      input: 0.2
-      output: 1.25
+      input: 0.1
+      output: 0.5
+      cache_read: 0.01
+      cache_write: 0.125
 
 budgets:
   monthly_limit_usd: 20
@@ -76,6 +79,7 @@ A reply that already started finishes on its model, so the reply that reaches th
 ## Over-Budget Replies
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
+When `fallback_model` names no [reasoning level](configuration/models.md#reasoning-levels), a reply that already names the fallback model at a level, such as `luna@high` for `fallback_model: luna`, keeps that level; a `fallback_model` with a level, such as `luna@low`, replaces it.
 This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](openai-api.md) keys mapped to a requester.
 The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.
@@ -146,4 +150,5 @@ A budget service assertion authorizes only the `/api/budgets/service` routes, an
 | Status | Meaning |
 | --- | --- |
 | `503` `Budget service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a budget service setting is missing |
-| `401` `Invalid budget service JWT` | Missing or invalid assertion |
+| `401` `Invalid budget service JWT` | Invalid assertion; a `Service JWT rejected` or `Trusted upstream JWT rejected` warning in the MindRoom log names the failed check |
+| `401` `Missing trusted upstream JWT header: <header>` | The request carried no assertion |

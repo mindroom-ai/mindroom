@@ -61,7 +61,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](https://docs.mindroom.chat/configuration/agents/#defaults) |
 | `memory` | Memory backends and embedder | [Memory](https://docs.mindroom.chat/memory/) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
-| `knowledge_reranker` | Optional reranker for knowledge search results | [Reranking](https://docs.mindroom.chat/knowledge/#reranking) |
+| `reranker` | Optional reranker for knowledge search results and, with `memory.search.rerank`, memory searches | [Reranking](https://docs.mindroom.chat/knowledge/#reranking) |
 | `knowledge_graph` | Graph of facts built from agents' conversations | [Knowledge Graph](https://docs.mindroom.chat/knowledge-graph/) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](https://docs.mindroom.chat/mcp/) |
 | `plugins` | Plugin loading | [Plugins](https://docs.mindroom.chat/plugins/) |
@@ -222,6 +222,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 | `MATRIX_REGISTRATION_SHARED_SECRET`, `MATRIX_REGISTRATION_SHARED_SECRET_FILE` | Synapse shared registration secret, or a file containing it, for creating managed agent accounts without pairing | _(unset)_ |
 | `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` or `appservice` authentication for accounts MindRoom creates and operates (see [Agent Users](https://docs.mindroom.chat/matrix/#agent-users)) | `password` |
 | `MATRIX_APPSERVICE_TOKEN`, `MATRIX_APPSERVICE_TOKEN_FILE` | Application-service token, or a file containing it, used when `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` | _(unset)_ |
+| `MATRIX_USER_APPSERVICE_TOKEN`, `MATRIX_USER_APPSERVICE_TOKEN_FILE` | Token of a separate application service, or a file containing it, that lets a personal agent's [`matrix_user`](https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user) tool act as its owner | _(unset)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait at startup for the homeserver to respond (`0` waits indefinitely); a certificate verification failure stops startup immediately | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Positive seconds the sync watchdog and `/api/health` keep waiting while event catch-up is still making progress; set it above the deployment's observed healthy catch-up time | `600` |
@@ -264,7 +265,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
-| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#environment-variables) egress broker; setting it turns Agent Keys on, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; off)_ |
+| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#environment-variables) egress broker for workers; `off` turns Agent Keys off, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; a loopback broker for shell calls in the primary)_ |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway and Agent CLI routes | `false` |

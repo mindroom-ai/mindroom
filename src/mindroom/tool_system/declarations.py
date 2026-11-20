@@ -86,6 +86,7 @@ class ToolManagedInitArg(str, Enum):
     FILE_ACCESS = "file_access"
     AGENT_STATE_ROOT = "agent_state_root"
     SHARED_DIRECTORY_ROOTS = "shared_directory_roots"
+    IN_SANDBOX_REQUEST = "in_sandbox_request"
 
 
 @dataclass

@@ -74,7 +74,12 @@ from mindroom.plugin_lifecycle import PluginLifespans
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, gather_shutdown_phase, run_process_shutdown_closers
+from mindroom.runtime_shutdown import (
+    CONFIG_RELOAD_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    gather_shutdown_phase,
+    run_process_shutdown_closers,
+)
 from mindroom.runtime_state import (
     clear_api_server_address,
     reset_runtime_state,
@@ -406,6 +411,7 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
             agent_reply_memberships=self.agent_reply_memberships,
             journal_provider=self.event_journal_store,
+            entity_unavailable=self.fleet.is_disabled,
         )
         self._thread_export_runner = WorkspaceThreadExportRunner(
             WorkspaceThreadExportDeps(
@@ -1327,7 +1333,7 @@ class _MultiAgentOrchestrator:
                     # Removal first, while the removed entities' bots still edit their approval cards
                     # and before the owner account's orphan cleanup could kick the removed accounts.
                     unsettled_removals = await self.fleet.remove(plan.remove)
-                    await self.fleet.stop(plan.restart | plan.stop)
+                    await self.fleet.stop(plan.restart | plan.stop, intent=CONFIG_RELOAD_SHUTDOWN)
                 except BaseException:
                     if staged is not None:
                         dispose_plugins(staged.generation)
@@ -1979,6 +1985,10 @@ async def _run_runtime(  # noqa: PLR0915
 
         shorten_gil_switch_interval()
         stall_detector = start_event_loop_stall_detector(runtime_paths)
+        # Deferred: the broker loads h11 and its TLS stack.
+        from mindroom.egress_broker.service import turn_off_unusable_default_broker  # noqa: PLC0415
+
+        runtime_paths = turn_off_unusable_default_broker(runtime_paths, api=api)
 
         # The first start after an upgrade converts every conversation database before the API binds, which can take
         # minutes, so probes meanwhile see a live process that is not ready yet instead of a closed port.

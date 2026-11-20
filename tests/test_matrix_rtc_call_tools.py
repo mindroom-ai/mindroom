@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
     from mindroom.llm.provider import TokenCounter
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.session_storage.types import ConversationSession
@@ -107,6 +108,20 @@ _EMPTY_SCHEMA = {"type": "object", "properties": {}}
 async def _authorized_call_operation() -> AsyncIterator[bool]:
     """Model a live admitted caller for call-tool unit tests."""
     yield True
+
+
+def _interruption(run_id: str, snapshot: InterruptedReplaySnapshot) -> dict[str, object]:
+    """Return what a call stores of an interrupted reply: its run and the facts of its record."""
+    return {
+        "run_id": run_id,
+        "user_message": snapshot.user_message,
+        "user_message_is_structured": snapshot.user_message_is_structured,
+        "partial_text": snapshot.partial_text,
+        "completed_tools": snapshot.completed_tools,
+        "interrupted_tools": snapshot.interrupted_tools,
+        "run_metadata": snapshot.run_metadata,
+        "original_status": snapshot.original_status,
+    }
 
 
 async def _unconnected() -> None:
@@ -1022,13 +1037,21 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     call_store = ConversationStore(tmp_path / "call.db")
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_session_storage", lambda *_args: call_store)
 
-    def record_interruption(*, storage: ConversationStore, session: ConversationSession, **kwargs: object) -> None:
+    def record_interruption(
+        *,
+        storage: ConversationStore,
+        session: ConversationSession,
+        run_id: str,
+        snapshot: InterruptedReplaySnapshot,
+    ) -> None:
         assert storage is call_store
         # The interrupted run is written in the database's lane, behind the conversation's other storage work.
         assert threading.current_thread().name.startswith("conversation-store")
-        persisted_interruptions.append({"session": (session.session_id, session.kind, session.owner_id), **kwargs})
+        persisted_interruptions.append(
+            {"session": (session.session_id, session.kind, session.owner_id), **_interruption(run_id, snapshot)},
+        )
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", record_interruption)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot", record_interruption)
     if not reconcile_spoken_response:
         monkeypatch.setattr(
             "mindroom.matrix_rtc.call_tools._CallResponseTracker.register",
@@ -1260,8 +1283,10 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable=())),
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
+        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot",
+        lambda *, session, run_id, snapshot, **_: persisted_interruptions.append(
+            {"session": session, **_interruption(run_id, snapshot)},
+        ),
     )
 
     tooling = await build_call_tools(
@@ -1348,8 +1373,10 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
         blocked_resolution,
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
+        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot",
+        lambda *, session, run_id, snapshot, **_: persisted_interruptions.append(
+            {"session": session, **_interruption(run_id, snapshot)},
+        ),
     )
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -2163,7 +2190,7 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", persist_interrupted)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot", persist_interrupted)
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,

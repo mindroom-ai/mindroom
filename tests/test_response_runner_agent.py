@@ -29,6 +29,9 @@ from mindroom.config.room_activity import AgentRoomActivityConfig
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
+    COMPACTION_NOTICE_CONTENT_KEY,
+    COMPACTIONS_CONTENT_KEY,
+    FORK_CONTENT_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -60,7 +63,7 @@ from mindroom.final_delivery import (
     outcome_label,
 )
 from mindroom.history.storage import with_force_compaction
-from mindroom.history.types import CompactionLifecycleStart, HistoryScope
+from mindroom.history.types import CompactionLifecycleStart, CompactionOutcome, HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -144,6 +147,7 @@ from tests.response_runner_helpers import (
 )
 from tests.test_event_journal_store import admit
 from tests.test_sandbox_proxy import _FakeResponse, _static_worker_manager_lease, _StreamsFromPost
+from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -435,6 +439,62 @@ class TestAgentBot(AgentBotTestBase):
         items = mock_ai.call_args.args[0].transient_enrichment_items
         (note,) = [item for item in items if item.key == "room_activity"]
         assert "- (thread $other): bob; 1 new message, last 1 min ago" in note.text.splitlines()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("forked", [True, False], ids=["fork", "plain-thread"])
+    async def test_a_fork_turn_is_told_which_thread_it_was_forked_from(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        forked: bool,
+    ) -> None:
+        """A fork's turn context names its parent thread and fork point, read from its root; a plain thread's has none."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        root_content: dict[str, object] = {"body": "carry on", "msgtype": "m.text"}
+        if forked:
+            root_content[FORK_CONTENT_KEY] = {"thread_id": "$parent", "event_id": "$fork-point"}
+        root = _visible_message(sender="@user:localhost", body="carry on", event_id="$fork", content=root_content)
+        # The locked turn re-reads its thread, so the journal serves the root the note is read from.
+        await seed_thread_history(bot, room_id="!test:localhost", thread_id="$fork", messages=[root])
+        mock_ai = AsyncMock(return_value="Handled")
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    thread_id="$fork",
+                    thread_history=[root],
+                    prompt="carry on",
+                    reply_to_event_id="$fork",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        thread_id="$fork",
+                        reply_to_event_id="$fork",
+                        prompt="carry on",
+                    ),
+                ),
+            )
+
+        items = [item for item in mock_ai.call_args.args[0].transient_enrichment_items if item.key == "thread_fork"]
+        if not forked:
+            assert items == []
+            return
+        (note,) = items
+        assert note.text == config.render_prompt(
+            "THREAD_FORK_CONTEXT_TEMPLATE",
+            parent_thread_id="$parent",
+            fork_point_event_id="$fork-point",
+        )
+        assert "thread $parent, forked after message $fork-point" in note.text
+        assert (note.cache_policy, note.persist, note.minimal_required) == ("stable", False, True)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1729,6 +1789,7 @@ class TestAgentBot(AgentBotTestBase):
                 "tool_name": "run_shell_command",
                 "args_preview": "cmd=git status",
                 "result_preview": "clean",
+                "tool_call_id": "call-1",
             },
         ]
 
@@ -2600,10 +2661,11 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """First-turn threaded replies should keep compaction notices and summaries in the resolved thread."""
 
+        # A requested compaction keeps its own notice; an automatic one is recorded on the reply instead.
         async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
             await ctx.compaction_lifecycle.start(
                 CompactionLifecycleStart(
-                    mode="auto",
+                    mode="manual",
                     session_id="session-1",
                     scope="agent:test_agent",
                     summary_model="summary-model",
@@ -2714,6 +2776,207 @@ class TestAgentBot(AgentBotTestBase):
         assert compaction_notice_kwargs["target"].resolved_thread_id == root_event_id
         assert compaction_notice_kwargs["reply_to_event_id"] == root_event_id
         assert "thread_summary_!test:localhost_$root_event" in scheduled_names
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streamed", [False, True], ids=["collected", "streamed"])
+    async def test_auto_compaction_records_on_reply_without_notice(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        streamed: bool,
+    ) -> None:
+        """An automatic compaction is recorded on the reply it ran for, collected or streamed, and sends no notice."""
+
+        async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+            lifecycle = ctx.compaction_lifecycle
+            entry_id = await lifecycle.start(
+                CompactionLifecycleStart(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:test_agent",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    history_budget_tokens=100_000,
+                    runs_before=20,
+                ),
+            )
+            await lifecycle.complete_success(
+                CompactionOutcome(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:test_agent",
+                    summary="summary",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    after_tokens=4_000,
+                    window_tokens=200_000,
+                    threshold_tokens=0,
+                    runs_before=20,
+                    runs_after=1,
+                    compacted_run_count=20,
+                    compacted_at="2026-11-17T00:00:00Z",
+                    history_budget_tokens=100_000,
+                    lifecycle_notice_event_id=entry_id,
+                    duration_ms=1_200,
+                ),
+            )
+            return "ok"
+
+        sent_contents: list[dict[str, Any]] = []
+        deliver_sent = delivered_matrix_side_effect("$response")
+        progress_edits: list[dict[str, Any]] = []
+        deliver_progress_edit = delivered_matrix_side_effect("$edit")
+
+        async def record_send(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
+            content = kwargs.get("content", args[2] if len(args) > 2 else None)
+            if isinstance(content, dict):
+                sent_contents.append(content)
+            return await deliver_sent(*args, **kwargs)
+
+        async def record_progress_edit(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
+            # A streamed reply's progress edits: (client, room_id, event_id, content, text).
+            progress_edits.append(cast("dict[str, Any]", args[3]))
+            return await deliver_progress_edit(*args, **kwargs)
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
+            return_value=_KnowledgeResolution(knowledge=None),
+        )
+        response_envelope = _hook_envelope(source_event_id="$user_msg")
+
+        with (
+            patch("mindroom.reply_turn.request.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=streamed),
+            patch(
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+            ),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(side_effect=record_send)),
+            patch(
+                "mindroom.delivery_gateway.edit_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+            ),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_progress_edit)),
+            patch(
+                "mindroom.reply_turn.locked_turn.store_conversation_memory",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("mindroom.post_response_effects.maybe_generate_thread_summary", new_callable=AsyncMock),
+        ):
+            await bot._response_runner.generate_response(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(response_envelope.source_event_id,),
+                        logical_source_event_ids=(response_envelope.source_event_id,),
+                    ),
+                    prompt="Hello",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=response_envelope,
+                ),
+            )
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+        assert not any(COMPACTION_NOTICE_CONTENT_KEY in content for content in sent_contents)
+        # The final answer edits the reply's placeholder; its new content carries the compaction.
+        placeholder, final_edit = sent_contents[0], sent_contents[-1]
+        assert "m.new_content" not in placeholder
+        assert final_edit["m.relates_to"]["rel_type"] == "m.replace"
+        assert final_edit["m.relates_to"]["event_id"] == "$response"
+        final_content = final_edit["m.new_content"]
+        assert final_content["body"] == "ok"
+        [entry] = final_content[COMPACTIONS_CONTENT_KEY]
+        assert entry["status"] == "success"
+        assert entry["phase"] == "pre_turn"
+        assert entry["mode"] == "auto"
+        assert entry["after_tool"] == 0
+        assert entry["after_tokens"] == 4_000
+        # A streamed reply also shows it in a progress edit, which only the stream itself writes.
+        shown = [content[COMPACTIONS_CONTENT_KEY] for content in progress_edits if COMPACTIONS_CONTENT_KEY in content]
+        assert [entries[0]["status"] for entries in shown] == (["success"] if streamed else [])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("show_tool_calls", "after_tool"), [(True, 2), (False, 0)])
+    async def test_collected_compaction_anchors_after_the_tools_collected_so_far(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        show_tool_calls: bool,
+        after_tool: int,
+    ) -> None:
+        """A compaction in a collected reply sits after the tool calls shown before it began, or at the top if hidden.
+
+        Either way the reply ran tools first, hidden ones too, so the compaction is mid-turn.
+        """
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        show_tool_calls=show_tool_calls,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        async def fake_stream_agent_response(
+            ctx: ResponseTurnContext,
+            *_args: object,
+            **_kwargs: object,
+        ) -> AsyncIterator[object]:
+            yield ToolStarted(ReportedCall(tool_call_id="call-1", tool_name="read_file", tool_args={"path": "a"}))
+            yield ToolStarted(ReportedCall(tool_call_id="call-2", tool_name="read_file", tool_args={"path": "b"}))
+            lifecycle = ctx.compaction_lifecycle
+            assert lifecycle is not None
+            await lifecycle.start(
+                CompactionLifecycleStart(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:calculator",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    history_budget_tokens=100_000,
+                    runs_before=20,
+                ),
+            )
+            yield "Answer after compacting"
+
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=fake_stream_agent_response,
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Read both",
+                    reply_to_event_id="$event",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Read both",
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+        content = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]
+        [entry] = content[COMPACTIONS_CONTENT_KEY]
+        assert entry["phase"] == "mid_turn"
+        assert entry["after_tool"] == after_tool
 
     @pytest.mark.asyncio
     async def test_generate_response_marks_non_streaming_model_error_unsuccessful_for_post_effects(

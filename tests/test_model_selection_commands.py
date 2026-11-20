@@ -17,7 +17,7 @@ from mindroom.commands.parsing import command_parser
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ReasoningConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
@@ -37,6 +37,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
+_LEVELS = ReasoningConfig(levels=["low", "high"], default="low")
+
+
 def _helper_override(paths: RuntimePaths, config: Config) -> str | None:
     return resolve_thread_model_override(paths, "$root", config=config).active.get("helper")
 
@@ -48,6 +51,7 @@ def _helper_override(paths: RuntimePaths, config: Config) -> str | None:
         ("set", "reset", "reset"),
         ("set", "list", "list"),
         ("set", "default", "default"),
+        ("set", "leveled@high", "leveled@high"),
     ],
 )
 @pytest.mark.asyncio
@@ -60,6 +64,7 @@ async def test_explicit_model_operation(
     """Explicit reset clears even with a reset key; explicit set never uses aliases."""
     client, config, paths, index, router, _ = picker_setup(tmp_path)
     config.models.update({name: ModelConfig(provider="openai", id="test-model") for name in ("reset", "list")})
+    config.models["leveled"] = ModelConfig(provider="openai", id="test-model", reasoning=_LEVELS)
     set_thread_model_override(
         paths,
         thread_id="$root",
@@ -100,7 +105,7 @@ async def test_explicit_model_operation(
     assert result["override"] == expected
 
 
-@pytest.mark.parametrize("failure", ["malformed", "missing_root", "unknown_model", "padded_model"])
+@pytest.mark.parametrize("failure", ["malformed", "missing_root", "unknown_model", "unknown_level", "padded_model"])
 @pytest.mark.asyncio
 async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, failure: str) -> None:
     """Rejected metadata or scope must leave the override untouched despite valid body."""
@@ -120,6 +125,8 @@ async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, fai
         client.room_get_event.return_value = nio.RoomGetEventError("Not found", "M_NOT_FOUND")
     elif failure == "unknown_model":
         metadata.update(operation="set", model="deleted")
+    elif failure == "unknown_level":
+        metadata.update(operation="set", model="reset@high")
     elif failure == "padded_model":
         # Model names cannot hold spaces, so a padded key names no model and is never trimmed to "reset".
         metadata.update(operation="set", model=" reset ")
@@ -154,6 +161,65 @@ async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, fai
         result = results[0][1]["io.mindroom.model_selection_result"]
         assert result["status"] == "rejected"
         assert "override" not in result
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "not_router",
+        "room_unavailable",
+        "not_joined",
+        "scope_check_error",
+        "thread_root_unavailable",
+        "thread_root_unreadable",
+        "not_thread_root",
+        "no_addressable_agent",
+    ],
+)
+@pytest.mark.parametrize("operation", ["set", "reset"])
+@pytest.mark.asyncio
+async def test_every_scope_denial_leaves_the_override_untouched(tmp_path: Path, reason: str, operation: str) -> None:
+    """Any scope that is not a granted picker scope rejects the command without setting or clearing an override."""
+    client, config, paths, index, router, _ = picker_setup(tmp_path)
+    config.models["other"] = ModelConfig(provider="openai", id="other-model")
+    set_thread_model_override(paths, thread_id="$root", model_name="default", entity_names=("helper",), config=config)
+    metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": operation}
+    if operation == "set":
+        metadata["model"] = "other"
+    event = root_event(
+        event_id="$command",
+        content={"body": f"!model {operation}", "msgtype": "m.text", "io.mindroom.model_selection": metadata},
+    )
+    results = []
+
+    async def record(text: str, *, extra_content: dict | None = None) -> None:
+        results.append((text, extra_content))
+
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(ROOM, "$root", "$command"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=record,
+        send_response=AsyncMock(return_value="$reply"),
+        agent_reply_memberships=index,
+    )
+    with patch(
+        "mindroom.commands.model_commands.validate_model_picker_scope",
+        new=AsyncMock(return_value=reason),
+    ):
+        await handle_command(
+            context=context,
+            room=client.rooms[ROOM],
+            event=event,
+            command=command_parser.parse(event.body),
+            requester_user_id=USER,
+        )
+    assert _helper_override(paths, config) == "default"
+    assert results[0][1]["io.mindroom.model_selection_result"]["status"] == "rejected"
 
 
 @pytest.mark.parametrize("wrong_target", ["runtime_user_id", "runtime_device_id"])
@@ -428,15 +494,19 @@ def resolved_thread_models(config: Config, paths: RuntimePaths) -> dict[str, str
 
 
 def _run_model_command(config: Config, args_text: str, requester_user_id: str) -> str:
-    return handle_model_command(
+    paths = runtime_paths_for(config)
+    text, _ = handle_model_command(
         args_text,
+        client=picker_client(config, paths),
         config=config,
-        runtime_paths=runtime_paths_for(config),
+        runtime_paths=paths,
         membership_index=AgentReplyMembershipIndex(),
         room_id=ROOM,
         thread_id="$root",
         requester_user_id=requester_user_id,
+        command_event_id="$command",
     )
+    return text
 
 
 def test_thread_overrides_keep_the_selection_of_entities_the_next_setter_cannot_address(tmp_path: Path) -> None:
@@ -549,6 +619,20 @@ def test_model_show_names_the_entities_each_thread_override_governs(tmp_path: Pa
     assert "- `expensive` (openai expensive-model) for `restricted`\n" in shown
 
 
+def test_model_command_sets_a_model_at_a_level_and_lists_the_levels(tmp_path: Path) -> None:
+    """``!model name@level`` stores the reference; a level the model does not list is an unknown model."""
+    config = restricted_config(tmp_path)
+    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=_LEVELS)
+    paths = runtime_paths_for(config)
+
+    assert "`cheap@high`" in _run_model_command(config, "cheap@high", USER)
+    assert resolved_thread_models(config, paths)["helper"] == "cheap@high"
+    rejected = _run_model_command(config, "cheap@xhigh", USER)
+    assert rejected.startswith("❌ Unknown model `cheap@xhigh`")
+    assert "- `cheap` (openai cheap-model; levels: low, high; default low)\n" in rejected
+    assert resolved_thread_models(config, paths)["helper"] == "cheap@high"
+
+
 @pytest.mark.asyncio
 async def test_thread_override_leaves_entities_the_requester_cannot_address(tmp_path: Path) -> None:
     """A member excluded by an agent's access cannot switch the model that agent uses in the thread."""
@@ -556,6 +640,7 @@ async def test_thread_override_leaves_entities_the_requester_cannot_address(tmp_
     paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = entity_identity_registry(config, paths).current_id("router").full_id
+    client.device_id = "DEVICE"
     room = nio.MatrixRoom(ROOM, client.user_id)
     event = root_event(event_id="$command", content={"body": "!model expensive", "msgtype": "m.text"})
     context = make_test_command_handler_context(
@@ -580,3 +665,230 @@ async def test_thread_override_leaves_entities_the_requester_cannot_address(tmp_
     )
 
     assert resolved_thread_models(config, paths) == {"helper": "expensive", "restricted": "default"}
+
+
+async def _model_command_reply(
+    tmp_path: Path,
+    body: str,
+    *,
+    thread_model: str | None = None,
+    picker_operation: str | None = None,
+) -> tuple[str, dict | None]:
+    """Run USER's command through the handler and return its reply and the content recorded beside it.
+
+    The command is typed unless `picker_operation` makes it the picker's structured one.
+    """
+    client, config, paths, index, router, _ = picker_setup(tmp_path)
+    config.models["leveled"] = ModelConfig(provider="openai", id="other-model", reasoning=_LEVELS)
+    if thread_model is not None:
+        set_thread_model_override(
+            paths,
+            thread_id="$root",
+            model_name=thread_model,
+            entity_names=("helper",),
+            config=config,
+        )
+    content: dict[str, object] = {"body": body, "msgtype": "m.text"}
+    if picker_operation is not None:
+        content["io.mindroom.model_selection"] = {
+            "version": 1,
+            "runtime_user_id": router,
+            "runtime_device_id": "DEVICE",
+            "operation": picker_operation,
+        }
+    event = root_event(event_id="$command", content=content)
+    results = []
+
+    async def record(text: str, *, extra_content: dict | None = None) -> None:
+        results.append((text, extra_content))
+
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(ROOM, "$root", "$command"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=record,
+        send_response=AsyncMock(return_value="$reply"),
+        agent_reply_memberships=index,
+    )
+    await handle_command(
+        context=context,
+        room=client.rooms[ROOM],
+        event=event,
+        command=command_parser.parse(event.body),
+        requester_user_id=USER,
+    )
+    resets = body.endswith(("reset", "clear"))
+    assert _helper_override(paths, config) == (None if resets else thread_model or "leveled@high")
+    return results[0]
+
+
+@pytest.mark.parametrize(
+    ("body", "thread_model", "operation"),
+    [
+        ("!model leveled@high", None, {"operation": "set", "model": "leveled@high", "override": "leveled@high"}),
+        ("/model reset", "leveled", {"operation": "reset", "override": None}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_typed_model_command_is_acknowledged_like_the_pickers(
+    tmp_path: Path,
+    body: str,
+    thread_model: str | None,
+    operation: dict[str, object],
+) -> None:
+    """A typed set or reset carries the picker's result, tied to its command event, so a client can pair the two."""
+    config = picker_setup(tmp_path)[1]
+    router = entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id
+
+    text, result = await _model_command_reply(tmp_path, body, thread_model=thread_model)
+    assert text.startswith("✅")
+    assert result == {
+        "io.mindroom.model_selection_result": {
+            "version": 1,
+            "command_event_id": "$command",
+            "room_id": ROOM,
+            "thread_id": "$root",
+            "runtime_user_id": router,
+            "runtime_device_id": "DEVICE",
+            "status": "applied",
+            **operation,
+        },
+    }
+
+
+@pytest.mark.parametrize("body", ["!model", "!model list", "!model missing", "!model leveled@xhigh"])
+@pytest.mark.asyncio
+async def test_typed_model_command_that_selects_nothing_carries_no_result(tmp_path: Path, body: str) -> None:
+    """A listing or a refusal stays an ordinary reply: nothing marks it as a selection."""
+    assert (await _model_command_reply(tmp_path, body, thread_model="leveled"))[1] is None
+
+
+@pytest.mark.parametrize("body", ["!model reset", "/model clear"])
+@pytest.mark.asyncio
+async def test_typed_reset_with_no_override_to_remove_carries_no_result(tmp_path: Path, body: str) -> None:
+    """A typed reset that removed nothing says so in an ordinary reply: an applied result would claim a reset."""
+    assert await _model_command_reply(tmp_path, body) == (
+        "This thread has no model override for the agents and teams you may address.",
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_picker_reset_with_no_override_to_remove_is_still_acknowledged(tmp_path: Path) -> None:
+    """The picker's result acknowledges its operation, so its client stops waiting whether or not anything changed."""
+    config = picker_setup(tmp_path)[1]
+    router = entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id
+
+    text, result = await _model_command_reply(tmp_path, "!model reset", picker_operation="reset")
+
+    assert text == "This thread has no model override for the agents and teams you may address."
+    assert result == {
+        "io.mindroom.model_selection_result": {
+            "version": 1,
+            "command_event_id": "$command",
+            "room_id": ROOM,
+            "thread_id": "$root",
+            "runtime_user_id": router,
+            "runtime_device_id": "DEVICE",
+            "operation": "reset",
+            "status": "applied",
+            "override": None,
+        },
+    }
+
+
+@pytest.mark.parametrize("args_text", ["default", "reset"])
+def test_typed_model_command_outside_a_thread_carries_no_result(tmp_path: Path, args_text: str) -> None:
+    """A command refused for want of a thread selected nothing."""
+    client, config, paths, index, _, _ = picker_setup(tmp_path)
+    text, result = handle_model_command(
+        args_text,
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        membership_index=index,
+        room_id=ROOM,
+        thread_id=None,
+        requester_user_id=USER,
+        command_event_id="$command",
+    )
+    assert text.startswith("❌")
+    assert result is None
+
+
+@pytest.mark.parametrize("structured", [False, True], ids=["typed", "picker"])
+@pytest.mark.asyncio
+async def test_model_command_reply_names_only_the_model_the_command_named(
+    tmp_path: Path,
+    *,
+    structured: bool,
+) -> None:
+    """The reply is readable by the whole room, so it names only the model the command itself named.
+
+    The model an agent inherits reaches only a requester who may address that agent, over to-device discovery;
+    neither a set nor a reset may put its key, label, or provider ID into the room.
+    """
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "private": AgentConfig(
+                    display_name="Private",
+                    model="hidden",
+                    access=ResponderAccessConfig(users=[OTHER]),
+                ),
+            },
+            models={
+                "default": ModelConfig(provider="openai", id="test-model"),
+                "hidden": ModelConfig(provider="openai", id="concealed-model-id", display_name="Concealed label"),
+                "cheap": ModelConfig(provider="openai", id="cheap-model", display_name="Thrifty"),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    paths = runtime_paths_for(config)
+    client = picker_client(config, paths, OTHER, entity_identity_registry(config, paths).current_id("private").full_id)
+    replies = []
+
+    async def record(text: str, *, extra_content: dict | None = None) -> None:
+        replies.append((text, extra_content))
+
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(ROOM, "$root", "$command"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=record,
+        send_response=AsyncMock(return_value="$reply"),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+    private_model = ModelScope(entity="private", room_id=ROOM, thread_id="$root")
+    for operation, model in (("set", "cheap"), ("reset", None)):
+        content: dict[str, object] = {"body": f"!model {model or 'reset'}", "msgtype": "m.text"}
+        if structured:
+            content["io.mindroom.model_selection"] = {
+                "version": 1,
+                "runtime_user_id": client.user_id,
+                "runtime_device_id": "DEVICE",
+                "operation": operation,
+                **({"model": model} if model else {}),
+            }
+        event = root_event(event_id=f"$command-{operation}", sender=OTHER, content=content)
+        await handle_command(
+            context=context,
+            room=client.rooms[ROOM],
+            event=event,
+            command=command_parser.parse(event.body),
+            requester_user_id=OTHER,
+        )
+        assert resolve_turn_model(config, paths, private_model, None).model_name == (model or "hidden")
+
+    assert [reply[1]["io.mindroom.model_selection_result"]["status"] for reply in replies] == ["applied", "applied"]
+    sent = json.dumps(replies)
+    assert not [secret for secret in ("hidden", "Concealed label", "concealed-model-id") if secret in sent]

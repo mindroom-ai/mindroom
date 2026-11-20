@@ -1119,8 +1119,6 @@ def _announce_bridge(
             _print_plain(auto_approval_notice(shell_auto_approve_minutes))
     if config.browser.enabled:
         _console.print("Playwright browser extension: enabled for the active installed browser profile")
-    if config.allowed_app_ids:
-        _console.print("Move the pointer to the upper-left corner to trigger PyAutoGUI's emergency stop.")
 
 
 __all__ = [

@@ -387,10 +387,10 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
         assert (workspace_avatar_dir / "agents/general.png").read_bytes() == b"avatar-bytes"
         assert [path for path, _ in requests] == ["/v1/responses", "/v1/images/generations"]
         prompt_request, image_request = [payload for _, payload in requests]
-        assert prompt_request["model"] == "gpt-6-astra"
+        assert prompt_request["model"] == "gpt-6.2-astra"
         assert prompt_request["reasoning"] == {"effort": "low"}
         assert prompt_request["store"] is False
-        assert image_request["model"] == "gpt-image-2.5-sunburst"
+        assert image_request["model"] == "gpt-image-2.6-sunburst"
         assert image_request["prompt"] == f"{AVATAR_CHARACTER_STYLE}, clear compass silhouette"
         assert client.is_closed()
     finally:

@@ -17,7 +17,7 @@ const request = (messages?: RequestErrorMessages) =>
 afterEach(() => vi.restoreAllMocks());
 
 describe("requestConnection error details", () => {
-  it.each([409, 413, 422])(
+  it.each([409, 412, 413, 422])(
     "shows the string detail of a %i",
     async (status) => {
       reply({ detail: "Something the user can act on" }, status);

@@ -50,11 +50,7 @@ from mindroom.requester_identity import is_access_checked_requester_id, resolve_
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces, room_execution_identity
 from mindroom.room_modes import change_room_thread_mode
-from mindroom.room_reply_modes import (
-    clear_room_reply_mode_override,
-    resolve_room_reply_mode_override,
-    set_room_reply_mode_override,
-)
+from mindroom.room_reply_modes import resolve_room_reply_mode_override, write_room_reply_mode
 from mindroom.room_steward import joined_bot, room_poster, room_steward
 from mindroom.room_thread_modes import (
     RoomThreadMode,
@@ -282,7 +278,7 @@ class RoomModes:
     thread: RoomThreadMode | None
     """The room's thread mode override, None while each agent uses its configured mode."""
     reply: RoomReplyMode | None
-    """The room's reply mode override, None while the room uses its configured one."""
+    """The room's reply mode override, its ``reply_mode`` room setting as the runtime last read it; None while unset."""
     reply_in_effect: RoomReplyMode
     """The reply mode the room uses: its override, else its ``rooms`` entry's, else ``auto``."""
 
@@ -342,15 +338,23 @@ class RoomReader:
         """Change the room's overrides as ``!thread_mode`` and ``!reply_mode`` do: None clears one, one left out stays.
 
         Before anything is written it answers 403 unless the caller holds room admin power by a ``power()`` read, 503
-        when that read fails, and 503 unless a running agent is in the room: its steward republishes the thread mode.
-        A thread mode the room refuses for lack of power changes nothing and answers 403 with what the steward needs.
-        A thread mode change that cannot be published otherwise stays saved and answers 503.
+        when that read fails, and 503 unless a running agent is in the room: its steward writes both modes.
+        A mode the room refuses for lack of power answers 403 with what the steward needs. A reply mode the room does
+        not take answers before the thread mode changes, with 503 when power is not the reason; a thread mode change
+        that cannot be published otherwise stays saved and answers 503.
         """
         if not (await self.power()).is_admin(self.user.user_id):
             raise HTTPException(403, "Only room admins change the room's modes.")
         steward = self._steward()
+        client = cast("nio.AsyncClient", steward.client)
+        if reply is not ...:
+            taken = await write_room_reply_mode(client, steward.runtime_paths, self._room_id, reply)
+            if taken is None:
+                raise HTTPException(403, moderator_rights_message("change the reply mode"))
+            if not taken:
+                raise HTTPException(503, "The room did not take its reply mode; nothing was changed.")
         published = thread is ... or await change_room_thread_mode(
-            cast("nio.AsyncClient", steward.client),
+            client,
             steward.config,
             steward.runtime_paths,
             self._room_id,
@@ -359,10 +363,6 @@ class RoomReader:
         )
         if published is None:
             raise HTTPException(403, moderator_rights_message("change the thread mode"))
-        if reply is None:
-            clear_room_reply_mode_override(steward.runtime_paths, self._room_id)
-        elif reply is not ...:
-            set_room_reply_mode_override(steward.runtime_paths, room_id=self._room_id, mode=reply)
         if not published:
             raise HTTPException(
                 503,

@@ -273,22 +273,36 @@ async def ensure_room_encryption_enabled(
     room_id: str,
     *,
     snapshot: RoomStateSnapshot | None = None,
-    put_state: Callable[..., Awaitable[bool | None]] | None = None,
-) -> bool | None:
+) -> bool:
     """Enable Matrix encryption on a room if it is not already enabled.
 
     Enabling encryption is irreversible; this helper never disables it.
-    A client that only answers writes through ``put_state``, the room steward's.
-    Returns whether the room is encrypted after the call, None when ``put_state`` says the room refused the write.
+    Returns whether the room is encrypted after the call.
+    """
+    return await room_encryption_enable_failure(client, room_id, snapshot=snapshot) is None
+
+
+async def room_encryption_enable_failure(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    snapshot: RoomStateSnapshot | None = None,
+    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]] | None = None,
+) -> str | None:
+    """Enable encryption like `ensure_room_encryption_enabled`; return None once encrypted, or why not.
+
+    A client that only answers writes through ``put_state``, the room steward's, whose None (no steward) is the
+    empty reason. A refusal is the homeserver's errcode and reason, such as `M_FORBIDDEN: Encryption is disabled on
+    this homeserver.`, which tells a server that refuses encryption apart from missing room permission.
     """
     enabled = await room_encryption_enabled(client, room_id, snapshot=snapshot)
     if enabled:
-        return True
+        return None
     if enabled is None:
-        return False
+        return "the room's encryption state could not be read"
     write = put_state or client.room_put_state
     response = await write(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
-    if response is True or isinstance(response, nio.RoomPutStateResponse):
+    if isinstance(response, nio.RoomPutStateResponse):
         cached_room = client.rooms.get(room_id)
         if cached_room is not None:
             # nio only encrypts sends once the cached room flips encrypted, which
@@ -296,9 +310,9 @@ async def ensure_room_encryption_enabled(
             # the sync window (e.g. the `!encrypt` confirmation) are not plaintext.
             cached_room.encrypted = True
         logger.info("matrix_room_encryption_enabled", room_id=room_id)
-        return True
+        return None
     logger.error("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
-    return None if response is None else False
+    return "" if response is None else _describe_matrix_response_error(response)
 
 
 def _with_event_power_level(
@@ -564,6 +578,9 @@ def _describe_matrix_response_error(response: object) -> str:
     """Convert a Matrix response object into a concise error string."""
     if isinstance(response, nio.ErrorResponse):
         if response.status_code and response.message:
+            # Tuwunel already prefixes the errcode to its message.
+            if str(response.message).startswith(f"{response.status_code}:"):
+                return str(response.message)
             return f"{response.status_code}: {response.message}"
         if response.status_code:
             return str(response.status_code)
@@ -942,5 +959,6 @@ __all__ = [
     "names_canonical_parent",
     "resolve_room_reference",
     "room_admin_power_user",
+    "room_encryption_enable_failure",
     "room_encryption_enabled",
 ]

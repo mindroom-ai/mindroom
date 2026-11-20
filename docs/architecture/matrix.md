@@ -78,8 +78,8 @@ The private reply type is `io.mindroom.models.response`:
   "capabilities": ["model_selection"],
   "agent_user_ids": ["@mindroom_helper:example.org"],
   "catalog_revision": "sha256-of-published-entries",
-  "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6-astra","icon_url":"mxc://example.org/image"}],
-  "selection": {"override":null,"inherited":[{"entity":"helper","model":"fast"}]}
+  "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6-astra","icon_url":"mxc://example.org/image","reasoning_levels":["low","high"],"reasoning_default":"low"}],
+  "selection": {"override":"fast","reasoning":"high","inherited":[{"entity":"helper","user_id":"@mindroom_helper:example.org","model":"fast","source":"agent"}]}
 }
 ```
 
@@ -87,6 +87,9 @@ The response omits `thread_id` when the request did.
 `selection.override` is always present and is `null` for absent or deleted model overrides.
 It names a thread override only when every requester-visible responding entity uses that override, and is `null` when those entities have different thread overrides or some have none.
 `inherited` lists requester-visible responding entities with their room-level model, ignoring thread overrides.
+Each `inherited[].user_id` is that agent's or team's own Matrix account, and each `inherited[].source` names what chose that model: `room` for a saved `!room_model` override, `room_config` for the room's authored `room_models` entry, or `agent` for the entity's own configured model.
+`reasoning_levels` and `reasoning_default` appear only on models with [reasoning levels](../configuration/models.md#reasoning-levels).
+`selection.override` and each `inherited[].model` are catalog keys; when the chosen reference is `key@level`, a `reasoning` field beside them carries the level, and it is absent otherwise.
 This explains what resetting the thread will use, including different defaults across agents and teams.
 
 Each request reads current config.
@@ -113,6 +116,7 @@ Mutations use the ordinary `m.room.message` / `m.text` path with readable body `
 ```
 
 `operation` is `set` or `reset`; reset omits `model`.
+`model` is a catalog key or `key@level` for one of the key's `reasoning_levels`, and the result's `override` echoes it as sent.
 Explicit set permits keys such as `default`, `reset`, or `list`.
 The required runtime device ID comes from authenticated discovery, routes the command to the account that answered that discovery, and grants no authority.
 Actual room and canonical thread come from Matrix event routing.
@@ -127,6 +131,12 @@ The normal command reply carries the persisted result alongside readable text:
 
 Applied reset omits `model` and has `override:null`.
 Rejection has `status:"rejected"`, no `override`, and may include a readable `error`.
+The reply to a typed `!model <key>` or `!model reset` that was applied carries the same result, with the answering account's own Matrix ID and device as `runtime_user_id` and `runtime_device_id`, so a client can pair any applied change with its command event and show both as one line.
+A typed listing or refusal, and a typed reset that found no override to remove, carry no result and stay ordinary text.
+The picker's own reset is acknowledged as applied either way, since its result answers the operation.
+The result is room-visible, so it names only what the command itself named: the selected key and level.
+It must never carry a previous model, an inherited default, a display name, or which agents changed, because those come from the requester-scoped discovery reply and other room members may not be allowed to see them.
+Clients therefore show a change's new model only, and cannot show the model it replaced.
 Uncertain crash recovery may omit result metadata; clients refresh after timeout rather than infer success from sending.
 Accept an acknowledgement only for the client's current pending command event, exact room/thread, runtime user/device, operation, and model.
 Encrypted events additionally authenticate the sender device.

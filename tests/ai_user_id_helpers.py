@@ -132,15 +132,13 @@ def _metadata_config(provider: str, model_id: str) -> Config:
     )
 
 
-def _mark_requester_online(client: AsyncMock, user_id: str, room_id: str = "!test:localhost") -> None:
-    """Make the requester show as online in the client's synced room cache.
+def _mark_requester_online(client: AsyncMock, user_id: str) -> None:
+    """Make the homeserver report the requester as online.
 
-    ``should_use_streaming`` reads presence from ``client.rooms`` first, so this
-    drives the streaming decision through its real input instead of a patch.
+    ``should_use_streaming`` asks the homeserver for presence, so this drives
+    the streaming decision through its real input instead of a patch.
     """
-    room = nio.MatrixRoom(room_id, "@mindroom_general:localhost")
-    room.users[user_id] = nio.MatrixUser(user_id, presence="online")
-    client.rooms = {room_id: room}
+    client.get_presence.return_value = nio.PresenceGetResponse(user_id, "online", None, True, None)
 
 
 def _make_bot(

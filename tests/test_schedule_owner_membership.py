@@ -991,6 +991,18 @@ async def test_new_task_is_owned_by_its_creator_even_when_owner_account_has_powe
     assert client.room_put_state.await_args.kwargs["content"]["owner"] == ids["general"]
 
 
+def test_owner_room_view_parses_only_matrix_state() -> None:
+    """The room view never parses MindRoom's own state, of which a busy room holds thousands of events."""
+    finished = [scheduled_task_state_event(f"done{index}", {"status": "completed"}) for index in range(3)]
+    state = _owner_room_state({_ROUTER_ID: 100, _ALPHA: 0})
+
+    with patch.object(nio.Event, "parse_event", wraps=nio.Event.parse_event) as parse:
+        room = ownership.room_from_state(_OWNER_ROOM, _ALPHA, [*finished, *state])
+
+    assert [call.args[0]["type"] for call in parse.call_args_list] == [event["type"] for event in state]
+    assert set(room.users) == {_ROUTER_ID, _ALPHA}
+
+
 def test_router_owned_task_goes_to_first_mentioned_joined_agent() -> None:
     """A task the router owned goes to the first agent its message mentions that is joined, before a lower Matrix ID."""
     room = ownership.room_from_state(_OWNER_ROOM, _ALPHA, _owner_room_state({_ROUTER_ID: 100, _ALPHA: 0, _BETA: 0}))

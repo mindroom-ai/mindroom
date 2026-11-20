@@ -585,9 +585,10 @@ async def wait_for_matrix_homeserver(
     )
 
     # Probe with the TLS trust Matrix logins use, so the probe cannot reject a server logins would accept.
+    # httpcore sets ALPN on the context it gets, so the probe takes its own.
     async with httpx.AsyncClient(
         timeout=request_timeout_seconds,
-        verify=maybe_ssl_context(homeserver, runtime_paths) or True,
+        verify=maybe_ssl_context(homeserver, runtime_paths, shared=False) or True,
     ) as client:
         while deadline is None or loop.time() < deadline:
             attempt += 1

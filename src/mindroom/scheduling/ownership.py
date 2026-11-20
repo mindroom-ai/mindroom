@@ -21,6 +21,9 @@ def room_from_state(room_id: str, own_user_id: str, events: Iterable[dict[str, o
     """Build the membership and power view of a room from its full state, as Matrix sync would."""
     room = nio.MatrixRoom(room_id, own_user_id)
     for source in events:
+        # nio's room view acts only on `m.` events, so MindRoom's own state, such as every finished task, is skipped.
+        if not str(source.get("type")).startswith("m."):
+            continue
         event = nio.Event.parse_event(dict(source))
         if isinstance(event, nio.RoomMemberEvent):
             room.handle_membership(event)

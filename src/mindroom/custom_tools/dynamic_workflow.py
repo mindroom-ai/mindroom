@@ -19,6 +19,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_a
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
+from mindroom.config.models import split_model_reference
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
@@ -885,11 +886,12 @@ def _resolve_participant_model_name(
     *,
     default_model: str,
 ) -> str:
+    """Return the participant's model as it runs now, which its run keeps whatever a later reload sets."""
     if raw_model is None:
-        return default_model
+        return _canonical_model_ref(context, default_model)
     model_ref = raw_model.strip()
     if (model_name := _configured_model_name(context, model_ref)) is not None:
-        return model_name
+        return _canonical_model_ref(context, model_name)
     msg = f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
     raise DynamicWorkflowError(msg)
 
@@ -909,15 +911,13 @@ def _validate_workflow_policy_for_context(
     tool_names = [*granted_tools, *(tool for participant in subagents for tool in participant.tools or ())]
     if tool_names:
         _reject_unavailable_workflow_tools(tool_names, config_plugins(context.config, context.runtime_paths).tools)
-    permission_models = _with_budget_substitutes(
-        context,
-        _workflow_permission_model_refs(context, spec.permissions.models or []),
-    )
+    permissions = spec.permissions.models or []
     allowed = _workflow_allowed_tools(context) if subagents else frozenset()
     requests: dict[str, PersonaRequest] = {}
     for participant in spec.participants:
         if isinstance(participant, RoomAgentParticipant):
-            model_name = _runtime_model_name(context, _validate_room_agent_reference_for_context(context, participant))
+            agent_name = _validate_room_agent_reference_for_context(context, participant)
+            model_ref = _canonical_model_ref(context, _runtime_model_name(context, agent_name))
         else:
             request = _participant_request(context, participant, workflow_id=spec.id)
             persona_tools = cast("SubagentPersona", request.persona).tools or ()
@@ -932,31 +932,66 @@ def _validate_workflow_policy_for_context(
             ):
                 raise DynamicWorkflowError(error)
             requests[participant.id] = request
-            model_name = cast("str", request.model)
-        if permission_models and _model_refs(context, model_name).isdisjoint(permission_models):
+            model_ref = cast("str", request.model)
+        if permissions and not (
+            _permissions_admit(context, model_ref, permissions) or _budget_admits(context, model_ref, permissions)
+        ):
             msg = (
-                f"Dynamic Workflow participant model '{model_name}' is not allowed by permissions.models. "
+                f"Dynamic Workflow participant model '{model_ref}' is not allowed by permissions.models. "
                 "Add the model to workflow permissions before running this revision."
             )
             raise DynamicWorkflowError(msg)
     return requests
 
 
-def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
-    """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
-    substitutes = {
-        budget_model(
-            context.config,
-            context.runtime_paths,
-            context.budget_monitor,
-            context.requester_id,
-            model_name,
-            log_fallback=False,
+def _canonical_model_ref(context: ToolRuntimeContext, model_name: str) -> str:
+    """Return the model as it runs now: ``name@level`` for a model with reasoning levels, else its name."""
+    model_config = context.config.models.get(model_name)
+    if model_config is None or model_config.reasoning is None:
+        return model_name
+    return f"{split_model_reference(model_name)[0]}@{model_config.reasoning.default}"
+
+
+def _permissions_admit(context: ToolRuntimeContext, model_ref: str, permissions: list[str]) -> bool:
+    """Return whether a permission admits the canonical ``model_ref``.
+
+    A ``name@level`` permission for a configured ``name`` admits only that exact reference.
+    Any other admits a model at every level: by its name, its provider ID, or another name with the same provider ID.
+    """
+    refs = _model_refs(context, split_model_reference(model_ref)[0])
+    for permission in permissions:
+        name, level = split_model_reference(permission)
+        if level is not None and name in context.config.models:
+            if permission == model_ref:
+                return True
+        elif not refs.isdisjoint(_model_refs(context, _configured_model_name(context, permission) or permission)):
+            return True
+    return False
+
+
+def _budget_admits(context: ToolRuntimeContext, model_ref: str, permissions: list[str]) -> bool:
+    """Return whether ``model_ref`` is the fallback that the caller's budget swaps a permitted model for.
+
+    Only the fallback's canonical reference counts, never another name for it or a provider ID.
+    """
+    budgets = context.config.budgets
+    if budgets is None or model_ref != _canonical_model_ref(context, budgets.fallback_model):
+        return False
+    swapped = partial(
+        budget_model,
+        context.config,
+        context.runtime_paths,
+        context.budget_monitor,
+        context.requester_id,
+        log_fallback=False,
+    )
+    return any(
+        _permissions_admit(context, candidate, permissions) and swapped(candidate) != candidate
+        for name, model_config in context.config.models.items()
+        for candidate in (
+            [f"{name}@{level}" for level in model_config.reasoning.levels] if model_config.reasoning else [name]
         )
-        for model_name in context.config.models
-        if not _model_refs(context, model_name).isdisjoint(model_refs)
-    }
-    return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes))
+    )
 
 
 def _participant_scope(context: ToolRuntimeContext, agent_name: str) -> ModelScope:
@@ -976,15 +1011,6 @@ def _caller_runtime_model_name(context: ToolRuntimeContext) -> str:
     return context.active_model_name or _runtime_model_name(context, context.agent_name)
 
 
-def _workflow_permission_model_refs(context: ToolRuntimeContext, models: list[str]) -> set[str]:
-    refs: set[str] = set()
-    for model_ref in models:
-        refs.add(model_ref)
-        if (model_name := _configured_model_name(context, model_ref)) is not None:
-            refs.update(_model_refs(context, model_name))
-    return refs
-
-
 def _configured_model_name(context: ToolRuntimeContext, model_ref: str) -> str | None:
     """Return the configured model a reference names, by its config name or else by its provider ID."""
     if model_ref in context.config.models:
@@ -996,8 +1022,6 @@ def _configured_model_name(context: ToolRuntimeContext, model_ref: str) -> str |
 
 
 def _model_refs(context: ToolRuntimeContext, model_name: str) -> set[str]:
-    refs = {model_name}
+    """Return the model's name and, when it is configured, its provider ID."""
     model_config = context.config.models.get(model_name)
-    if model_config is not None:
-        refs.add(model_config.id)
-    return refs
+    return {model_name} if model_config is None else {model_name, model_config.id}

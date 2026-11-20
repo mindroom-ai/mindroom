@@ -6,7 +6,9 @@ participation gate, the approval receipt, mid-turn compaction, the run's checkpo
 portable tool search, the tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
 and ``HookTurn`` holds what every run takes from its turn. Every run has the approval receipt hook; the hook adds
-the receipt only to the runs the bound approval continuation names (``mindroom.approval.receipt``).
+the receipt only to the runs the bound approval continuation names (``mindroom.approval.receipt``). Every agent run
+likewise has the hook that publishes a delegated child's usage, which does nothing in any other run
+(``mindroom.delegation.lifecycle.child_usage_hook``).
 
 The loop lets a hook's exception fail the run, so a mistake in a hook the run depends on surfaces. A hook whose
 work a reply can do without catches and logs that work's failures itself: mid-turn compaction sends the request
@@ -16,19 +18,23 @@ a Matrix reaction, or a job acknowledgement that failed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+import time
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom import ai_runtime
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.tools import failed_answer
 from mindroom.approval.receipt import approval_receipt_hook
+from mindroom.delegation.lifecycle import child_usage_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.run_checkpoint import checkpoint_hooks
 from mindroom.history.types import HistoryScope
 from mindroom.llm.provider import DeferredTools
 from mindroom.llm.tool_search import resolve_call_tool_calls
+from mindroom.memory import stamp_entrypoint_snapshot
 from mindroom.participation_hook import participation_hook
 from mindroom.skill_learning.capture import capture_final_request
 from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_hook
@@ -36,9 +42,10 @@ from mindroom.tool_jobs.notices import job_notice_hook
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.agent_loop.model_loop import AnswerToolCalls, BeforeRequestHook
+    from mindroom.agent_loop.model_loop import AnswerToolCalls, BeforeRequestHook, LoopState
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
@@ -62,7 +69,10 @@ class HookTurn:
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
     ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
     member lack. ``checkpoints`` is off for a run that saves no checkpoint: a voice call's, and an approved run's
-    resume, whose paused row is what settles it when it is cut short.
+    resume, whose paused row is what settles it when it is cut short, unless a job runs it as its subagent.
+    ``memory_copy`` is the file of the MEMORY.md copy this turn's system prompt holds
+    (``memory._entrypoint_snapshots``), None for a turn that sends none and for a resume, which may send a copy the
+    file no longer holds.
     """
 
     config: Config
@@ -74,6 +84,7 @@ class HookTurn:
     lifecycle: CompactionLifecycle | None = None
     turn_recorder: TurnRecorder | None = None
     checkpoints: bool = True
+    memory_copy: Path | None = None
 
 
 def agent_loop_hooks(
@@ -90,11 +101,13 @@ def agent_loop_hooks(
     The run compacts as its build's agent, and a top-level agent hears of its ended jobs. ``queued_notices`` is off
     for a team member, whose leader owns the turn's notices; ``steering`` is on for a run that owns its reply, which a
     completed batch then ends for a steering message, and off for a delegated child, whose owner it leaves that to.
-    ``skill_review_capture`` records the run's final request.
+    ``skill_review_capture`` records the run's final request. Every request of a run whose turn sends its
+    conversation's MEMORY.md copy (``turn.memory_copy``) restarts the idle time after which the conversation loads
+    the file again.
     """
     jobs = build.tool_jobs
     agent_name = build.spec.id
-    return _loop_hooks(
+    hooks = _loop_hooks(
         turn,
         model=build.spec.model,
         scope=HistoryScope(kind="agent", scope_id=agent_name),
@@ -110,6 +123,18 @@ def agent_loop_hooks(
         steering=steering,
         skill_review_capture=skill_review_capture,
     )
+    # First, so a delegated child's usage shows before a compaction the request may wait for.
+    hooks = replace(hooks, before_request=(child_usage_hook(turn.config), *hooks.before_request))
+    memory_copy = turn.memory_copy
+    if memory_copy is None:
+        return hooks
+
+    async def stamp_request(_state: LoopState) -> SendRequest:
+        """Stamp the conversation's prompt cache as read now; last, so only for a request that is sent."""
+        await asyncio.to_thread(stamp_entrypoint_snapshot, memory_copy, now=time.time())
+        return SendRequest()
+
+    return replace(hooks, before_request=(*hooks.before_request, stamp_request))
 
 
 def leader_loop_hooks(

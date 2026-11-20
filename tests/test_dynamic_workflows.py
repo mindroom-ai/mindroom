@@ -23,7 +23,7 @@ from mindroom.approval.tool_approval import _matching_tool_approval_rule
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ReasoningConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools, _WorkflowRun
@@ -1665,6 +1665,61 @@ async def test_dynamic_workflow_tool_accepts_any_configured_participant_model(tm
         )
 
     assert result["status"] == "ok", result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("permitted", "participant_model", "allowed"),
+    [
+        ("sol@low", "sol@low", True),
+        ("sol@low", "sol@high", False),
+        ("sol@low", "sol", False),
+        ("sol@high", "sol", True),
+        ("sol", "sol@high", True),
+        ("gpt-6.2-sol", "sol@high", True),
+        ("gpt-6.2-sol", "twin@low", True),
+        ("sol@low", "twin@low", False),
+        ("sol@low", "lookalike", False),
+        ("vendor/model@2026", "dated", True),
+    ],
+)
+async def test_dynamic_workflow_permission_models_keep_a_reasoning_level(
+    tmp_path: Path,
+    permitted: str,
+    participant_model: str,
+    allowed: bool,
+) -> None:
+    """A ``name@level`` permission admits only the model that runs as exactly that reference.
+
+    A model name or provider ID admits every level, and every other name for the same provider ID.
+    """
+    tool = DynamicWorkflowTools()
+    context = _make_context(tmp_path)
+    reasoning = ReasoningConfig(levels=["low", "high"], default="high")
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
+            models={
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
+                "sol": ModelConfig(provider="codex", id="gpt-6.2-sol", reasoning=reasoning),
+                "twin": ModelConfig(provider="codex", id="gpt-6.2-sol", reasoning=reasoning),
+                "lookalike": ModelConfig(provider="openai", id="sol@low"),
+                "dated": ModelConfig(provider="openai", id="vendor/model@2026"),
+            },
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config), active_model_name="default")
+    participant = {"id": "writer", "kind": "subagent", "system_prompt": "P", "model": participant_model, "tools": []}
+
+    with tool_runtime_context(context):
+        result = _tool_payload(
+            await tool.validate_workflow(
+                _workflow_spec(participants=[participant], permissions={"models": [permitted], "tools": []}),
+            ),
+        )
+
+    assert (result["status"] == "ok") is allowed, result
 
 
 @pytest.mark.asyncio

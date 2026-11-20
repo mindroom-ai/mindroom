@@ -1085,7 +1085,7 @@ class TestConsolidatedConfigManager:
     @pytest.mark.parametrize("broker_on", [False, True])
     def test_get_info_offers_the_egress_tool_only_while_the_broker_is_on(self, tmp_path: Path, broker_on: bool) -> None:
         """The tool list and tool details offer egress_credentials only while the egress broker is on."""
-        process_env = {"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}
+        process_env = {"MINDROOM_EGRESS_BROKER_PORT": "8768" if broker_on else "off"}
         runtime_paths = resolve_runtime_paths(config_path=_minimal_config_path(tmp_path), process_env=process_env)
         cm = ConfigManagerTools(runtime_paths)
 
@@ -1629,6 +1629,24 @@ class TestConsolidatedConfigManager:
         cm = _config_manager(config_path)
         result = cm.manage_agent(operation="validate", agent_name="test_agent")
         assert "Invalid tools" not in result
+
+    def test_manage_agent_validate_accepts_a_model_at_one_of_its_levels(self, tmp_path: Path) -> None:
+        """A model reference at a listed reasoning level is a configured model."""
+        config_path = tmp_path / "config.yaml"
+        reasoning = {"levels": ["low", "high"], "default": "low"}
+        config = Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test role", model="sol@high")},
+            models={
+                "default": {"provider": "openai", "id": "m"},
+                "sol": {"provider": "codex", "id": "s", "reasoning": reasoning},
+            },
+        )
+        write_config_yaml(config, config_path)
+
+        result = _config_manager(config_path).manage_agent(operation="validate", agent_name="test_agent")
+
+        assert "Model: sol@high" in result
+        assert "not in configured models" not in result
 
     def test_manage_agent_create_rejects_unknown_knowledge_bases(self, tmp_path: Path) -> None:
         """Create must fail when knowledge base IDs are not configured."""

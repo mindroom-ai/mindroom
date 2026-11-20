@@ -5,15 +5,18 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from functools import partial
+from html import unescape
 from typing import TYPE_CHECKING
 
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
+from mindroom.matrix.thread_forks import fork_parent_thread_id
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import (
     GeneratedSummary,
+    clamp_generated_title,
     generate_summary,
     resolve_thread_summary_model_name,
     room_summary_instructions,
@@ -27,6 +30,7 @@ from mindroom.thread_summary.notices import (
 from mindroom.thread_summary.state import (
     SummaryState,
     TruncatedThreadHistoryError,
+    current_thread_summary,
     human_summary_authorizer,
     load_complete_thread_history,
     summary_state,
@@ -39,12 +43,13 @@ from mindroom.thread_tag_vocabulary import (
 from mindroom.thread_tags import (
     RESOLVED_THREAD_TAG,
     ThreadTagsPermissionError,
-    get_thread_tags,
+    get_thread_tag_content,
+    parse_thread_tag_record,
     set_thread_tags_if_empty,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Sequence
 
     import nio
 
@@ -59,6 +64,74 @@ logger = get_logger(__name__)
 
 # Rooms already warned that their power levels refuse the agent's automatic tags.
 _rooms_refusing_automatic_tags: set[str] = set()
+# Ends every automatic title of a forked thread.
+_FORKED_TITLE_SUFFIX = " (forked)"
+
+
+def _keepable_title(title: str | None, *, retitle: bool) -> str | None:
+    """Return the title a check may keep: one within the short-title rule, never for a retitle."""
+    base = (title or "").removesuffix(_FORKED_TITLE_SUFFIX)
+    return title if base and not retitle and clamp_generated_title(base) == base else None
+
+
+def _title_key(title: str) -> str:
+    """Return a title without what a reader would not call a new title: case, spacing, emoji style, end, fork marker."""
+    key = " ".join(normalize_thread_summary_text(title).replace("\ufe0f", "").casefold().split())
+    return key.rstrip(".!?…。\uff01\uff1f ").removesuffix(_FORKED_TITLE_SUFFIX)
+
+
+def _title_to_deliver(
+    generated: GeneratedSummary,
+    current: str | None,
+    history: Sequence[ResolvedVisibleMessage],
+    thread_id: str,
+) -> str:
+    """Return ``current`` when the model kept it, by its answer or an echo escaped or not, else the new title cut."""
+    echoes = {_title_key(generated.summary), _title_key(unescape(generated.summary))}
+    if current is not None and (generated.keep_current or _title_key(current) in echoes):
+        return current
+    return _publishable_title(generated.summary, history, thread_id)
+
+
+def _publishable_title(title: str, history: Sequence[ResolvedVisibleMessage], thread_id: str) -> str:
+    """Return a new title normalized and cut to the short-title limits, marked once as a fork's when it is one."""
+    base = normalize_thread_summary_text(title)
+    if not base or fork_parent_thread_id(history, thread_id) is None:
+        return clamp_generated_title(base)
+    # The marker is outside the limits, and a fork of a fork stays "X (forked)".
+    return f"{clamp_generated_title(base.removesuffix(_FORKED_TITLE_SUFFIX))}{_FORKED_TITLE_SUFFIX}"
+
+
+async def _provisional_title(
+    prompt_message: ResolvedVisibleMessage | None,
+    history: Sequence[ResolvedVisibleMessage],
+    thread_id: str,
+    *,
+    parent_summary: Callable[[str], Awaitable[SummaryState | None]],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+    room_instructions: Callable[[], Awaitable[str | None]],
+) -> str | None:
+    """Return a new thread's first title: a fork's parent's current title without a model, else its prompt's, if any."""
+    parent_thread_id = fork_parent_thread_id(history, thread_id)
+    parent_state = None if parent_thread_id is None else await parent_summary(parent_thread_id)
+    title = None if parent_state is None else parent_state.summary
+    if title is None:
+        if prompt_message is None:
+            return None
+        generated = await generate_summary(
+            [prompt_message],
+            config,
+            runtime_paths,
+            model_name=model_name,
+            tag_vocabulary=None,
+            room_instructions=await room_instructions(),
+        )
+        if generated is None:
+            return None
+        title = generated.summary
+    return _publishable_title(title, history, thread_id) or None
 
 
 async def _thread_is_resolved(
@@ -72,11 +145,11 @@ async def _thread_is_resolved(
     module: this is a best-effort background read, and the cost of being wrong is
     one summary on a resolved thread. Letting a transport error escape instead
     would abort the pass before it advances the baseline, so a persistently
-    failing room-state read would re-run the full state and history reads on
-    every turn.
+    failing tag read would re-run the tag and history reads on every turn.
     """
     try:
-        tags_state = await get_thread_tags(client, room_id, thread_id)
+        # One state event, not the room's whole state, which a busy room makes large.
+        content = await get_thread_tag_content(client, room_id, thread_id, RESOLVED_THREAD_TAG)
     except Exception as exc:
         # Keep the type and traceback: this catch is broad, and intermittent
         # Matrix failures are otherwise indistinguishable from each other.
@@ -87,7 +160,7 @@ async def _thread_is_resolved(
             error_type=type(exc).__name__,
         )
         return False
-    return tags_state is not None and RESOLVED_THREAD_TAG in tags_state.tags
+    return parse_thread_tag_record(RESOLVED_THREAD_TAG, content) is not None
 
 
 async def _summary_delivery_timestamp(
@@ -329,19 +402,24 @@ async def _countable_thread_history(
         return None
 
 
-async def _sole_untitled_prompt(
+async def _untitled_prompt(
     history: ThreadHistoryResult,
     *,
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
-    prompt_event_id: str,
+    prompt_event_ids: Collection[str],
     config: Config,
     runtime_paths: RuntimePaths,
     trusted_sender_ids: Collection[str],
     authorize_human: Callable[[str], bool],
+    sole: bool,
 ) -> ResolvedVisibleMessage | None:
-    """Return the prompt while it is the only prompt of an untitled, unresolved thread."""
+    """Return the turn's first message in an untitled, unresolved thread; when ``sole``, only while it is the only turn.
+
+    Attachments and the text sent with them are one turn, so ``sole`` means the
+    thread's human messages are exactly ``prompt_event_ids``, all unedited.
+    """
     state = summary_state(
         history,
         thread_id=thread_id,
@@ -355,18 +433,22 @@ async def _sole_untitled_prompt(
     ordinary = [
         message
         for message in state.ordinary_messages
-        if message.event_id == prompt_event_id or not is_managed_entity_id(message.sender, config, runtime_paths)
+        if message.event_id in prompt_event_ids or not is_managed_entity_id(message.sender, config, runtime_paths)
     ]
-    if len(ordinary) != 1 or ordinary[0].event_id != prompt_event_id:
+    prompt_message = next((message for message in ordinary if message.event_id in prompt_event_ids), None)
+    if prompt_message is None:
         return None
-    # An edit keeps the prompt's event ID but changes its text, so the prompt
+    # An edit keeps a message's event ID but changes its text, so the prompt
     # this title would be made from is no longer what the thread shows.
-    if ordinary[0].latest_event_id != prompt_event_id:
+    if sole and (
+        {message.event_id for message in ordinary} != set(prompt_event_ids)
+        or any(message.latest_event_id != message.event_id for message in ordinary)
+    ):
         return None
     # Resolution lives in room state, which a history read cannot see.
     if await _thread_is_resolved(client, room_id, thread_id):
         return None
-    return ordinary[0]
+    return prompt_message
 
 
 async def maybe_generate_prompt_summary(  # noqa: PLR0911
@@ -376,15 +458,17 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    prompt_event_id: str,
+    prompt_event_ids: Collection[str],
     prompt: str | None,
+    prompt_as_shown: bool = False,
     conversation_reader: ConversationReader,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
 ) -> None:
-    """Title a new thread from its prompt without advancing the post-reply schedule.
+    """Title a new thread from its first turn's messages without advancing the post-reply schedule.
 
-    `prompt` is the prompt's text as its turn read it, or None to title the prompt as the thread shows it.
+    ``prompt`` is None for a batch of messages starting a fork: only the parent's title can title it then.
+    It is None too with ``prompt_as_shown``, for a routed prompt whose turn holds no text: the thread's own shows it.
     """
     baselines = schedule.THREAD_SUMMARY_BASELINES
     if (prompt is not None and not prompt.strip()) or not baselines.claim_provisional_title(room_id, thread_id):
@@ -403,6 +487,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 conversation_reader,
                 room_id,
                 thread_id,
+                edits_of=prompt_event_ids,
                 unreadable_is_missing=True,
             )
             if not history.is_full_history:
@@ -416,29 +501,46 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 entity_name,
                 membership_index,
             )
-            sole_untitled_prompt = partial(
-                _sole_untitled_prompt,
+            untitled_prompt = partial(
+                _untitled_prompt,
                 client=client,
                 room_id=room_id,
                 thread_id=thread_id,
-                prompt_event_id=prompt_event_id,
+                prompt_event_ids=prompt_event_ids,
                 config=config,
                 runtime_paths=runtime_paths,
                 trusted_sender_ids=trusted_sender_ids,
                 authorize_human=authorize_human,
+                sole=prompt is not None or prompt_as_shown,
             )
-            if (prompt_message := await sole_untitled_prompt(history)) is None:
+            if (prompt_message := await untitled_prompt(history)) is None:
                 return
             model_name = resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
-            generated = await generate_summary(
-                [prompt_message if prompt is None else replace(prompt_message, body=prompt)],
-                config,
-                runtime_paths,
+            title = await _provisional_title(
+                replace(prompt_message, body=prompt)
+                if prompt is not None
+                else prompt_message
+                if prompt_as_shown
+                else None,
+                history,
+                thread_id,
+                parent_summary=partial(
+                    current_thread_summary,
+                    client,
+                    room_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    conversation_reader=conversation_reader,
+                    entity_name=entity_name,
+                    membership_index=membership_index,
+                    trusted_sender_ids=trusted_sender_ids,
+                ),
+                config=config,
+                runtime_paths=runtime_paths,
                 model_name=model_name,
-                tag_vocabulary=None,
-                room_instructions=await room_summary_instructions(client, room_id),
+                room_instructions=partial(room_summary_instructions, client, room_id),
             )
-            if generated is None:
+            if title is None:
                 return
             # A different runtime can title or pin the thread while the model
             # runs. Keep that title even though this runtime holds its lock.
@@ -446,13 +548,14 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 conversation_reader,
                 room_id,
                 thread_id,
+                edits_of=prompt_event_ids,
                 unreadable_is_missing=True,
             )
             if not history.is_full_history:
                 return
             # Everything that made the thread eligible can change while the model
             # runs: another title or pin, a resolution, or a deleted or edited prompt.
-            if await sole_untitled_prompt(history) is None:
+            if await untitled_prompt(history) is None:
                 return
             # The reply can be delivered while the model runs; its post-reply pass titles the thread instead.
             if baselines.provisional_title_superseded(room_id, thread_id):
@@ -461,7 +564,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 client,
                 room_id,
                 thread_id,
-                generated.summary,
+                title,
                 0,
                 model_name,
                 conversation_reader,
@@ -470,7 +573,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
         logger.exception("Prompt thread summary failed", room_id=room_id, thread_id=thread_id)
 
 
-async def maybe_generate_thread_summary(  # noqa: PLR0911
+async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -554,6 +657,8 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             tag_vocabulary = refreshed_tag_vocabulary or format_tag_vocabulary_with_counts(
                 load_tag_vocabulary_snapshot(runtime_paths, room_id),
             )
+        # A long legacy title is rewritten once; a retitle asks for a new title outright.
+        current_title = _keepable_title(state.summary, retitle=retitle)
         try:
             model_name = resolve_thread_summary_model_name(
                 config,
@@ -568,6 +673,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
                 model_name=model_name,
                 tag_vocabulary=tag_vocabulary,
                 room_instructions=await room_summary_instructions(client, room_id),
+                current_title=current_title,
             )
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
@@ -581,7 +687,14 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             baselines.record(room_id, thread_id, message_count)
             return
 
-        normalized_summary = normalize_thread_summary_text(generated.summary)
+        # A kept title with tags to apply is posted again as it is, so the notice records the tags as done.
+        normalized_summary = _title_to_deliver(generated, current_title, thread_history, thread_id)
+        # The first reply's check posts a kept prompt title again, so its count schedules the tagging refresh.
+        if normalized_summary == current_title and not generated.tags and state.last_summary_count > 0:
+            # Only this process remembers the check, as after a failed generation; a restart checks once more.
+            logger.debug("Keeping the current thread title", room_id=room_id, thread_id=thread_id)
+            baselines.record(room_id, thread_id, message_count)
+            return
         if not normalized_summary:
             logger.warning(
                 "Thread summary generation returned no plain-text content",

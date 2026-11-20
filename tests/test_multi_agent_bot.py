@@ -198,7 +198,10 @@ class TestAgentBot(AgentBotTestBase):
         ingestion_config = login_kwargs["config"]
         assert isinstance(ingestion_config, DurableSyncConfig)
         assert ingestion_config.sync_timeout_ms == 12_345
-        assert ingestion_config.sync_filter == {"room": {"timeline": {"limit": 5000}}}
+        assert ingestion_config.sync_filter == {
+            "presence": {"senders": []},
+            "room": {"timeline": {"limit": 5000}},
+        }
         # The owned ingestion pump is the sole durable source owner. The
         # public client keeps only compatibility callbacks; it must not retain
         # either of the superseded public sync/admission engines.
@@ -207,7 +210,7 @@ class TestAgentBot(AgentBotTestBase):
         assert mock_client.add_event_callback.call_args_list == [
             call(bot._room_lifecycle.on_invite, nio.InviteEvent),
             call(bot._room_lifecycle.on_space_child, nio.RoomSpaceChildEvent),
-            call(bot._on_thread_tag_state, nio.UnknownEvent),
+            call(bot._on_room_state_event, nio.UnknownEvent),
             call(bot.steward_duties.power_levels_event, nio.PowerLevelsEvent),
         ]
         assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member

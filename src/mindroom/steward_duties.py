@@ -21,7 +21,7 @@ from mindroom.hooks import (
     RoomMemberLeftContext,
     emit,
 )
-from mindroom.matrix.room_accounts import reconcile_room_accounts
+from mindroom.matrix.room_accounts import reconcile_room_accounts, reconcile_room_router_binding
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.room_member_joins import (
     RoomMemberJoin,
@@ -72,6 +72,25 @@ async def runs_room_hooks(
     return await orchestrator.event_journal_store().claim_room_event(room_id, event_id, purpose, owner) == agent_name
 
 
+async def room_state_response_as_steward(
+    room_steward: Callable[[str], AgentBot | None],
+    room_id: str,
+    event_type: str,
+    content: dict[str, Any],
+    *,
+    state_key: str | None = "",
+) -> nio.RoomPutStateResponse | nio.RoomPutStateError | None:
+    """Write one state event through the room steward's client and return the homeserver's answer, None without one.
+
+    A ``state_key`` of None is the steward's own Matrix ID, the one such key Matrix lets it write.
+    """
+    steward = room_steward(room_id)
+    if steward is None or steward.client is None:
+        return None
+    key = steward.client.user_id if state_key is None else state_key
+    return await steward.client.room_put_state(room_id, event_type, content, state_key=key)
+
+
 async def put_room_state_as_steward(
     room_steward: Callable[[str], AgentBot | None],
     room_id: str,
@@ -80,23 +99,18 @@ async def put_room_state_as_steward(
     *,
     state_key: str | None = "",
 ) -> bool | None:
-    """Write one state event through the room steward's client and return whether it was written.
+    """Write one state event like `room_state_response_as_steward` and return whether it was written.
 
     None means refused: the room has no steward, or it lacks the power, which only moderator rights can fix.
-    A ``state_key`` of None is the steward's own Matrix ID, the one such key Matrix lets it write.
     """
-    steward = room_steward(room_id)
-    if steward is None or steward.client is None:
-        return None
-    key = steward.client.user_id if state_key is None else state_key
-    response = await steward.client.room_put_state(room_id, event_type, content, state_key=key)
-    if isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN":
+    response = await room_state_response_as_steward(room_steward, room_id, event_type, content, state_key=state_key)
+    if response is None or (isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"):
         return None
     return isinstance(response, nio.RoomPutStateResponse)
 
 
 async def reconcile_held_room_states(runtime: OrchestratorRuntime) -> None:
-    """Reconcile the thread mode and MindRoom accounts of every room a bot holds, each once, through its steward."""
+    """Reconcile the thread mode, MindRoom accounts and binding of every room a bot holds, once, through its steward."""
     bots = runtime.agent_bots.values()
     room_ids = {room_id for bot in bots if bot.client is not None for room_id in bot.client.rooms}
     stewards = ((runtime.room_steward(room_id), room_id) for room_id in room_ids)
@@ -220,7 +234,7 @@ class StewardDuties:
                 return
 
     async def _reconcile_room_state(self, room_id: str) -> bool:
-        """Reconcile one stewarded room's thread mode and MindRoom accounts and return whether both are current."""
+        """Reconcile one stewarded room's thread mode, MindRoom accounts and binding; return whether all are current."""
         runtime = self.deps.runtime
         client = runtime.client
         if client is None or room_id not in client.rooms or not self.is_steward(room_id):
@@ -228,6 +242,7 @@ class StewardDuties:
         current = await asyncio.gather(
             reconcile_room_thread_mode(client, runtime.config, runtime.runtime_paths, room_id),
             reconcile_room_accounts(client, runtime.config, runtime.runtime_paths, room_id),
+            reconcile_room_router_binding(client, runtime.config, runtime.runtime_paths, room_id),
         )
         return all(current)
 

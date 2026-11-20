@@ -11,7 +11,7 @@ import yaml
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, ReasoningConfig
 from mindroom.custom_tools import dynamic_workflow as workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
@@ -686,6 +686,43 @@ async def test_later_step_fails_when_its_named_function_becomes_gated(
     assert run["status"] == "failed", run
     assert "participant 'adder' tool 'calculator.add' requires approval" in run["error"]
     assert workflow.model.offered == [["add"]]
+
+
+@pytest.mark.asyncio
+async def test_a_participant_keeps_the_reasoning_level_it_was_validated_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain model name runs at the default level of the config that validated it, whatever a later reload sets."""
+
+    def config(default: str) -> Config:
+        reasoning = ReasoningConfig(levels=["low", "high"], default=default)
+        loaded = _config()
+        loaded.models["sol"] = ModelConfig(provider="openai", id="sol-model", reasoning=reasoning)
+        return loaded
+
+    workflow = _Workflow(tmp_path, monkeypatch, config("low"))
+    live = [workflow.config]
+    loaded: list[str] = []
+
+    def load_model(*args: object, **_kwargs: object) -> _ChildModel:
+        loaded.append(str(args[2]))
+        live[0] = config("high")
+        return workflow.model
+
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load_model)
+    context = _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity())
+    monkeypatch.setattr(
+        workflow,
+        "context",
+        lambda: tool_runtime_context(replace(context, config_provider=lambda: live[0])),
+    )
+    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": "sol"}
+
+    run = await workflow.run(_spec([participant], steps=2, models=["sol@low"]))
+
+    assert run["status"] == "completed", run
+    assert loaded == ["sol@low", "sol@low"]
 
 
 @pytest.mark.asyncio

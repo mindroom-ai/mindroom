@@ -440,6 +440,8 @@ class TurnIngress:
                 pending_event.notice = None
             return
         mentions_nobody = event.for_another_participant is None
+        # A replay its sender edits again carries something new.
+        self.deps.response_runner.note_edited_source(event.event_id)
         if pending_event.notice is None:
             pending_event.notice = queued_notice_reservation_if_busy(
                 self.deps.response_runner,

@@ -106,7 +106,9 @@ When an agent calls tools, MindRoom shows inline markers in the message text:
 🔧 `web_search` [1]          ← tool call completed
 ```
 
-The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, and result preview for call `[N]`.
+The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, result preview, and `tool_call_id` for call `[N]`.
+A completed call that did not succeed (it errored, was refused or denied, or was cancelled or interrupted) also carries `is_error: true`, and its result preview says why; the key is omitted on a call that succeeded and on a started one, in live frames and the final event alike.
+A secret request card (`io.mindroom.secret_request`) that a reply's tool call posted names that reply's event (`response_event_id`) and the call (`tool_call_id`), so a client can draw the card at the call's line; a call made through the CLI from a Bash call has its own line, which the card names.
 Tools that start in quick succession appear together in one edit.
 Markers and tool-trace metadata are shown by default; to hide them, set `show_tool_calls: false` on one agent or under `defaults` for every agent that leaves it unset (see [Agent Configuration](configuration/agents.md#defaults)).
 With tool calls hidden, the agent still shows typing activity, and a tool that needs an isolated worker may show generic progress such as `Preparing isolated worker... 17s elapsed.` without naming the tool.
@@ -132,6 +134,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 |------|-------|
 | `**[Response cancelled by user]**` | The user stopped the response. |
 | `**[Response interrupted by service restart]**` | MindRoom restarted while the response was being generated; the reply continues below the note once MindRoom is back, or ends there if nothing is left to continue. |
+| `**[Response interrupted: agent restarted to apply a config change]**` | A `config.yaml` edit restarted this agent (for example, its tools changed) while the response was being generated; MindRoom itself kept running, and the reply continues below the note once the agent is back, or ends there if nothing is left to continue. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
 | `**[Response interrupted by an error: <error description>]**` | MindRoom could not finish the reply; the description says why. |
 | `Done.` | The agent finished without writing an answer of its own, for example after tool calls hidden by `show_tool_calls: false` or after a tool posted its answer; those tool calls still ran. |

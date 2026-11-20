@@ -17,6 +17,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_SOURCE_EVENT_ID_KEY,
 )
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, _VoiceNormalizationResult
 from mindroom.routing_judgment import ResponderSelection
@@ -103,6 +104,7 @@ async def test_answering_agent_posts_transcript_before_reply(tmp_path: Path, mon
     assert transcript.target.resolved_thread_id == _THREAD_ROOT
     assert transcript.extra_content is not None
     assert transcript.extra_content[VISIBLE_ROUTER_VOICE_ECHO_KEY] is True
+    assert transcript.extra_content[VOICE_SOURCE_EVENT_ID_KEY] == event.event_id
     assert transcript.extra_content[ORIGINAL_SENDER_KEY] == _SENDER
     assert [request.prompt for request in harness.runner.requests] == [_TRANSCRIPT]
     assert (await harness.turn_store.visible_echo(event.event_id)).event_id == "$sent-1:localhost"

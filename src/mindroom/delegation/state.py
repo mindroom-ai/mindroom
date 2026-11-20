@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 
 from mindroom.history.types import HistoryScope
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -26,6 +27,20 @@ DELEGATION_STATE_KEY = "mindroom_delegation"
 # The functions of the ``delegate`` toolkit, each of which runs one child turn.
 RUN_SUBAGENT = "run_subagent"
 CONTINUE_SUBAGENT = "continue_subagent"
+# What a child turn that a restart cut short is settled with, as failed.
+RESTART_INTERRUPTION_REASON = (
+    "Subagent turn was interrupted by a restart. MindRoom may continue it automatically; if it doesn't, you may be "
+    "able to continue it with a follow-up."
+)
+# LEGACY_COMPAT: restart-settled child turns with the reason that told the reader to send a follow-up.
+# Legacy format: a failed child whose result is this string, which a stopping build writes for the next one to continue.
+# Last legacy release: v2026.11.444; the first release containing this fix writes
+# `RESTART_INTERRUPTION_REASON` instead.
+# Handling: `interrupted_by_restart` reads it as a restart's, so a turn the old build settled on its way down continues.
+# Coverage: tests/test_background_subagent_behavior.py::test_a_subagent_a_release_before_the_upgrade_stopped_still_continues
+_LEGACY_RESTART_INTERRUPTION_REASON = (
+    "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
+)
 DELEGATION_FUNCTIONS = (RUN_SUBAGENT, CONTINUE_SUBAGENT)
 
 
@@ -171,6 +186,15 @@ class DelegationChild:
     # Unix seconds when each of the turn's tool calls that has not completed was first announced, across its pauses,
     # by call id; the caller's progress and the feed's row name it.
     tool_started_at: dict[str, float] = field(default_factory=dict)
+    # LEGACY_COMPAT: Delegation child snapshots stored before a subagent call named a title.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `title`.
+    # Last legacy release: v2026.11.445; the next, still unreleased, release writes it.
+    # Handling: The default reads such a child as untitled, so its rows show its task, as those releases' did. It
+    # stays on the model for the reason above.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # What people watching the run see it as, from the call that started it; follow-ups keep it.
+    title: str = ""
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DelegationChild:
@@ -181,6 +205,19 @@ class DelegationChild:
         fields: dict[str, Any] = dict(data)
         persona = fields.pop("persona")
         return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))
+
+
+def display_title(title: object) -> str:
+    """Return ``title`` on one line of at most 80 characters, redacted before it is cut; anything but text is none."""
+    return redact_sensitive_text(" ".join(title.split()), max_length=80) if isinstance(title, str) and title else ""
+
+
+def interrupted_by_restart(child: DelegationChild) -> bool:
+    """Return whether a restart cut the child's turn short, which only that settlement ends with this reason."""
+    return child.status == "failed" and child.result in (
+        RESTART_INTERRUPTION_REASON,
+        _LEGACY_RESTART_INTERRUPTION_REASON,
+    )
 
 
 def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:

@@ -45,6 +45,7 @@ The [macOS app's local model setup](https://docs.mindroom.chat/installation/maco
 | `context_window` | No | `null` | Provider context window in tokens, at least 1; budgets history replay and compaction (see [Context Window](https://docs.mindroom.chat/configuration/history/#context-window)); a `compaction.model` or `compaction.fallback_model` needs its own value |
 | `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](https://docs.mindroom.chat/budgets/) and [reply costs](https://docs.mindroom.chat/usage/#reply-cost): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price; set `cache_write` for Claude models, whose cache writes cost more than input |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
+| `reasoning` | No | `null` | Reasoning levels the model offers: `levels` (non-empty, no repeats) and `default` (one of `levels`), each one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (see [Reasoning Levels](#reasoning-levels)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
 It may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load; name it `gpt-6-1` instead and set `display_name` to show the dotted name.
@@ -54,7 +55,7 @@ It may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.
 models:
   default:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     display_name: Quick helper
     icon: icons/helper.png
 ```
@@ -82,13 +83,13 @@ models:
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     context_window: 1050000
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-3.8-flash
+    id: gemini-4-hydrogen
     context_window: 1048576
 
   # Anthropic Claude on Vertex AI
@@ -154,7 +155,8 @@ Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces th
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
-Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
+Claude Fable 5.2 uses `claude-fable-5-2` on Anthropic and Vertex AI and `anthropic/claude-fable-5.2` on OpenRouter.
+`bedrock_claude` calls Claude in Amazon Bedrock (the bedrock-mantle endpoint), which does not serve Fable 5.2, so it uses Fable 5.1 as `anthropic.claude-fable-5-1`.
 Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro; the older `deepseek-v4-flash` name is a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 OpenRouter serves the current V4.1 Flash release as `deepseek/deepseek-v4.1-flash-1017`.
@@ -265,14 +267,14 @@ The endpoint must support the selected API.
 models:
   astra:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     api: responses
     extra_kwargs:
       base_url: http://localhost:4000/v1
       reasoning_effort: high
 ```
 
-[GPT-6 Astra, GPT-6.1 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
+[GPT-6.2 Astra, GPT-6.2 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
 Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, Terra, and Luna fail at their default reasoning effort.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
 A reply shows the model's reasoning while it thinks only when the model requests a reasoning summary, with `extra_kwargs.reasoning_summary: auto` or `extra_kwargs.reasoning: {summary: auto}`.
@@ -309,12 +311,12 @@ Model access and usage limits depend on the logged-in ChatGPT account, so check 
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
-| GPT-6.1 Sol | `gpt-6.1-sol` | Near-Astra reasoning for long-running work; the starter default |
-| GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
+| GPT-6.2 Sol | `gpt-6.2-sol` | Near-Astra reasoning for long-running work; the starter default |
+| GPT-6.2 Astra | `gpt-6.2-astra` | The hardest end-to-end reasoning and agentic work |
 | GPT-6.1 Terra | `gpt-6.1-terra` | Fast everyday coding, writing, screenshots, and computer use |
 | GPT-6 Luna | `gpt-6-luna` | Efficient, high-volume work such as summaries and routing |
 
-Older or preview slugs work when the account exposes them, the form `openai-codex/gpt-6.1-sol` is accepted, and the legacy `gpt-5.6` alias maps to `gpt-5.6-sol`.
+Older or preview slugs work when the account exposes them, the form `openai-codex/gpt-6.2-sol` is accepted, and the legacy `gpt-5.6` alias maps to `gpt-5.6-sol`.
 If Codex state lives outside `~/.codex`, set `CODEX_HOME` in the `.env` beside `config.yaml` or the process environment, or `extra_kwargs.codex_home`; `~` prefixes are expanded.
 `mindroom config init --provider codex` generates this config (see [CLI](https://docs.mindroom.chat/cli/)):
 
@@ -322,14 +324,14 @@ If Codex state lives outside `~/.codex`, set `CODEX_HOME` in the `.env` beside `
 models:
   default:
     provider: codex
-    id: gpt-6.1-sol
+    id: gpt-6.2-sol
     display_name: Sol
     context_window: 258000
     extra_kwargs:
       reasoning_effort: medium
   astra:
     provider: codex
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     display_name: Astra
     context_window: 258000
     extra_kwargs:
@@ -350,7 +352,7 @@ defaults:
 ```
 
 Use `258000` as the context window: it fits the Codex window of every model above, which is smaller than the OpenAI API window.
-Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.2 Sol, GPT-6.2 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
 Codex models ask for a reasoning summary (`auto`, as the Codex CLI does) unless `extra_kwargs.reasoning_summary` or `extra_kwargs.reasoning.summary` sets another, so a reply shows the model's reasoning while it thinks.
 Codex clients also offer Ultra for Sol, Astra, and Terra, but Ultra's Codex-managed subagents are not available through MindRoom.
 The provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
@@ -439,7 +441,7 @@ models:
     context_window: 1000000
 ```
 
-Bedrock lists Fable 5.1 and Sonnet 5 as open access, while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
+Bedrock lists Fable 5.1 and Sonnet 5 as open access (Fable 5.2 is served only on the `bedrock-runtime` endpoint, which `bedrock_claude` does not call), while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
 The Bedrock starter config defaults to Opus 5.5 with commented alternatives, so confirm access, or switch to its `fable` alternative or `id: anthropic.claude-sonnet-5`.
 
 ## Ollama Context Size
@@ -517,7 +519,7 @@ A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`
 
 On `deepseek`, `use_thinking`, a boolean that defaults to `true`, runs requests in DeepSeek's thinking mode, where the model reasons before it answers; set it to `false` to answer without thinking.
 An `ollama` model's `think` turns a thinking model's reasoning on (`true`) or off (`false`), or sets its effort (`low`, `medium`, or `high`) on models that take a level; unset leaves the choice to Ollama.
-A `google` or `gemini` model's `search: true` grounds its answers with Google Search, and search with tools needs a Gemini 3 or later model name on the Gemini API, such as `gemini-3.8-flash`: there the agent keeps its tools beside search, while other models, aliases such as `gemini-flash-latest`, and every Vertex AI model use search alone, in place of the agent's tools.
+A `google` or `gemini` model's `search: true` grounds its answers with Google Search, and search with tools needs a Gemini 3 or later model name on the Gemini API, such as `gemini-4-hydrogen`: there the agent keeps its tools beside search, while other models, aliases such as `gemini-flash-latest`, and every Vertex AI model use search alone, in place of the agent's tools.
 
 When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its maximum output on `anthropic`, 128,000 tokens for Claude 5 models, except Claude Sonnet 4.5 and models older than Claude 4.5, which write up to 8,192 tokens, as every model does on `bedrock_claude` and `vertexai_claude`, whose quotas count the requested output when a request starts; set `max_tokens` to choose another limit.
@@ -525,8 +527,8 @@ A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its max
 Some models reject sampling controls:
 
 - Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
-- MindRoom also omits those controls for direct Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
-- [GPT-6 Astra and GPT-6.1 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
+- MindRoom also omits those controls for direct Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
+- [GPT-6.2 Astra and GPT-6.2 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 
 ## Prompt Caching
 
@@ -603,7 +605,7 @@ Before each retry it waits as long as the provider's `Retry-After` or Azure's `r
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
 A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
-A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, that OpenRouter refuses because the key reached its credit limit, or that any provider answers with HTTP `402 Payment Required` is not retried either, and the turn ends with "💳 The AI budget for this MindRoom is used up or its plan has expired (<provider>), so I can't answer right now. Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), then try again." The provider's own message is in the `agent_error` log line.
+A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, that OpenRouter refuses because the key reached its credit limit, or that any provider answers with HTTP `402 Payment Required` is not retried either, and the turn ends with "💳 The AI budget for this MindRoom is used up or its plan has expired (<provider>), so I can't answer right now. Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), then try again." The provider's own message is in the `agent_error` log line, which carries `error_code` `quota_exhausted`.
 
 ## Stalled Streams
 
@@ -631,9 +633,50 @@ models:
     stream_idle_timeout_seconds: 1800  # longest wait for a queued request plus model load
   deep_thinker:
     provider: openrouter
-    id: openai/gpt-6-astra
+    id: openai/gpt-6.2-astra
     stream_idle_timeout_seconds: 0  # never cut off long silent reasoning
 ```
+
+## Reasoning Levels
+
+A `reasoning` block lets one model entry run at several reasoning levels, so `sol` and `sol_high` need not be two entries:
+
+```yaml
+models:
+  sol:
+    provider: codex
+    id: gpt-6.2-sol
+    display_name: Sol
+    reasoning:
+      levels: [low, medium, high, xhigh]  # what clients offer, in this order
+      default: high                       # what plain `sol` runs at
+```
+
+Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
+`sol@high` here is the same as `sol`, and a level the model does not list is an unknown model.
+A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
+`!model list` and the `thread_model` tool's `list_models()` show each model's levels and default.
+
+MindRoom sends the level in the setting the provider reads, and the block wins over the same key in `extra_kwargs`:
+
+| Provider | A level `L` | `off` |
+|----------|-------------|-------|
+| `openai`, `codex`, `azure`, `openrouter`, `llama_cpp`, `kimi` | `reasoning_effort: L` | `reasoning_effort: none` |
+| `zai` | `reasoning_effort: L` | no `off` level |
+| `deepseek` | `reasoning_effort: L`, `use_thinking: true` | `use_thinking: false` |
+| `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L`, and an authored `thinking: {type: disabled}` is dropped | `thinking: {type: disabled}`, and an authored `output_config.effort` is dropped |
+| `google` | `thinking_level: L` | `thinking_budget: 0` |
+| `ollama` | `think: L` | `think: false` |
+
+Write `off` in quotes, as in `levels: ["off", low, high]` or `default: "off"`, because YAML reads a bare `off` as false.
+`groq`, `cerebras`, and `synthetic` take no level, so a `reasoning` block on them fails config load.
+Z.ai has no setting MindRoom can switch thinking off with, so listing `off` for a `zai` model fails config load too; set `extra_kwargs.extra_body.thinking` yourself on a separate model entry.
+MindRoom does not know which levels each model accepts, so list only levels the model supports; a level it rejects fails the reply with the provider's error, like a wrong `extra_kwargs` value.
+For example, Claude 5 models reject disabled thinking, so do not list `off` for them.
+`request_params` and `extra_body` still win over the block.
+
+To replace per-level entries such as `opus` and `opus_high`, add a `reasoning` block to `opus`, point references at `opus@high`, and delete `opus_high`.
+Thread and room overrides that named the deleted entry, or a level later removed from `levels`, are ignored like any override naming a removed model, so room-level model selection applies again.
 
 ## Hot Reload
 
@@ -654,7 +697,7 @@ Users can change that per thread or per room, and the most specific choice wins:
 Thread and room overrides name models from the `models:` section and survive restarts.
 A Matrix client's model picker lists the configured models and changes the thread override like `!model`.
 The picker works in encrypted and unencrypted rooms when at least one agent you may address is joined; teams alone do not qualify.
-It shows each model's key, display name, provider, model ID, and icon, never API keys, hosts, local paths, or `extra_kwargs`.
+It shows each model's key, display name, provider, model ID, icon, and [reasoning levels](#reasoning-levels), never API keys, hosts, local paths, or `extra_kwargs`.
 Catalogs with more than 256 models or over 64 KiB are not offered to the picker; `!model` still works.
 The client protocol is described in [Model Selection Protocol](https://docs.mindroom.chat/architecture/matrix/#model-selection-protocol).
 
@@ -666,6 +709,7 @@ Show or switch the model that the agents and teams you may address, and routing,
 !model
 !model list
 !model opus
+!model sol@high
 !model reset
 ```
 
@@ -712,9 +756,9 @@ agents:
       - thread_model
 ```
 
-- `list_models()` returns every configured model name with its provider and model ID and works outside a thread.
+- `list_models()` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
 - `get_thread_model()` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
-- `switch_thread_model(model_name, when)` accepts a configured model name and rejects unknown names with the available list.
+- `switch_thread_model(model_name, when)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
   `when` is `next-turn` (default), which keeps the current response on its model, or `after-toolcall`, which continues the current response with the new model after the tool call.
 - `reset_thread_model()` removes the thread override so room-level selection applies again.
 

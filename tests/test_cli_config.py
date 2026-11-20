@@ -667,11 +667,14 @@ class TestConfigInit:
         assert "knowledge_bases" not in mind
         assert mind["tools"] == [
             "shell",
+            "coding",
             "memory",
             "scheduler",
             "update_awareness",
-            "todo",
             "matrix_message",
+            {"name": "todo", "defer": True},
+            {"name": "temporary_secrets", "defer": True},
+            {"name": "egress_credentials", "defer": True},
             {"name": "config_manager", "defer": True},
             {"name": "duckduckgo", "defer": True},
             {"name": "website", "defer": True},
@@ -1963,14 +1966,14 @@ class TestConfigInit:
         assert config["models"] == {
             "default": {
                 "provider": "codex",
-                "id": "gpt-6.1-sol",
+                "id": "gpt-6.2-sol",
                 "display_name": "Sol",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},
             },
             "astra": {
                 "provider": "codex",
-                "id": "gpt-6-astra",
+                "id": "gpt-6.2-astra",
                 "display_name": "Astra",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},

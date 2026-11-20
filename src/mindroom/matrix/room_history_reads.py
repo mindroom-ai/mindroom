@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import nio
 from aiohttp import ClientError
-from nio.responses import RoomThreadsResponse
+from nio.responses import Response, RoomThreadsError, RoomThreadsResponse, verify
+from nio.schemas import Schemas
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
@@ -319,6 +321,21 @@ async def missing_outbox_delivery_copy_indices_via_room_messages(
     return missing
 
 
+@dataclass
+class _RoomThreadRootIds(Response):
+    """One /threads page as its roots' event IDs, validated as nio validates the page but with no event built per root."""
+
+    root_ids: list[str]
+    next_batch: str | None
+
+    @classmethod
+    @verify(Schemas.room_get_chunked_messages, RoomThreadsError, pass_arguments=False)
+    def from_dict(cls, parsed_dict: dict[str, Any], room_id: str) -> _RoomThreadRootIds | RoomThreadsError:
+        """Return the page's root event IDs, or nio's error for a page that fails its schema."""
+        del room_id
+        return cls([root["event_id"] for root in parsed_dict["chunk"]], parsed_dict.get("next_batch"))
+
+
 async def get_room_threads_page(
     client: nio.AsyncClient,
     room_id: str,
@@ -327,6 +344,31 @@ async def get_room_threads_page(
     page_token: str | None = None,
 ) -> tuple[list[nio.Event], str | None]:
     """Fetch a single page of thread roots for a room."""
+    response = await _room_threads_page(client, room_id, RoomThreadsResponse, limit=limit, page_token=page_token)
+    return response.thread_roots, response.next_batch
+
+
+async def _thread_root_ids_page(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    limit: int,
+    page_token: str | None = None,
+) -> tuple[list[str], str | None]:
+    """Fetch a single page of a room's thread-root event IDs."""
+    response = await _room_threads_page(client, room_id, _RoomThreadRootIds, limit=limit, page_token=page_token)
+    return response.root_ids, response.next_batch
+
+
+async def _room_threads_page[R: (RoomThreadsResponse, _RoomThreadRootIds)](
+    client: nio.AsyncClient,
+    room_id: str,
+    response_class: type[R],
+    *,
+    limit: int,
+    page_token: str | None,
+) -> R:
+    """Fetch a single /threads page for a room as ``response_class``."""
     if not client.access_token:
         raise RoomThreadsPageError(
             response="Matrix client access token is required for room thread pagination.",
@@ -340,33 +382,29 @@ async def get_room_threads_page(
     )
     try:
         response = await client._send(
-            RoomThreadsResponse,
+            response_class,
             method,
             path,
             response_data=(room_id,),
         )
     except (ClientError, TimeoutError) as exc:
         raise _room_threads_page_error_from_exception(exc) from exc
-    if not isinstance(response, RoomThreadsResponse):
+    if not isinstance(response, response_class):
         raise _room_threads_page_error_from_response(response)
-
-    return response.thread_roots, response.next_batch
+    return response
 
 
 def _append_unique_thread_root_ids(
-    thread_roots: Iterable[nio.Event],
+    page_root_ids: Iterable[str],
     thread_root_ids: list[str],
     seen_thread_root_ids: set[str],
     *,
     max_thread_roots: int,
 ) -> tuple[int, bool]:
-    """Append unseen thread roots up to the cap and report discarded roots."""
+    """Append a page's unseen root IDs up to the cap and report discarded ones."""
     new_root_count = 0
-    for thread_root in thread_roots:
-        thread_root_id = thread_root.event_id
-        if not thread_root_id:
-            continue
-        if thread_root_id in seen_thread_root_ids:
+    for thread_root_id in page_root_ids:
+        if not thread_root_id or thread_root_id in seen_thread_root_ids:
             continue
         if len(thread_root_ids) >= max_thread_roots:
             return new_root_count, True
@@ -395,16 +433,16 @@ async def enumerate_room_thread_root_ids(
     pages_fetched = 0
 
     while True:
-        thread_roots, next_token = await get_room_threads_page(
+        page_root_ids, next_token = await _thread_root_ids_page(
             client,
             room_id,
             limit=page_size,
             page_token=page_token,
         )
         pages_fetched += 1
-        if thread_roots:
+        if page_root_ids:
             new_root_count, discarded_due_to_cap = _append_unique_thread_root_ids(
-                thread_roots,
+                page_root_ids,
                 thread_root_ids,
                 seen_thread_root_ids,
                 max_thread_roots=max_thread_roots,

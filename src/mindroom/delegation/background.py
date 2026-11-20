@@ -7,7 +7,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, interrupted_by_restart
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, JobRecoveryBlockedError, JobSpec
 
@@ -40,7 +40,11 @@ def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
     # A child rebuilt from its saved snapshot has no result, so cleanup must settle it.
     if child.result is None or child.status not in TERMINAL_CHILD_STATUSES:
         return None
-    return delegation_outcome(cast("DelegationTerminalStatus", child.status), child.result)
+    outcome = delegation_outcome(cast("DelegationTerminalStatus", child.status), child.result)
+    if interrupted_by_restart(child):
+        # A turn a restart cut short interrupts its job, which the runtime may continue; any other end is the job's.
+        outcome.status = "interrupted"
+    return outcome
 
 
 async def reconcile_delegation(

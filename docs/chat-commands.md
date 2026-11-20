@@ -23,8 +23,8 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](tools/agent-orchestration.md#background-jobs) |
 | `/desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](tools/desktop.md#desktop) |
 | `/mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](tools/agent-cli.md#mode) |
-| `/model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](configuration/models.md#model) |
-| `/room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](configuration/models.md#room_model) |
+| `/model [name\|name@level\|list\|reset]` | Show or switch the model used in the current thread | [Models](configuration/models.md#model) |
+| `/room_model [name\|name@level\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](configuration/models.md#room_model) |
 | `/thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](configuration/threads.md#thread_mode) |
 | `/reply_mode [auto\|mentions\|reset\|show]` | Show or switch whether agents need a mention to start a conversation in the current room (set/reset require a room admin) | [Threads](configuration/threads.md#reply_mode) |
 | `/auto_approve [<minutes>\|<hours>h\|off]` | Run your tool calls in this thread without approval for a while, or show or end that window | [Tool Approval](tool-approval.md#auto-approve-everything) |
@@ -87,7 +87,7 @@ Otherwise it replies `❌ Config command disabled.` or `❌ Admin only.`
 /config get agents
 /config get agents.analyst.display_name
 /config set agents.analyst.display_name "Research Expert"
-/config set models.default.id gpt-6-astra
+/config set models.default.id gpt-6.2-astra
 /config set defaults.markdown false
 /config set agents.analyst.tools [shell, file]
 ```

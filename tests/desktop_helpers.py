@@ -23,7 +23,7 @@ from mindroom.desktop.bridge import DesktopBridge
 from mindroom.desktop.bridge_session import DesktopBridgeSessionDeps
 from mindroom.desktop.media import upload_encrypted_media
 from mindroom.desktop.protocol import DESKTOP_APP_ACTIONS, DesktopCommand, EncryptedDesktopMedia
-from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProviderError, ScreenCapture
+from mindroom.desktop.provider import DesktopProviderError, ScreenCapture
 from mindroom.desktop.session import DesktopMatrixSession
 from mindroom.desktop.shell import DesktopShell, DesktopShellOutput
 
@@ -183,7 +183,8 @@ class FakeProvider:
     """Record the local operations requested of the GUI provider."""
 
     calls: list[tuple[str, object]] = field(default_factory=list)
-    emergency_stop: bool = False
+    all_apps: bool = False
+    running_apps: list[DesktopApp] = field(default_factory=list)
     screenshot_error: bool = False
     click_error: bool = False
     stale_state: bool = False
@@ -198,17 +199,14 @@ class FakeProvider:
             "accessibility": {"available": True, "backend": "fake"},
         }
 
-    def check_emergency_stop(self) -> None:
-        """Model the pointer fail-safe checked before every browser control call."""
-        self.calls.append(("check_emergency_stop", None))
-        if self.emergency_stop:
-            msg = "Desktop emergency stop engaged; restart the bridge locally before granting control again."
-            raise DesktopEmergencyStopError(msg)
+    def set_all_apps(self, enabled: bool) -> None:
+        """Remember the scope the bridge last gave the provider's own target checks."""
+        self.all_apps = enabled
 
     def list_apps(self) -> list[DesktopApp]:
-        """Return only the configured fake application."""
+        """Return the configured fake application, and with every app in scope the other running ones."""
         self.calls.append(("list_apps", None))
-        return [DesktopApp(APP_ID, "Editor", True)]
+        return [DesktopApp(APP_ID, "Editor", True), *(self.running_apps if self.all_apps else [])]
 
     def launch_app(self, app_id: str) -> None:
         """Record one exact allowlisted application launch."""
@@ -221,7 +219,7 @@ class FakeProvider:
             msg = "App state failed."
             raise AccessibilityError(msg)
         self.state_count += 1
-        return replace(STATE, state_id=f"state-{self.state_count}")
+        return replace(STATE, app_id=app_id, state_id=f"state-{self.state_count}")
 
     def screenshot(self, *, app_id: str, state_id: str) -> ScreenCapture:
         """Record the exact window crop."""
@@ -265,9 +263,6 @@ class FakeProvider:
     def click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
         """Record one normalized fallback click."""
         self.calls.append(("click", (app_id, state_id, x, y, button)))
-        if self.emergency_stop:
-            msg = "Desktop emergency stop engaged; restart the bridge locally before granting control again."
-            raise DesktopEmergencyStopError(msg)
         if self.stale_state:
             msg = "Accessibility state is stale; request get_app_state again before acting."
             raise AccessibilityError(msg)

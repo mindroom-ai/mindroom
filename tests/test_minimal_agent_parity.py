@@ -12,8 +12,10 @@ from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno evalua
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import nio
 import pytest
 import yaml
 from agno.run import RunContext  # noqa: TC002 - injected tool argument
@@ -35,6 +37,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.custom_tools import temporary_secrets
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.knowledge.read_protocol import SearchHit
@@ -43,7 +46,13 @@ from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
-from mindroom.response_turn import apply_exact_approval_decisions
+from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
+from mindroom.response_turn import (
+    CollectedStreamPresentation,
+    apply_exact_approval_decisions,
+    collect_streamed_response_content,
+)
+from mindroom.secret_requests import SECRET_REQUEST_CONTENT_KEY, secret_request_registry
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
@@ -54,7 +63,12 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import answered_calls
-from tests.conftest import install_model_providers, publish_test_plugins
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    install_model_providers,
+    make_matrix_client_mock,
+    publish_test_plugins,
+)
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
@@ -264,7 +278,7 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
         provider = ScriptedProvider()
         ScriptedAgents({"helper": provider, "code": ScriptedModel([answer("child done")] * 2)}).install(monkeypatch)
         for function, initial_arguments in (
-            ("run_subagent", {"agent_name": "code", "task": "work"}),
+            ("run_subagent", {"agent_name": "code", "task": "work", "title": "Do the work"}),
             ("continue_subagent", None),
         ):
             arguments = initial_arguments
@@ -363,6 +377,88 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
 
 def _bash_call(toolkit, function, arguments):
     return [("bash", {"command": json.dumps([toolkit, function, arguments])})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["minimal", "standard"], ids=["minimal-bash", "standard-native-shell"])
+async def test_a_secret_card_asked_through_the_cli_names_the_call_line_the_reply_shows(
+    response_harness,
+    monkeypatch,
+    mode,
+) -> None:
+    """A card a CLI call posts from a shell command names that call's own trace entry and the reply making it.
+
+    Minimal Bash and a standard-mode native shell run `request_temporary_secret` through the CLI owner; the reply's
+    trace shows the inner call on its own line, so the card's `tool_call_id` is that entry's and not the shell's.
+    """
+    h = response_harness
+    h.runtime.config.agents["helper"].tools = ["shell", "temporary_secrets"]
+    client = make_matrix_client_mock(user_id="@mindroom_helper:example.test")
+    client.room_send.return_value = nio.RoomSendResponse("$card:example.test", "!room:example.test")
+    h.runtime = replace(h.runtime, client=client)
+    monkeypatch.setattr(temporary_secrets, "chat_refusal", AsyncMock(return_value=None))
+    persist_entity_accounts(h.runtime.config, h.runtime.runtime_paths)
+    command = json.dumps(["temporary_secrets", "request_temporary_secret", {"name": "TOKEN", "reason": "to deploy"}])
+    shell_call = ("bash", {"command": command}) if mode == "minimal" else ("run_shell_command", {"args": command})
+    h.provider.steps = [[shell_call], "done"]
+    ctx = replace(
+        _turn_context(),
+        agent_mode=mode,
+        run_id=None,
+        prompt="ask for the token",
+        execution_identity=h.runtime.execution_identity,
+        supports_native_tool_approval=True,
+        show_tool_calls=True,
+    )
+    handle = MagicMock(spec=SpanHandle)
+    handle.reply = MagicMock(event_id="$response:example.test")
+    handle.stopped.return_value = False
+
+    def cards() -> list[dict[str, object]]:
+        sent = [call.kwargs["content"] for call in client.room_send.await_args_list]
+        return [
+            content.get("m.new_content", content)
+            for content in sent
+            if "m.new_content" in content or SECRET_REQUEST_CONTENT_KEY in content
+        ]
+
+    token = _current_slot.set(SpanSlot(handle=handle))
+    try:
+        with tool_runtime_context(h.runtime):
+            reply = asyncio.create_task(
+                collect_streamed_response_content(
+                    ai.stream_agent_response(ctx, h.runtime.runtime_paths, h.runtime.config),
+                    presentation=CollectedStreamPresentation(show_tool_calls=True),
+                ),
+            )
+    finally:
+        _current_slot.reset(token)
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        while not cards():
+            assert not reply.done(), reply.result()
+            await asyncio.sleep(0.001)
+    [pending] = cards()
+    secret_request_registry().resolve(pending[SECRET_REQUEST_CONTENT_KEY]["request_id"], "declined")
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        text, trace = await reply
+
+    assert "done" in text
+    shell_name = "bash" if mode == "minimal" else "run_shell_command"
+    [outer] = [entry for entry in trace if entry.tool_name == shell_name]
+    [inner] = [entry for entry in trace if entry.tool_name == "request_temporary_secret"]
+    # Minimal Bash runs the CLI call in the Bash call's window; a native shell in a window of its own.
+    assert (
+        inner.parent_bash_call_id == outer.tool_call_id
+        if mode == "minimal"
+        else inner.parent_bash_call_id.startswith("native-")
+    )
+    assert inner.tool_call_id not in {None, outer.tool_call_id}
+    pending_card, settled_card = cards()
+    assert pending_card[SECRET_REQUEST_CONTENT_KEY]["status"] == "pending"
+    assert settled_card[SECRET_REQUEST_CONTENT_KEY]["status"] == "declined"
+    for card in (pending_card, settled_card):
+        content = card[SECRET_REQUEST_CONTENT_KEY]
+        assert (content["response_event_id"], content["tool_call_id"]) == ("$response:example.test", inner.tool_call_id)
 
 
 @pytest.mark.asyncio

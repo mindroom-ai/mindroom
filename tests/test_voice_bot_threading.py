@@ -21,6 +21,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
+    SUBMISSION_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
@@ -1601,6 +1602,59 @@ async def test_text_only_voice_fallback_drops_sender_supplied_attachment_ids(moc
         thread_id="$thread_root",
     )
     assert ATTACHMENT_IDS_KEY not in dispatched_event.source["content"]
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [{"id": "upload-1", "more": True}, {"id": "upload-1", "more": False}, {"id": 7}, "not-a-marker", None],
+)
+@pytest.mark.asyncio
+async def test_text_only_voice_fallback_keeps_the_submission_marker(mock_home_bot: AgentBot, marker: object) -> None:
+    """The last-resort fallback copies the sender's marker unchanged, and adds none to unmarked voice."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$audio-marked-preparers-fail")
+    if marker is not None:
+        voice_event.source["content"][SUBMISSION_CONTENT_KEY] = marker
+    dispatches: list[tuple[PreparedIngress | nio.RoomMessageText, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
+
+    normalizer = bot._turn_ingress.deps.normalizer
+    with (
+        patch.object(normalizer, "prepare_voice_event", new=AsyncMock(side_effect=RuntimeError("stt failed"))),
+        patch.object(
+            normalizer,
+            "prepare_raw_voice_fallback_event",
+            new=AsyncMock(side_effect=RuntimeError("registration failed")),
+        ),
+        patch.object(
+            TurnDispatcher,
+            "dispatch_turn",
+            new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        ),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+    ):
+        await bot._on_media_message(room, voice_event)
+        await drain_coalescing(bot)
+
+    dispatched_event = _assert_voice_fallback_dispatch(
+        dispatches,
+        source_event_id="$audio-marked-preparers-fail",
+        thread_id="$thread_root",
+    )
+    if marker is None:
+        assert SUBMISSION_CONTENT_KEY not in dispatched_event.source["content"]
+    else:
+        assert dispatched_event.source["content"][SUBMISSION_CONTENT_KEY] == marker
 
 
 @pytest.mark.asyncio

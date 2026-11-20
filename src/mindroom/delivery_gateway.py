@@ -96,6 +96,7 @@ from mindroom.reply_presentation import (
     note_segment,
     render,
     render_body,
+    restart_note,
     with_trailing_note,
 )
 from mindroom.reply_scope import (
@@ -108,6 +109,7 @@ from mindroom.reply_scope import (
     interrupted_end,
     owed_note_write,
     release_decision,
+    replaced_for_config_change,
     suppress_decision,
     terminal_source_decision,
     terminal_write,
@@ -138,6 +140,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.event_journal.replies import Decide, PostCommitEffect
+    from mindroom.history.reply_compactions import ReplyCompactions
     from mindroom.history.types import (
         CompactionLifecycleFailure,
         CompactionLifecycleProgress,
@@ -495,6 +498,8 @@ class StreamingDeliveryRequest:
     show_tool_calls: bool = False
     extra_content: dict[str, Any] | None = None
     tool_trace_collector: list[ToolTraceEntry] | None = None
+    # The automatic compactions the reply runs, which its writes carry.
+    compactions: ReplyCompactions | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
@@ -534,9 +539,14 @@ _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
     MatrixDeliveryFailureKind.ENCRYPTION_GUARD: "encrypted delivery rejected by local trust policy",
     MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE: "room encryption state unknown",
     MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE: "matrix event exceeds the hard size limit",
+    MatrixDeliveryFailureKind.ENCRYPTION_REFUSED: "homeserver refuses encrypted events",
     MatrixDeliveryFailureKind.SEND_EXCEPTION: "matrix delivery raised a local exception",
     MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE: "matrix delivery returned an unexpected response",
 }
+# Refusals no resend can change: the outbox records them as permanent failures instead of retrying.
+_PERMANENT_MATRIX_DELIVERY_FAILURES = frozenset(
+    {MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, MatrixDeliveryFailureKind.ENCRYPTION_REFUSED},
+)
 
 
 def _matrix_delivery_failure_reason(outcome: MatrixSendOutcome) -> str:
@@ -687,7 +697,7 @@ class DeliveryGateway:
         )
         if isinstance(outcome, MatrixDeliveryFailure):
             detail = _matrix_delivery_failure_reason(outcome)
-            if outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+            if outcome.kind in _PERMANENT_MATRIX_DELIVERY_FAILURES:
                 raise PermanentDeliveryError(detail)
             msg = f"Matrix refused {what} for turn {claimed.delivery_id!r} stage {claimed.stage.value!r}: {detail}"
             raise _DeliveryRefusedError(msg)
@@ -1193,14 +1203,19 @@ class DeliveryGateway:
     ) -> str | None:
         """Send one rendered reply row as an edit of the reply's event, or as its create.
 
-        Raises ``ReplyWriteRefusedError`` when the reply's rule writes no row.
+        Raises ``ReplyWriteRefusedError`` when the reply's rule writes no row. A running span's note keeps listing
+        the compactions its answer ran, a running one included, which the client shows as interrupted.
         """
+        extra_content: dict[str, Any] = {constants.STREAM_STATUS_KEY: rendered.stream_status}
+        compactions = write.handle.compactions.content() if write.handle is not None else None
+        if compactions is not None:
+            extra_content[constants.COMPACTIONS_CONTENT_KEY] = compactions
         return await self._send_reply_write(
             write,
             target,
             text=rendered.body,
             tool_trace=list(rendered.tool_trace) or None,
-            extra_content={constants.STREAM_STATUS_KEY: rendered.stream_status},
+            extra_content=extra_content,
             event_id=event_id,
         )
 
@@ -1495,7 +1510,12 @@ class DeliveryGateway:
                 return None
             span = await self.deps.outbox.replies.span(reply.owed_write.span_id)
             assert span is not None, "an owed write names a span of its reply"
-            shown = _with_note(_shown_before(reply, None), note_segment(reply.owed_write.note, reply.owed_write.text))
+            owed = reply.owed_write
+            if owed.note is NoteKind.RESTART:
+                note = restart_note(config_change=replaced_for_config_change(span.bot_generation))
+            else:
+                note = note_segment(owed.note, owed.text)
+            shown = _with_note(_shown_before(reply, None), note)
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
             target = MessageTarget.resolve(room_id=reply.room_id, thread_id=reply.thread_id, reply_to_event_id=None)
@@ -2020,6 +2040,7 @@ class DeliveryGateway:
                 request.extra_content if request.extra_content is not None else {},
             ),
             tool_trace_collector=request.tool_trace_collector,
+            compactions=request.compactions,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
             visible_progress_callback=request.visible_progress_callback,

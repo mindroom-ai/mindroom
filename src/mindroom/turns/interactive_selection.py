@@ -20,6 +20,7 @@ from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_sources import Owned, ResponseSources
+from mindroom.streaming import PROGRESS_PLACEHOLDER
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 
@@ -306,14 +307,14 @@ class InteractiveSelections:
         # is the turn's initial delivery and not its answer. Staging it that way
         # also keeps it from settling the journal source: a placeholder
         # discharges nothing, and a crash before the model finished would
-        # otherwise leave "Processing your response..." in the room with
+        # otherwise leave "Thinking..." in the room with
         # nothing pending to replay.
         ack_event_id, interactive_span_id = await self.deps.visible_responses.deliver_selection_acknowledgement(
             selection_handled_turn,
             target=response_target,
-            response_text=(
-                f"You selected: {selection.selection_key} {selection.selected_label}\n\nProcessing your response..."
-            ),
+            # The answered question card already shows the choice, so this is the
+            # Thinking placeholder every reply starts with.
+            response_text=PROGRESS_PLACEHOLDER,
             delivery_turn_id=source_event_id,
         )
         if not ack_event_id:

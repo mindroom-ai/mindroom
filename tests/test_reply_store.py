@@ -1758,6 +1758,21 @@ async def test_settling_a_replay_without_a_turn_ends_the_reply_it_would_continue
     assert not await _answered(journal_store, "$source")
 
 
+async def test_settling_several_replays_ends_their_replies_in_reply_id_order(journal_store: EventJournalStore) -> None:
+    """Replies ended together are locked and returned in reply-ID order, not in the order they were created."""
+    principal = journal_store.principal(PRINCIPAL)
+    await principal.replies.write_generation("gen-1")
+    for name, now_ns in (("b", 10), ("a", 20)):
+        await admit(principal, f"${name}")
+        request = _request(f"span-{name}", reply_id=f"reply-{name}", source=f"${name}")
+        await principal.replies.claim(replace(request, now_ns=now_ns))
+        await _pending_turn(journal_store, f"${name}")
+    await principal.replies.write_generation("gen-2")
+    assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 2
+
+    assert await principal.settle_many(("$b", "$a")) == ("reply-a", "reply-b")
+
+
 async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_store: EventJournalStore) -> None:
     """While the placeholder's send is unresolved the replay keeps its sources; once sent, both settle together."""
     principal = journal_store.principal(PRINCIPAL)

@@ -14,7 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.model_selection_scope import validate_model_picker_scope
+from mindroom.model_selection_scope import ModelPickerScope, validate_model_picker_scope
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.test_conversation_hydration import encrypted
 
@@ -94,7 +94,7 @@ async def test_scope_requires_actual_joined_authorized_agent(tmp_path: Path) -> 
         requester_user_id=USER,
         thread_id="$root",
     )
-    assert scope is not None
+    assert isinstance(scope, ModelPickerScope)
     assert scope.agent_user_ids == (agent,)
     assert scope.entity_names == ("helper",)
     client.joined_members.return_value = joined_response(USER, router)
@@ -108,7 +108,7 @@ async def test_scope_requires_actual_joined_authorized_agent(tmp_path: Path) -> 
             requester_user_id=USER,
             thread_id="$root",
         )
-        is None
+        == "no_addressable_agent"
     )
 
 
@@ -153,34 +153,40 @@ async def test_scope_reads_a_member_list_refused_for_a_membership_change_again(t
         thread_id="$root",
     )
 
-    assert scope is not None
+    assert isinstance(scope, ModelPickerScope)
     assert scope.agent_user_ids == (agent,)
 
 
 @pytest.mark.parametrize(
-    "root",
+    ("root", "reason"),
     [
-        root_event(room_id="!foreign:localhost"),
-        root_event(event_id="$wrong"),
-        root_event(
-            content={
-                "msgtype": "m.text",
-                "body": "Child",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$parent"},
-            },
+        (root_event(room_id="!foreign:localhost"), "thread_root_unreadable"),
+        (root_event(event_id="$wrong"), "thread_root_unreadable"),
+        (
+            root_event(
+                content={
+                    "msgtype": "m.text",
+                    "body": "Child",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$parent"},
+                },
+            ),
+            "not_thread_root",
         ),
-        root_event(
-            content={
-                "msgtype": "m.text",
-                "body": "Edit",
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$parent"},
-            },
+        (
+            root_event(
+                content={
+                    "msgtype": "m.text",
+                    "body": "Edit",
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$parent"},
+                },
+            ),
+            "not_thread_root",
         ),
-        root_event(content={}, unsigned={"redacted_because": {}}),
+        (root_event(content={}, unsigned={"redacted_because": {}}), "thread_root_unreadable"),
     ],
 )
 @pytest.mark.asyncio
-async def test_invalid_root_cannot_grant_scope(tmp_path: Path, root: nio.Event) -> None:
+async def test_invalid_root_cannot_grant_scope(tmp_path: Path, root: nio.Event, reason: str) -> None:
     """A native thread relation shortcut cannot prove the referenced root."""
     client, config, paths, index, _, _ = picker_setup(tmp_path)
     client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(root.source)
@@ -194,7 +200,7 @@ async def test_invalid_root_cannot_grant_scope(tmp_path: Path, root: nio.Event) 
             requester_user_id=USER,
             thread_id="$root",
         )
-        is None
+        == reason
     )
 
 
@@ -218,7 +224,7 @@ async def test_membership_loss_during_root_fetch_denies_scope(tmp_path: Path) ->
             requester_user_id=USER,
             thread_id="$root",
         )
-        is None
+        == "not_joined"
     )
 
 
@@ -239,7 +245,7 @@ async def test_missing_joined_member_denies_scope(tmp_path: Path, absent: str) -
             requester_user_id=USER,
             thread_id=None,
         )
-        is None
+        == "not_joined"
     )
 
 
@@ -258,7 +264,7 @@ async def test_joined_but_unauthorized_agent_does_not_grant_scope(tmp_path: Path
             requester_user_id=USER,
             thread_id="$root",
         )
-        is None
+        == "no_addressable_agent"
     )
 
 
@@ -296,4 +302,8 @@ async def test_encrypted_root_proof_uses_only_readable_content(tmp_path: Path, d
         requester_user_id=USER,
         thread_id="$root",
     )
-    assert (scope is not None) == (decrypted == "root")
+    expected = {"child": "not_thread_root", "foreign": "thread_root_unreadable", "unreadable": "thread_root_unreadable"}
+    if decrypted == "root":
+        assert isinstance(scope, ModelPickerScope)
+    else:
+        assert scope == expected[decrypted]

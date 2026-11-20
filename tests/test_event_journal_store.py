@@ -61,8 +61,10 @@ from mindroom.event_journal import (
     approval_arguments_digest,
     delivery_transaction_id,
     journal,
+    outbox,
     reads,
     replacement_target,
+    reply_messages,
     room_claims,
     sqlite_backend,
     turn_rows,
@@ -9619,6 +9621,14 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "db.example" not in rendered
 
 
+def _plan_database(path: Path) -> sqlite3.Connection:
+    """Return an empty SQLite journal schema to ask for query plans."""
+    database = sqlite3.connect(path)
+    for statement in schema_statements(SQLITE_DIALECT):
+        database.execute(statement)
+    return database
+
+
 class TestHotQueriesAreIndexCovered:
     """Every scan a running bot repeats must come from an index, ordering included."""
 
@@ -9694,9 +9704,7 @@ class TestHotQueriesAreIndexCovered:
 
     async def test_no_hot_query_falls_back_to_a_scan_or_a_temporary_sort(self, tmp_path: Path) -> None:
         """No hot query falls back to a table scan or a temporary sort."""
-        database = sqlite3.connect(tmp_path / "plans.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "plans.db")
 
         offenders = {}
         for name, sql in self._QUERIES.items():
@@ -9730,9 +9738,7 @@ class TestHotQueriesAreIndexCovered:
         appears nowhere in it, which is what makes this assertion fail the
         moment the spelling drifts back.
         """
-        database = sqlite3.connect(tmp_path / "cursor-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "cursor-plan.db")
         sql = self._QUERIES["projection page after a cursor"]
 
         plan = " | ".join(
@@ -9748,9 +9754,7 @@ class TestHotQueriesAreIndexCovered:
         sources joined that way are built for every principal, with an automatic
         index over them, on each page that has a pending row.
         """
-        database = sqlite3.connect(tmp_path / "pending-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "pending-plan.db")
         plans: list[str] = []
 
         class _PlanRecorder:
@@ -9782,9 +9786,7 @@ class TestHotQueriesAreIndexCovered:
         value in the window to size it, which is the cost sizing exists to
         avoid. ``octet_length`` marks its column read as length-only.
         """
-        database = sqlite3.connect(tmp_path / "size-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "size-plan.db")
         sql = (
             f"SELECT {reads._PAGE_SIZE_COLUMNS} FROM visible_messages "  # noqa: S608 - the production columns, not input
             "WHERE principal_id=? AND room_id=? AND thread_id=? "
@@ -9795,11 +9797,88 @@ class TestHotQueriesAreIndexCovered:
 
         assert _SQLITE_BYTE_LENGTH_ONLY_COLUMN_READ in column_reads, column_reads
 
+    async def test_a_thread_fingerprint_seeks_the_thread_instead_of_walking_the_room(self, tmp_path: Path) -> None:
+        """Each read of a thread's fingerprint is entered on the thread or the root's ID, never on the room alone.
+
+        A plan entered on the primary key's room prefix and filtered down to the thread, which ordering the rows by
+        `logical_event_id` makes SQLite choose, still says SEARCH, so the scan and temporary sort test passes while
+        every export pass reads the whole room once per thread. The thread's rows also come from an index alone: a
+        table row of a long message spills into overflow pages, which SQLite walks to reach `refresh_token`.
+        """
+        database = _plan_database(tmp_path / "fingerprint-plan.db")
+        steps: list[str] = []
+
+        class _PlanRecorder:
+            def _plan(self, sql: str, params: Sequence[object]) -> None:
+                rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
+                steps.extend(row[-1] for row in rows)
+
+            def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object]:
+                self._plan(sql, params)
+                # A standing hydration marker, so the thread's rows are read too.
+                return {
+                    "hydrated_epoch": 1,
+                    "current_epoch": 1,
+                    "walk_version": reads._THREAD_WALK_VERSION,
+                    "recovery_state": None,
+                    "complete": 1,
+                    "attempted_policy_rank": 1,
+                }
+
+            def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
+                self._plan(sql, params)
+                return ()
+
+        reads.thread_fingerprint(cast("Transaction", _PlanRecorder()), "principal", room_id=ROOM, thread_id="$t")
+
+        visible = [step for step in steps if "visible_messages" in step]
+        assert any("thread_id=?" in step for step in visible), steps
+        assert any("logical_event_id=?" in step for step in visible), steps
+        assert all("thread_id=?" in step or "logical_event_id=?" in step for step in visible), steps
+        assert any("COVERING INDEX" in step and "thread_id=?" in step for step in visible), steps
+        assert not any(marker in step for step in steps for marker in ("SCAN ", "TEMP B-TREE")), steps
+
+    async def test_per_event_lookups_seek_their_own_column_instead_of_walking_the_room(self, tmp_path: Path) -> None:
+        """Each lookup the journal writer runs per event is entered on the column it matches, not the room prefix.
+
+        Entered on the room or principal prefix alone, the plan still says SEARCH while every call reads each row of
+        the room, payload included.
+        """
+        database = _plan_database(tmp_path / "lookup-plan.db")
+        steps: list[str] = []
+
+        class _PlanRecorder:
+            def fetchone(self, sql: str, params: Sequence[object] = ()) -> None:
+                self.fetchall(sql, params)
+
+            def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
+                rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
+                steps.append(" | ".join(row[-1] for row in rows))
+                return ()
+
+        recorder = cast("Transaction", _PlanRecorder())
+        principal = "agent@@agent:example.org"
+        outbox.event_belongs_to_membership(
+            recorder,
+            principal,
+            room_id=ROOM,
+            event_id="$echo",
+            membership_epoch=1,
+            sender="@agent:example.org",
+            transaction_id="txn",
+        )
+        outbox.has_attempted_unacknowledged_prompt_delivery(recorder, principal, room_id=ROOM, membership_epoch=1)
+        reply_messages.event_ids_of_spans(recorder, principal, ROOM, ("span-1", "span-2"))
+        reply_messages.waiting_to_replay(recorder, principal, ("$a", "$b"))
+
+        columns = ("acknowledged_event_id=?", "transaction_id=?", "membership_epoch=?", "current_span_id=?", "state=?")
+        assert len(steps) == len(columns), steps
+        for column, plan in zip(columns, steps, strict=True):
+            assert column in plan, plan
+
     async def test_room_activity_titles_load_by_primary_key(self, tmp_path: Path) -> None:
         """Roots and summary notices are loaded by their IDs, not by walking the room's index to find them."""
-        database = sqlite3.connect(tmp_path / "summary-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "summary-plan.db")
         sql = reads._rows_by_id_sql(3)
 
         plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?")))
@@ -9814,9 +9893,7 @@ class TestHotQueriesAreIndexCovered:
         writer every bot shares. Entered on the primary key's room prefix alone,
         the plan still says SEARCH, so it has to name `edit_event_id`.
         """
-        database = sqlite3.connect(tmp_path / "redaction-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "redaction-plan.db")
         sql = "UPDATE unresolved_edits SET content_json = '{}' WHERE principal_id=? AND room_id=? AND edit_event_id=?"
 
         plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x", "x", "x")))
@@ -9825,9 +9902,7 @@ class TestHotQueriesAreIndexCovered:
 
     async def test_a_redaction_deletes_its_questions_through_their_revision(self, tmp_path: Path) -> None:
         """A redaction finds the questions of the revision it deletes by that revision, not by every question held."""
-        database = sqlite3.connect(tmp_path / "question-plan.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
+        database = _plan_database(tmp_path / "question-plan.db")
         sql = "DELETE FROM interactive_questions WHERE principal_id=? AND room_id=? AND revision_event_id=?"
 
         plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x", "x", "x")))

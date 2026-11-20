@@ -39,12 +39,14 @@ if TYPE_CHECKING:
     from mindroom.event_journal import PrincipalStore
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.thread_export.execution import ExportedThreads
     from mindroom.thread_export.models import ThreadExportGroup, ThreadExportStats
 
 logger = get_logger(__name__)
 
 _WORKSPACE_EXPORT_DIRNAME = "thread_exports"
-_DEBOUNCE_SECONDS = 2.0
+# Long enough that a busy room is not re-exported every few seconds with nearly all of its threads unchanged.
+_DEBOUNCE_SECONDS = 60.0
 
 
 class _ThreadExportBot(Protocol):
@@ -104,9 +106,11 @@ class WorkspaceThreadExportRunner:
         self._wakeup = asyncio.Event()
         self._loop = SupervisedLoop("thread_export_workspace_sync", self._run)
         self._manual_exports: set[asyncio.Task[object]] = set()
+        # What earlier passes wrote, per agent.
+        self._exported: dict[str, ExportedThreads] = {}
 
     async def sync(self, config: Config) -> None:  # noqa: ARG002 - each pass reads the active config
-        """Start the loop, and reconcile every workspace against a changed config right away.
+        """Start the loop, and queue a pass that reconciles every workspace against a changed config.
 
         The first sync, from startup maintenance, finds the startup pass already queued once bots ran, so only later syncs queue one.
         """
@@ -310,6 +314,7 @@ class WorkspaceThreadExportRunner:
                     agent_targets,
                     config,
                     membership_index=self._deps.agent_reply_memberships,
+                    exported=self._exported.setdefault(agent_name, {}),
                 ),
             )
         stats = await export_threads_to_sources(
@@ -354,6 +359,7 @@ def _source_for_bot(
     config: Config,
     *,
     membership_index: AgentReplyMembershipIndex,
+    exported: ExportedThreads | None = None,
 ) -> ThreadExportSource:
     """Read ``rooms`` through one running bot's client and projection view."""
     client = bot.client
@@ -370,6 +376,7 @@ def _source_for_bot(
         entity_name=bot.agent_name,
         membership_index=membership_index,
         target_output_dirs=None if targets is None else tuple(target.output_dir for target in targets),
+        exported=exported,
     )
 
 

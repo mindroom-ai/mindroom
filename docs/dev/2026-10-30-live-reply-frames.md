@@ -26,8 +26,14 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Every durable write of a reply that sent frames carries `io.mindroom.live_checkpoint: {sid, seq}`, the last frame it covers.
   Publisher ids start with zero-padded start milliseconds, so `(sid, seq)` orders live state across a restart.
   Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
-  Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
-- A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
+  Checkpoints never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
+  Without frames (no relay, switched off, or stopped), progress edits carry the reasoning so far, fitted to an ordinary edit, so the reply keeps its thinking dropdown.
+- Frames cut each tool entry's `args_preview` and `result_preview` to 200 characters (ending in `…`), and a snapshot that still does not fit the 60,000-byte limit (encrypted size in an encrypted room) leaves out the previews of the fewest oldest entries that make it fit (oldest first, up to all of them), and `progress` is untouched.
+  An entry that lost any preview carries `clipped: true`; the durable trace keeps the whole previews, which Chat shows once the reply ends.
+  A result that is a background job handle (`{job_id, tool, status}`) keeps that handle, since Chat reads it for the call's status.
+  Only a snapshot widens that cut, every 5 s or when a delta would not fit, so fitting never strips previews from earlier entries in a delta.
+  Before this, whole traces stopped frames 17 times in production on 2026-11-17 (one reply: 61 calls, a 48 KB trace).
+- A frame too large to send even so, as when its Markdown and reasoning alone pass the limit, stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
 - Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms, segments}` (sidecar-only for large messages).
   Its duration runs from the start of each reasoning segment to the model's next output.
   OpenAI's Responses API streams a reasoning summary in parts, the first well after the model began reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
@@ -59,6 +65,7 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Sync: `{type, content, sender, origin_server_ts}` in `rooms.join.*.ephemeral.events`, never on initial sync, only after `since`; clients take the room from the enclosing sync room.
 - Frame: `{"v": 1, "reply", "sid", "seq", "snapshot": {md, reasoning, tools, status, activity}}` or the same with `"delta"`, whose `md` and `reasoning` are splices `{at, del, ins, len}` in UTF-16 code units, `tools` is `{len, set: [[index, entry]]}`, and `status`/`activity` are new values.
   A snapshot also carries `segments: [{start, after_tool}]`, where each reasoning segment begins (`start` in UTF-16 code units into `reasoning`), and a delta carries the whole list only when it changed; old clients ignore the key.
+  A snapshot also carries `compactions`, the reply's `io.mindroom.compactions` entries in start order (the reply keeps only its newest 8, fewer when they exceed 8 KiB of JSON), and a delta carries the whole list only when it changed; old clients ignore the key.
   `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
 - Cadence: a frame per 100 ms tick when something changed, one send in flight, a snapshot first, after a failed send, and every 5 s.
 
@@ -83,7 +90,13 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
   - `agent`: the sub-agent's name; `model`: the model it runs on, which follows a switch during the run, as the `model` object of `io.mindroom.ai_run` (`config`, the configured model key such as `default`, plus `display_name`, `id`, and `provider` when known); `subagent`: the sub-agent this run is a turn of, the delegation ID of its first turn (equal to `run` for a first turn); `caller`: the agent or sub-agent that delegated to it; `root`: the agent in the room whose turn started the chain (equal to `caller` for a direct child); `parent`: the delegation ID of the run (the turn) that delegated to it, or `null`.
   - `thread_id`: the Matrix thread the chain belongs to, or `null`; `source`: `"delegate"` or `"workflow"`.
   - `status`: one of the statuses below; `started_at`: Unix seconds; `ended_at`: Unix seconds once the run ended, else `null`.
-  - A snapshot's `meta` also carries `task` (at most 1,000 characters) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
+  - `usage`: what the run has used so far, as `input_tokens`, the whole prompts with cache reads and writes included on every provider, and `output_tokens`, both summed over the run's model requests that ended, `tool_calls`, every call the run started, the ones whose rows the caps removed included, and `cost_usd`, those tokens at the deployment's prices, left out when none of them is of a priced model.
+    The tokens include what the turn's earlier runs used, before a pause or a restart, and leave out what the run's own sub-agents used, as the cost does.
+    A request's tokens are added once the tool calls it made have ended, the last request's at the run's end, however it ends, and they are zero until then.
+    Known limit: a call denied at an approval never completes, so a later call that reuses its ID is not counted in `tool_calls`.
+    New usage alone sends no frame; it goes out with the run's next frame, the 10-second snapshot at the latest.
+    Old clients ignore the key, and a client must show a frame without it.
+  - A snapshot's `meta` also carries `task` (at most 1,000 characters), `title` (one line of at most 80 characters, which the `run_subagent` call that started the sub-agent named and its follow-ups keep; absent when it named none) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
     Deltas carry neither, so a client keeps them from the snapshot.
 - Documents: text items are concatenated as the Markdown of `md`.
   Each tool call adds the marker line a reply shows for it (`🔧 \`name\` [n] ⏳`, with the hourglass replaced by the finished form once the call completes), numbered from 1 by its entry in `tools`, in order of appearance.
@@ -94,12 +107,17 @@ A run's frames have a reply frame's structure, so one delta format serves both: 
 - `docs.status` is `"streaming"` while `meta.status` is `running` or `awaiting_approval`, and `"pending"` otherwise, so a client takes the run's state from `meta.status`.
 - Statuses: `running` from the first frame, and again after an approval or a pause; `awaiting_approval` while the child waits for the person to decide its gated calls, as a background job child does through its job's cards; `paused` when the child stopped on an approval its parent's reply owns, until it resumes as `running`; `completed`, `failed`, `cancelled`, and `denied` end the run.
   An attempt that settled no outcome ends as `cancelled` when it was cancelled and as `failed` otherwise, with the reason as `result`.
+  A turn a restart, shutdown, or event-loop teardown cut short ends `failed` with `interrupted_by_restart: true` in its `meta`, published as the attempt exits and not read from `result`, because its job may continue it with a later turn; any other run has no such key.
+  Known limit: the frame goes out before the turn is settled, so a turn whose settlement then finds a completed stored run still shows as interrupted, where earlier releases showed it cancelled.
+  Known limit: the key rides only on the terminal frame the live feed emits, so a turn a crash cut short keeps the frames it had, as no feed outlives the process.
   A run's last frame is a snapshot of its end, and `ended_at` is set from then on.
 - Caps: the transcript's text is cut to its newest 5,000 characters once it passes 6,000, so the frames after a cut are appends again until the next cut; at most the 20 newest tool rows; `args_preview` and `result_preview` at 300 characters, with `truncated: true` on a row whose preview was cut.
   Text and previews are redacted before any cut, so a secret is masked whole.
   How many older items the caps removed is not part of the frame.
 - Size: a frame must fit the 60,000-byte limit as nio sends it (compact JSON with ASCII escapes, so a character outside ASCII takes 6 bytes; in an encrypted room the Megolm ciphertext, padding, base64, and envelope are counted as well).
   A snapshot that does not fit drops the tool previews first, then cuts the oldest text from the front by the least that fits.
+  A snapshot that would fit with its previews without the usage in `meta` keeps both and cuts that much of the oldest text.
+  Known limit: a snapshot with too little text to cut, such as one of tool rows alone, drops its previews when the usage pushes it over the limit; the tool names stay.
   A fitted frame is always a snapshot, and later deltas keep its fit, so they stay appends.
   A delta that does not fit is replaced by a fitted snapshot.
 - A frame never carries an empty delta: when only `meta` changed, such as a status, the frame is a snapshot.

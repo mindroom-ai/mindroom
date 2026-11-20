@@ -24,6 +24,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan, configured_entity_names
 from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.slack.integration import bound_slack_runtime
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, install_bots, published_config_load, swap_fleet_bot
 from tests.identity_helpers import persist_entity_accounts
@@ -1018,8 +1019,9 @@ async def test_update_config_removes_and_stops_entities_before_publishing_and_sy
         # Its approval settlement failed once, so the reload settles it again once the removal is published.
         return set(entity_names)
 
-    async def stop(entity_names: set[str]) -> None:
-        record(f"stop:{','.join(sorted(entity_names))}")
+    async def stop(entity_names: set[str], *, intent: RuntimeShutdownIntent = SYNC_RESTART_SHUTDOWN) -> None:
+        # The entities the config edit changed restart as a config reload; a catalog refresh's do not.
+        record(f"{'reload' if intent.config_reload else 'stop'}:{','.join(sorted(entity_names))}")
 
     async def reconcile_unavailable(entity_names: set[str]) -> None:
         record(f"settle:{','.join(sorted(entity_names))}")
@@ -1043,7 +1045,7 @@ async def test_update_config_removes_and_stops_entities_before_publishing_and_sy
     ):
         assert await orchestrator.config_reload._update_config() is True
 
-    assert events[:4] == ["remove:plain@old", "stop:code@old", "settle:plain@new", "mcp@new"]
+    assert events[:4] == ["remove:plain@old", "reload:code@old", "settle:plain@new", "mcp@new"]
     mock_start.assert_awaited_once_with({"code"})
 
 
@@ -1092,7 +1094,7 @@ async def test_reload_restarts_refreshed_mcp_dependents_inline_only_after_a_drai
     code_bot = orchestrator.agent_bots["code"]
     plain_bot = orchestrator.agent_bots["plain"]
 
-    async def stop(names: set[str]) -> None:
+    async def stop(names: set[str], **_intent: RuntimeShutdownIntent) -> None:
         for name in names:
             swap_fleet_bot(orchestrator, name, None)
 
@@ -1110,6 +1112,8 @@ async def test_reload_restarts_refreshed_mcp_dependents_inline_only_after_a_drai
     assert orchestrator.config is new_config
     plain_bot.apply_published_config.assert_called_once_with()
     code_bot.apply_published_config.assert_called_once_with()
+    # A catalog refresh replaces its dependents with the intent no config edit carries.
+    assert mock_stop.await_args.kwargs == {}
     if plan_requires_drain:
         mock_notify.assert_not_awaited()
         assert mock_stop.await_args.args[0] == {"code", "dev_team"}

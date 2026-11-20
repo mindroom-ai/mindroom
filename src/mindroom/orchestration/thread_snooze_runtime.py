@@ -11,6 +11,7 @@ import nio
 from mindroom.background_tasks import SupervisedLoop
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id
+from mindroom.room_reply_modes import seed_room_reply_mode
 from mindroom.room_steward import room_poster, room_steward
 from mindroom.thread_snooze import (
     SNOOZE_RETRY_DELAY,
@@ -135,6 +136,8 @@ class ThreadSnoozeRuntimeCoordinator:
                     parsed = self._parse_state_event(room_id, event)
                     if parsed is not None and parsed[0] not in live_roots:
                         self._apply_state_event(room_id, parsed)
+                # The same read gives the room's reply mode setting, which plugins read before any turn does.
+                seed_room_reply_mode(self.runtime_paths, room_id, response.events)
                 self._restored_rooms.add(room_id)
             except asyncio.CancelledError:
                 raise

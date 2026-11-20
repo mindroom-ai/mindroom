@@ -33,7 +33,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
-from mindroom.room_reply_modes import set_room_reply_mode_override
+from mindroom.room_reply_modes import observe_room_settings_event
 from tests.authorization_helpers import (
     isolated_membership_index,
     make_test_command_handler_context,
@@ -959,7 +959,8 @@ async def test_untargeted_command_goes_to_lowest_id_candidate_without_model_call
 @pytest.mark.asyncio
 async def test_untargeted_command_answers_in_mentions_reply_mode(config: Config) -> None:
     """A command addresses MindRoom itself, so a room that answers only mentions still answers it."""
-    set_room_reply_mode_override(runtime_paths_for(config), room_id=_ROOM_ID, mode="mentions")
+    setting = {"type": "io.mindroom.room_settings", "state_key": "reply_mode", "content": {"value": "mentions"}}
+    assert observe_room_settings_event(runtime_paths_for(config), _ROOM_ID, setting)
 
     assert await _command_owners(config, "!help", _shared_room(config, "general", "research")) == ["general"]
 

@@ -233,13 +233,13 @@ async def _entrypoint_preamble(
     preamble = "\n".join(part for part in (body, _render_truncation_notice(entrypoint, config)) if part)
     if conversation is None or entrypoint.source_path is None:
         return preamble
-    return stable_entrypoint_preamble(
-        agent_name,
+    return await asyncio.to_thread(
+        stable_entrypoint_preamble,
         conversation,
         entrypoint.source_path,
         body,
         preamble,
-        now=time.monotonic(),
+        now=time.time(),
     )
 
 
@@ -258,7 +258,14 @@ async def conversation_entrypoint_preamble(
     """
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return ""
-    return await _entrypoint_preamble(backend, agent_name, config, execution_identity, conversation, counter)
+    return await _entrypoint_preamble(
+        backend,
+        agent_name,
+        config,
+        execution_identity,
+        conversation,
+        counter,
+    )
 
 
 @timed("system_prompt_assembly.memory_enhancement")

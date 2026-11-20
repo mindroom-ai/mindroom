@@ -231,13 +231,12 @@ class EntityFleet:
             if slot.retry_task is asyncio.current_task():
                 slot.retry_task = None
 
-    async def stop(self, entity_names: Iterable[str]) -> None:
+    async def stop(self, entity_names: Iterable[str], *, intent: RuntimeShutdownIntent = SYNC_RESTART_SHUTDOWN) -> None:
         """Stop entities for a restart and drop their slots; a failed stop keeps every slot and raises."""
         slots = self._existing(entity_names)
         if not slots:
             return
         await self._prepare_change(slots)
-        intent = SYNC_RESTART_SHUTDOWN
         bots = [slot.bot for slot in slots.values()]
         cancellations: list[asyncio.CancelledError] = []
         quiesce_results = await _phase(cancellations, *(bot.quiesce_matrix_ingestion() for bot in bots))

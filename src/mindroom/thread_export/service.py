@@ -218,6 +218,7 @@ async def _run_export_source(
             rooms=source.rooms,
             targets=tuple(accumulator.target for accumulator in accumulators),
             max_thread_roots=max_thread_roots,
+            exported=source.exported,
         )
     except asyncio.CancelledError:
         # Each export source owns its hydrator, but borrows the client's and

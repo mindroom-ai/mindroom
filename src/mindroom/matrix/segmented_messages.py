@@ -13,7 +13,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import REASONING_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY, TOOL_TRACE_CONTENT_KEY
+from mindroom.constants import (
+    COMPACTIONS_CONTENT_KEY,
+    REASONING_CONTENT_KEY,
+    STREAM_VISIBLE_BODY_KEY,
+    TOOL_TRACE_CONTENT_KEY,
+)
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import build_thread_relation, markdown_to_html
 from mindroom.tool_system.events import (
@@ -194,7 +199,10 @@ def _continuation_content(
     relation = (
         build_thread_relation(thread_id, latest_thread_event_id=reply_to_event_id or thread_id) if thread_id else None
     )
-    return _rich_text_content(source, body, relation=relation)
+    content = _rich_text_content(source, body, relation=relation)
+    # The reply's compactions are shown once, on its first segment.
+    content.pop(COMPACTIONS_CONTENT_KEY, None)
+    return content
 
 
 def _shrinking_trace_slices(entries: list[ToolTraceEntry]) -> tuple[list[ToolTraceEntry], ...]:

@@ -458,7 +458,7 @@ def _parse_scheduled_task_record(
         return None
     try:
         workflow = ScheduledWorkflow(**json.loads(workflow_data_raw))
-    except ValueError:
+    except (TypeError, ValueError):
         logger.exception("Failed to parse scheduled task workflow", room_id=room_id, task_id=task_id)
         return None
     if not workflow.created_by:
@@ -550,18 +550,19 @@ def task_records(
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
     tasks: list[ScheduledTaskRecord] = []
     for event in state_response.events:
-        if event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
+        if not isinstance(event, dict) or event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
             continue
 
         state_key = event.get("state_key")
         content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
         if not isinstance(state_key, str) or content is None:
             continue
+        # A room keeps every finished task's state, so only the records a caller wants are parsed.
+        if not include_non_pending and _stored_task_status(content) != "pending":
+            continue
 
         task = _parse_scheduled_task_record(room_id, state_key, content)
         if not task:
-            continue
-        if not include_non_pending and task.status != "pending":
             continue
         tasks.append(task)
 

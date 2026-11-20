@@ -26,8 +26,7 @@ from mindroom.constants import resolve_runtime_paths, runtime_paths_with_storage
 from mindroom.knowledge.file_memory_knowledge import resolve_agent_file_memory_knowledge
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.memory import _semantic_file_search, build_memory_prompt_parts
-from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT
-from mindroom.memory._prompting import select_recall_hits
+from mindroom.memory._file_backend import _RECALL_SEARCH_LIMIT, _RECALL_SELECTION, _retrieve_memories
 from mindroom.memory._semantic_file_search import search_semantic_file_memories
 from mindroom.runtime_resolution import resolve_knowledge_binding
 from tests.fakes.token_counter import fake_token_counter
@@ -64,6 +63,9 @@ METRIC_KEYS = {
     "abstained_turns",
     "judge_errors",
     "search_errors",
+    "rerank_errors",
+    "usd_per_turn",
+    "usd_source",
 }
 THREAD = "!room:example.org:$thread-root"
 ROOM = "!room:example.org"
@@ -172,6 +174,30 @@ def _sources(results: list[MemoryResult]) -> list[str]:
     return [(result.get("metadata") or {})["source_file"] for result in results]
 
 
+def _cli_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    queries: Sequence[str],
+    *options: str,
+) -> tuple[list[str], Path]:
+    """Prepare a benchmark CLI run over one turn per query on the fixture memory; return its argv and output dir.
+
+    It installs the counting embedder, needs no judge retry delay, and sets the judge key.
+    """
+    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _CountingEmbedder())
+    monkeypatch.setattr(judge, "_RETRY_DELAY_S", 0.0)
+    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-test")
+    memory_dir = shutil.copytree(FIXTURE_MEMORY, tmp_path / "workspace" / "memory")
+    write_turns([_turn("2026-01-15", query) for query in queries], tmp_path / "turns.jsonl")
+    out = tmp_path / "out"
+    argv = [
+        *("--turns", str(tmp_path / "turns.jsonl"), "--memory-dir", str(memory_dir)),
+        *("--config", str(_write_config(tmp_path)), "--out", str(out), "--key-env", "TEST_JUDGE_KEY"),
+        *options,
+    ]
+    return argv, out
+
+
 def _judge_transport() -> httpx.MockTransport:
     """Rate the first hit of each request directly relevant and the rest unrelated."""
 
@@ -221,7 +247,7 @@ async def test_run_smoke_on_fixture(
         transport=_judge_transport(),
     )
 
-    results = json.loads((out / "results.json").read_text())
+    results = json.loads((out / "results.json").read_text())["splits"]["all"]
     assert set(results) == {"A0", "A1", "A2", "A3", "A4"}
     for metrics in results.values():
         assert set(metrics) == METRIC_KEYS
@@ -424,7 +450,7 @@ async def test_a0_top3_matches_live_recall_search(tmp_path: Path, monkeypatch: p
 
 @pytest.mark.asyncio
 async def test_shipped_arm_matches_live_per_turn_recall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The shipped arm injects what the shipped per-turn recall does: its search, then `select_recall_hits`."""
+    """The shipped arm injects what the shipped per-turn recall does: its search, then `_RECALL_SELECTION`."""
     memory_dir = _ranked_notes(tmp_path, monkeypatch)
     queries = ["beacon", "lantern", "rank010"]
     replayed = await _replay(tmp_path, memory_dir, "shipped", [_turn("2026-01-25", query) for query in queries])
@@ -442,7 +468,7 @@ async def test_shipped_arm_matches_live_per_turn_recall(tmp_path: Path, monkeypa
             limit=_RECALL_SEARCH_LIMIT,
         )
         assert hits
-        assert hits == select_recall_hits(live), query
+        assert hits == await _retrieve_memories(query, live, _RECALL_SELECTION), query
 
 
 @pytest.mark.asyncio
@@ -679,7 +705,7 @@ async def test_search_failing_every_attempt_counts_as_search_error(
         ],
         transport=_judge_transport(),
     )
-    results = json.loads((tmp_path / "out" / "results.json").read_text())
+    results = json.loads((tmp_path / "out" / "results.json").read_text())["splits"]["all"]
     for metrics in results.values():
         assert metrics["search_errors"] == 1
         assert metrics["turns"] == 1

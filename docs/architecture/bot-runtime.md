@@ -68,11 +68,15 @@ An interrupted turn stays pending, and its replay continues the reply in place.
 A run saves a checkpoint of itself before each tool batch runs and before each request after one, because a kill keeps only what storage holds; the checkpoint is a cancelled row, which history skips, so a run that ends on its own stores and replays exactly what it would without one.
 The replay of an interrupted turn, and the settlement of an interrupted subagent turn, finish that row as a turn of the run's own stored messages, reasoning included, adding only an answer for each call that had none: the next request then starts with the bytes the interrupted run already sent, which a provider's prompt cache still holds, where a prose account of the whole work would be sent, and billed, as new input.
 A reply its user stops settles its run the same way at once, since no replay continues it: the run keeps its own messages, each call still running answered, and ends with the text of the response the Stop cut off and a note that the user stopped the turn, so the next turn's request starts with the bytes the stopped run sent.
-A stopped run that called no tool, a team's reply, an approved run's continuation, and a turn that another cancellation ended, such as a failed delivery, keep the prose record of what the reply showed.
+A run stopped before it called a tool settles the same way once a response of it had begun, and so does an attempt that continues an approved run's turn.
+The note is MindRoom's, not the agent's words, so memory extraction, compaction hooks and the knowledge graph keep the text the stopped response showed and leave the note out.
+A run stopped before its first response began, a team's reply, and a turn that another cancellation ended, such as a failed delivery, keep the prose record of what the reply showed.
+An approved run stopped while it still works after its approval keeps the cancelled row it stored, which history skips.
 A recovered run is history like any finished run, so the agent's limits, the request's budget and compaction apply to it unchanged; the replay's prompt therefore still lists the bounded previews of the recorded tool calls, after the cached prefix, so a request that history trimmed or folded still names the calls whose effects stand.
 The retry of an edit's regeneration recovers that edit's own attempts the same way, so the edit's commit, which every retry repeats, removes what answered the text before the edit and keeps the runs that read the edit itself; a newer edit's regeneration takes over no attempt and starts fresh.
 A turn restarts cut short more than twice stops continuing from its recovered runs and takes them out of history, in case continuing from them is what stops it, which leaves it the bounded previews of its recorded tool calls.
 An approved run's resume saves no checkpoint, since the paused row is what an approval cut short settles from; a run that paused for a subagent without tool jobs is continued by its own turn with the subagent's answer and checkpoints as before.
+A subagent job's child is the exception: its job asks for its approvals and resumes each paused row once, so nothing settles from that row, and its approved resume checkpoints as its fresh run does, and before each approved call, because a crash that left the paused row would end its job where a restart continues it.
 An interrupted edit regeneration also stays pending: a retry of the same edit recovers its attempts as above, and a newer edit's regeneration starts fresh, because it replaced the prompt the stopped attempts answered; a regeneration's approved resume that was cut short continues below what it showed, as an interrupted turn does.
 
 A chat command runs on the bot it is aimed at, which `TurnPolicy.owns_command` decides from the bot's own copy of the room and the room's joined candidates.
@@ -106,6 +110,10 @@ Pure-policy ignores, such as unmentioned managed senders, blocked deep synthetic
 A global scan only discovers rooms; each room's lane runs its pending callbacks in receipt order, and a failure pauses only that room.
 Revisiting a receipt at or before the room's latest admitted receipt also backs off, because immediate downstream handoffs would otherwise trap recovery in a retry loop.
 A periodic liveness sweep exists because a downstream owner can vanish without a completion notification.
+A running turn stays a pending row until its owner hands it back, so discovery does not page through running turns again on every wake: while turns are in flight it reads only what was admitted after its last finished scan.
+A lane still starts each pass at the front of its room, because a commit is visible before anything announces it, and an older source it made runnable has to run before the room's newer ones.
+A retry or a lost owner rewinds its room, and so does an account that leaves a room and fails a reply paused on its approval card, so the freed source still runs before later messages in its room.
+The same sweep, which starts with the first turn in flight, sends discovery over the whole backlog again, which reopens a room for work that became runnable with nothing to announce it.
 
 ### Shutdown, replacement, and crash
 

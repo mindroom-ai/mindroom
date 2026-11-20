@@ -24,7 +24,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 # Fields of an agent's own entry that shape only its prompt and model, never the toolkits a prepared catalog built or
-# their permissions. Every other field of the config, including any added later, counts as the catalog's authority.
+# their permissions. Every other field of the entry, and any config section `_catalog_authority` does not name,
+# including one added later, counts as the catalog's authority.
 _PROMPT_ONLY_AGENT_FIELDS = frozenset(
     {"display_name", "role", "instructions", "minimal_instructions", "model", "cheap_model", "markdown"},
 )
@@ -168,13 +169,15 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
     """Return what a prepared catalog's toolkits and permissions were built from, or None once the agent is gone.
 
     Other agents' and teams' entries are left out: a call re-authorizes its requester against the current config, and
-    nothing an edit there changes reaches the toolkits this agent's catalog holds.
+    nothing an edit there changes reaches the toolkits this agent's catalog holds. So are the model entries: they
+    shape model requests and prompt text, like the agent's own ``model`` field, and no toolkit is resolved, configured,
+    routed, or permitted from one.
     """
     agent = config.agents.get(agent_name)
     if agent is None:
         return None
     private = config.__pydantic_private__ or {}
-    dump = config.model_dump(exclude={"agents", "teams"})
+    dump = config.model_dump(exclude={"agents", "teams", "models"})
     # Each onboarding adds the new user's agent to calls.agents; another generated agent's entry never reaches this one.
     dump["calls"]["agents"] = {
         name: profile
@@ -196,8 +199,8 @@ def check_prepared_catalog_authority(context: ToolRuntimeContext) -> None:
     """Refuse a prepared CLI catalog once a reload changed what its agent's toolkits were built from.
 
     The catalog's toolkits were resolved from ``context.config``, while live reloads hand running turns the current
-    config. Edits that leave the agent's own toolkits and permissions alone, such as another agent's instructions or
-    this agent's own prompt, keep the catalog valid; any other edit refuses it.
+    config. Edits that leave the agent's own toolkits and permissions alone, such as another agent's instructions,
+    this agent's own prompt, or a model entry, keep the catalog valid; any other edit refuses it.
     """
     current = context.current_config
     if current is context.config:
