@@ -106,7 +106,7 @@ Use [knowledge bases](https://docs.mindroom.chat/knowledge/) only for non-memory
 
 ## Context and history
 
-Preloaded `context_files` are capped by `defaults.max_preload_chars` (default `50000`); see [File-Based Context Loading](https://docs.mindroom.chat/configuration/agents/#file-based-context-loading) for what gets dropped when a workspace exceeds it.
+Each preloaded context file is limited on its own by `defaults.max_preload_file_chars` (default `30000`); see [File-Based Context Loading](https://docs.mindroom.chat/configuration/agents/#file-based-context-loading) for where a longer file is cut.
 How much conversation history each reply sees is set by `num_history_runs`, `num_history_messages`, and `compaction`; see [History & Compaction](https://docs.mindroom.chat/configuration/history/).
 
 ## Room conversations instead of threads
