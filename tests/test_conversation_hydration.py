@@ -26,6 +26,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    UNREADABLE_EDIT_NOTICE,
 )
 from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent
 from mindroom.execution_preparation import _get_unseen_messages_for_sender
@@ -33,7 +34,6 @@ from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
-    _UNREADABLE_EDIT_NOTICE,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
     ConversationReadError,
@@ -905,7 +905,7 @@ class TestThreadHydrationBounds:
 
     @pytest.mark.parametrize(
         ("ceiling", "expected"),
-        [(3, f"root\n\n{_UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
+        [(3, f"root\n\n{UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
         ids=["edits_past_ceiling", "edit_before_ceiling"],
     )
     async def test_others_edits_filling_the_root_edit_fetch_do_not_pass_the_root_off_as_unedited(
@@ -2771,7 +2771,7 @@ class TestPointRefetch:
 
     @pytest.mark.parametrize(
         ("ceiling", "expected"),
-        [(3, f"first\n\n{_UNREADABLE_EDIT_NOTICE}"), (5, "second")],
+        [(3, f"first\n\n{UNREADABLE_EDIT_NOTICE}"), (5, "second")],
         ids=["edits_past_ceiling", "edit_before_ceiling"],
     )
     async def test_others_relations_filling_the_walk_do_not_pass_the_original_off_as_unedited(
@@ -3192,7 +3192,7 @@ class TestEncryptedRelations:
         assert await hydrator(alice, client).refresh(
             (await refreshes(alice))[0],
         )
-        assert await bodies(alice) == [f"first\n\n{_UNREADABLE_EDIT_NOTICE}"]
+        assert await bodies(alice) == [f"first\n\n{UNREADABLE_EDIT_NOTICE}"]
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
         # The mark reaches a responder's thread history, where the notice alone would pass for the sender's words.
         assert projected_visible_messages(page)[0].content[INCOMPLETE_TEXT_KEY] is True

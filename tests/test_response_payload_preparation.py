@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.ai import _compose_current_turn_prompt
-from mindroom.constants import INCOMPLETE_TEXT_KEY
+from mindroom.constants import INCOMPLETE_TEXT_KEY, UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
 from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.hooks import EVENT_MESSAGE_ENRICH, HookRegistry, MessageEnrichContext, hook
@@ -179,6 +179,17 @@ def _held(
         ),
         # An edit whose file, or whose own later edit, could not be read leaves the route's whole prompt standing.
         pytest.param([_held("$first", "the preview", revision="$edit", whole=False)], ("$first",), "raw prompt"),
+        # A row stored before the mark existed says so only in its text, which ends in the notice its read appended.
+        pytest.param(
+            [_held("$first", f"the preview\n\n{UNREADABLE_SIDECAR_NOTICE}", revision="$edit")],
+            ("$first",),
+            "raw prompt",
+        ),
+        pytest.param(
+            [_held("$first", f"an older edit\n\n{UNREADABLE_EDIT_NOTICE}", revision="$edit")],
+            ("$first",),
+            "raw prompt",
+        ),
         # A voice message's transcript is not replaced by the filename of an audio edit.
         pytest.param([_held("$first", "clip.ogg", revision="$edit", msgtype="m.audio")], ("$first",), "raw prompt"),
         # Another message's edit is not the routed one's.
@@ -191,6 +202,8 @@ def _held(
         "unedited-or-replaced-by-another",
         "batch",
         "edit-not-whole",
+        "edit-file-unread-before-the-mark",
+        "later-edit-unread-before-the-mark",
         "edit-not-text",
         "neighbour-edited",
         "unrouted",

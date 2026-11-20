@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments.ids import merge_attachment_ids
-from mindroom.constants import INCOMPLETE_TEXT_KEY
+from mindroom.constants import INCOMPLETE_TEXT_KEY, UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayloadWithAttachmentsRequest,
@@ -120,8 +120,10 @@ class ResponsePayloadPreparer:
         read = preparation.routed_revision
         read = tuple(read) if isinstance(read, list) and [type(part) for part in read] == [int, str] else (0, "")
         held = [m for m in request.thread_history if m.event_id in lone and INCOMPLETE_TEXT_KEY not in m.content]
-        text = [m for m in held if m.content.get("msgtype") == "m.text" and m.edited_timestamp]
-        newer = [m.body for m in text if (m.edited_timestamp, m.latest_event_id) > read]
+        text = [m for m in held if m.content.get("msgtype") == "m.text"]
+        # A row stored before that mark existed is incomplete by the notice its body ends in.
+        whole = [m for m in text if not m.body.endswith((UNREADABLE_SIDECAR_NOTICE, UNREADABLE_EDIT_NOTICE))]
+        newer = [m.body for m in whole if m.edited_timestamp and (m.edited_timestamp, m.latest_event_id) > read]
         preparation = replace(preparation, prompt=newer[0]) if newer else preparation
         payload = await self._build_payload(preparation, thread_history=request.thread_history)
 

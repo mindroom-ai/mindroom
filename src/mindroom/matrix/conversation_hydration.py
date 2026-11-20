@@ -58,7 +58,7 @@ from typing import TYPE_CHECKING
 import nio
 from nio.api import RelationshipType
 
-from mindroom.constants import INCOMPLETE_TEXT_KEY
+from mindroom.constants import INCOMPLETE_TEXT_KEY, UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
 from mindroom.event_journal import (
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
@@ -158,9 +158,6 @@ _HYDRATION_EPOCH_ATTEMPTS = 3
 # is refused its root on every request: Tuwunel and Synapse answer 404
 # ``M_NOT_FOUND``, and ``M_FORBIDDEN`` is the other answer the spec allows.
 _HIDDEN_EVENT_ERRCODES = frozenset({"M_NOT_FOUND", "M_FORBIDDEN"})
-
-_UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
-_UNREADABLE_EDIT_NOTICE = "[A later edit of this message could not be read.]"
 
 # The Matrix message fields readers of a stored message use. An attachment holds
 # whatever its uploader wrote, and what it resolves to is stored with every
@@ -1085,7 +1082,7 @@ class ConversationHydrator:
                 # passing as unedited.
                 events[0] = replace(
                     root_projected,
-                    content=_with_notice(root_projected.content, _UNREADABLE_EDIT_NOTICE),
+                    content=_with_notice(root_projected.content, UNREADABLE_EDIT_NOTICE),
                 )
         missed_edits = await self._fetch_missed_edits(
             room_id,
@@ -1537,7 +1534,7 @@ class ConversationHydrator:
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
             )
-            content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
+            content = _with_notice(content, UNREADABLE_EDIT_NOTICE)
         elif (
             relations.ceiling_reached
             and revision.event_id == request.logical_event_id
@@ -1549,7 +1546,7 @@ class ConversationHydrator:
             # sender's surviving edits past the ceiling with edits of their
             # own. The original gets the same notice rather than passing as
             # unedited, and the debt still settles: another walk stops there too.
-            content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
+            content = _with_notice(content, UNREADABLE_EDIT_NOTICE)
         return await self.store.install_refetched_revision(
             request,
             revision_event_id=revision.event_id,
@@ -1602,7 +1599,7 @@ class ConversationHydrator:
             "conversation_refresh_sidecar_unresolved",
             event_id=event_id,
         )
-        return _with_notice(without_sidecar_reference(content), _UNREADABLE_SIDECAR_NOTICE)
+        return _with_notice(without_sidecar_reference(content), UNREADABLE_SIDECAR_NOTICE)
 
     async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> None:
         """Repair exactly the messages one read found missing.
