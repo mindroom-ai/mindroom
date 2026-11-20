@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import NAMESPACE_OID, uuid5
 from weakref import WeakValueDictionary
 
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.delegation.personas import persona_allows
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
@@ -56,6 +57,7 @@ _MAX_LABEL_CHARS = 80
 _ADMISSIONS = "admissions"
 _ERROR_TAIL_BYTES = 4096
 _NO_RETURN = "The script ended without returning from main(args)."
+_STOPPED_STARTING = "MindRoom stopped while the run was starting."
 _ATTEMPT_GONE = "The record of the run's attempt is gone."
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
 # How long a waiter sleeps before it reads the store again, with or without a wake.
@@ -91,6 +93,7 @@ class WorkflowEngine:
         self._changed: WeakValueDictionary[str, asyncio.Condition] = WeakValueDictionary()
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._waiting: Counter[str] = Counter()
+        self._closed = False
 
     async def launch(
         self,
@@ -102,8 +105,34 @@ class WorkflowEngine:
 
         The engine owns a launch once it began, so a caller that goes away leaves no process its run does not name.
         """
-        launch = self._launch(run_id, context, limits or WorkflowLimits())
-        return await asyncio.shield(self._spawn(_ADMISSIONS, launch))
+        launch = self._spawn(_ADMISSIONS, self._owned_launch(run_id, context, limits or WorkflowLimits()))
+        try:
+            return await asyncio.shield(launch)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if not launch.cancelled() or (caller is not None and caller.cancelling()):
+                raise
+            # The stopping engine ended the launch and its run, which the caller reads as any ended run.
+            return self.store.get_run(run_id)
+
+    async def _owned_launch(self, run_id: str, context: ToolRuntimeContext, limits: WorkflowLimits) -> WorkflowRun:
+        """Launch unless the engine stopped, which ends a run that names no attempt yet as interrupted."""
+        stopped = partial(
+            self.store.update_run,
+            run_id,
+            when={WorkflowRunState.STARTING},
+            state=WorkflowRunState.INTERRUPTED,
+            error=_STOPPED_STARTING,
+            finished_at=utc_timestamp(),
+        )
+        if self._closed:
+            return await asyncio.to_thread(stopped)
+        try:
+            return await self._launch(run_id, context, limits)
+        except asyncio.CancelledError:
+            # Only the engine's stop cancels its launch: the run ends with it, so none stays `starting` for nobody.
+            await run_blocking_until_complete(stopped)
+            raise
 
     async def _launch(self, run_id: str, context: ToolRuntimeContext, limits: WorkflowLimits) -> WorkflowRun:
         # Held until the run names the attempt, so the new process's first request waits instead of being refused.
@@ -196,7 +225,8 @@ class WorkflowEngine:
                 logger.exception("workflow_run_reconcile_failed", run_id=run.run_id)
 
     async def close(self) -> None:
-        """Stop the engine's own tasks; unsettled nodes keep their handles for the next start to read."""
+        """Stop the engine's own tasks and start no more; unsettled nodes keep their handles for the next start."""
+        self._closed = True
         tasks = [task for run_tasks in self._tasks.values() for task in run_tasks]
         self._tasks.clear()
         for task in tasks:

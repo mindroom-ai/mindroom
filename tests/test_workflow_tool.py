@@ -645,6 +645,41 @@ async def test_a_shutdown_interrupts_the_job_and_does_not_cancel_the_run(stack: 
 
 
 @pytest.mark.asyncio
+async def test_a_shutdown_while_the_first_attempt_starts_interrupts_the_run_and_its_job(stack: WorkflowStack) -> None:
+    """The engine stops before the jobs do: a launch it stops ends its run, so no run stays `starting` with a dead job."""
+    stack.scripts.hold_launch = asyncio.Event()
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    await stack.until(lambda: stack.scripts.launched)
+
+    await stack.engine.close()
+    await stack.jobs.quiesce()
+
+    job = await _ended_job(stack, handle["job_id"])
+    run = stack.store.get_run(handle["run_id"])
+    assert (run.state, run.attempt, run.error) == (
+        WorkflowRunState.INTERRUPTED,
+        0,
+        "MindRoom stopped while the run was starting.",
+    )
+    assert run.finished_at is not None
+    assert job.status == "interrupted"
+    assert await stack.collect(job) == "MindRoom stopped while the run was starting."
+
+
+@pytest.mark.asyncio
+async def test_a_start_after_the_engine_stopped_interrupts_its_run(stack: WorkflowStack) -> None:
+    """A start admitted between the engine's stop and the job runtime's launches nothing and ends its run interrupted."""
+    await stack.engine.close()
+
+    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    job = await _ended_job(stack, handle["job_id"])
+
+    assert job.status == "interrupted"
+    assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.INTERRUPTED
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
 async def test_failed_run_delivers_the_error_tail(stack: WorkflowStack) -> None:
     """A failed run's job fails with the end of the script's traceback, so the agent can fix the script."""
     handle = await _started(stack)
