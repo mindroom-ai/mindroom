@@ -193,6 +193,18 @@ async def test_named_entity_refusals_set_no_flag(tmp_path: Path, args_text: str,
 
 
 @pytest.mark.asyncio
+async def test_named_compact_asks_to_retry_while_membership_is_pending(tmp_path: Path) -> None:
+    config, paths = _config(tmp_path)
+    config.agents["code"].access = ResponderAccessConfig(current_room_members=True)
+    _seed(config, paths, "code")
+
+    assert await _compact(config, paths, "code") == (
+        "Room membership for `code` is still loading; try `/compact code` again in a moment."
+    )
+    assert not _queued(config, paths, "code")
+
+
+@pytest.mark.asyncio
 async def test_unavailable_compaction_reports_the_reason(tmp_path: Path) -> None:
     config, paths = _config(tmp_path, context_window=None)
     _seed(config, paths, "code")
@@ -246,7 +258,8 @@ async def test_bare_compact_flags_only_addressable_entities_with_a_session_here(
 
 
 @pytest.mark.asyncio
-async def test_bare_compact_continues_after_an_unreadable_store(tmp_path: Path) -> None:
+@pytest.mark.parametrize("args_text", ["", "docs"], ids=["bare", "named"])
+async def test_compact_reports_an_unreadable_store(tmp_path: Path, args_text: str) -> None:
     config, paths = _config(tmp_path)
     database = scope_session_database_path(
         scope=_scope(config, "docs"),
@@ -258,11 +271,11 @@ async def test_bare_compact_continues_after_an_unreadable_store(tmp_path: Path) 
     database.write_text("not a database", encoding="utf-8")
     _seed(config, paths, "squad")
 
-    assert (await _compact(config, paths, "")).splitlines() == [
-        "❌ `docs`: its history could not be read.",
-        "✅ `squad` compacts its context before its next reply in this thread.",
-    ]
-    assert _queued(config, paths, "squad")
+    expected = ["❌ `docs`: its history could not be read."]
+    if not args_text:
+        expected.append("✅ `squad` compacts its context before its next reply in this thread.")
+    assert (await _compact(config, paths, args_text)).splitlines() == expected
+    assert _queued(config, paths, "squad") is (not args_text)
 
 
 @pytest.mark.asyncio

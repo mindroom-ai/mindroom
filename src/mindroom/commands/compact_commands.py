@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.authorization import addressable_responder_names, is_sender_allowed_for_responder
+from mindroom.authorization import (
+    ReplyMembershipPendingError,
+    addressable_responder_names,
+    is_sender_allowed_for_responder,
+)
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.manual import schedule_compaction_before_next_reply, scope_has_session
 from mindroom.history.types import HistoryScope
@@ -41,23 +45,28 @@ async def handle_compact_command(
         name = words[0]
         if name not in config.agents and name not in config.teams:
             return f"Unknown agent or team `{name}`."
-        if not is_sender_allowed_for_responder(
-            requester_id,
-            name,
-            target.room_id,
-            config,
-            runtime_paths,
-            membership_index,
-            require_resolved_membership=True,
-        ):
+        try:
+            allowed = is_sender_allowed_for_responder(
+                requester_id,
+                name,
+                target.room_id,
+                config,
+                runtime_paths,
+                membership_index,
+                require_resolved_membership=True,
+            )
+        except ReplyMembershipPendingError:
+            return f"Room membership for `{name}` is still loading; try `/compact {name}` again in a moment."
+        if not allowed:
             return f"Access denied for `{name}`."
-        reply = await _compact(name, config, runtime_paths, target, budget)
-        return reply or f"`{name}` has nothing to compact here yet."
-    names = addressable_responder_names(requester_id, target.room_id, config, runtime_paths, membership_index)
+        names = (name,)
+        empty_reply = f"`{name}` has nothing to compact here yet."
+    else:
+        responders = addressable_responder_names(requester_id, target.room_id, config, runtime_paths, membership_index)
+        names = tuple(name for name in responders if name != ROUTER_AGENT_NAME)
+        empty_reply = "Nothing to compact here."
     replies = []
     for name in names:
-        if name == ROUTER_AGENT_NAME:
-            continue
         try:
             reply = await _compact(name, config, runtime_paths, target, budget)
         except Exception:
@@ -65,7 +74,7 @@ async def handle_compact_command(
             reply = f"❌ `{name}`: its history could not be read."
         if reply is not None:
             replies.append(reply)
-    return "\n".join(replies) or "Nothing to compact here."
+    return "\n".join(replies) or empty_reply
 
 
 async def _compact(
