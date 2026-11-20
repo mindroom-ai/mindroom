@@ -3814,6 +3814,10 @@ depends_on = [
     "mindroom.workers.backend_kinds",
 ]
 
+[[modules]]
+path = "mindroom.tailnet_ssh.store"
+depends_on = ["mindroom.config.tailnet_ssh", "mindroom.constants"]
+
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
 [[modules]]
 path = "mindroom.memory"
