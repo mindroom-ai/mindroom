@@ -2455,7 +2455,6 @@ async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_tr
 async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) -> None:
     """Without an explicit override, the parse-produced history limit persists and surfaces."""
     client = AsyncMock()
-    serve_full_room_state(client, "!test:server")
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
         {"event_id": "$state"},
         room_id="!test:server",
@@ -2603,7 +2602,6 @@ async def test_steward_write_failure_that_is_not_about_power_gives_no_moderator_
 async def test_schedule_task_fails_when_active_write_returns_unexpected_response(tmp_path: Path) -> None:
     """Scheduling must require a positive Matrix state-write response before returning success."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    serve_full_room_state(client, "!test:server")
     client.room_put_state = AsyncMock(return_value=None)
     room = _matrix_room("!test:server")
     runtime_paths = schedule_runtime_paths(tmp_path)

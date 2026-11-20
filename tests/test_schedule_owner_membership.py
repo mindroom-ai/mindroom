@@ -825,9 +825,7 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         schedule_type=schedule_type,
         writer=_ALIAS_SCHEDULE_WRITER,
     )
-    # The router saves the task in a room it has not joined, so it owns the task as its creator.
     client.user_id = _ALIAS_SCHEDULE_WRITER
-    serve_full_room_state(client, "!test:server")
     config, runtime_paths = _alias_schedule_config(tmp_path)
     config.agents["helper"].rooms = ["!test:server"]
     config.agents["helper"].access = ResponderAccessConfig(users=["@alice:server"])

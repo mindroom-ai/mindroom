@@ -95,7 +95,7 @@ def room_create_state_response(room_id: str, *, full_event: bool) -> nio.RoomGet
 
 
 def serve_full_room_state(client: Any, room_id: str, events: list[dict[str, Any]] | None = None) -> None:  # noqa: ANN401
-    """Answer the full room-state read that decides a new task's owner; without events no router has joined."""
+    """Answer the room's full-state read (listing, cancel-all, restore) from ``events``."""
     client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events or [], room_id=room_id))
 
 
