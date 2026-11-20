@@ -244,6 +244,7 @@ Matrix sync callback
 | `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
 | `orchestration/workflow_runtime.py` | Builds the workflow store and engine on the script runtime, ties the engine's life to the orchestrator's, and follows each script-runtime pass by ending runs whose attempts ended and pruning runs past the script retention |
 | `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
+| `custom_tools/workflow.py` | `workflow` agent tool: reserve a workflow run and start it as its background job or wait for it inline, and read or cancel the requester's runs |
 | `script_runs/manager.py` | Starts, polls, and cancels script runs in a worker or unsafe-local, and finalizes their cleanup |
 | `script_runs/store.py` | The primary-only SQLite store of script runs and their tool-call receipts, with atomic state transitions |
 | `script_runs/legacy_schema.py` | Script-run columns that older releases' databases lack |

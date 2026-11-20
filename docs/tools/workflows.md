@@ -11,6 +11,7 @@ Every `tool()` and `shell()` call of the script is saved with its result as a no
 This release starts a run, reports it, and cancels it.
 Running agents from the script, resuming a stopped run, and continuing a run after a MindRoom restart are not available yet.
 After a restart, a run that was in progress ends as `interrupted` and its job as interrupted.
+A run whose script had not started when MindRoom stopped ends as `interrupted` with `MindRoom stopped while the run was starting.`
 
 Treat `workflow` as trusted arbitrary code with authority comparable to `python` or `shell`.
 The script is ordinary Python, so nothing restricts its imports, file access, subprocesses, or network clients.
@@ -39,7 +40,7 @@ background_tool_jobs:
 
 | Option | Default | Meaning |
 |--------|---------|---------|
-| `max_concurrent_runs` | `8` | Unfinished top-level runs one requester may have with one agent |
+| `max_concurrent_runs` | `8` | Unfinished top-level runs one requester may have with one agent; a run inside another run does not count |
 | `max_runtime_hours` | `72` | Working time one run may use, `0` for no limit; stored with each run and not enforced yet |
 | `max_tool_calls_per_minute` | `600` | New `tool()` and `shell()` calls per minute for one run |
 | `max_concurrent_agents` | none | Ceiling for the `max_concurrent` a call asks for; not used yet |
@@ -48,6 +49,7 @@ background_tool_jobs:
 A run is a background job, so `start_workflow` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
 Otherwise a call from the agent's own reply fails with `Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow.`
 An operator [`tool_approval`](../tool-approval.md) rule for `start_workflow` asks before anything starts, as for any other call.
+A plugin's `tool:before_call` hook that declines `start_workflow` also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
 
 ## Functions
 
@@ -67,7 +69,7 @@ A run belongs to the agent and the requester that started it.
 Another requester, or another agent, gets `No workflow run <id> in your runs.` for its ID, exactly as for an ID that does not exist.
 
 Where a call cannot become a background job, such as inside a subagent or a minimal-mode agent, `start_workflow` waits for the run and returns the report itself.
-Cancelling that call cancels its run.
+Cancelling that call cancels its run, unless the same call still waits for the run elsewhere.
 
 ## What The Script Can Call
 
@@ -89,6 +91,7 @@ def main(args):
 - `phase(title)` groups the calls that follow, and `log(text)` adds a progress line to the run.
 
 The script calls the tools the agent has at the time of each call, with the same hooks, approval rules, worker routing, and audit trail as a call from a reply.
+A run that a subagent with a narrowed tool list started has only the tools on that list, checked at every call, and never the rest of its agent's tools.
 `compact_context`, `dynamic_tools`, `slack`, and functions that stop the agent's current model step are never available to a script.
 Do writes (files, git, HTTP) through `shell()` or `tool()`, never with plain Python: those calls are saved with their results, and the Python between them is not.
 A call whose tool was started and whose end is unknown, for example because MindRoom stopped in between, ends `indeterminate` and is never run again on its own.
