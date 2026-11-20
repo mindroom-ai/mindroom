@@ -5342,6 +5342,38 @@ async def test_room_level_silent_schedule_trigger_never_replies_to_hidden_source
 
 
 @pytest.mark.asyncio
+async def test_a_routed_room_level_silent_schedule_stays_quiet_and_replies_to_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent schedule that names nobody runs for the responder its steward picks as one that named it would."""
+    config = _two_agent_config(tmp_path)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    steward = _build_harness(config, tmp_path / "steward", agent_name=ROUTER_AGENT_NAME)
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("research")),
+    )
+
+    await steward.deliver(room, _silent_schedule_event(config, extra_content={}))
+
+    assert steward.runner.requests == []
+    [route] = steward.gateway.routes
+    responder = _build_harness(config, tmp_path / "responder", agent_name="research")
+
+    await responder.deliver(room, _route_as_delivered(config, route, steward=ROUTER_AGENT_NAME))
+
+    [request] = responder.runner.requests
+    assert request.user_id == _SENDER
+    assert request.quiet is True
+    assert request.reply_to_event_id is None
+    envelope = request.response_envelope
+    assert envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    assert envelope.target.resolved_thread_id is None
+    assert envelope.target.is_room_mode is True
+
+
+@pytest.mark.asyncio
 async def test_eventless_silent_schedule_completion_is_terminal_before_recovery(tmp_path: Path) -> None:
     """An admitted successful no-response turn cannot replay after cleanup."""
     config = _single_agent_config(tmp_path, "room")

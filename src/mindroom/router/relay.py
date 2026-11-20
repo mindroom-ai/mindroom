@@ -20,7 +20,12 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.dispatch_handoff import PreparedIngress
-from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, content_owns_per_fire_thread_root
+from mindroom.dispatch_source import (
+    SILENT_SCHEDULE_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    content_owns_per_fire_thread_root,
+    source_kind_from_content,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.media import is_matrix_media_dispatch_event
@@ -171,14 +176,17 @@ def _router_handoff_extra_content(
         routed_extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
         routed_extra_content[ORIGINAL_SENDER_KEY] = handoff_original_sender
     event_content = event.source.get("content") if isinstance(event.source, dict) else None
-    if (
-        deps.ingress.sender_is_trusted_for_ingress_metadata(event.sender)
-        and isinstance(event_content, dict)
-        and content_owns_per_fire_thread_root(event_content)
-    ):
+    if not deps.ingress.sender_is_trusted_for_ingress_metadata(event.sender) or not isinstance(event_content, dict):
+        return routed_extra_content
+    if content_owns_per_fire_thread_root(event_content):
         routed_extra_content[PER_FIRE_THREAD_ROOT_KEY] = True
         if thread_event_id is not None:
             routed_extra_content[PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] = thread_event_id
+    if source_kind_from_content(event_content) == SILENT_SCHEDULE_SOURCE_KIND:
+        # A silent schedule's route stays one, so its responder runs it as a trigger that named it: quiet, for
+        # whoever the task runs as, and in reply to nothing where the hidden trigger stands in the room.
+        routed_extra_content[SOURCE_KIND_KEY] = SILENT_SCHEDULE_SOURCE_KIND
+        routed_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
     return routed_extra_content
 
 
