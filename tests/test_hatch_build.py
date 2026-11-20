@@ -97,6 +97,7 @@ def test_editable_build_env_opt_in_builds_repo_frontend_dist(
         "which",
         lambda name: "/usr/local/bin/bun" if name == "bun" else None,
     )
+    monkeypatch.setattr(hatch_build_module, "_installed_bun_version", lambda _bun: "1.4.3")
     monkeypatch.setattr(hatch_build_module, "_build_frontend", fake_build_frontend)
 
     hook.initialize("editable", build_data)
@@ -122,6 +123,38 @@ def test_editable_build_env_opt_in_requires_bun(
 
     with pytest.raises(RuntimeError, match="MINDROOM_BUILD_FRONTEND=1"):
         hook.initialize("editable", {})
+
+
+@pytest.mark.parametrize(
+    ("bun_version", "builds"),
+    [("1.3.14", False), ("1.4.0-canary.20260820.1", True), ("1.10.0", True)],
+)
+def test_wheel_build_names_the_bun_version_the_lockfile_needs(
+    hatch_build_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    bun_version: str,
+    builds: bool,
+) -> None:
+    """A Bun too old for the frontend lockfile should fail with the version it needs instead of a lockfile error."""
+    (tmp_path / "frontend").mkdir()
+    hook = hatch_build_module.FrontendBuildHook()
+    hook.target_name = "wheel"
+    hook.root = str(tmp_path)
+    hook.directory = str(tmp_path / "dist")
+    build_calls: list[str] = []
+
+    monkeypatch.setattr(hatch_build_module.shutil, "which", lambda _name: "/usr/local/bin/bun")
+    monkeypatch.setattr(hatch_build_module, "_installed_bun_version", lambda _bun: bun_version)
+    monkeypatch.setattr(hatch_build_module, "_build_frontend", lambda _frontend, _output, bun: build_calls.append(bun))
+
+    if builds:
+        hook.initialize("standard", {})
+        assert build_calls == ["/usr/local/bin/bun"]
+    else:
+        with pytest.raises(RuntimeError, match=r"needs Bun 1\.4 or newer, but /usr/local/bin/bun is Bun 1\.3\.14"):
+            hook.initialize("standard", {})
+        assert build_calls == []
 
 
 def test_run_command_retries_once_before_succeeding(

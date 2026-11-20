@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     consumes_workspace_paths=True,
     auth_provider="slack",
-    icon="SiSlack",
+    icon="FaSlack",
     icon_color="text-purple-600",
     config_fields=[
         ConfigField(
