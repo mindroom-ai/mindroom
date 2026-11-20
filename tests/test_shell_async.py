@@ -385,7 +385,7 @@ async def test_run_shell_command_returns_after_foreground_exit_with_inherited_pi
 
     elapsed = time.perf_counter() - started
     assert elapsed < 2
-    assert result == ""
+    assert result == "(no output)"
 
 
 @pytest.mark.asyncio
@@ -496,7 +496,17 @@ async def test_run_shell_command_keeps_blank_stderr_and_trims_only_whole_stdout(
     assert await entrypoint(r"printf 'a\n\n' >&2", tail=1) == f"{notice}\nStderr:\n"
     assert await entrypoint(r"printf 'a\r\n\r\n' >&2", tail=1) == f"{notice}\nStderr:\n\r"
     assert await entrypoint(r"printf 'a\n\n\n'") == "a"
-    assert await entrypoint("echo") == ""
+    assert await entrypoint("echo") == "(no output)"
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_says_when_a_success_printed_nothing(tmp_path: Path) -> None:
+    """A success with no output says so, since an empty tool result can reach the model as a placeholder."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.functions["run_shell_command"]
+
+    assert await entrypoint("true") == "(no output)"
+    assert await entrypoint("exit 1") == "Exit code 1"
 
 
 def test_the_line_cap_keeps_line_boundaries_across_appends() -> None:
