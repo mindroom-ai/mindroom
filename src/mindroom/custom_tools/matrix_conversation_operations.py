@@ -96,7 +96,8 @@ class _MessageSendState:
 
 def _sent_fields(verdict: ContactVerdict | None, done: str, content: dict[str, Any] | None = None) -> dict[str, str]:
     """Return the result fields that tell the agent what changed on the way out: the contact policy, image notes."""
-    image = _NO_IMAGE_NOTE if IMAGE_NOT_SENT_NOTE in (content or {}).get("formatted_body", "") else ""
+    html, body = (content or {}).get("formatted_body", ""), (content or {}).get("body", "")  # body: the author's text
+    image = _NO_IMAGE_NOTE if IMAGE_NOT_SENT_NOTE in html and IMAGE_NOT_SENT_NOTE not in body else ""
     policy = "changed by the contact policy" if verdict is not None and verdict.rewritten else ""
     changes = "; ".join(change for change in (policy, image) if change)
     fields = {"note": f"{done} ({changes})"} if changes else {}

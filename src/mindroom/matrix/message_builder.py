@@ -325,15 +325,16 @@ IMAGE_NOT_SENT_NOTE = "⚠️ Image not sent:"
 
 def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
     """Return the text replacing an ``<img>`` whose first ``src`` no client can load, or None to keep it."""
-    src = unescape(next((value or "" for name, value in attrs if name == "src"), ""))  # the src as emitted
+    src = unescape(next((value or "" for name, value in attrs if name == "src"), "")).strip()  # the src as emitted
     server, _, media_id = src.removeprefix("mxc://").partition("/")
     try:
         parts = urlsplit(src)
-        web = parts.scheme.lower() in {"http", "https"} and bool(parts.hostname) and parts.port != -1  # port may raise
+        host = parts.hostname or "%"
+        web = parts.scheme.lower() in {"http", "https"} and "%" not in host and parts.port != -1  # port may raise
     except ValueError:
         web = False
-    mxc = src.startswith("mxc://") and valid_matrix_server_name(server) and bool(media_id)
-    if (web or (mxc and not {"/", "?", "#"} & set(media_id))) and not any(char.isspace() for char in src):
+    mxc = src.startswith("mxc://") and valid_matrix_server_name(server) and re.fullmatch(r"[A-Za-z0-9_-]+", media_id)
+    if (web or mxc) and not any(char.isspace() for char in src):
         return None
     alt = next((value for name, value in attrs if name == "alt" and value), "image")
     return escape(f"{IMAGE_NOT_SENT_NOTE} {alt} (no uploaded file)")
@@ -342,12 +343,13 @@ def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
 def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | None]]) -> str:
     allowed_attributes = _ALLOWED_FORMATTED_BODY_ATTRIBUTES.get(tag_name, frozenset())
     sanitized_attributes: list[str] = []
-    seen: set[str] = set()  # a repeated attribute keeps its first value, as browsers do
+    seen: set[str] = set()  # an img keeps only its first src, the one checked
     for attr_name, attr_value in attrs:
         normalized_attr_name = attr_name.lower()
         if normalized_attr_name not in allowed_attributes or normalized_attr_name in seen:
             continue
-        seen.add(normalized_attr_name)
+        if tag_name == "img" and normalized_attr_name == "src":
+            seen.add("src")
         if normalized_attr_name == "open":
             sanitized_attributes.append(" open")
             continue

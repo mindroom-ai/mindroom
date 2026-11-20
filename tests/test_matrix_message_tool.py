@@ -272,6 +272,23 @@ async def test_matrix_message_omits_the_image_note_when_the_delivered_payload_la
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_quoting_the_image_note_reports_nothing() -> None:
+    """The author's own text quoting the note is not an image the sanitizer replaced."""
+    tool = MatrixMessageTools()
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$sent")),
+        ),
+        tool_runtime_context(_make_context()),
+    ):
+        payload = json.loads(await tool.matrix_message(action="send", message="The error was `⚠️ Image not sent:`."))
+
+    assert payload["status"] == "ok"
+    assert "note" not in payload
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_active_mentions_mark_trusted_human_relay() -> None:
     """Intentional mention dispatch should preserve a trusted human requester."""
     tool = MatrixMessageTools()
