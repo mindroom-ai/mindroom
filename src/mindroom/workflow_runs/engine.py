@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import NAMESPACE_OID, uuid5
 from weakref import WeakValueDictionary
 
+from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 from mindroom.delegation.personas import persona_allows
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
@@ -37,7 +38,7 @@ from mindroom.workflow_runs.replay import node_digest, split_key
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
     from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.script_runs.manager import ScriptResourceProfileName, ScriptRunManager
@@ -57,6 +58,7 @@ _ADMISSIONS = "admissions"
 _ERROR_TAIL_BYTES = 4096
 _NO_RETURN = "The script ended without returning from main(args)."
 _STOPPED_STARTING = "MindRoom stopped while the run was starting."
+_ABANDONED = "The call that waited was cancelled."
 _ATTEMPT_GONE = "The record of the run's attempt is gone."
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
 # How long a waiter sleeps before it reads the store again, with or without a wake.
@@ -91,7 +93,7 @@ class WorkflowEngine:
         # One per run with a waiter or a launch in progress: polls and `wait` sleep on it, a launch holds its lock.
         self._changed: WeakValueDictionary[str, asyncio.Condition] = WeakValueDictionary()
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
-        self._waiting: Counter[str] = Counter()
+        self._attending: Counter[object] = Counter()
         self._closed = False
         self._launching: dict[asyncio.Task[WorkflowRun], str] = {}
 
@@ -184,20 +186,39 @@ class WorkflowEngine:
     async def wait(self, run_id: str) -> WorkflowRun:
         """Return the run once it has ended."""
         condition = self._condition(run_id)
-        self._waiting[run_id] += 1
-        try:
-            async with condition:
-                while (run := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
-                    # The saved run decides: a wake only shortens the wait; a writer cancelled at its commit sends none.
-                    with suppress(TimeoutError):
-                        await asyncio.wait_for(condition.wait(), _RECHECK_SECONDS)
-        finally:
-            self._waiting -= Counter({run_id: 1})
+        async with condition:
+            while (run := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
+                # The saved run decides: a wake only shortens the wait, since a writer cancelled at its commit sends none.
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(condition.wait(), _RECHECK_SECONDS)
         return run
 
-    def waited(self, run_id: str) -> bool:
-        """Return whether a call still waits for the run to end."""
-        return self._waiting[run_id] > 0
+    async def attend(
+        self,
+        origin: str | None,
+        reserve: Callable[[], Awaitable[tuple[WorkflowRun, bool]]],
+        context: ToolRuntimeContext,
+        limits: WorkflowLimits,
+    ) -> WorkflowRun:
+        """Reserve, launch and wait for a run that is no job, as one of the calls of *origin* that wait for it.
+
+        A cancelled call only stops waiting, and its reservation still ends. When it was the last call and MindRoom
+        is not stopping, nobody is left to receive the report, so the engine cancels the run.
+        """
+        key: object = origin or object()
+        self._attending[key] += 1
+        reserving = asyncio.ensure_future(reserve())
+        try:
+            run, _ = await wait_for_future_until_complete(reserving)
+            await self.launch(run.run_id, context, limits)
+            return await self.wait(run.run_id)
+        except asyncio.CancelledError:
+            stopping = self._closed or context.orchestrator is None or not context.orchestrator.running
+            if self._attending[key] == 1 and not stopping and not reserving.cancelled() and not reserving.exception():
+                await run_coroutine_until_complete(self.cancel(reserving.result()[0].run_id, reason=_ABANDONED))
+            raise
+        finally:
+            self._attending -= Counter({key: 1})
 
     def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
         """Return the run and its current nodes."""

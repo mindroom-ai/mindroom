@@ -577,6 +577,64 @@ async def test_a_cancelled_inline_call_leaves_the_run_to_the_call_that_still_wai
 
 
 @pytest.mark.asyncio
+async def test_an_inline_call_cancelled_because_mindroom_stops_does_not_cancel_its_run(stack: WorkflowStack) -> None:
+    """A stopping MindRoom cancels its calls, which is no cancel of their runs: the restart judges those."""
+    call = await _inline(stack)
+    [run] = stack.store.list_runs()
+    stack.context.orchestrator.running = False
+
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert stack.store.get_run(run.run_id).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_while_the_run_launches_leaves_the_run_to_the_other_delivery(
+    stack: WorkflowStack,
+) -> None:
+    """Calls count as waiting from before the launch, so one of two cancelled during it does not stop the run."""
+    stack.scripts.hold_launch = asyncio.Event()
+    first = asyncio.create_task(stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT))
+    second = asyncio.create_task(stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT))
+    await stack.until(lambda: stack.scripts.launched)
+    await asyncio.sleep(0.05)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    stack.scripts.hold_launch.set()
+    [run] = stack.store.list_runs()
+    stack.run_id = run.run_id
+    await stack.until(lambda: stack.store.get_run(run.run_id).state is WorkflowRunState.RUNNING)
+    await stack.finish_attempt(result="the report")
+
+    assert await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS) == "the report"
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_inline_call_cancelled_while_it_reserves_its_run_frees_the_run_slot(stack: WorkflowStack) -> None:
+    """The reservation of a cancelled call still ends, and with nobody left to wait the engine cancels the run."""
+    writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        call = asyncio.create_task(stack.call("start_workflow", depth=1, source=SCRIPT))
+        await asyncio.sleep(0.1)
+        call.cancel()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    [run] = stack.store.list_runs()
+    assert (run.state, run.attempt) == (WorkflowRunState.CANCELLED, 0)
+    assert stack.scripts.launched == []
+
+
+@pytest.mark.asyncio
 async def test_background_jobs_off_is_refused_in_one_sentence(tmp_path: Path) -> None:
     """A top-level call needs the job runtime: with it off, or with `workflow` excluded, the call says what to set."""
     refusal = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."

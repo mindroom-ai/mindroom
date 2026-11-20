@@ -10,11 +10,10 @@ from dataclasses import asdict, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.delegation.lifecycle import running_child_id
 from mindroom.script_runs.manager import workflow_placement
-from mindroom.tool_jobs.control import job_owns_execution, job_stopped_by_shutdown
+from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
@@ -133,19 +132,9 @@ class WorkflowTools(Toolkit):
         if running_child_id() is None and not _jobs_enabled(context):
             # A top-level call is a job or nothing; only an agent inside another's turn waits for its run here.
             raise WorkflowRunStoreError(_NEEDS_JOBS)
-        run, _ = await self._reserve(engine, context, _inline_origin(context), arguments)
-        try:
-            await engine.launch(run.run_id, context, self.limits)
-            ended = await engine.wait(run.run_id)
-        except asyncio.CancelledError:
-            # With nobody left to receive the report the run stops too, unless the primary itself is stopping.
-            stopping = job_stopped_by_shutdown() if job_owns_execution() else not _running(context)
-            if not stopping and not engine.waited(run.run_id):
-                await run_coroutine_until_complete(
-                    engine.cancel(run.run_id, reason="The call that waited was cancelled."),
-                )
-            raise
-        return _outcome_text(ended)
+        origin = _inline_origin(context)
+        reserve = partial(self._reserve, engine, context, origin, arguments)
+        return _outcome_text(await engine.attend(origin, reserve, context, self.limits))
 
     async def get_workflow(self, run_id: str, nodes: Literal["active", "failed", "all"] = "active") -> str:
         """Return a run's status, cost, open questions, failed calls and nodes. nodes is "active" (default), "failed" or "all".
@@ -340,10 +329,6 @@ def _owned(engine: WorkflowEngine, context: ToolRuntimeContext, run_id: str) -> 
 def _jobs_enabled(context: ToolRuntimeContext) -> bool:
     config, paths = context.config, context.runtime_paths
     return background_tool_jobs_enabled(config, paths) and not toolkit_is_background_excluded("workflow", config, paths)
-
-
-def _running(context: ToolRuntimeContext) -> bool:
-    return context.orchestrator is not None and context.orchestrator.running
 
 
 def _inline_origin(context: ToolRuntimeContext) -> str | None:
