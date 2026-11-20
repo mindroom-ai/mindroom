@@ -2279,6 +2279,25 @@ class TestMaybeGenerateThreadSummary:
         assert _sent_summaries(self.client)[0]["initial_enrichment_complete"] is True
         assert self._count() == 15
 
+    async def test_three_rejected_enrichment_titles_post_no_title_and_no_tags(self) -> None:
+        """Tags ride on an accepted title, so a tagging refresh whose titles are all too long writes neither."""
+        overlong = "🧵 Review of the login failure investigation meeting notes"
+        model = self._summarizer(*[_ThreadEnrichment(title=overlong, tags=["bug"])] * 3)
+        self._history(
+            [
+                *_make_thread_history(15),
+                _make_summary_notice_message(_THREAD, message_count=5, initial_enrichment_complete=False),
+            ],
+        )
+
+        await self._maybe_generate(_mock_config())
+
+        assert len(model.requests) == 3
+        assert all(request.output_schema is _ThreadEnrichment for request in model.requests)
+        assert _sent_summaries(self.client) == []
+        assert self.room_state.tags(_THREAD) == []
+        assert self._count() == 15
+
     async def test_concurrent_calls_serialize_history_fetch_inside_lock(self) -> None:
         """Only one concurrent task should fetch history before the per-thread lock is released."""
         self._summarizer(_title("Users discussed testing strategies"))
