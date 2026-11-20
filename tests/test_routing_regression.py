@@ -24,7 +24,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTE_EVENT_TYPE, SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTE_EVENT_TYPE, ROUTE_PROMPT_STRUCTURED_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind
@@ -1170,6 +1170,9 @@ class TestRoutingRegression:
             },
             SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             ORIGINAL_SENDER_KEY: "@user:localhost",
+            # The steward's prompt for the turn, which its responder answers without reading the message again.
+            "body": "What's the latest news?",
+            ROUTE_PROMPT_STRUCTURED_KEY: False,
         }
 
         # The person's message itself leaves both candidates silent.

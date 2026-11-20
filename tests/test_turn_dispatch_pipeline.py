@@ -915,6 +915,7 @@ class TestAgentBot(AgentBotTestBase):
             media_events: list[object] | None = None,
             handled_turn: TurnRecord | None = None,
             scheduled_prompt: str | None = None,
+            prompt_is_structured: bool = False,  # noqa: ARG001
         ) -> None:
             assert message == "hello"
             assert requester_user_id == "@user:localhost"

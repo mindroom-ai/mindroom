@@ -1067,11 +1067,15 @@ SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
 # Its content holds, under this same key, the responder's Matrix ID as `entity`, the person's event as `event_id`,
 # and the thread the answer belongs in as `thread_id`.
 ROUTE_EVENT_TYPE = "io.mindroom.route"
-# The text of a route that carries none, until its responder reads what the person wrote from the thread.
+# Stands in for the text of a route that carries none, until its responder reads the messages it names: no model
+# is sent it.
 ROUTED_PROMPT_PLACEHOLDER = "could you help with this?"
+# In a route's content: whether its `body`, the steward's prompt for the turn, holds the steward's own message tags.
+ROUTE_PROMPT_STRUCTURED_KEY = "io.mindroom.route_prompt_structured"
 # In a route's content: the steward's transcript of each voice message it routes, by event ID.
 ROUTE_VOICE_TRANSCRIPTS_KEY = "io.mindroom.voice_transcripts"
-# The route stays a small event: transcripts over this many encoded bytes are left to the responder's own checkpoint.
+# The route stays a small event: transcripts over this many encoded bytes are left to the responder's own checkpoint,
+# and a prompt over it to the responder's read of each message.
 ROUTE_VOICE_TRANSCRIPTS_LIMIT = 16 * 1024
 # Room state holding one scheduled task, keyed by its task ID.
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"

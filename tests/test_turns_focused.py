@@ -5041,8 +5041,8 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
         "event_ids": [scheduled_event.event_id],
         "thread_id": scheduled_event.event_id,
     }
-    # The task itself is a visible message the responder reads, so the route repeats no text.
-    assert "body" not in route
+    # The route carries the prompt its steward read, the task's own text.
+    assert route["body"] == scheduled_event.body
     assert route[constants.SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     assert route[constants.SCHEDULED_MODEL_KEY] == "cheap"
     assert route[constants.PER_FIRE_THREAD_ROOT_KEY] is True
@@ -8206,12 +8206,17 @@ def _route_message(
     thread_id: str | None = None,
     event_id: str = "$route:localhost",
     event_ids: tuple[str, ...] = ("$question:localhost",),
+    body: str | None = "who can help with this?",
 ) -> nio.RoomMessageFormatted:
-    """Return a steward's route of the person's ``event_ids`` to an entity, as journal dispatch hands it to ingress."""
+    """Return a steward's route of the person's ``event_ids`` to an entity, as journal dispatch hands it to ingress.
+
+    It carries the steward's prompt as ``body``; an older route, or one of a very large prompt, carries none.
+    """
     route = {"entity": _entity_user_id(config, entity), "event_ids": list(event_ids)}
     return _route_as_delivered(
         config,
         {
+            **({} if body is None else {"body": body}),
             constants.ROUTE_EVENT_TYPE: route if thread_id is None else {**route, "thread_id": thread_id},
             constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             constants.ORIGINAL_SENDER_KEY: _SENDER,
@@ -8345,13 +8350,36 @@ async def test_a_routed_responders_model_input_holds_the_persons_text_and_the_th
     )
     harness = _build_harness(config, tmp_path, thread_history=thread)
     room = _room_with_members(config, "general", "research")
+    harness.runtime.client.room_get_event = AsyncMock(side_effect=_events_by_id(thread))
 
-    await harness.deliver(room, _route_message(config, steward="research", thread_id=_THREAD_ROOT, event_ids=routed))
+    route = _route_message(config, steward="research", thread_id=_THREAD_ROOT, event_ids=routed, body=None)
+    await harness.deliver(room, route)
 
     [request] = harness.runner.requests
-    # The steward's hidden route carries no text, and `message:received` hooks see what the person wrote.
-    assert request.response_envelope.body == "Which release is next?"
-    # The reply's own builder turns the request and the thread the reply reads into what the model is sent.
+    # A route that carries no text names the person's messages, which its responder reads by their IDs, in order.
+    text = "Which release is next?" if len(routed) == 1 else "One more thing first\n\nWhich release is next?"
+    assert request.response_envelope.body == text
+    assert request.prompt_source_event_ids == routed
+    before, current = _model_input(config, request, thread)
+    assert current == f'<msg event_id="$question:localhost" from="{_SENDER}"><![CDATA[{text}]]></msg>'
+    assert "We deploy on Fridays" in before
+    assert "Which release is next?" not in before
+
+
+def _events_by_id(messages: Iterable[ResolvedVisibleMessage]) -> Callable[[str, str], nio.RoomGetEventResponse]:
+    """Return a homeserver's answer to an exact event read: each message as the text event it is."""
+    bodies = {message.event_id: message.body for message in messages}
+
+    def read(_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+        response = nio.RoomGetEventResponse()
+        response.event = _text_event(bodies[event_id], event_id=event_id)
+        return response
+
+    return read
+
+
+def _model_input(config: Config, request: ResponseRequest, thread: ThreadHistoryResult) -> list[str]:
+    """Return what the reply's own builder sends the model for a request: the context, then the current message."""
     turn, _unseen = _build_unseen_context_messages(
         request.prompt,
         thread,
@@ -8369,11 +8397,81 @@ async def test_a_routed_responders_model_input_holds_the_persons_text_and_the_th
         timezone="UTC",
         attachment_context=None,
     )
-    before, current = render_prepared_messages_text([*turn.context, turn.prompt]).split("Current message:\n")
-    assert current == (f'<msg event_id="$question:localhost" from="{_SENDER}"><![CDATA[Which release is next?]]></msg>')
-    # Each earlier message of the thread, an earlier message of the routed batch too, is read once, in order.
-    assert before.index("We deploy on Fridays") < before.index("One more thing first")
-    assert "Which release is next?" not in before
+    return render_prepared_messages_text([*turn.context, turn.prompt]).split("Current message:\n")
+
+
+_BATCH_PROMPT = (
+    "The user sent these messages:\n\n<messages>\n"
+    f'<msg event_id="$first:localhost" from="{_SENDER}"><![CDATA[The release date is Thursday.]]></msg>\n'
+    f'<msg event_id="$question:localhost" from="{_SENDER}"><![CDATA[What day did I say?]]></msg>\n</messages>'
+)
+
+
+def _route_with_prompt(config: Config, thread_id: str, *, structured: bool = True) -> nio.RoomMessageFormatted:
+    """Return a steward's route of a two-message batch that carries the prompt the steward read."""
+    route = _route_message(
+        config,
+        steward="research",
+        thread_id=thread_id,
+        event_ids=("$first:localhost", "$question:localhost"),
+    )
+    route.source["content"] |= {"body": _BATCH_PROMPT, constants.ROUTE_PROMPT_STRUCTURED_KEY: structured}
+    return route
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "thread_messages",
+    [
+        # Two top-level messages: the answer's thread is the second, and holds only it.
+        (("What day did I say?", "$question:localhost"),),
+        # A voice note and a question in a thread, which shows the note as its audio file.
+        (("recording.ogg", "$first:localhost"), ("What day did I say?", "$question:localhost")),
+        # The person's messages are older than the page of the thread this responder reads, or it cannot decrypt them.
+        (("Something much later", "$later:localhost"),),
+    ],
+    ids=["top-level batch", "voice then text", "unread sources"],
+)
+async def test_a_routed_responders_current_message_is_the_prompt_its_route_carries(
+    tmp_path: Path,
+    thread_messages: tuple[tuple[str, str], ...],
+) -> None:
+    """The steward read the whole batch, so its route's prompt is the responder's current message, whatever it reads."""
+    config = _two_agent_config(tmp_path)
+    thread = thread_history_result(
+        [make_visible_message(sender=_SENDER, body=body, event_id=event_id) for body, event_id in thread_messages],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=thread)
+    room = _room_with_members(config, "general", "research")
+    # The homeserver returns what this responder cannot decrypt, and is not asked.
+    harness.runtime.client.room_get_event = AsyncMock(return_value=nio.RoomGetEventError("unreadable"))
+
+    await harness.deliver(room, _route_with_prompt(config, thread_messages[0][1]))
+
+    [request] = harness.runner.requests
+    assert request.response_envelope.body == _BATCH_PROMPT
+    assert request.prompt_source_event_ids == ("$first:localhost", "$question:localhost")
+    harness.runtime.client.room_get_event.assert_not_awaited()
+    # The steward's tags are the current message as they stand, as a batch this responder coalesced itself would be.
+    assert _model_input(config, request, thread)[-1] == _BATCH_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_a_route_without_a_prompt_whose_message_cannot_be_read_starts_no_turn(tmp_path: Path) -> None:
+    """A responder that can read neither a prompt on its route nor the message it names answers nothing yet."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    undecrypted = nio.RoomGetEventResponse()
+    undecrypted.event = MagicMock(spec=nio.MegolmEvent)
+    harness.runtime.client.room_get_event = AsyncMock(return_value=undecrypted)
+
+    await harness.deliver(room, _route_message(config, steward="research", thread_id="$question:localhost", body=None))
+
+    # No model is asked the route's placeholder, and the route stays pending for when the message can be read.
+    assert harness.runner.requests == []
+    assert harness.ignored_dispatch_sources == []
 
 
 @pytest.mark.asyncio
@@ -8402,6 +8500,29 @@ async def test_a_route_runs_nothing_in_an_agent_it_does_not_name(tmp_path: Path)
 
     assert observed == []
     assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_steward_routes_the_prompt_it_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A route carries its steward's prompt for the turn, the batch as the steward coalesced it, unless too large."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+    large = "x" * (constants.ROUTE_VOICE_TRANSCRIPTS_LIMIT + 1)
+
+    await harness.deliver(room, _text_event("What day did I say?", event_id="$a:localhost"))
+    await harness.deliver(room, _text_event(large, event_id="$b:localhost", origin_server_ts=1_000_001))
+
+    carried, oversize = harness.gateway.routes
+    turn = harness.gate_batches[0]
+    assert carried["body"] == turn.event.body == "What day did I say?"
+    assert carried[constants.ROUTE_PROMPT_STRUCTURED_KEY] is turn.current_prompt_is_structured
+    # A route stays a small event: its responder reads a message this large by its ID.
+    assert "body" not in oversize
 
 
 @pytest.mark.asyncio

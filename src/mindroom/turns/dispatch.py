@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
+import nio
+
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.authorization import is_requester_joined_to_room
 from mindroom.background_tasks import create_background_task
@@ -15,6 +17,7 @@ from mindroom.bot_runtime_view import RunPhase
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_PROMPT_STRUCTURED_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     ROUTED_PROMPT_PLACEHOLDER,
     SCHEDULED_HISTORY_LIMIT_KEY,
@@ -69,7 +72,6 @@ from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    import nio
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -331,7 +333,6 @@ class TurnDispatcher:
 
         timing_scope_token = None
         try:
-            turn = await self._with_routed_text(turn)
             dispatch_timing = get_dispatch_pipeline_timing(turn.event.source)
             prepared = await self._prepare_text_dispatch(
                 turn,
@@ -339,6 +340,8 @@ class TurnDispatcher:
             )
             if prepared is None:
                 return
+            # A routed turn's text is what the person wrote from here on.
+            turn = prepared.turn
             timing_scope_token = timing_scope_context.set(event_timing_scope(turn.event.event_id))
             async with self.deps.ingress.admitted_reply_decision(
                 turn.facts.run_requester_id,
@@ -450,25 +453,30 @@ class TurnDispatcher:
             owner=self.deps.runtime,
         )
 
-    async def _with_routed_text(self, turn: PreparedTurn) -> PreparedTurn:
-        """Return a turn a steward routed to this bot in a thread with what the person wrote as its text.
+    async def _with_routed_text(self, turn: PreparedTurn) -> PreparedTurn | None:
+        """Return a turn a steward routed to this bot with what the person wrote as its text, or None if unreadable.
 
-        Such a route names the person's messages and carries no text. The newest is the turn's own message, read as
-        this bot or the steward transcribed it, else as the thread shows it; the thread's history holds the others.
+        A route carries its steward's prompt for the turn. One that carries none names the person's messages, and
+        each is read by its ID: as this bot or the steward transcribed it, else as the homeserver returns it.
         """
-        routed, thread_id = turn.facts.routed_event_id, turn.coalescing_key.thread_id
-        if routed is None or thread_id is None or turn.event.body != ROUTED_PROMPT_PLACEHOLDER:
+        content = turn.event.source["content"]
+        if not turn.facts.routed_event_ids:
             return turn
-        mentions = self.deps.resolver.pre_hydration_mentions(room=turn.room, event=turn.event)
-        if not mentions[1]:
-            return turn
-        voice = await self.deps.turn_store.prepared_voice_for_source(routed)
-        transcripts = turn.event.source["content"].get(ROUTE_VOICE_TRANSCRIPTS_KEY, {})
-        body = voice.body if voice is not None else transcripts.get(routed)
-        if body is None:
-            thread = await self.deps.resolver.fetch_thread_history(turn.room.room_id, thread_id)
-            body = next((message.body for message in thread if message.event_id == routed), None)
-        return turn if body is None else replace(turn, event=replace(turn.event, body=body))
+        if turn.event.body != ROUTED_PROMPT_PLACEHOLDER:
+            return replace(turn, current_prompt_is_structured=content.get(ROUTE_PROMPT_STRUCTURED_KEY) is True)
+        bodies: list[str] = []
+        for event_id in turn.facts.routed_event_ids:
+            voice = await self.deps.turn_store.prepared_voice_for_source(event_id)
+            body = voice.body if voice is not None else content.get(ROUTE_VOICE_TRANSCRIPTS_KEY, {}).get(event_id)
+            if body is None:
+                response = await self._client().room_get_event(turn.room.room_id, event_id)
+                event = response.event if isinstance(response, nio.RoomGetEventResponse) else None
+                if not isinstance(event, nio.RoomMessageFormatted):
+                    self.deps.logger.warning("Cannot read a routed message; its turn stays pending", event_id=event_id)
+                    return None
+                body = event.body
+            bodies.append(body)
+        return replace(turn, event=replace(turn.event, body="\n\n".join(bodies)))
 
     async def _prepare_text_dispatch(
         self,
@@ -479,6 +487,10 @@ class TurnDispatcher:
         if dispatch_timing is not None:
             dispatch_timing.mark("dispatch_start")
         dispatch_started_at = time.monotonic()
+        routed_turn = await self._with_routed_text(turn)
+        if routed_turn is None:
+            return None
+        turn = routed_turn
         if dispatch_timing is not None:
             dispatch_timing.mark("dispatch_prepare_start")
         prepared = await self._prepare_dispatch(turn)
@@ -653,6 +665,7 @@ class TurnDispatcher:
                 on_lifecycle_lock_acquired=response_started.set,
                 on_participation_approved=publish_voice,
                 reconcile_visible_response=pending_turn.resumes_response,
+                prompt_source_event_ids=prepared.turn.facts.routed_event_ids,
             ),
             name=f"inbox_response:{prepared.turn.event.event_id}",
             room_id=room.room_id,
@@ -741,6 +754,7 @@ class TurnDispatcher:
                 media_events=None if single_direct_media_route else plan.media_events,
                 handled_turn=handled_turn,
                 scheduled_prompt=turn.event.body if prepared.dispatch.scheduled_history_budget is not None else None,
+                prompt_is_structured=turn.current_prompt_is_structured,
             )
 
     async def _has_newer_unresponded_in_thread(
@@ -1020,6 +1034,7 @@ class TurnDispatcher:
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
         on_participation_approved: Callable[[], Awaitable[None]] | None = None,
         reconcile_visible_response: bool = False,
+        prompt_source_event_ids: tuple[str, ...] = (),
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
         action = self.deps.turn_policy.effective_response_action(action)
@@ -1107,6 +1122,7 @@ class TurnDispatcher:
                     logical_source_event_ids=handled_turn.source_event_ids,
                     discovery_event_ids=handled_turn.discovery_event_ids,
                 ),
+                prompt_source_event_ids=prompt_source_event_ids,
                 user_id=dispatch.requester_user_id,
                 # A replay finds the reply its earlier attempt left through the reply's records.
                 response_envelope=dispatch.envelope,

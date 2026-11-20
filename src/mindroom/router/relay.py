@@ -14,6 +14,7 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     ROUTE_EVENT_TYPE,
+    ROUTE_PROMPT_STRUCTURED_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     ROUTE_VOICE_TRANSCRIPTS_LIMIT,
     SOURCE_KIND_KEY,
@@ -267,6 +268,7 @@ async def execute_router_relay(  # noqa: PLR0911
     media_events: list[MediaDispatchEvent] | None = None,
     handled_turn: TurnRecord | None = None,
     scheduled_prompt: str | None = None,
+    prompt_is_structured: bool = False,
 ) -> bool:
     """Route one turn as the room's steward; return whether the steward itself was selected and answers it.
 
@@ -350,10 +352,11 @@ async def execute_router_relay(  # noqa: PLR0911
         route["thread_id"] = thread_event_id
     transcripts = await _voice_transcripts(deps, route["event_ids"])
     content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route, **transcripts}
-    if scheduled_prompt is not None or thread_event_id is None:
-        # A responder in a thread reads the person's messages there. One that answers in the room reads no
-        # conversation, and a scheduled task's prompt may be in no visible message, so their route carries the prompt.
-        content["body"] = scheduled_prompt or message or event.body
+    prompt = scheduled_prompt or message or event.body
+    if scheduled_prompt is not None or len(prompt.encode()) <= ROUTE_VOICE_TRANSCRIPTS_LIMIT:
+        # The steward read every message of the turn, which its responder may not: the route carries its prompt.
+        # A scheduled task's prompt may be in no visible message, so it is carried whatever its size.
+        content |= {"body": prompt, ROUTE_PROMPT_STRUCTURED_KEY: prompt_is_structured}
     event_id = await deps.delivery_gateway.send_route(room.room_id, content)
     with bound_log_context(**resolved_target.log_context):
         if event_id is None:

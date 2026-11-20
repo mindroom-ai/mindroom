@@ -340,6 +340,8 @@ class ResponseTurnContext:
     current_sender_id: str | None = None
     # Interactive selections reply to the question but consume history through the selecting source.
     history_boundary_event_id: str | None = None
+    # The messages the prompt already holds, a route's named sources, which are left out of the thread's history.
+    prompt_source_event_ids: tuple[str, ...] = ()
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     active_model_name: str | None = None
     active_event_ids: frozenset[str] = frozenset()

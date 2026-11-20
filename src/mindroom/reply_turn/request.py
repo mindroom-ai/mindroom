@@ -94,6 +94,8 @@ class ResponseRequest:
     requires_model_history_refresh: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     history_boundary_event_id: str | None = None
+    # The person's messages a route names, which the prompt holds: the thread's copy of each is no history beside it.
+    prompt_source_event_ids: tuple[str, ...] = ()
     scheduled_model: str | None = None
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None

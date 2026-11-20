@@ -17,6 +17,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTE_EVENT_TYPE,
+    ROUTE_PROMPT_STRUCTURED_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
@@ -969,6 +970,9 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         "thread_id": "$voice_event",
     }
     assert route == {
+        # The steward's prompt: what it transcribed, in place of the audio file's name.
+        "body": f"{VOICE_PREFIX}summarize this audio",
+        ROUTE_PROMPT_STRUCTURED_KEY: False,
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],

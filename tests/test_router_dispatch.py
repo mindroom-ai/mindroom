@@ -144,6 +144,7 @@ class TestAgentBot(AgentBotTestBase):
             media_events=None,
             handled_turn=None,
             scheduled_prompt=None,
+            prompt_is_structured=False,
         )
 
     @pytest.mark.asyncio

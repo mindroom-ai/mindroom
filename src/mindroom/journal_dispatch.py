@@ -29,6 +29,7 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     ROUTE_EVENT_TYPE,
+    ROUTE_PROMPT_STRUCTURED_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
     ROUTED_PROMPT_PLACEHOLDER,
     SCHEDULED_HISTORY_LIMIT_KEY,
@@ -478,6 +479,7 @@ _ROUTE_CONTEXT_KEYS = (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
     ROUTE_VOICE_TRANSCRIPTS_KEY,
+    ROUTE_PROMPT_STRUCTURED_KEY,
 )
 
 
@@ -543,8 +545,8 @@ def _route_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
     message = _as_message(
         event,
         build_message_content(
-            # A route carries the text of a scheduled prompt and of a turn answered in the room; the responder
-            # of any other reads what the person wrote from the thread.
+            # A route carries its steward's prompt for the turn. The responder of one that carries none, an older
+            # or a very large one, reads the messages it names before any model is asked.
             body if isinstance(body, str) and body.strip() else ROUTED_PROMPT_PLACEHOLDER,
             mentioned_user_ids=[entity],
             thread_event_id=thread_id,

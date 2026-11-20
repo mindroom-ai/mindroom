@@ -516,6 +516,18 @@ def _thread_history_before_current_event(
     return tuple(preceding_messages)
 
 
+def _without_prompt_sources(
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    prompt_source_event_ids: Collection[str],
+    current_event_id: str | None,
+) -> Sequence[ResolvedVisibleMessage] | None:
+    """Return the thread without the messages the prompt already holds; the current one stays as the boundary."""
+    held = set(prompt_source_event_ids) - {current_event_id}
+    if not held or not thread_history:
+        return thread_history
+    return tuple(message for message in thread_history if message.event_id not in held)
+
+
 def _thread_history_with_scheduled_budget(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     *,
@@ -748,6 +760,7 @@ async def _prepare_execution_context_common(
     stands in for persisted replay, so ``resolved_inputs``' request limit bounds it too.
     """
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
+    thread_history = _without_prompt_sources(thread_history, ctx.prompt_source_event_ids, history_boundary_event_id)
     active_event_ids = ctx.active_event_ids
     # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.
     seen_event_ids = await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
