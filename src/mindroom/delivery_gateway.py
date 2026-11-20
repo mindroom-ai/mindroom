@@ -1588,10 +1588,7 @@ class DeliveryGateway:
         return None
 
     async def send_route(self, room_id: str, content: dict[str, Any]) -> str | None:
-        """Send a steward's hidden route event, which no client shows, and return its event ID.
-
-        A prompt too long for one event goes in the route's long-text file, never cut short.
-        """
+        """Send a steward's hidden route event, a long one with its long-text file or not at all; return its event ID."""
         outcome = await send_message_outcome(
             self._ready_client(),
             room_id,

@@ -1720,6 +1720,23 @@ class TestPendingEventWorker:
 
         assert runs == 1
 
+    async def test_a_pending_message_replays_as_its_sender_edited_it(self, alice: PrincipalStore) -> None:
+        """A waiting message keeps the content its settled edit gave it, and a settled one keeps none."""
+        await self._admit(alice, text_event("$waiting", "June."))
+        await self._admit(alice, text_event("$answered", "May.", ts=1_001))
+        await alice.settle("$answered")
+
+        for event_id in ("$waiting", "$answered", "$unknown"):
+            await alice.revise_pending(event_id, {"body": "July, not June.", "msgtype": "m.text"})
+
+        [waiting] = await alice.pending()
+        assert waiting.event_id == "$waiting"
+        assert waiting.source["content"] == {"body": "July, not June.", "msgtype": "m.text"}
+        assert waiting.source["sender"] == ALICE
+        answered = await alice.load_event("$answered")
+        assert answered is not None
+        assert answered.source == {}
+
     async def test_a_failed_event_stays_pending(self, alice: PrincipalStore) -> None:
         """A failed event stays pending."""
 

@@ -8538,6 +8538,76 @@ async def test_a_route_too_large_for_one_event_is_read_whole_from_its_file(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agent", [ROUTER_AGENT_NAME, "general"], ids=["routed", "answered directly"])
+async def test_a_correction_a_waiting_message_took_survives_a_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+) -> None:
+    """A message edited while it waited is answered as edited by the process that replays it after a crash.
+
+    The edit is settled when the message takes it, so only the message replays, and nothing once it is settled.
+    """
+    config = _two_agent_config(tmp_path)
+    members = (ROUTER_AGENT_NAME, "general", "research") if agent == ROUTER_AGENT_NAME else ("general",)
+    room = _room_with_members(config, *members)
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+    original = _text_event("June.", event_id="$question:localhost", thread_id=_THREAD_ROOT)
+    edit = _text_event("* July, not June.", event_id="$correction:localhost", origin_server_ts=1_000_001)
+    edit.source["content"]["m.new_content"] = {"body": "July, not June.", "msgtype": "m.text"}
+    edit.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": original.event_id}
+    key = CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER))
+
+    def process(name: str) -> tuple[_Harness, JournalDispatcher]:
+        harness = _build_harness(config, tmp_path / name, agent_name=agent)
+        dispatcher = _obligation_runner(
+            harness,
+            tracking_path=tmp_path / "journal",
+            matrix_user_id=_entity_user_id(config, agent),
+            entity_name=agent,
+            room=room,
+        )
+        _replace_harness_deps(harness, interactive_questions=dispatcher.store)
+        return harness, dispatcher
+
+    crashed, journal = process("crashed")
+    with patch.object(crashed.ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
+        await admit_dispatch_event(journal, room, original, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await journal.drain_once()
+
+        async def queued() -> None:
+            while not crashed.gate.queued_pending_events(key):  # noqa: ASYNC110
+                await asyncio.sleep(0.001)
+
+        await asyncio.wait_for(queued(), timeout=5)
+        await admit_dispatch_event(journal, room, edit, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await journal.drain_once()
+        assert await journal.store.unsettled_event_ids() == {original.event_id}
+
+        # The process dies with the message still waiting: another one replays the journal.
+        restarted, replay = process("restarted")
+        await replay.drain_once()
+        await restarted.gate.drain_all()
+        await restarted.runner.settle_inbox_responses()
+
+        answered = [route["body"] for route in restarted.gateway.routes] + [
+            request.prompt for request in restarted.runner.requests
+        ]
+        assert answered == ["July, not June."]
+
+        await replay.settle_intentionally_ignored_turn_sources((original.event_id,))
+        idle, settled = process("idle")
+        await settled.drain_once()
+        await idle.gate.drain_all()
+        assert idle.gateway.routes == []
+        assert idle.runner.requests == []
+        await crashed.gate.drain_all()
+
+
+@pytest.mark.asyncio
 async def test_a_steward_routes_a_message_as_its_sender_edited_it_while_it_waited(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

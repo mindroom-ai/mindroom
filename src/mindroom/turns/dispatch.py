@@ -453,11 +453,7 @@ class TurnDispatcher:
         )
 
     async def _with_routed_text(self, turn: PreparedTurn) -> PreparedTurn | None:
-        """Return a routed turn with its steward's whole prompt as its text, or None while that cannot be read.
-
-        The prompt is the route's own text or, when too long for one event, its long-text file's.
-        No prompt is made from the messages a route names.
-        """
+        """Return a routed turn with its steward's prompt, the route's text or its long-text file's, or None while unread."""
         content, body = turn.event.source["content"], turn.event.body
         if not turn.facts.routed_event_ids:
             return turn

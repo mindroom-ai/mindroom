@@ -105,6 +105,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
     The responder reads the prompt from the route or from the route's file, and never makes one from the messages the route names.
     While it cannot read the file, and for a route without a `body`, it starts no turn and leaves the route pending.
     No model is ever sent a preview or a stand-in text.
+    A message its sender edits while it waits for its turn takes the edit, which settles then, and the journal stores the waiting message as edited: after a crash the message replays with the correction, for a steward and for an agent answering directly.
     Only the responder a route names processes it: every other bot settles it unread, having run its hooks for the person's own message.
     The steward routes under `router.access` alone, so a candidate steward whose own access denies the person still routes the person's message, and answers it itself, runs the person's commands and runs its own `message:received` hooks only when its own access allows.
     Every bot journals the event from sync, in encrypted rooms too, the way a silent schedule trigger is journaled, and only when its sender is an account the identity registry manages.

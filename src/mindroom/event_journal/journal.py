@@ -1358,6 +1358,16 @@ def load(
     return None if row is None else _journal_event(row)
 
 
+def revise_pending(transaction: Transaction, principal_id: str, event_id: str, content: Mapping[str, object]) -> None:
+    """Store the content its sender edited a pending message to, which a replay of the message then reads."""
+    stored = load(transaction, principal_id, event_id)
+    if stored is not None:
+        transaction.execute(
+            "UPDATE journal_events SET source_json = ? WHERE principal_id = ? AND event_id = ? AND state = 'pending'",
+            (json.dumps({**stored.source, "content": content}), principal_id, event_id),
+        )
+
+
 def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bool:
     """Return whether one event still owes semantic work."""
     row = transaction.fetchone(

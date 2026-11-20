@@ -417,6 +417,8 @@ class TurnIngress:
         )
         if edited is None:
             return False
+        # The edit settles here, so after a crash only the message replays: the journal keeps it as edited.
+        await self.deps.interactive_questions.revise_pending(original_event_id, edited[1].event.source["content"])
         self._renew_queued_notice(room, *edited)
         return True
 
