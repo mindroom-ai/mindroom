@@ -123,6 +123,12 @@ def test_nested_quote_list_div_keeps_inner_markdown_literal() -> None:
         ("![a](mxc://?/id)", "a"),
         ("![a](https://example.org:garbage/x)", "a"),
         ("<hr>\n![logo](./logo.png)", "logo"),
+        ("![a](mxc://.../id)", "a"),
+        ("![a](mxc://server/id?foo)", "a"),
+        ("![a](mxc://server/id#x)", "a"),
+        ("![a](https://example.org:99999/a)", "a"),
+        ('<img src="./bad.png" src="https://example.org/x.png" alt="a">', "a"),
+        ('<img src="./bad.png" src="https://example.org/x.png" alt="a" />', "a"),
     ],
 )
 def test_unloadable_image_becomes_a_note(markdown: str, alt: str) -> None:
@@ -134,7 +140,15 @@ def test_unloadable_image_becomes_a_note(markdown: str, alt: str) -> None:
 
 @pytest.mark.parametrize(
     "markdown",
-    ["![logo](mxc://matrix.org/abc123)", "![logo](https://example.org/logo.png)", "![l](http://example.org:8080)"],
+    [
+        "![logo](mxc://matrix.org/abc123)",
+        "![logo](https://example.org/logo.png)",
+        "![l](http://example.org:8080)",
+        '<img src="mxc://[2001:db8::1]:8448/id">',
+        "![a](mxc://[2001:db8::1]:8448/id)",
+        "![a](https://[2001:db8::1]/x.png)",
+        "![a](https://user@example.org/x.png)",
+    ],
 )
 def test_loadable_image_is_kept(markdown: str) -> None:
     """Uploaded media and web images still render as <img>."""
@@ -148,6 +162,14 @@ def test_quoted_image_beside_its_code_span_copy_leaves_the_code() -> None:
     html = markdown_to_html("> ![a\n> b](bad) ![a\n> b](bad)\n> `![a\nb](bad)`")
     assert "<code>![a b](bad)</code>" in html
     assert "<img" not in html
+
+
+@pytest.mark.parametrize("close", [">", " />"])
+def test_duplicate_src_keeps_only_the_first(close: str) -> None:
+    """Browsers load the first ``src``; the sanitizer checks that one and emits only it."""
+    html = markdown_to_html(f'<img src="https://example.org/x.png" src="./bad.png" alt="a"{close}')
+    assert html.count("src=") == 1
+    assert '<img src="https://example.org/x.png" alt="a">' in html
 
 
 def test_image_syntax_in_code_stays_code() -> None:

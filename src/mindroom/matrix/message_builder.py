@@ -17,6 +17,7 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 from mindroom.matrix.event_info import UNQUOTED_REPLY_RELATION_KEY
+from mindroom.matrix.identity import valid_matrix_server_name
 
 # Standard Matrix-safe HTML tags.
 _GENERAL_FORMATTED_BODY_TAGS = frozenset(
@@ -318,25 +319,36 @@ def _escape_unterminated_html_fragments(html_text: str) -> str:
     return _HTML_LINE_PATTERN.sub(_escape_unterminated_html_fragment, html_text)
 
 
+# HTML rendered from Markdown never keeps an <img> no client can load; explicit or relayed formatted_body is not checked.
 IMAGE_NOT_SENT_NOTE = "⚠️ Image not sent:"
-_LOADABLE_IMG_SRC = re.compile(r"(?i)mxc://[A-Za-z0-9.\-]+(:\d+)?/[^/\s]+|https?://\w[\w.\-]*(:\d+)?([/?#]\S*)?")
 
 
 def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
-    """Return the text replacing an ``<img>`` whose ``src`` no client can load, or None to keep it."""
-    values = dict(attrs)
-    if _LOADABLE_IMG_SRC.fullmatch((values.get("src") or "").strip()):
+    """Return the text replacing an ``<img>`` whose first ``src`` no client can load, or None to keep it."""
+    src = next((value or "" for name, value in attrs if name == "src"), "").strip()
+    src = src.replace("%5B", "[").replace("%5D", "]")  # markdown-it percent-encodes IPv6 brackets
+    server, _, media_id = src.removeprefix("mxc://").partition("/")
+    try:
+        parts = urlsplit(src)
+        web = parts.scheme.lower() in {"http", "https"} and bool(parts.hostname) and parts.port != -1  # port may raise
+    except ValueError:
+        web = False
+    mxc = src.startswith("mxc://") and valid_matrix_server_name(server) and bool(media_id)
+    if web or (mxc and not {"/", "?", "#"} & set(media_id)):
         return None
-    return escape(f"{IMAGE_NOT_SENT_NOTE} {values.get('alt') or 'image'} (no uploaded file)")
+    alt = next((value for name, value in attrs if name == "alt" and value), "image")
+    return escape(f"{IMAGE_NOT_SENT_NOTE} {alt} (no uploaded file)")
 
 
 def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | None]]) -> str:
     allowed_attributes = _ALLOWED_FORMATTED_BODY_ATTRIBUTES.get(tag_name, frozenset())
     sanitized_attributes: list[str] = []
+    seen: set[str] = set()  # a repeated attribute keeps its first value, as browsers do
     for attr_name, attr_value in attrs:
         normalized_attr_name = attr_name.lower()
-        if normalized_attr_name not in allowed_attributes:
+        if normalized_attr_name not in allowed_attributes or normalized_attr_name in seen:
             continue
+        seen.add(normalized_attr_name)
         if normalized_attr_name == "open":
             sanitized_attributes.append(" open")
             continue
