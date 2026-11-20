@@ -2792,8 +2792,8 @@ name = "httpcore2"
 version = "2.16.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11" },
-    { name = "truststore" },
+    { name = "h11", marker = "sys_platform != 'emscripten'" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/92/9d/df40b41f7db0370f82019820709244e7b660c52aa3da3c9e5c4e8141f6e6/httpcore2-2.16.2.tar.gz", hash = "sha256:6c519d0f7b44f7269fa9bbb4d2763db395a4a2370f046d8e8e0a4b38227815d2", size = 70064, upload-time = "2026-11-16T10:12:19.491Z" }
 wheels = [
@@ -3769,7 +3769,7 @@ name = "macholib"
 version = "1.16.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "altgraph" },
+    { name = "altgraph", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/10/2f/97589876ea967487978071c9042518d28b958d87b17dceb7cdc1d881f963/macholib-1.16.4.tar.gz", hash = "sha256:f408c93ab2e995cd2c46e34fe328b130404be143469e41bc366c807448979362", size = 59427, upload-time = "2025-11-22T08:28:38.373Z" }
 wheels = [
@@ -7148,10 +7148,10 @@ name = "pyobjc-framework-applicationservices"
 version = "13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
-    { name = "pyobjc-framework-coretext" },
-    { name = "pyobjc-framework-quartz" },
+    { name = "pyobjc-core", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pyobjc-framework-coretext", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/69/02/fdcf6554abfb830f335e68a43a5ac102cdc73c720a1e039551d4a61f692b/pyobjc_framework_applicationservices-13.0.tar.gz", hash = "sha256:d869115dd13300fa9ce926cdc23e6cceec1279bc02cc75d1be24562c89cd9ecc", size = 108163, upload-time = "2026-10-30T10:45:46.598Z" }
 wheels = [
@@ -7166,7 +7166,7 @@ name = "pyobjc-framework-cocoa"
 version = "13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
+    { name = "pyobjc-core", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/30/50/55a8779d35f1f86d795264cbd6fe62e35b2cf4fb8343fc888e99268c988a/pyobjc_framework_cocoa-13.0.tar.gz", hash = "sha256:bb7a23941fc8d7866578dbc84e56140efd343a1d28510f530dd1dbf80807daf4", size = 3135308, upload-time = "2026-10-30T10:46:03.982Z" }
 wheels = [
@@ -7181,8 +7181,8 @@ name = "pyobjc-framework-coremedia"
 version = "13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-core", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/10/f6/3ccdac27fd6a2a94ae122b807a6f0512076614b85265559a9055996b5839/pyobjc_framework_coremedia-13.0.tar.gz", hash = "sha256:d95ef87f6f33ec98347439284f0add1f7d1d019b88cb8e218e81b39aec14d324", size = 99534, upload-time = "2026-10-30T10:46:14.941Z" }
 wheels = [
@@ -7197,9 +7197,9 @@ name = "pyobjc-framework-coretext"
 version = "13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
-    { name = "pyobjc-framework-quartz" },
+    { name = "pyobjc-core", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fb/8c/6521bee7ae7a25ff7cf2ac91078f06a50a2ecf6ef35068108e18f542b398/pyobjc_framework_coretext-13.0.tar.gz", hash = "sha256:0ee3b7e886ffa4be769402c5341b2101d949e31a33d1a468d64b3a3579d2aea1", size = 97797, upload-time = "2026-10-30T10:46:20.71Z" }
 wheels = [
@@ -7214,8 +7214,8 @@ name = "pyobjc-framework-quartz"
 version = "13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-core", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/86/ffaa76ca28df5450cce14614c657b910bbd7bb737feaf47f74230c3b78d3/pyobjc_framework_quartz-13.0.tar.gz", hash = "sha256:b9a4942182efbbc7e18e6cb7f5a8faa166dc2fc5e33bece7c7b1355494274add", size = 3399243, upload-time = "2026-10-30T10:47:23.667Z" }
 wheels = [
@@ -7230,9 +7230,9 @@ name = "pyobjc-framework-screencapturekit"
 version = "13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
-    { name = "pyobjc-framework-coremedia" },
+    { name = "pyobjc-core", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pyobjc-framework-coremedia", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/b3/2a38e35a2d0b7703e6a3c0a03c4e4854f1ea700b930ad50cf8fe34de1aec/pyobjc_framework_screencapturekit-13.0.tar.gz", hash = "sha256:036ee91a5566c053117120c423c747becdd803906dae1822c537ea61af976273", size = 40818, upload-time = "2026-10-30T10:47:29.126Z" }
 wheels = [
