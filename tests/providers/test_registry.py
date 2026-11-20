@@ -28,6 +28,7 @@ from mindroom.llm.errors import MALFORMED_TOOL_CALL, ModelSafeguardRefusal, Prov
 from mindroom.llm.media import Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
+from mindroom.llm.request_context import bind_request_headers
 from mindroom.providers import names
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
@@ -674,6 +675,90 @@ async def test_an_authored_claude_credential_never_goes_out_beside_an_implicit_k
 
     headers = wire.requests[0].headers
     assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "extra_kwargs", "sent"),
+    [
+        ("env", {}, {"x-api-key": "gw"}),
+        ("callback", {}, {"x-api-key": "gw"}),
+        ("config", {"default_headers": {"X-Api-Key": "gw"}}, {"x-api-key": "gw"}),
+        (
+            "config",
+            {"api_key": "sk-own", "default_headers": {"X-Api-Key": "gw"}},
+            {"x-api-key": "gw", "authorization": "Bearer sk-own"},
+        ),
+        (
+            "config",
+            {"default_headers": {}, "client_params": {"default_headers": {"X-Api-Key": "gw"}}},
+            {"authorization": "Bearer sk-shared"},
+        ),
+    ],
+    ids=["env", "callback", "config", "authored-two-hop", "shadowed-map"],
+)
+async def test_an_implicit_claude_key_never_goes_out_beside_a_gateway_key(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    extra_kwargs: dict[str, Any],
+    sent: dict[str, str],
+) -> None:
+    """A gateway ``X-Api-Key`` from the env, the bound headers, or the config keeps the shared key local.
+
+    Only a config that authors both a key and the header sends both; a header in a shadowed map is not sent.
+    """
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+    if source == "env":
+        monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Api-Key: gw")
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
+    provider = build_model_provider(Config(models={"target": model_config}), runtime_paths, "target")
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with (
+        bind_request_headers(lambda: {"X-Api-Key": "gw"} if source == "callback" else {}),
+        pytest.raises(ProviderError),
+    ):
+        await complete(provider, ModelRequest(messages=[_user()]))
+
+    headers = wire.requests[0].headers
+    assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
+
+
+@pytest.mark.asyncio
+async def test_an_empty_default_header_map_clears_the_client_params_one(
+    runtime_paths: RuntimePaths, wire: Wire,
+) -> None:
+    """An explicit empty ``default_headers`` replaces ``client_params.default_headers``, as an unset one would not."""
+    extra_kwargs = {"api_key": "sk-own", "default_headers": {}, "client_params": {"default_headers": {"X-Label": "x"}}}
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert "x-label" not in wire.requests[0].headers
+
+
+@pytest.mark.asyncio
+async def test_blank_claude_credentials_count_as_unset(runtime_paths: RuntimePaths, wire: Wire) -> None:
+    """A blank ``auth_token`` or ``client_params`` key is no credential, so the shared key goes out alone."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+    extra_kwargs = {"auth_token": "  ", "client_params": {"api_key": "", "auth_token": ""}}
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer sk-shared"
 
 
 @pytest.mark.parametrize(

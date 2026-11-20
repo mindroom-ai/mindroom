@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import anthropic
 from anthropic import NOT_GIVEN, AsyncAnthropic, AsyncAnthropicVertex, omit
-from anthropic.lib._env import with_environment_headers
 from anthropic.lib.streaming import (
     ParsedBetaContentBlockStopEvent,
     ParsedBetaMessageStopEvent,
@@ -152,7 +151,6 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 _BEDROCK_LEGACY_API_VERSION = "2023-06-01"
 _FIRST_API_2026_BEDROCK_VERSION = (4, 7)
 _CLAUDE_VERSION_NUMBERS = re.compile(r"(?<![0-9])[0-9]{1,2}(?![0-9])")
-_CREDENTIAL_HEADERS = frozenset({"authorization", "x-api-key"})
 # The models whose dropped sampling controls were already logged, once each.
 _SAMPLING_WARNED: set[tuple[str, str]] = set()
 # The SDK's ``messages.stream`` arguments that are request options or headers, not body fields. The SDK adds its own
@@ -252,7 +250,7 @@ class ClaudeProvider:
     @property
     def keeps_legacy_api_version(self) -> bool:
         """Return whether the model is a Claude older than 4.7 on Bedrock, which sends API version 2023-06-01."""
-        return self.route == "bedrock_claude" and predates_bedrock_api_2026(self.identity.id)
+        return _keeps_legacy_api_version(self.route, self.identity.id, self.settings)
 
     @property
     def model_params(self) -> dict[str, Any]:
@@ -301,7 +299,7 @@ class ClaudeProvider:
         """
         timer = TurnTimer()
         client, body = await asyncio.to_thread(self._prepare, request)
-        kwargs = with_request_headers(body.kwargs)
+        kwargs = self._without_implicit_key(client, with_request_headers(body.kwargs))
         try:
             await request.on_send(sdk_request_body(kwargs, _SDK_OPTION_KEYS))
             manager = client.beta.messages.stream(**kwargs) if body.beta else client.messages.stream(**kwargs)
@@ -567,30 +565,42 @@ class ClaudeProvider:
         if settings.timeout is not None:
             kwargs["timeout"] = settings.timeout
         kwargs.update(settings.client_params or {})
+        # The winning map replaces the one in ``client_params``, an explicit empty one included.
         default_headers = dict(self._authored_default_headers() or {})
         if self.keeps_legacy_api_version:
             default_headers = {"anthropic-version": _BEDROCK_LEGACY_API_VERSION, **default_headers}
-        if self.route == "anthropic" and self._sends_header_credential_alone(kwargs, default_headers):
-            # Without a key or token the SDK sends ANTHROPIC_API_KEY from the process env beside the authored header.
-            default_headers["Authorization"] = omit
-        if default_headers:
-            kwargs["default_headers"] = default_headers
+        kwargs["default_headers"] = default_headers
         kwargs["http_client"] = self.http_client
         kwargs["max_retries"] = 0
         if self.route == "anthropic":
             return AsyncAnthropic(**kwargs)
         if self.route == "vertexai_claude":
-            return _without_environment_headers(self._vertex_client(kwargs), default_headers)
-        from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
+            client = self._vertex_client(kwargs)
+        else:
+            from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
 
-        return _without_environment_headers(AsyncAnthropicBedrockMantle(**kwargs), default_headers)
+            client = AsyncAnthropicBedrockMantle(**kwargs)
+        # SDK 2.7 adds ANTHROPIC_CUSTOM_HEADERS, meant for the direct API, to the platform clients, with no opt-out.
+        client._custom_headers = dict(default_headers)
+        return client
 
-    def _sends_header_credential_alone(self, kwargs: dict[str, Any], default_headers: Mapping[str, Any]) -> bool:
-        """Return whether the client gets no key or token and an authored header other than ``Authorization`` carries one."""
-        request_headers = (self.settings.request_params or {}).get("extra_headers") or {}
-        authored = {str(name).casefold() for mapping in (default_headers, request_headers) for name in mapping}
-        has_credential = any(kwargs.get(name) for name in ("api_key", "auth_token", "credentials", "config", "profile"))
-        return not has_credential and bool(authored & _CREDENTIAL_HEADERS) and "authorization" not in authored
+    def _without_implicit_key(self, client: _AsyncClaudeClient, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Keep the client's key off a direct request that carries an ``X-Api-Key`` from elsewhere, as SDK 1 did.
+
+        SDK 2 sends the key as ``Authorization``, which an ``X-Api-Key`` from ``ANTHROPIC_CUSTOM_HEADERS``, the bound
+        request headers, or the config no longer replaces. A config that authors both a key and the header keeps both.
+        """
+        settings = self.settings
+        client_headers = client._custom_headers
+        sent = {str(name).casefold() for name in (*client_headers, *(kwargs.get("extra_headers") or {}))}
+        authored = {str(name).casefold() for name in self._authored_default_headers() or {}}
+        authored |= {str(name).casefold() for name in (settings.request_params or {}).get("extra_headers") or {}}
+        two_hop = "x-api-key" in authored and bool(
+            settings.api_key or settings.auth_token or (settings.client_params or {}).get("auth_token"),
+        )
+        if self.route != "anthropic" or "x-api-key" not in sent or "authorization" in sent or two_hop:
+            return kwargs
+        return {**kwargs, "extra_headers": {**(kwargs.get("extra_headers") or {}), "Authorization": omit}}
 
     def _vertex_client(self, kwargs: dict[str, Any]) -> AsyncAnthropicVertex:
         """Build a Vertex client; without configured credentials it shares the adapter's ambient ones.
@@ -773,19 +783,15 @@ def predates_bedrock_api_2026(model_id: str) -> bool:
     return bool(numbers) and (numbers[0], numbers[1] if len(numbers) > 1 else 0) < _FIRST_API_2026_BEDROCK_VERSION
 
 
-def _without_environment_headers(client: _AsyncClaudeClient, configured: Mapping[str, Any]) -> _AsyncClaudeClient:
-    """Return the platform client without the ``ANTHROPIC_CUSTOM_HEADERS`` its constructor added, as before SDK 2.7.
+def _sent_model_id(model_id: str, settings: ClaudeSettings) -> str:
+    """Return the model the body names: the raw ``model`` override, ``extra_body`` first as the SDK merges, else the id."""
+    request_params = settings.request_params or {}
+    return str((request_params.get("extra_body") or {}).get("model") or request_params.get("model") or model_id)
 
-    Those headers are meant for the direct API, such as a gateway credential; a header the model configured stays.
-    """
-    configured_names = {name.casefold() for name in configured}
-    environment = {name for name in with_environment_headers(None) or {} if name.casefold() not in configured_names}
-    if environment:
-        # The SDK has no option to skip the variable, so its parsed headers come off the built client.
-        client._custom_headers = {
-            name: value for name, value in client._custom_headers.items() if name not in environment
-        }
-    return client
+
+def _keeps_legacy_api_version(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> bool:
+    """Return whether the request goes to a Claude older than 4.7 on Bedrock, which sends API version 2023-06-01."""
+    return route == "bedrock_claude" and predates_bedrock_api_2026(_sent_model_id(model_id, settings))
 
 
 def _sampling_in_extra_body(params: dict[str, Any], *, keep: bool) -> dict[str, Any]:
@@ -871,7 +877,7 @@ def _claude_capabilities(
             endpoint=endpoint,
         ),
         # Only a model that keeps API version 2023-06-01 sends sampling controls (``_SAMPLING_CONTROL_NAMES``).
-        provider_default_sampling=not (route == "bedrock_claude" and predates_bedrock_api_2026(model_id)),
+        provider_default_sampling=not _keeps_legacy_api_version(route, model_id, settings),
     )
 
 

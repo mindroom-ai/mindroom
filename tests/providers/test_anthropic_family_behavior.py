@@ -581,7 +581,7 @@ async def test_only_an_older_claude_on_bedrock_keeps_the_old_api_version_and_sam
         id=model_id,
         extra_kwargs={"temperature": 0.7, "top_k": 3, "request_params": {"top_p": 0.9}},
     )
-    assert provider.capabilities.provider_default_sampling is not sampling
+    assert provider.capabilities.provider_default_sampling == (not sampling)
     await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
     body = wire.body()
     assert {name: body[name] for name in ("temperature", "top_p", "top_k") if name in body} == sampling
@@ -605,6 +605,26 @@ async def test_env_custom_headers_reach_only_the_direct_api(tmp_path: Path, rout
         "from-env" if route == "anthropic" else None,
         "configured",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_params",
+    [{"model": "anthropic.claude-haiku-4-5"}, {"extra_body": {"model": "anthropic.claude-haiku-4-5"}}],
+    ids=["model", "extra-body-model"],
+)
+async def test_the_bedrock_api_version_follows_the_model_the_body_names(
+    tmp_path: Path,
+    request_params: dict[str, Any],
+) -> None:
+    """A raw ``model`` override decides the Bedrock API version and sampling, not the configured id."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    authored = {"temperature": 0.7, "request_params": request_params}
+    provider = route_provider("bedrock_claude", tmp_path, wire, id="anthropic.claude-haiku-5-5", extra_kwargs=authored)
+    await claude_turn(provider, ModelRequest(messages=_user()))
+    body = wire.body()
+    assert (body["model"], body.get("temperature")) == ("anthropic.claude-haiku-4-5", 0.7)
+    assert wire.requests[0].headers["anthropic-version"] == "2023-06-01"
 
 
 @pytest.mark.asyncio

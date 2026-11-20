@@ -93,9 +93,10 @@ def _claude_authors_credential(extra_kwargs: dict[str, Any]) -> bool:
     """Return whether a direct Claude model's config authors a credential other than ``api_key``, header included."""
     client_params = extra_kwargs.get("client_params") or {}
     request_params = extra_kwargs.get("request_params") or {}
+    # A top-level ``default_headers``, an empty one included, replaces the one in ``client_params``.
+    default_headers = extra_kwargs.get("default_headers")
     headers = (
-        extra_kwargs.get("default_headers"),
-        client_params.get("default_headers"),
+        client_params.get("default_headers") if default_headers is None else default_headers,
         request_params.get("extra_headers"),
     )
     return bool(
