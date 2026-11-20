@@ -15,7 +15,7 @@ from mindroom.script_runs.models import validated_script_run_id
 
 # Bump when the worker launch/status/cancel protocol or script SDK gateway contract
 # becomes incompatible with an already-running worker from an earlier image.
-SCRIPT_PROTOCOL_VERSION = 2
+SCRIPT_PROTOCOL_VERSION = 3
 
 __all__ = [
     "SCRIPT_PROTOCOL_VERSION",
@@ -81,6 +81,7 @@ class SandboxScriptRunRequest(BaseModel):
     source_digest: str = Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
     gateway_url: str = Field(min_length=1, max_length=2048)
     max_runtime_seconds: int = Field(gt=0, strict=True)
+    entry: Literal["script", "workflow"] = "script"
     private_agent_names: list[str] | None = Field(default=None, max_length=128)
     config_snapshot: dict[str, Any] | None = None
 

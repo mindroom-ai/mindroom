@@ -14,6 +14,12 @@ _SCRIPT_RUN_COLUMN_MIGRATIONS = (
     # Handling: Add the absent column in place; old rows read it as null, so a restart never adopts their workers.
     # Coverage: tests/test_script_run_store.py::test_run_store_migrates_existing_table_without_recovery_signature.
     ("recovery_signature", "ALTER TABLE script_runs ADD COLUMN recovery_signature TEXT"),
+    # LEGACY_COMPAT: Script-run rows without a workflow run column.
+    # Legacy format: Script-run rows lacked workflow_run_id.
+    # Last legacy release: v2026.11.466; replacement: the next release adds workflow_run_id for workflow attempts.
+    # Handling: Add the absent column in place; old rows read it as null, so they stay plain script runs.
+    # Coverage: tests/test_script_run_store.py::test_run_store_migrates_existing_table_without_workflow_run_id.
+    ("workflow_run_id", "ALTER TABLE script_runs ADD COLUMN workflow_run_id TEXT"),
     # LEGACY_COMPAT: Script-run rows without resource snapshot columns.
     # Legacy format: Script-run rows lacked resource_profile, resource_requests_json, and resource_limits_json.
     # Last legacy release: v2026.8.96; replacement: v2026.8.97 added all three resource snapshot columns.

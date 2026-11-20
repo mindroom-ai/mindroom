@@ -14,6 +14,7 @@ from pathlib import Path
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV
 from mindroom.script_runs.launch_contract import (
+    ENTRY_ENV,
     MAX_SOURCE_BYTES,
     MAX_TOKEN_BYTES,
     SNAPSHOT_ROOT_ENV,
@@ -21,6 +22,7 @@ from mindroom.script_runs.launch_contract import (
     TOKEN_PATH_ENV,
     WORKSPACE_ROOT_ENV,
 )
+from mindroom.workflow import run_workflow
 
 
 def _validated_file(
@@ -119,7 +121,10 @@ def _main(argv: list[str]) -> int:
         sys.path.append(str(workspace_root))
         # The script takes no arguments; keep the shim's own source and capability paths out of its argv.
         sys.argv = [str(source_path)]
-        runpy.run_path(str(source_path), run_name="__main__")
+        if os.environ.get(ENTRY_ENV) == "workflow":
+            run_workflow(str(source_path))
+        else:
+            runpy.run_path(str(source_path), run_name="__main__")
     finally:
         sys.stdout.flush()
         sys.stderr.flush()

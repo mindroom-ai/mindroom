@@ -28,7 +28,7 @@ from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TO
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-__all__ = ["AgentError", "ShellResult", "ToolError", "WorkflowError", "log", "phase", "shell", "tool"]
+__all__ = ["AgentError", "ShellResult", "ToolError", "WorkflowError", "log", "phase", "run_workflow", "shell", "tool"]
 
 _NODE_WAIT_SECONDS = 25
 _HTTP_TIMEOUT_SECONDS = 40.0
@@ -258,8 +258,11 @@ def log(text: str) -> None:
     _gateway().log(str(text))
 
 
-def _run_workflow(source_path: str) -> None:
-    """Load the script as the module `__workflow__`, call its `main(args)` and report what it returned or raised."""
+def run_workflow(source_path: str) -> None:
+    """Load the script as the module `__workflow__`, call its `main(args)` and report what it returned or raised.
+
+    MindRoom's launcher calls this once per attempt; a script never does.
+    """
     gateway = _gateway()
     try:
         module = types.ModuleType("__workflow__")

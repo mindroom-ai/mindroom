@@ -1317,6 +1317,7 @@ async def test_supervised_launch_passes_the_launch_contract_and_reports_a_refusa
         snapshot=snapshot,
         workspace=tmp_path,
         max_runtime_seconds=5,
+        entry="script",
     )
 
     assert await launch() is None
@@ -1330,4 +1331,5 @@ async def test_supervised_launch_passes_the_launch_contract_and_reports_a_refusa
         launch_contract.SNAPSHOT_ROOT_ENV: str(tmp_path / "root"),
         launch_contract.TOKEN_PATH_ENV: str(tmp_path / "cap"),
         launch_contract.WORKSPACE_ROOT_ENV: str(tmp_path),
+        launch_contract.ENTRY_ENV: "script",
     }

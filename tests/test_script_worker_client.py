@@ -93,7 +93,51 @@ async def test_script_worker_client_sends_a_narrow_derived_launch_request() -> N
         "private_agent_names": ["private-agent"],
         "config_snapshot": {"agents": {"private-agent": {"display_name": "Private"}}},
         "protocol_version": SCRIPT_PROTOCOL_VERSION,
+        "entry": "script",
     }
+
+
+@pytest.mark.asyncio
+async def test_workflow_entry_crosses_the_worker_wire() -> None:
+    """The worker is told which entry the validated shim runs, as part of the trusted launch description."""
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.read()))
+        return httpx.Response(200, json={"ok": True})
+
+    await _launch(_client(handler), entry="workflow")
+
+    assert [(payload["entry"], payload["protocol_version"]) for payload in payloads] == [("workflow", 3)]
+
+
+@pytest.mark.asyncio
+async def test_older_protocol_worker_refuses_a_workflow_launch() -> None:
+    """A worker image from before workflows rejects the request, and the launch says what to do."""
+    request = {
+        "protocol_version": SCRIPT_PROTOCOL_VERSION,
+        "run_id": _RUN_ID,
+        "worker_key": "v1:test:shared:scripts",
+        "source_digest": "a" * 64,
+        "gateway_url": "http://primary.test/api/script-gateway",
+        "max_runtime_seconds": 3600,
+    }
+    assert SandboxScriptRunRequest.model_validate(request).entry == "script"
+    with pytest.raises(ValidationError, match="protocol_version"):
+        SandboxScriptRunRequest.model_validate({**request, "protocol_version": SCRIPT_PROTOCOL_VERSION - 1})
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        SandboxScriptRunRequest.model_validate({**request, "a_field_of_a_newer_primary": "workflow"})
+
+    def refuse(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"detail": [{"loc": ["body", "protocol_version"], "msg": "Input should be 2"}]})
+
+    with pytest.raises(ScriptWorkerError) as refused:
+        await _launch(_client(refuse), entry="workflow")
+    assert str(refused.value) == "This worker image is too old to run workflows. Update it."
+
+    with pytest.raises(ScriptWorkerError) as plain:
+        await _launch(_client(refuse))
+    assert "too old to run workflows" not in str(plain.value)
 
 
 @pytest.mark.asyncio

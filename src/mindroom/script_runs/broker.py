@@ -848,6 +848,9 @@ def _background_approval_config(
     context: ToolRuntimeContext,
     run: ScriptRunRecord,
 ) -> Config:
+    if run.workflow_run_id is not None:
+        # A workflow's calls answer to the operator's own default and rules, as its owner's calls do.
+        return context.current_config
     return build_automation_approval_config(
         context.current_config,
         function_owners=_launch_function_owners(run),

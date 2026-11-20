@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import quote
 
 import httpx
@@ -26,6 +27,7 @@ from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 _TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _REQUEST_TIMEOUT_SECONDS = 15.0
+_WORKER_TOO_OLD = "This worker image is too old to run workflows. Update it."
 
 __all__ = ["ScriptWorkerClient"]
 
@@ -44,6 +46,7 @@ class ScriptWorkerClient:
         source_digest: str,
         gateway_url: str,
         max_runtime_seconds: int,
+        entry: Literal["script", "workflow"] = "script",
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
         config_snapshot: dict[str, object] | None = None,
@@ -62,11 +65,19 @@ class ScriptWorkerClient:
                 "source_digest": source_digest,
                 "gateway_url": gateway_url,
                 "max_runtime_seconds": max_runtime_seconds,
+                "entry": entry,
                 "private_agent_names": private_agent_names,
                 "config_snapshot": config_snapshot,
             },
         )
-        await self._post(worker, worker_api_endpoint(worker, "script-run"), request, SandboxScriptRunResponse)
+        await self._post(
+            worker,
+            worker_api_endpoint(worker, "script-run"),
+            request,
+            SandboxScriptRunResponse,
+            # A worker from before workflows knows neither this protocol version nor the entry field.
+            unprocessable=_WORKER_TOO_OLD if entry == "workflow" else None,
+        )
 
     async def status(
         self,
@@ -109,6 +120,8 @@ class ScriptWorkerClient:
         url: str,
         request: BaseModel,
         receipt_model: type[ReceiptT],
+        *,
+        unprocessable: str | None = None,
     ) -> ReceiptT:
         token = worker.auth_token
         if token is None:
@@ -121,6 +134,8 @@ class ScriptWorkerClient:
         except httpx.HTTPError as exc:
             message = f"Worker script request failed: {exc}"
             raise ScriptWorkerError(message) from exc
+        if unprocessable is not None and response.status_code == httpx.codes.UNPROCESSABLE_ENTITY:
+            raise ScriptWorkerError(unprocessable)
         if response.status_code >= 400:
             detail = error_detail_from_response(
                 response,

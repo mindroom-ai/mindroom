@@ -52,7 +52,7 @@ def run_source(sdk: ModuleType, tmp_path: Path) -> Callable[[str], None]:
     def run(source: str) -> None:
         path = tmp_path / "wf.py"
         path.write_text(source, encoding="utf-8")
-        sdk._run_workflow(str(path))
+        sdk.run_workflow(str(path))
 
     return run
 
@@ -82,7 +82,8 @@ def test_phase_as_a_context_manager_ends_with_its_block(gateway: FakeWorkflowGat
 
 @pytest.mark.usefixtures("in_main")
 def test_shell_reads_the_exit_status_from_the_receipt_and_sends_the_command_unchanged(
-    gateway: FakeWorkflowGateway, sdk: ModuleType
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
 ) -> None:
     """The exit status comes from the receipt, so nothing in the command can fake it."""
     gateway.respond = lambda _request: completed({"output": "2 failed\n", "exit_code": 1})
@@ -258,7 +259,8 @@ def test_sdk_imports_only_stdlib_and_launch_contract() -> None:
 
 @pytest.mark.usefixtures("in_main")
 def test_result_over_the_inline_limit_is_fetched_in_full_and_keeps_its_type(
-    gateway: FakeWorkflowGateway, sdk: ModuleType
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
 ) -> None:
     """A receipt that only references its result makes the SDK read all of it, never the preview."""
     full = ["x" * 1023] * (9 * 1024)

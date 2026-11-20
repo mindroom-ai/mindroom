@@ -1009,6 +1009,29 @@ def test_worker_script_launch_reports_a_supervisor_refusal(
     assert response.json() == {"ok": False, "error": "Error: handle is already in use"}
 
 
+@pytest.mark.parametrize(("fields", "entry"), [({}, "script"), ({"entry": "workflow"}, "workflow")])
+def test_worker_script_launch_passes_the_entry_to_the_shim_launcher(
+    runner_client: tuple[TestClient, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    fields: dict[str, object],
+    entry: str,
+) -> None:
+    """The worker starts the shim with the entry the primary's launch description names, a plain script by default."""
+    client, workspace = runner_client
+    payload = {**_run_payload(workspace, run_id=f"script-{'8' * 32}", source="def main(args): return 1\n"), **fields}
+    entries: list[object] = []
+
+    async def launch(*_args: object, **kwargs: object) -> None:
+        entries.append(kwargs["entry"])
+
+    monkeypatch.setattr(sandbox_runner_scripts_module, "launch_supervised_script", launch)
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.json() == {"ok": True, "error": None}
+    assert entries == [entry]
+
+
 def test_worker_script_launch_rejects_a_state_scope_that_does_not_own_its_worker(
     runner_client: tuple[TestClient, Path],
 ) -> None:

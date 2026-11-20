@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CurrentScriptTool",
+    "live_workflow_grant",
     "resolve_current_script_tool",
     "resolve_script_launch_grants",
     "resolve_script_launch_toolkit_names",
@@ -47,9 +48,14 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
 )
 
 
-def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
-    """Resolve the stable registered function surface captured when a script launches."""
-    entries = _visible_script_tool_entries(context, context.config)
+# A workflow's calls may use the owner's other tools; these act on the calling turn (its context, its loaded tools, its
+# hook source), and a script has none.
+_WORKFLOW_RESTRICTED_TOOLKITS = frozenset({"compact_context", "dynamic_tools", "slack"})
+
+
+def resolve_script_launch_grants(context: ToolRuntimeContext, *, workflow: bool = False) -> tuple[ScriptToolGrant, ...]:
+    """Resolve the stable registered function surface captured when a script or a workflow attempt launches."""
+    entries = _visible_script_tool_entries(context, context.config, workflow=workflow)
     toolkits = _build_script_toolkits(context, context.config, entries)
     return tuple(
         ScriptToolGrant(entry.name, function_name)
@@ -76,6 +82,7 @@ def resolve_current_script_tool(
     context: ToolRuntimeContext,
     grant: ScriptToolGrant,
     *,
+    workflow: bool = False,
     rejected_toolkit_cleanup: Callable[[AnyToolkit], None] | None = None,
 ) -> CurrentScriptTool | None:
     """Build one requested live toolkit only when its granted function remains visible, adapting that function alone."""
@@ -83,7 +90,11 @@ def resolve_current_script_tool(
     if context.agent_name not in config.agents:
         return None
     tool_entry = next(
-        (entry for entry in _visible_script_tool_entries(context, config) if entry.name == grant.toolkit_name),
+        (
+            entry
+            for entry in _visible_script_tool_entries(context, config, workflow=workflow)
+            if entry.name == grant.toolkit_name
+        ),
         None,
     )
     if tool_entry is None:
@@ -106,16 +117,28 @@ def resolve_current_script_tool(
     return CurrentScriptTool(toolkit, function)
 
 
-def _visible_script_tool_entries(context: ToolRuntimeContext, config: Config) -> tuple[EffectiveToolConfig, ...]:
+def live_workflow_grant(context: ToolRuntimeContext, toolkit_name: str, function_name: str) -> ScriptToolGrant | None:
+    """Return the grant for a workflow's call when the owner's live tools offer that function now, else None."""
+    grant = ScriptToolGrant(toolkit_name, function_name)
+    return None if resolve_current_script_tool(context, grant, workflow=True) is None else grant
+
+
+def _visible_script_tool_entries(
+    context: ToolRuntimeContext,
+    config: Config,
+    *,
+    workflow: bool = False,
+) -> tuple[EffectiveToolConfig, ...]:
     if context.agent_name not in config.agents:
         msg = f"Background scripts require a configured agent owner; {context.agent_name!r} is not an agent."
         raise ValueError(msg)
     # The registry the call's tool hooks come from, so its toolkits and hooks share one generation.
     tools = context.plugins.tools
+    restricted = _WORKFLOW_RESTRICTED_TOOLKITS if workflow else _SCRIPT_RESTRICTED_TOOLKITS
     return tuple(
         entry
         for entry in resolve_agent_tools(config, context.agent_name, tools).candidates()
-        if entry.name in tools and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
+        if entry.name in tools and entry.name not in restricted
     )
 
 
