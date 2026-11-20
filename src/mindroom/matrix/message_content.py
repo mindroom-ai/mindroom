@@ -205,6 +205,7 @@ async def extract_and_resolve_message(
     client: nio.AsyncClient | None = None,
     *,
     trusted_sender_ids: Collection[str] = (),
+    agent_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
 
@@ -215,6 +216,7 @@ async def extract_and_resolve_message(
         event: The Matrix event to extract data from
         client: Optional Matrix client for downloading attachments
         trusted_sender_ids: Exact trusted internal sender IDs allowed to override visible body
+        agent_sender_ids: The router, agents and teams, whose replies are read with their tool markers in their text
 
     Returns:
         Dict with sender, body, timestamp, event_id, and content fields.
@@ -222,7 +224,7 @@ async def extract_and_resolve_message(
         the full text from the attachment.
 
     """
-    resolved_content, _ = await _resolve_event_content(event.source, client, trusted_sender_ids)
+    resolved_content, _ = await _resolve_event_content(event.source, client, agent_sender_ids)
     resolved_body = visible_body_from_content(
         resolved_content,
         event.body,
@@ -257,9 +259,10 @@ async def extract_edit_body(
     client: nio.AsyncClient | None = None,
     *,
     trusted_sender_ids: Collection[str] = (),
+    agent_sender_ids: Collection[str] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
-    resolved_content, _ = await _resolve_event_content(event_source, client, trusted_sender_ids)
+    resolved_content, _ = await _resolve_event_content(event_source, client, agent_sender_ids)
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
     body = visible_body_from_content(
         new_content,

@@ -7,7 +7,7 @@ import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
@@ -40,6 +40,7 @@ from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY, MatrixMe
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
+from mindroom.requester_identity import mindroom_user_id
 from mindroom.session_ids import create_session_id
 from mindroom.teams.members import _as_member
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -2514,14 +2515,11 @@ async def test_matrix_message_read_drops_tool_markers_from_bodies() -> None:
     assert "🔧" not in json.dumps(payload, ensure_ascii=False)
 
 
-@pytest.mark.asyncio
-async def test_matrix_message_read_thread_is_the_same_for_a_reply_stored_as_matrix_got_it(
-    journal_store: EventJournalStore,
-) -> None:
-    """A whole thread read, edit options included, reads a reply Matrix holds without its markers as one with them."""
+def _reply_with_a_separator_after_its_call() -> tuple[dict[str, object], dict[str, object]]:
+    """Return a reply as its agent built it and as Matrix holds it, where reading drops the separator with the marker."""
     fixture = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))
     sent = next(case for case in fixture["cases"] if case["name"].startswith("a separator after a call"))["sent"]
-    marked = {
+    marked: dict[str, object] = {
         "msgtype": "m.text",
         "body": sent["body"],
         "format": "org.matrix.custom.html",
@@ -2530,6 +2528,53 @@ async def test_matrix_message_read_thread_is_the_same_for_a_reply_stored_as_matr
     }
     wire = tool_markers_out_of_text(marked)
     assert wire["body"] == "---\n\n\nAfter."
+    return marked, wire
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_room_puts_tool_markers_back_in_an_agents_reply_and_in_no_other_message() -> None:
+    """A room read asks the homeserver, which holds a reply without its marker lines.
+
+    A person may sign in to the internal user's account, so what it sent is read as a person's message is.
+    """
+    marked, wire = _reply_with_a_separator_after_its_call()
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None, mindroom_user=MindRoomUserConfig())
+    internal_user = mindroom_user_id(ctx.config, ctx.runtime_paths)
+    assert internal_user in trusted_visible_sender_ids(ctx.config, ctx.runtime_paths)
+    senders = ["@mindroom_general:localhost", internal_user, "@alice:localhost"]
+
+    async def read(content: dict[str, object]) -> list[dict[str, Any]]:
+        events = [
+            {
+                "type": "m.room.message",
+                "event_id": f"$m{at}",
+                "sender": sender,
+                "origin_server_ts": at,
+                "content": content,
+            }
+            for at, sender in enumerate(senders)
+        ]
+        ctx.client.room_messages.return_value = nio.RoomMessagesResponse.from_dict(
+            {"chunk": events[::-1], "start": "s", "end": "e"},
+            ctx.room_id,
+        )
+        with tool_runtime_context(ctx):
+            return json.loads(await tool.matrix_message(action="read", limit=5))["messages"]
+
+    as_built, as_held = await read(marked), await read(wire)
+
+    assert as_held[0] == as_built[0]
+    assert [message["body"] for message in as_held] == ["After.", wire["body"], wire["body"]]
+    assert [message["content"]["io.mindroom.tool_trace"]["version"] for message in as_held] == [2, 3, 3]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_thread_is_the_same_for_a_reply_stored_as_matrix_got_it(
+    journal_store: EventJournalStore,
+) -> None:
+    """A whole thread read, edit options included, reads a reply Matrix holds without its markers as one with them."""
+    marked, wire = _reply_with_a_separator_after_its_call()
     tool = MatrixMessageTools()
     ctx = _make_context()
     payloads = []

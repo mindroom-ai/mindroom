@@ -228,6 +228,7 @@ async def extract_visible_edit_body(
         event_source,
         client,
         trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
+        agent_sender_ids=entity_identity_registry(config, runtime_paths).managed_user_ids,
     )
 
 
@@ -306,8 +307,9 @@ async def bundled_replacement_body(
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
+    agents = entity_identity_registry(config, runtime_paths).managed_user_ids
     for candidate in bundled_replacement_candidates(event_source):
-        resolved_candidate = await resolve_event_source_content(candidate, client, trusted_sender_ids)
+        resolved_candidate = await resolve_event_source_content(candidate, client, agents)
         body = bundled_visible_body_preview(
             resolved_candidate,
             trusted_sender_ids=trusted_sender_ids,
@@ -507,6 +509,7 @@ async def apply_latest_edits_to_messages(
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     edit_candidates: EditCandidates,
     trusted_sender_ids: Collection[str] = (),
+    agent_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply latest edits to message records, reconstructing originals that were never seen."""
     for original_event_id in edit_candidates.original_event_ids():
@@ -523,6 +526,7 @@ async def apply_latest_edits_to_messages(
             edit_event.source,
             client,
             trusted_sender_ids=trusted_sender_ids,
+            agent_sender_ids=agent_sender_ids,
         )
         if edited_body is None:
             continue
@@ -567,6 +571,7 @@ async def resolve_latest_visible_messages(
     client: nio.AsyncClient,
     *,
     trusted_sender_ids: Collection[str] = (),
+    agent_sender_ids: Collection[str] = (),
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
@@ -584,6 +589,7 @@ async def resolve_latest_visible_messages(
             event,
             client,
             trusted_sender_ids=trusted_sender_ids,
+            agent_sender_ids=agent_sender_ids,
         )
         messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
             message_data,
@@ -596,6 +602,7 @@ async def resolve_latest_visible_messages(
         messages_by_event_id=messages_by_event_id,
         edit_candidates=edit_candidates,
         trusted_sender_ids=trusted_sender_ids,
+        agent_sender_ids=agent_sender_ids,
     )
     return messages_by_event_id
 

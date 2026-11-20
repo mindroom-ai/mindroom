@@ -36,6 +36,8 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
+    bundled_replacement_body,
+    extract_visible_edit_body,
     resolve_visible_event_source,
     thread_root_body_preview,
 )
@@ -398,7 +400,9 @@ def _is_agent(sender: str) -> bool:
 
 
 _INTERNAL_USER = "@mindroom_user:localhost"
-_AGENTS = frozenset({_AGENT})
+# Whom a read trusts for the text of a warm-up frame, and whose replies had marker lines: the first has the internal
+# user, whose account a person may sign in to.
+_TRUSTED, _AGENTS = [_AGENT, _INTERNAL_USER], frozenset({_AGENT})
 
 
 @pytest.fixture
@@ -434,9 +438,9 @@ async def test_every_way_into_the_backend_reads_an_agents_reply_as_it_was_built(
 
     fetched = await resolve_event_source_content(_event(wire), None, _AGENTS)
     assert fetched["content"] == sent
-    message = await extract_and_resolve_message(nio.RoomMessage.parse_event(_event(wire)), trusted_sender_ids=_AGENTS)
+    message = await extract_and_resolve_message(nio.RoomMessage.parse_event(_event(wire)), agent_sender_ids=_AGENTS)
     assert (message["body"], message["content"]) == (sent["body"], sent)
-    edited = await extract_edit_body(_event(wire_edit, "$edit"), None, trusted_sender_ids=_AGENTS)
+    edited = await extract_edit_body(_event(wire_edit, "$edit"), None, agent_sender_ids=_AGENTS)
     assert edited == (sent["body"], sent)
 
     def read_by_a_person(reply: dict[str, Any], its_edit: dict[str, Any]) -> list[list[str]]:
@@ -459,7 +463,10 @@ async def test_no_way_into_the_backend_puts_markers_in_a_message_that_is_no_agen
     assert tool_markers_in_text(wire)["body"] != wire["body"]
 
     assert await resolve_event_source_content(event, None, _AGENTS) is event
-    assert await extract_edit_body(edit, None, trusted_sender_ids=_AGENTS) == (wire["body"], wire)
+    assert await extract_edit_body(edit, None, trusted_sender_ids=_TRUSTED, agent_sender_ids=_AGENTS) == (
+        wire["body"],
+        wire,
+    )
     assert all("🔧" not in line for line in _message_lines([event, edit], _AGENTS))
     if not isinstance(sender, str):
         return
@@ -477,7 +484,11 @@ async def test_no_way_into_the_backend_puts_markers_in_a_message_that_is_no_agen
     assert projected is not None
     assert projected.content == wire
 
-    message = await extract_and_resolve_message(nio.RoomMessage.parse_event(event), trusted_sender_ids=_AGENTS)
+    message = await extract_and_resolve_message(
+        nio.RoomMessage.parse_event(event),
+        trusted_sender_ids=_TRUSTED,
+        agent_sender_ids=_AGENTS,
+    )
     assert (message["body"], message["content"]) == (wire["body"], wire)
 
 
@@ -488,19 +499,27 @@ async def test_the_reads_that_know_the_runtime_take_the_internal_user_for_a_pers
     agent = entity_identity_registry(config, paths).current_ids["general"].full_id
     case = _case("a separator after a call and extra blank lines stay")
     sent, wire = _sent(case), _wire(case)
+    edit = build_edit_event_content(event_id="$reply", new_content=sent, new_text=sent["body"])
+    wire_edit = tool_markers_out_of_text(edit)
+    assert wire_edit["m.new_content"] == wire
 
     async def read(sender: str) -> list[object]:
-        event = _event(wire, sender=sender)
+        event, its_edit = _event(wire, sender=sender), _event(wire_edit, "$edit", sender)
+        edited = {**_event({"msgtype": "m.text", "body": "Before."}, sender=sender)}
+        edited["unsigned"] = {"m.relations": {"m.replace": {"latest_event": its_edit}}}
         source, _body = await resolve_visible_event_source(event, None, fallback_body="", **known)
+        _edit_body, edit_content = await extract_visible_edit_body(its_edit, None, **known)
         return [
             source["content"],
+            edit_content,
+            await bundled_replacement_body(edited, client=runtime.client, **known),
             await thread_root_body_preview(nio.RoomMessage.parse_event(event), client=runtime.client, **known),
         ]
 
     known = {"config": config, "runtime_paths": paths}
-    assert await read(agent) == [sent, "After."]
+    assert await read(agent) == [sent, sent, "After.", "After."]
     for sender in (_INTERNAL_USER, _PERSON):
-        assert await read(sender) == [wire, "--- After."]
+        assert await read(sender) == [wire, wire, wire["body"], "--- After."]
 
 
 @pytest.mark.asyncio
