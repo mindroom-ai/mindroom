@@ -48,7 +48,7 @@ It provides `web_search(query, max_results=5)` and `search_news(query, max_resul
 | --- | --- | --- | --- |
 | `enable_search` | `boolean` | `true` | Enable `web_search()`. |
 | `enable_news` | `boolean` | `true` | Enable `search_news()`. |
-| `modifier` | `text` | `null` | Text prepended to every `web_search()` query, for example `site:docs.example.com`. |
+| `modifier` | `text` | `null` | Text prepended to every `web_search()` and `search_news()` query, for example `site:docs.example.com`. |
 | `fixed_max_results` | `number` | `null` | Result count for every call, replacing the per-call `max_results`. |
 | `timelimit` | `text` | `null` | Age filter: `d`, `w`, `m`, or `y`. |
 | `region` | `text` | `null` | DDGS region code, such as `us-en`. |
