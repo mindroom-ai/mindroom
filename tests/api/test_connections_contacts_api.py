@@ -125,7 +125,7 @@ def _contact(contact_id: str, requester: ContactParty, target: ContactParty, **f
         "target": target,
         "reason": "Plan the dinner",
         "requester_side": ContactSide(rules="Alice's secret rule"),
-        "target_side": ContactSide(rules="Bob's secret rule", tools=["calculator", "file"]),
+        "target_side": ContactSide(rules="Bob's secret rule", tools=["calculator", "filesystem"]),
         "origin_room_id": "!aliceroom:example.org",
         "origin_thread_id": "$ask",
         "notice_event_id": "$notice",
@@ -204,11 +204,11 @@ def test_listing_leaves_out_removed_contacts_and_shows_only_an_active_room(porta
 def test_listing_says_what_each_tool_a_contact_may_use_reaches(portal: dict[str, Any]) -> None:
     """Each choice says whether it runs code, is not confined to the agent's files, reaches them, or neither."""
     choices = {choice["name"]: choice for choice in _get(portal, "alice")["agents"][0]["tool_choices"]}
-    assert set(choices) == {"calculator", "shell", "file", "duckdb", "google_drive"}
+    assert set(choices) == {"calculator", "shell", "filesystem", "duckdb", "google_drive"}
     assert {name: choice["reach"] for name, choice in choices.items()} == {
         "calculator": "none",
         "shell": "code",
-        "file": "files",
+        "filesystem": "files",
         "duckdb": "unconfined",
         "google_drive": "files",
     }
@@ -228,7 +228,7 @@ def test_tools_of_an_agent_with_unrestricted_file_access_are_not_confined(portal
     payload["personal_agents"]["mind"]["agent"]["file_access"] = "unrestricted"
     publish_api_payload(main.app, payload)
     choices = {choice["name"]: choice["reach"] for choice in _get(portal, "alice")["agents"][0]["tool_choices"]}
-    assert (choices["file"], choices["shell"], choices["calculator"]) == ("unconfined", "code", "none")
+    assert (choices["filesystem"], choices["shell"], choices["calculator"]) == ("unconfined", "code", "none")
 
 
 def test_a_tool_served_by_a_shared_service_account_names_no_account_of_the_owner(
@@ -265,13 +265,22 @@ def test_update_changes_only_the_viewers_side(portal: dict[str, Any]) -> None:
     assert stored.requester_side == ContactSide(rules="Alice's secret rule")
 
 
+def test_update_takes_the_filesystem_toolkit_by_its_other_names(portal: dict[str, Any]) -> None:
+    """A fresh choice naming file or coding is the agent's filesystem toolkit, stored once under that name."""
+    _seed(portal["paths"], _contact("ab", _agent("mind_alice", ALICE), _agent("mind_bob", BOB), status="active"))
+    response = _post(portal, "bob", "ab/update", {"tools": ["coding", "calculator", "file"]})
+    assert response.status_code == 200, response.text
+    assert response.json()["contacts"][0]["effective_tools"] == ["filesystem", "calculator", "matrix_message"]
+    assert read_contacts(portal["paths"]).contacts[0].target_side.tools == ["filesystem", "calculator"]
+
+
 def test_update_refuses_tools_a_contact_may_not_use(portal: dict[str, Any]) -> None:
     """A tool the agent lacks or a contact never offers is refused with the reason, and nothing changes."""
     _seed(portal["paths"], _contact("ab", _agent("mind_alice", ALICE), _agent("mind_bob", BOB), status="active"))
     response = _post(portal, "bob", "ab/update", {"tools": ["scheduler"]})
     assert response.status_code == 409
     assert response.json()["detail"].startswith("Not among the tools a contact may use: scheduler")
-    assert read_contacts(portal["paths"]).contacts[0].target_side.tools == ["calculator", "file"]
+    assert read_contacts(portal["paths"]).contacts[0].target_side.tools == ["calculator", "filesystem"]
 
 
 @pytest.mark.parametrize("action", ["accept", "decline", "update", "remove"])

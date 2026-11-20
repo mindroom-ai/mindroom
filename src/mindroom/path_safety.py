@@ -48,13 +48,6 @@ def _moved_base_dir_message(base_dir: Path) -> str:
     return f"base_dir '{base_dir}' no longer resolves to itself; it was moved or replaced by a link."
 
 
-def blocked_file_action_message(action: str, requested_path: str, base_dir: Path) -> str:
-    """Explain why a file-tool action was blocked."""
-    if not _base_dir_is_current(base_dir):
-        return f"Error {action}: {_moved_base_dir_message(base_dir)}"
-    return f"Error {action}: path '{requested_path}' is outside base_dir '{base_dir}'. {_BASE_DIR_ESCAPE_HINT}"
-
-
 def blocked_git_metadata_message(action: str, requested_path: str) -> str:
     """Explain why a file-tool write into Git metadata was blocked."""
     return f"Error {action}: path '{requested_path}' is inside Git metadata ('.git'), which file tools may not modify."

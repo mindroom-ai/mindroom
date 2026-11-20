@@ -23,6 +23,7 @@ import nio
 import yaml
 
 from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
+from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.constants import CONVERSATION_CONTENT_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.contacts.parties import (
     agent_party,
@@ -159,6 +160,7 @@ def _validate_side_tools(
     """Return the tools one side of a contact offers, refusing any the agent lacks or a contact may never offer."""
     if tools is None:
         return None
+    tools = canonical_tool_names(tools)
     allowed = contact_tool_choices(config, runtime_paths, agent_name)
     if outside := [name for name in tools if name not in allowed]:
         msg = f"Not among the tools a contact may use: {', '.join(outside)}; allowed: {', '.join(allowed)}"
@@ -368,7 +370,9 @@ async def request_contact(
         requester, side = person_party(config, paths, actor.owner), ContactSide()
     else:
         requester, side = own, ContactSide()
-        _change_side(side, rules, _validate_side_tools(config, paths, agent_name, tools))
+        # The stored side holds the validated names, so a repeat is compared by them too.
+        tools = _validate_side_tools(config, paths, agent_name, tools)
+        _change_side(side, rules, tools)
     _check_pair(requester, target_party)
     if (problem := answerer_problem(config, target_party.local_owner)) is not None:
         raise ValueError(problem)
@@ -425,7 +429,8 @@ async def _request_remote(
         raise ValueError(_REMOTE_NEEDS_AN_AGENT)
     agent_name, paths = requester.id, actor.runtime_paths
     side = ContactSide()
-    _change_side(side, rules, _validate_side_tools(actor.config, paths, agent_name, tools))
+    tools = _validate_side_tools(actor.config, paths, agent_name, tools)
+    _change_side(side, rules, tools)
     pair = partial(_pair_contact, requester=requester, target=target, rules=rules, tools=tools)
     if (found := await run_blocking_until_complete(update_contacts, paths, pair)) is not None:
         return found, False

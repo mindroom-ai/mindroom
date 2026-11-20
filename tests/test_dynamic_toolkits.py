@@ -206,14 +206,14 @@ def test_config_accepts_inline_deferred_tool_flags(tmp_path: Path) -> None:
     entries = config.agents["code"].tools
     assert [(entry.name, entry.defer, entry.initial) for entry in entries] == [
         ("shell", False, False),
-        ("file", True, True),
+        ("filesystem", True, True),
         ("searxng", True, False),
     ]
     assert entries[1].overrides == {"enable_delete_file": True}
     assert entries[2].overrides == {"fixed_max_results": 10}
     assert config.authored_model_dump()["agents"]["code"]["tools"] == [
         "shell",
-        {"file": {"enable_delete_file": True, "defer": True, "initial": True}},
+        {"filesystem": {"enable_delete_file": True, "defer": True, "initial": True}},
         {"searxng": {"fixed_max_results": 10, "defer": True}},
     ]
 
@@ -361,7 +361,7 @@ def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_pa
     overrides_by_name = {entry.name: entry.tool_config_overrides for entry in runtime_configs}
 
     assert overrides_by_name["shell"] == {"shell_path_prepend": "/run/wrappers/bin"}
-    assert overrides_by_name["coding"] == {}
+    assert overrides_by_name["filesystem"] == {}
 
 
 def test_attached_deferred_concrete_tool_preserves_override_over_preset_child(tmp_path: Path) -> None:
@@ -1859,7 +1859,7 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     """Agno registers the first toolkit's function for a name; deferral follows that owner and search offers only it."""
     raw = _base_config_data()
     raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
-    tools: list[object] = ["file", {"coding": {"defer": True}}]
+    tools: list[object] = ["filesystem", {"python": {"defer": True}}]
     raw["agents"]["code"]["tools"] = tools[::-1] if deferred_first else tools  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
@@ -1869,7 +1869,7 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     if "tool_search" in _function_names(agent):
         matches = (await _search(agent, "read_file"))["matches"]
         offered = [match["toolkit"] for match in matches if match["name"] == "read_file"]
-        assert offered == (["coding"] if deferred_first else [])
+        assert offered == (["python"] if deferred_first else [])
 
 
 def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewritten(tmp_path: Path) -> None:

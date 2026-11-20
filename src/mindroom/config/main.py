@@ -53,7 +53,7 @@ from mindroom.config.legacy_access import (
     persist_access_migration,
     validate_access_migration_source,
 )
-from mindroom.config.legacy_fields import rename_legacy_knowledge_reranker
+from mindroom.config.legacy_fields import approval_rule_a_file_rename_escapes, rename_legacy_knowledge_reranker
 from mindroom.config.matrix import (
     EventJournalConfig,
     MatrixSpaceConfig,
@@ -71,6 +71,7 @@ from mindroom.config.models import (
     ModelTable,
     RouterConfig,
     ToolConfigEntry,
+    reject_unmergeable_spellings,
 )
 from mindroom.config.personal_agents import (
     PersonalAgentInstance,
@@ -641,6 +642,17 @@ class Config(BaseModel):
             raise ValueError(msg)
         for server_id in self.mcp_servers:
             normalize_mcp_server_id(server_id)
+        return self
+
+    @model_validator(mode="after")
+    def validate_tool_spellings_across_layers(self) -> Config:
+        """Refuse a default and an agent entry that name one toolkit differently unless both are plain."""
+        defaults = {entry.name: entry for entry in self.defaults.tools}
+        for agent_name, agent in self.agents.items():
+            for entry in agent.tools if agent.include_default_tools else ():
+                default = defaults.get(entry.name)
+                if default is not None and len({*default.spellings, *entry.spellings}) > 1:
+                    reject_unmergeable_spellings(entry, default, scope=f"agents.{agent_name}.tools and defaults.tools")
         return self
 
     @model_validator(mode="after")
@@ -1505,6 +1517,19 @@ class Config(BaseModel):
                 tools=tools,
             )
         self._validate_listen_tools(tools)
+        # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
+        elsewhere = {
+            function
+            for name in tools
+            if name != "filesystem" and (metadata := tools.get(name)) is not None
+            for function in metadata.function_names or ()
+        }
+        globs = [rule.match for rule in self.tool_approval.rules]
+        if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
+            msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
+            raise ToolConfigOverrideError(msg)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
         """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.

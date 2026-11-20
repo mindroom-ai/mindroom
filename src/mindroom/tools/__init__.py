@@ -55,7 +55,6 @@ from mindroom.tools.cartesia import cartesia_tools
 from mindroom.tools.chat_ui import chat_ui_tools
 from mindroom.tools.claude_agent import claude_agent_tools
 from mindroom.tools.clickup import clickup_tools
-from mindroom.tools.coding import coding_tools
 from mindroom.tools.composio import composio_tools
 from mindroom.tools.config_manager import config_manager_tools
 from mindroom.tools.confluence import confluence_tools
@@ -75,8 +74,8 @@ from mindroom.tools.email_invite import email_invite_tools
 from mindroom.tools.exa import exa_tools
 from mindroom.tools.external_trigger_manager import external_trigger_manager_tools
 from mindroom.tools.fal import fal_tools
-from mindroom.tools.file import file_tools
 from mindroom.tools.file_generation import file_generation_tools
+from mindroom.tools.filesystem import filesystem_tools
 from mindroom.tools.financial_datasets_api import financial_datasets_api_tools
 from mindroom.tools.firecrawl import firecrawl_tools
 from mindroom.tools.gemini import gemini_tools
@@ -190,12 +189,12 @@ if TYPE_CHECKING:
     name="openclaw_compat",
     file_access=ToolFileAccess.NONE,
     display_name="OpenClaw Compat",
-    description="Convenience bundle that implies shell, coding, browser, and other common tools",
+    description="Convenience bundle that implies shell, filesystem, browser, and other common tools",
     docs_url="https://docs.mindroom.chat/openclaw/#openclaw_compat",
     category=ToolCategory.DEVELOPMENT,
     icon="Workflow",
     icon_color="text-orange-500",
-    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
+    helper_text="Implies: shell, filesystem, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
 )
 def _openclaw_compat_tools() -> type[Toolkit]:
     """Return an empty toolkit — the real tools are loaded via tool preset expansion."""

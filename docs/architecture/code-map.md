@@ -667,7 +667,7 @@ Matrix sync callback
 | `custom_tools/matrix_user_writes.py` | What `matrix_user_write` does as the owner, one event per call: a message or a file, a reaction, an edit, or a redaction, each sent marked agent-authored, and joins, leaves, invitations, and new rooms, which carry no marker; a send to a person uses their existing DM and never makes one; logs one audit line per write |
 | `custom_tools/stop_reply.py` | Agent tool that stops another agent's reply with a 🛑 reaction relaying the caller's requester |
 | `custom_tools/shared_directories.py` | Agent tool that creates shared directories, invites agents at once on behalf of a user who may use them or as pending invitations otherwise, and accepts or declines invitations through the invited agent |
-| `shared_directories/` | The primary-only membership ledger and storage of shared directories, the paths agents see, and the share roots `file` and `coding` accept |
+| `shared_directories/` | The primary-only membership ledger and storage of shared directories, the paths agents see, and the share roots `filesystem` accepts |
 | `custom_tools/thread_move.py` | Copies a thread into another room as a new thread: per-entity re-posts, mention-guarded router relays, tag copy, and the moved notice in the source thread |
 | `custom_tools/computer_announcement.py` | Tool hook that shows a chat_ui agent's worker computer in MindRoom Chat on its first worker browser call in a conversation |
 | `tools/react.py` | Tool-catalog registration for the reaction-only tool |

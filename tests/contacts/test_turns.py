@@ -127,6 +127,7 @@ def _setup(
     memory_backend: str = "none",
     access: dict[str, Any] | None = None,
     plugins: tuple[str, ...] = (),
+    contact_tools: tuple[str, ...] = ("calculator", "sleep", "scheduler"),
 ) -> tuple[Config, RuntimePaths]:
     """Personal agents of Alice, Bob, and Carol with contacts and skill learning; ``sleep`` always needs approval."""
     data: dict[str, Any] = {
@@ -141,7 +142,7 @@ def _setup(
                     "model": "default",
                     "instructions": ["Sign every message with a haiku."],
                     "tools": [*tools, "matrix_message", "scheduler"],
-                    "contacts": {"rules": [CONFIG_RULE], "tools": ["calculator", "sleep", "scheduler"]},
+                    "contacts": {"rules": [CONFIG_RULE], "tools": list(contact_tools)},
                     "skill_learning": {"enabled": True},
                 },
             },
@@ -262,6 +263,26 @@ def test_a_contact_turn_offers_the_chosen_tools_the_agent_still_has_plus_matrix_
         "calculator",
         "matrix_message",
     )
+
+
+def test_a_stored_grant_under_an_old_toolkit_name_stays_dormant(tmp_path: Path) -> None:
+    """A grant saved as file or coding is not read as filesystem: it offers nothing until its owner grants it anew."""
+    config, paths = _setup(tmp_path, tools=("coding", "calculator"))
+
+    assert _tools(config, paths, ContactSide(tools=["coding"])) == ("matrix_message",)
+    assert _tools(config, paths, ContactSide(tools=["file", "calculator", "coding"])) == (
+        "calculator",
+        "matrix_message",
+    )
+    assert _tools(config, paths, ContactSide(tools=["filesystem"])) == ("filesystem", "matrix_message")
+
+
+@pytest.mark.parametrize("name", ["coding", "file", "filesystem"])
+def test_the_configured_default_under_any_toolkit_name_offers_filesystem(tmp_path: Path, name: str) -> None:
+    """contacts.tools is authored config, so file or coding there still gives contact turns the toolkit."""
+    config, paths = _setup(tmp_path, tools=(name, "calculator"), contact_tools=(name,))
+
+    assert _tools(config, paths, ContactSide()) == ("filesystem", "matrix_message")
 
 
 def test_a_plugin_tool_that_needs_a_room_is_never_offered_in_a_contact_turn(tmp_path: Path) -> None:

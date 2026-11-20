@@ -376,7 +376,7 @@ class TestListExpansion:
         config = load_config(resolve_runtime_paths(config_path=config_path))
         result = runner.invoke(app, ["config", "resolve", "--path", str(config_path)])
 
-        assert [tool.name for tool in config.agents["code"].tools] == ["calculator", "file"]
+        assert [tool.name for tool in config.agents["code"].tools] == ["calculator", "filesystem"]
         assert [tool.name for tool in config.agents["research"].tools] == ["calculator"]
         assert (tmp_path / "agents/_shared/tools.yaml").resolve() in config.source_files
         assert result.exit_code == 0, result.output

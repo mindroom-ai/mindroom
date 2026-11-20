@@ -91,7 +91,7 @@ Not included:
 
 ## [`openclaw_compat`]
 
-`openclaw_compat` is a preset that belongs in an agent's `tools:` list and expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, and `matrix_message`.
+`openclaw_compat` is a preset that belongs in an agent's `tools:` list and expands to `shell`, `filesystem`, `duckduckgo`, `website`, `browser`, `scheduler`, and `matrix_message`.
 `matrix_message` also enables `attachments` and `matrix_room`, so the agent gets all nine tools.
 The preset has no callable functions of its own, and listing it next to one of its member tools does not create duplicates.
 

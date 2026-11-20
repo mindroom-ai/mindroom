@@ -15,7 +15,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.headless import run_turn
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
-from mindroom.tools.file import with_view_file_hint
+from mindroom.tools.filesystem import with_view_file_hint
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 from tests.test_headless import _last_tool_result
@@ -124,63 +124,55 @@ _SAVED_OUTPUT = "{storage}/agents/coder/workspace/mindroom_tool_outputs/board.pn
             "read_file",
             "board.png",
             image_bytes(),
-            "Error reading file: board.png is an image (image/png), not text. View it with view_file.",
+            "Error: board.png is an image (image/png), not text. View it with view_file.",
         ),
         (
             ["file", "attachments"],
             "read_file",
             "{workdir}/board.png",
             image_bytes(),
-            "Error reading file: {workdir}/board.png is an image (image/png), not text. View it with view_file.",
-        ),
-        (
-            ["file", "attachments"],
-            "read_file_chunk",
-            "board.png",
-            image_bytes(),
-            "Error reading file: board.png is an image (image/png), not text. View it with view_file.",
+            "Error: {workdir}/board.png is an image (image/png), not text. View it with view_file.",
         ),
         (
             ["file", "attachments"],
             "read_file",
             _SAVED_OUTPUT,
             image_bytes(),
-            f"Error reading file: {_SAVED_OUTPUT} is an image (image/png), not text.",
+            f"Error: {_SAVED_OUTPUT} is an image (image/png), not text.",
         ),
         (
             ["file", "attachments"],
             "read_file",
             "logo.svg",
             "<svg>\N{LATIN SMALL LETTER E WITH ACUTE}</svg>".encode("latin-1"),
-            "Error reading file: 'utf-8' codec can't decode byte 0xe9 in position 5: invalid continuation byte",
+            "1| <svg>\N{REPLACEMENT CHARACTER}</svg>",
         ),
         (
             ["file", "attachments"],
             "read_file",
             "missing.png",
             None,
-            "Error reading file: [Errno 2] No such file or directory: 'missing.png'",
+            "Error: File not found: missing.png",
         ),
-        (["file", "attachments"], "read_file", "notes.png", b"plain text", "plain text"),
+        (["coding", "attachments"], "read_file", "notes.png", b"plain text", "1| plain text"),
         (
             ["file"],
             "read_file",
             "board.png",
             image_bytes(),
-            "Error reading file: board.png is an image (image/png), not text.",
+            "Error: board.png is an image (image/png), not text.",
         ),
         (
             ["file", {"attachments": {"exclude_tools": ["view_file"]}}],
             "read_file",
             "board.png",
             image_bytes(),
-            "Error reading file: board.png is an image (image/png), not text.",
+            "Error: board.png is an image (image/png), not text.",
         ),
     ],
     ids=[
         "offered",
         "absolute-path",
-        "chunk",
         "saved-output",
         "not-viewable",
         "missing",
@@ -210,7 +202,7 @@ async def test_reading_an_image_says_so_and_names_view_file_when_it_can_open_it(
     if content is not None:
         (workdir / file_name).parent.mkdir(parents=True, exist_ok=True)
         (workdir / file_name).write_bytes(content)
-    arguments = {"file_name": file_name, **({"start_line": 0, "end_line": 1} if function == "read_file_chunk" else {})}
+    arguments = {"path": file_name}
     provider = ScriptedProvider(steps=[[(function, arguments)], "done"])
     provider.install(monkeypatch)
 
@@ -232,13 +224,13 @@ def _toolkit(name: str, *functions: str) -> AdaptedToolkit:
 
 def test_file_reads_name_view_file_only_where_the_run_offers_it() -> None:
     """An `attachments` a persona narrowed to other functions leaves the reads without a view_file hint."""
-    file = _toolkit("file", "read_file", "read_file_chunk", "save_file")
+    file = _toolkit("filesystem", "read_file", "write_file")
 
     narrowed = with_view_file_hint([file, _toolkit("attachments", "list_attachments")], lambda _path: True)
     offered = with_view_file_hint([file, _toolkit("attachments", "view_file")], lambda _path: True)
 
-    assert [len(function.middleware) for function in narrowed[0].functions] == [0, 0, 0]
-    assert [len(function.middleware) for function in offered[0].functions] == [1, 1, 0]
+    assert [len(function.middleware) for function in narrowed[0].functions] == [0, 0]
+    assert [len(function.middleware) for function in offered[0].functions] == [1, 0]
 
 
 @pytest.mark.asyncio
