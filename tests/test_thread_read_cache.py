@@ -403,11 +403,13 @@ class TestReadsRacingAWrite:
         assert not {"root", "reply 1"}.intersection(body for page in bodies for body in page)
         assert await thread.bodies() == ["ROOT", "REPLY 1"]
 
-    async def test_a_read_that_outlives_a_commit_does_not_keep_the_body_it_replaced(
+    @pytest.mark.parametrize("another_reader_keeps_the_stored_body", [False, True])
+    async def test_a_read_that_outlives_a_commit_reads_its_own_snapshot_and_keeps_nothing(
         self,
         journal_database: Callable[[], EventJournalStore],
+        another_reader_keeps_the_stored_body: bool,
     ) -> None:
-        """A page sized before the write and loaded after it returns its own snapshot and leaves nothing behind."""
+        """A page sized before the write and loaded after it neither takes the stored body nor keeps the replaced one."""
         journal = journal_database()
         alice = journal.principal("agent@alice")
         uncached = EventJournalStore(backend=journal.backend, approval_signals=journal.approval_signals)
@@ -417,6 +419,9 @@ class TestReadsRacingAWrite:
         def land() -> None:
             async def rewrite() -> None:
                 await _refetch_another_body(alice, await _owe_a_refetch(alice, uncached.principal("agent@alice")))
+                if another_reader_keeps_the_stored_body:
+                    page = await alice.read_conversation(room_id=ROOM, thread_id=ROOT, limit=WINDOW)
+                    assert page.messages[7].content["body"] == "REPLY 7"
 
             asyncio.run_coroutine_threadsafe(rewrite(), loop).result(SETTLE_TIMEOUT_SECONDS)
 

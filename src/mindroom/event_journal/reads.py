@@ -110,7 +110,8 @@ class PageCache:
     can store another body under values a page already read, so every write that stores a body signals
     ``StoredBody``. The store's one writer marks the row before the write commits, and a marked row is neither
     read from here nor kept; once the commit is published the row is forgotten, and a page that began before then
-    does not keep it. Only a store whose backend reports both moments here may read through a cache.
+    neither keeps it nor takes what a later page kept. Only a store whose backend reports both moments here may
+    read through a cache.
 
     Only what the database stored is kept. Each page decodes its own content, so no two readers share an object.
 
@@ -138,24 +139,33 @@ class PageCache:
         with self._lock:
             self._committing.update(signal for signal in signals if isinstance(signal, StoredBody))
 
-    def kept(self, keys: list[_ContentKey]) -> dict[_ContentKey, _Content]:
-        """Return the content kept under each of ``keys``, marking it read just now."""
+    def _stored_since(self, since: int) -> set[tuple[str, ...]] | None:
+        """Return the rows a write stored a body for since ``generation`` was ``since``, or None when that is forgotten."""
+        published = self.generation - since
+        if published > len(self._published):
+            return None
+        return self._committing.union(*islice(reversed(self._published), published))
+
+    def kept(self, keys: list[_ContentKey], since: int) -> dict[_ContentKey, _Content]:
+        """Return what is kept under ``keys`` and older than a page that read ``generation`` as ``since`` before its first query."""
         with self._lock:
             found: dict[_ContentKey, _Content] = {}
+            stored = self._stored_since(since)
+            if stored is None:
+                return found
             for key in keys:
-                entry = None if key[:3] in self._committing else self._contents.get(key[:3])
+                entry = None if key[:3] in stored else self._contents.get(key[:3])
                 if entry is not None and entry[0] == key:
                     self._contents.move_to_end(key[:3])
                     found[key] = entry[1]
             return found
 
     def keep(self, loaded: dict[_ContentKey, _Content], since: int) -> None:
-        """Keep what a page that read ``generation`` as ``since`` before its first query loaded, less rows stored since."""
+        """Keep what such a page loaded, less the rows a write stored a body for since it began."""
         with self._lock:
-            published = self.generation - since
-            if published > len(self._published):
+            stored = self._stored_since(since)
+            if stored is None:
                 return
-            stored = self._committing.union(*islice(reversed(self._published), published))
             for key, content in loaded.items():
                 if key[:3] in stored:
                     continue
@@ -614,7 +624,7 @@ def _load_contents(
     }
     contents: dict[_ContentKey, _Content] = {key: (None, 0) for key in keys.values() if key[-1] is None}
     if cache is not None:
-        contents.update(cache.kept(list(keys.values())))
+        contents.update(cache.kept(list(keys.values()), since))
     missing = [logical_event_id for logical_event_id, key in keys.items() if key not in contents]
     if missing:
         placeholders = ", ".join("?" for _ in missing)
