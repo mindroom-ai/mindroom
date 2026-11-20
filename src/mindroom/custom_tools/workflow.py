@@ -136,9 +136,9 @@ class WorkflowTools(Toolkit):
             await engine.launch(run.run_id, context, self.limits)
             ended = await engine.wait(run.run_id)
         except asyncio.CancelledError:
-            # Nobody is left to receive the report, so the run stops too, unless the primary itself is stopping.
+            # With nobody left to receive the report the run stops too, unless the primary itself is stopping.
             stopping = job_stopped_by_shutdown() if job_owns_execution() else not _running(context)
-            if not stopping:
+            if not stopping and not engine.waited(run.run_id):
                 await run_coroutine_until_complete(
                     engine.cancel(run.run_id, reason="The call that waited was cancelled."),
                 )

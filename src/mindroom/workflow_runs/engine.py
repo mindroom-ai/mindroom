@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
@@ -89,6 +90,7 @@ class WorkflowEngine:
         # One per run with a waiter or a launch in progress: polls and `wait` sleep on it, a launch holds its lock.
         self._changed: WeakValueDictionary[str, asyncio.Condition] = WeakValueDictionary()
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
+        self._waiting: Counter[str] = Counter()
 
     async def launch(
         self,
@@ -159,12 +161,20 @@ class WorkflowEngine:
     async def wait(self, run_id: str) -> WorkflowRun:
         """Return the run once it has ended."""
         condition = self._condition(run_id)
-        async with condition:
-            while (run := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
-                # The saved run decides: a wake only shortens the wait, since a writer cancelled at its commit sends none.
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(condition.wait(), _RECHECK_SECONDS)
+        self._waiting[run_id] += 1
+        try:
+            async with condition:
+                while (run := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
+                    # The saved run decides: a wake only shortens the wait; a writer cancelled at its commit sends none.
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(condition.wait(), _RECHECK_SECONDS)
+        finally:
+            self._waiting -= Counter({run_id: 1})
         return run
+
+    def waited(self, run_id: str) -> bool:
+        """Return whether a call still waits for the run to end."""
+        return self._waiting[run_id] > 0
 
     def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
         """Return the run and its current nodes."""

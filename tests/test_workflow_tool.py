@@ -436,6 +436,24 @@ async def test_an_inline_call_that_is_cancelled_cancels_its_run(stack: WorkflowS
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_inline_call_leaves_the_run_to_the_call_that_still_waits_for_it(stack: WorkflowStack) -> None:
+    """The same call delivered twice waits twice; the run stops with its last waiter, not its first."""
+    first = await _inline(stack, call_id="call-1")
+    second = await _inline(stack, call_id="call-1")
+    [run] = stack.store.list_runs()
+    await asyncio.sleep(0.05)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert stack.store.get_run(run.run_id).state is WorkflowRunState.RUNNING
+    stack.run_id = run.run_id
+    await stack.finish_attempt(result="the report")
+    assert await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS) == "the report"
+
+
+@pytest.mark.asyncio
 async def test_background_jobs_off_is_refused_in_one_sentence(tmp_path: Path) -> None:
     """A top-level call needs the job runtime: with it off, or with `workflow` excluded, the call says what to set."""
     refusal = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
