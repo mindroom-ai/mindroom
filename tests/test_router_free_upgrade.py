@@ -128,7 +128,8 @@ async def _the_routers_schedule_fires_through_an_agent(config: Config) -> None:
     # The workflow and the send path run for real; the fake homeserver clients record what reaches Matrix.
     for bot in (general, helper):
         bot.client.room_send = AsyncMock(return_value=nio.RoomSendResponse("$fired", ROOM_ID))
-    assert [await schedules.restore_room(bot, ROOM_ID) for bot in (general, helper)] == [0, 1]
+    # The first bot to restore the room starts the heir's runner.
+    assert [await schedules.restore_room(bot, ROOM_ID) for bot in (general, helper)] == [1, 0]
     await asyncio.wait_for(schedules._runners[TASK_ID][1], timeout=2)
     general.client.room_send.assert_not_awaited()
     helper.client.room_send.assert_awaited_once()
