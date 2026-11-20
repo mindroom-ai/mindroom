@@ -21,6 +21,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTE_EVENT_TYPE,
     ROUTE_PROMPT_FILE_KEY,
+    ROUTE_REVISION_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
     SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
@@ -5563,6 +5564,7 @@ class TestRouteDispatch:
                 "m.mentions": {"user_ids": ["@mallory:example.org"]},
                 "m.relates_to": {"m.in_reply_to": {"event_id": "$other"}},
                 "url": "mxc://example.org/prompt",
+                ROUTE_REVISION_KEY: [1_000_001, "$edit"],
             },
         )
 
@@ -5589,6 +5591,8 @@ class TestRouteDispatch:
             ORIGINAL_SENDER_KEY: ALICE,
             # What names a long prompt's file is set apart: the message's own text is not read from it.
             ROUTE_PROMPT_FILE_KEY: {"url": "mxc://example.org/prompt"},
+            # A route's own word on which edit its prompt is stays: its steward wrote it.
+            ROUTE_REVISION_KEY: [1_000_001, "$edit"],
         }
         # What makes the message a route is outside its content, where only this dispatch writes.
         assert delivered.source[ROUTE_EVENT_TYPE] == ["$earlier", "$question"]
@@ -5608,6 +5612,19 @@ class TestRouteDispatch:
         assert delivered.body == "an ordinary message"
         assert ROUTE_EVENT_TYPE not in delivered.source
         assert ROUTE_EVENT_TYPE not in delivered.source["content"]
+
+    async def test_a_message_that_says_which_edit_its_text_is_reaches_its_callback_without_that(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only the edit a waiting message took is written there, by this process: its sender's own word is dropped."""
+        event = text_event("$message", "an ordinary message")
+        event.source["content"][ROUTE_REVISION_KEY] = [9_007_199_254_740_991, "$future"]
+
+        [delivered] = await self._delivered(alice, event, kind=EventKind.MESSAGE)
+
+        assert delivered.source["content"]["body"] == "an ordinary message"
+        assert ROUTE_REVISION_KEY not in delivered.source["content"]
 
     async def test_a_route_outside_a_thread_carries_the_prompt_its_scheduled_task_relays(
         self,

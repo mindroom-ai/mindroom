@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Protocol, TypeIs, cast
 
 import nio
 
-from mindroom.constants import ROUTE_EVENT_TYPE, SILENT_SCHEDULE_EVENT_TYPE
+from mindroom.constants import ROUTE_EVENT_TYPE, ROUTE_REVISION_KEY, SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.event_journal import (
     EventClass,
     EventKind,
@@ -246,7 +246,10 @@ def _inbound_event(
     event_class: EventClass,
 ) -> InboundEvent:
     """Return the admission view of one timeline event."""
-    content = event.source.get("content")
+    content, source = event.source.get("content"), _event_source(event)
+    if kind is not EventKind.ROUTE and isinstance(stored := source.get("content"), dict):
+        # Which edit a waiting message's text is, only its journal row's revision says: its sender's word is dropped.
+        source["content"] = {key: value for key, value in stored.items() if key != ROUTE_REVISION_KEY}
     return InboundEvent(
         event_id=event.event_id,
         room_id=room_id,
@@ -255,7 +258,7 @@ def _inbound_event(
         event_class=event_class,
         sender=event.sender,
         origin_server_ts=event.server_timestamp,
-        source=_event_source(event),
+        source=source,
     )
 
 

@@ -309,24 +309,16 @@ async def execute_router_relay(  # noqa: PLR0911
     )
     if pending_turn is None or await deps.visible_responses.settle_deleted_sources(pending_turn, room_id=room.room_id):
         return False
-    tracked_handled_turn = pending_turn.record
+    turn = pending_turn.record
     # The responder may have stopped or restarted, and this bot may have lost the room, while the route was prepared.
-    if not await _responder_ready(deps, suggested_entity, tracked_handled_turn) or not await _still_steward(
-        deps,
-        room.room_id,
-        tracked_handled_turn,
-    ):
+    if not await _responder_ready(deps, suggested_entity, turn) or not await _still_steward(deps, room.room_id, turn):
         return False
-    route = {
-        "entity": entity_identity_registry(deps.runtime.config, deps.runtime_paths)
-        .current_id(suggested_entity)
-        .full_id,
-        # Every message of the routed batch, the one the answer replies to last.
-        "event_ids": [*(i for i in tracked_handled_turn.source_event_ids if i != event.event_id), event.event_id],
-    }
-    if thread_event_id is not None:
-        route["thread_id"] = thread_event_id
-    transcripts = await _voice_transcripts(deps, route["event_ids"])
+    entity = entity_identity_registry(deps.runtime.config, deps.runtime_paths).current_id(suggested_entity).full_id
+    # Every message of the routed batch, the one the answer replies to last.
+    event_ids = [*(i for i in turn.source_event_ids if i != event.event_id), event.event_id]
+    thread = {} if thread_event_id is None else {"thread_id": thread_event_id}
+    route = {"entity": entity, "event_ids": event_ids, **thread}
+    transcripts = await _voice_transcripts(deps, event_ids)
     content: dict[str, Any] = {**routed_extra_content, ROUTE_EVENT_TYPE: route, **transcripts}
     # The route carries its steward's whole prompt or, past what a responder reads of its long-text file, a notice.
     content |= {"body": message or event.body, ROUTE_PROMPT_STRUCTURED_KEY: prompt_is_structured}
@@ -342,10 +334,10 @@ async def execute_router_relay(  # noqa: PLR0911
             raise RuntimeError(msg)
         deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
         # The route is not an outbox delivery, so a replay before the turn is recorded answered adopts it from here.
-        await deps.turn_store.record_placeholder(tracked_handled_turn, event_id)
+        await deps.turn_store.record_placeholder(turn, event_id)
         await deps.turn_store.record_responded_turn(
-            canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
+            canonicalize_turn_record(turn, response_event_id=event_id),
         )
         # The route is this steward's whole answer: nothing else settles the messages it routed.
-        await deps.visible_responses.settle_source_events_ignored(tracked_handled_turn)
+        await deps.visible_responses.settle_source_events_ignored(turn)
     return False

@@ -8814,6 +8814,49 @@ async def test_a_steward_routes_a_message_as_its_sender_edited_it_while_it_waite
 
 
 @pytest.mark.asyncio
+async def test_a_sender_cannot_say_which_edit_its_own_message_is(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pair its sender wrote into a message names no edit to its route, so the genuine edit still outranks it.
+
+    Written far in the future, it would hide the edit that lands while the steward selects from the responder,
+    which answers a lone routed message as edited only past the edit its route names.
+    """
+    config = _two_agent_config(tmp_path)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+    steward = _build_harness(config, tmp_path / "steward", agent_name=ROUTER_AGENT_NAME)
+    journal = _obligation_runner(
+        steward,
+        tracking_path=tmp_path / "journal",
+        matrix_user_id=_entity_user_id(config, ROUTER_AGENT_NAME),
+        entity_name=ROUTER_AGENT_NAME,
+        room=room,
+    )
+    _replace_harness_deps(steward, interactive_questions=journal.store)
+    forged = _text_event("June.", event_id="$question:localhost", thread_id=_THREAD_ROOT)
+    forged.source["content"][constants.ROUTE_REVISION_KEY] = [9_007_199_254_740_991, "$future"]
+
+    await admit_dispatch_event(journal, room, forged, EventKind.MESSAGE, EventClass.ACTIONABLE)
+    await journal.drain_once()
+    await steward.gate.drain_all()
+
+    [route] = steward.gateway.routes
+    assert route["body"] == "June."
+    assert constants.ROUTE_REVISION_KEY not in route
+    responder = _build_harness(config, tmp_path / "responder")
+    await responder.deliver(room, _route_as_delivered(config, route, steward=ROUTER_AGENT_NAME))
+    [request] = responder.runner.requests
+    # No edit is named, so any whole edit of the sender's in the responder's thread is answered
+    # (``test_a_lone_routed_message_is_answered_as_its_sender_last_edited_it[edited]``).
+    assert request.payload_preparation.routed_revision is None
+
+
+@pytest.mark.asyncio
 async def test_a_route_without_a_prompt_starts_no_turn(tmp_path: Path) -> None:
     """A responder makes no prompt of its own from the messages a route names: a route without one answers nothing."""
     config = _two_agent_config(tmp_path)
