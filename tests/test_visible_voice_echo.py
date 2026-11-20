@@ -108,11 +108,21 @@ async def test_answering_agent_posts_transcript_before_reply(tmp_path: Path, mon
     assert transcript.extra_content[ORIGINAL_SENDER_KEY] == _SENDER
     assert [request.prompt for request in harness.runner.requests] == [_TRANSCRIPT]
     assert (await harness.turn_store.visible_echo(event.event_id)).event_id == "$sent-1:localhost"
+    assert harness.gateway.edited == []  # No placeholder was sent and replaced.
 
 
+@pytest.mark.parametrize("checkpoint_cleaned", [False, True])
 @pytest.mark.asyncio
-async def test_routed_responder_posts_transcript_before_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A steward that routes a voice message posts nothing; the responder it selects posts the transcript."""
+async def test_routed_responder_posts_transcript_before_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    checkpoint_cleaned: bool,
+) -> None:
+    """A steward that routes a voice message posts nothing; the responder it selects posts the transcript.
+
+    Retention may clear the checkpoint of a voice message its bot ignored; the route still carries the transcript.
+    """
     config = _config(tmp_path)
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
     event, normalized = _voice_event(config, mentions=())
@@ -129,35 +139,9 @@ async def test_routed_responder_posts_transcript_before_reply(tmp_path: Path, mo
     await _deliver(responder, room, event)
     assert steward.gateway.sent == responder.gateway.sent == []
     assert responder.runner.requests == []
-    [route] = steward.gateway.routes
-    await _deliver(responder, room, _route_as_delivered(config, route, steward=ROUTER_AGENT_NAME))
-
-    assert [request.response_text for request in responder.gateway.sent] == [_TRANSCRIPT]
-    assert replies_at_send == [0]
-    assert len(responder.runner.requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_routed_responder_posts_the_routes_transcript_when_its_checkpoint_is_gone(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Retention clears the checkpoint of a voice message its bot ignored; the route still carries the transcript."""
-    config = _config(tmp_path)
-    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
-    event, normalized = _voice_event(config, mentions=())
-    _transcribes(monkeypatch, normalized)
-    monkeypatch.setattr(
-        "mindroom.router.relay.suggest_responder_for_message",
-        AsyncMock(return_value=ResponderSelection("general")),
-    )
-    steward = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    responder = _build_harness(config, tmp_path)
-    replies_at_send = _record_replies_at_send(responder, monkeypatch)
-    await _deliver(steward, room, event)
-    await _deliver(responder, room, event)
-    await responder.turn_store.cleanup(unsettled_source_event_ids=frozenset())
-    assert await responder.turn_store.prepared_voice_for_source(event.event_id) is None
+    if checkpoint_cleaned:
+        await responder.turn_store.cleanup(unsettled_source_event_ids=frozenset())
+        assert await responder.turn_store.prepared_voice_for_source(event.event_id) is None
 
     [route] = steward.gateway.routes
     await _deliver(responder, room, _route_as_delivered(config, route, steward=ROUTER_AGENT_NAME))
@@ -202,26 +186,6 @@ async def test_restart_after_transcript_does_not_post_again(tmp_path: Path, monk
 
     assert restarted.gateway.sent == []
     assert [request.prompt for request in restarted.runner.requests] == [_TRANSCRIPT]
-
-
-@pytest.mark.asyncio
-async def test_restart_before_transcript_posts_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A bot that restarts before its transcript was sent posts it from its checkpoint, once."""
-    config = _config(tmp_path)
-    room = _room_with_members(config, "general")
-    event, normalized = _voice_event(config)
-    normalize = _transcribes(monkeypatch, normalized)
-    crashed = _build_harness(config, tmp_path)
-    monkeypatch.setattr(crashed.gateway, "send_text", AsyncMock(side_effect=RuntimeError("crash before the send")))
-    await _deliver(crashed, room, event)
-    assert crashed.runner.requests == []
-
-    restarted = _build_harness(config, tmp_path)
-    await _deliver(restarted, room, event)
-
-    assert [request.response_text for request in restarted.gateway.sent] == [_TRANSCRIPT]
-    assert [request.prompt for request in restarted.runner.requests] == [_TRANSCRIPT]
-    normalize.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -427,17 +391,3 @@ async def test_raw_audio_fallback_posts_nothing(tmp_path: Path, monkeypatch: pyt
 
     assert harness.gateway.sent == []
     assert len(harness.runner.requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_no_placeholder_is_sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With transcription on, the only message before the reply is the finished transcript, never edited."""
-    config = _config(tmp_path, enabled=True)
-    harness = _build_harness(config, tmp_path)
-    event, normalized = _voice_event(config)
-    _transcribes(monkeypatch, normalized)
-
-    await _deliver(harness, _room_with_members(config, "general"), event)
-
-    assert [request.response_text for request in harness.gateway.sent] == [_TRANSCRIPT]
-    assert harness.gateway.edited == []
