@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.matrix.message_builder import replace_unsendable_images
 from mindroom.session_storage.store import persist_to
 
 if TYPE_CHECKING:
@@ -115,6 +116,17 @@ def without_terminal_record(kind: type[RunRecord | TeamRunRecord], name: str) ->
     return RuntimeError(f"{entity} run {name!r} ended without its terminal record")
 
 
+def _as_shown(record: AnyRunRecord) -> AnyRunRecord:
+    """Return ``record`` with its replies as Matrix shows them, so an image the agent made up replays as its note."""
+    messages = [
+        replace(message, content=replace_unsendable_images(message.content))
+        if message.role == "assistant" and isinstance(message.content, str)
+        else message
+        for message in record.messages
+    ]
+    return replace(record, content=record.content and replace_unsendable_images(record.content), messages=messages)
+
+
 def persist_into[R: AnyRunRecord](
     terminal: TerminalRecord[R] | None,
     storage: RunStorage | None,
@@ -135,7 +147,7 @@ def persist_into[R: AnyRunRecord](
         if terminal is not None:
             terminal.keep(record)
         if store_persist is not None:
-            await store_persist(record)
+            await store_persist(_as_shown(record))
 
     return persist
 

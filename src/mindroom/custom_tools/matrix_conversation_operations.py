@@ -36,7 +36,7 @@ from mindroom.matrix.client_visible_messages import (
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.guarded_rooms import allowed_send
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.message_builder import build_reaction_content
+from mindroom.matrix.message_builder import build_reaction_content, replace_unsendable_images
 from mindroom.matrix.message_extras import build_message_extras_content
 from mindroom.matrix.thread_forks import with_fork_prefix
 from mindroom.requester_identity import is_human_requester_id
@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_NO_IMAGE_NOTE = "an image with no uploaded file went out as a note; send files via matrix_message(attachments=[...])"
 _DIRECT_INTERACTIVE_ERROR = "Interactive prompts are only supported in normal agent responses."
 _CONTACT_TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
 
@@ -93,8 +94,10 @@ class _MessageSendState:
     newly_registered_attachment_ids: list[str] = field(default_factory=list)
 
 
-def _contact_policy_fields(verdict: ContactVerdict | None, done: str) -> dict[str, str]:
-    """Return the result fields that tell the agent the contact policy changed what went out, and to what."""
+def _sent_fields(verdict: ContactVerdict | None, done: str, text: str | None = None) -> dict[str, str]:
+    """Return the result fields that tell the agent an image note or the contact policy changed what went out, and how."""
+    if text is not None and (shown := replace_unsendable_images(text)) != text:
+        return {"note": f"{done}; {_NO_IMAGE_NOTE}", "sent_text": shown}
     if verdict is None or not verdict.rewritten:
         return {}
     return {"note": f"{done} (changed by the contact policy)", "sent_text": verdict.text}
@@ -405,7 +408,7 @@ class MatrixMessageOperations:
                 return self._result("error", action="send", message=error, **asdict(state))
         if state.event_id is None and state.attachment_event_ids:
             state.event_id = state.attachment_event_ids[0]
-        return self._result("ok", action="send", **asdict(state), **_contact_policy_fields(contact_verdict, "Sent"))
+        return self._result("ok", action="send", **asdict(state), **_sent_fields(contact_verdict, "Sent", text))
 
     async def _message_react(
         self,
@@ -448,7 +451,7 @@ class MatrixMessageOperations:
                 reacted_event_id=event_id,
                 reaction=reaction,
                 event_id=response.event_id,
-                **_contact_policy_fields(contact_verdict, "Reacted"),
+                **_sent_fields(contact_verdict, "Reacted"),
             )
         return self._result(
             "error",
@@ -626,7 +629,7 @@ class MatrixMessageOperations:
             thread_id=thread_id,
             edited_event_id=event_id,
             event_id=delivered.event_id,
-            **_contact_policy_fields(contact_verdict, "Edited"),
+            **_sent_fields(contact_verdict, "Edited", formatted_text),
         )
 
     async def dispatch_action(
