@@ -74,6 +74,7 @@ import mindroom.reply_turn.locked_turn as locked_turn_module
 import mindroom.reply_turn.request as reply_request_module
 import mindroom.response_runner as response_runner_module
 import mindroom.streaming as streaming_module
+import mindroom.tls_trust as tls_trust_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools.shell as shell_tool_module
@@ -3897,6 +3898,12 @@ def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None]:
     api_main = sys.modules.get("mindroom.api.main")
     if api_main is not None:
         api_main.unbind_embedded_runtime(api_main.app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_shared_tls_context() -> None:
+    """Build the shared TLS context anew in each test, so a test that patches CA loading sees its patch."""
+    tls_trust_module._shared_context.cache_clear()
 
 
 @pytest.fixture(autouse=True)

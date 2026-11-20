@@ -4010,7 +4010,7 @@ class TestMultiAgentOrchestrator:
                 monkeypatch.setattr(
                     client_session,
                     "verifying_ssl_context",
-                    lambda _env: ssl.create_default_context(cafile=certificate_path),
+                    lambda _env, **_: ssl.create_default_context(cafile=certificate_path),
                 )
             runtime_paths = resolve_runtime_paths(
                 config_path=tmp_path / "config.yaml",
