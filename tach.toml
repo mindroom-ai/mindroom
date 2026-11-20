@@ -6434,6 +6434,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.sidecar_content",
     "mindroom.runtime_protocols",
     "mindroom.voice.handler",
 ]

@@ -8518,8 +8518,12 @@ def _read_by_id(content: dict[str, Any], **source: Any) -> AsyncMock:  # noqa: A
 
 
 @pytest.mark.asyncio
-async def test_a_route_without_a_prompt_reads_a_long_message_in_full(tmp_path: Path) -> None:
-    """A message too long for one event is a file with its text beside it, which its routed responder reads whole."""
+@pytest.mark.parametrize("downloads", [True, False], ids=["readable", "download fails"])
+async def test_a_route_without_a_prompt_reads_a_long_message_in_full(tmp_path: Path, downloads: bool) -> None:
+    """A message too long for one event is a file with its text beside it, which its routed responder reads whole.
+
+    While the file cannot be downloaded the responder waits: the event's own text is only a preview of the message.
+    """
     config = _two_agent_config(tmp_path)
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
@@ -8537,12 +8541,13 @@ async def test_a_route_without_a_prompt_reads_a_long_message_in_full(tmp_path: P
     client.room_get_event = _read_by_id(
         await prepare_large_message(upload_client, _ROOM_ID, text, room_encrypted=False),
     )
-    client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadResponse, body=uploads[0]))
+    full_text = MagicMock(spec=nio.DownloadResponse, body=uploads[0])
+    client.download = AsyncMock(return_value=full_text if downloads else nio.DownloadError("unavailable"))
 
     await harness.deliver(room, _route_message(config, steward="research", thread_id="$question:localhost", body=None))
 
-    [request] = harness.runner.requests
-    assert request.prompt == body
+    assert [request.prompt for request in harness.runner.requests] == ([body] if downloads else [])
+    assert harness.ignored_dispatch_sources == []
 
 
 @pytest.mark.asyncio

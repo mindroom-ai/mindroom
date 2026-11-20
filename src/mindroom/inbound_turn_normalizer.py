@@ -39,6 +39,7 @@ from mindroom.matrix.media import (
     is_matrix_media_dispatch_event,
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.thread_forks import fork_parent_thread_ids
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
@@ -247,10 +248,13 @@ class InboundTurnNormalizer:
             prepared = await self.resolve_text_event(TextNormalizationRequest(event=event))
         else:
             return None
+        if prepared is None or holds_unresolved_sidecar(prepared.source["content"]):
+            # A preview is not the message: the file is read on a later try.
+            return None
         candidates = bundled_replacement_candidates(event.source)
         # A replacement from anyone but the message's sender is not an edit of it.
-        if prepared is None or any(c.get("sender", event.sender) != event.sender for c in candidates):
-            return None if prepared is None else prepared.body
+        if any(c.get("sender", event.sender) != event.sender for c in candidates):
+            return prepared.body
         edited = await bundled_replacement_body(
             event.source,
             client=self._client(),
