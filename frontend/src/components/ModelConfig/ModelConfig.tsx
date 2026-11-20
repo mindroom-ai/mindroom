@@ -11,9 +11,12 @@ import {
   type Column,
   type ColumnDef,
   type SortingState,
-  getCoreRowModel,
-  getSortedRowModel,
-  useReactTable,
+  createSortedRowModel,
+  rowSortingFeature,
+  sortFn_alphanumeric,
+  sortFn_text,
+  tableFeatures,
+  useTable,
 } from "@tanstack/react-table";
 import { useConfigStore } from "@/store/configStore";
 import { SchemaSection } from "@/components/SchemaForm";
@@ -416,12 +419,19 @@ function getKeyStatusDisplay(
   };
 }
 
+// Sorting resolves the default "auto" sort function only among registered ones: alphanumeric for values with digits, else text.
+const modelTableFeatures = tableFeatures({
+  rowSortingFeature,
+  sortedRowModel: createSortedRowModel(),
+  sortFns: { alphanumeric: sortFn_alphanumeric, text: sortFn_text },
+});
+
 function SortableHeader({
   label,
   column,
 }: {
   label: string;
-  column: Column<ModelRowData, unknown>;
+  column: Column<typeof modelTableFeatures, ModelRowData, unknown>;
 }) {
   return (
     <Button
@@ -1438,7 +1448,7 @@ export function ModelConfig() {
     );
   };
 
-  const columns: ColumnDef<ModelRowData>[] = [
+  const columns: ColumnDef<typeof modelTableFeatures, ModelRowData>[] = [
     {
       accessorKey: "modelName",
       header: ({ column }) => <SortableHeader label="Name" column={column} />,
@@ -1684,13 +1694,12 @@ export function ModelConfig() {
     },
   ];
 
-  const table = useReactTable({
+  const table = useTable({
+    features: modelTableFeatures,
     data: rows,
     columns,
     state: { sorting },
     onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
   });
 
   if (!config) {
@@ -1878,7 +1887,7 @@ export function ModelConfig() {
                             : "cursor-pointer hover:bg-muted/30",
                         )}
                       >
-                        {row.getVisibleCells().map((cell) => (
+                        {row.getAllCells().map((cell) => (
                           <td
                             key={cell.id}
                             className={cn(
