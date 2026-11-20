@@ -23,6 +23,7 @@ from mindroom.agent_cli.shell_contract import SHELL_FUNCTION, unbound_agent_cli_
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.shared_directories.store import load_shared_directories
 from mindroom.tailnet_ssh.eligibility import link_ineligibility
 from mindroom.tailnet_ssh.projection import authorized_key_lines, signin_keys, write_projection
 from mindroom.tailnet_ssh.store import (
@@ -47,11 +48,12 @@ from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.shared_directories.store import SharedDirectory
     from mindroom.tailnet_ssh.store import Link, LinkBook
     from mindroom.tool_system.sandbox_proxy import WorkerCall
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -174,12 +176,14 @@ def _desired(
     link: Link,
     *,
     now: float,
+    node: LinkStatus | None,
+    directories: Sequence[SharedDirectory],
 ) -> Literal["on", "suspended", "removing"]:
-    """Return what the gateway is to do with a link stored ``on``.
+    """Return what the gateway is to do with a link stored ``on``, whose node the gateway last reported as ``node``.
 
     It is removed when its agent is gone, its person may no longer use the agent, its worker is no longer the one
-    that person's turns run in, or nobody enrolled it within a day; failing any other condition suspends it, as does
-    room membership that is not known yet.
+    that person's turns run in, or nobody enrolled it within a day and it is not waiting for an admin's approval;
+    failing any other condition suspends it, as does room membership that is not known yet.
     """
     if link.agent_name not in config.agents:
         return "removing"
@@ -190,11 +194,14 @@ def _desired(
         link.agent_name,
         link.worker_key,
         membership_index,
+        directories,
     )
+    # A node waiting for an admin's approval was signed in to, however long the approval takes.
+    expires = link.enrolled_at is None and (node is None or node.state != "needs_approval")
     if (
         (ineligible is not None and ineligible.reason == "not_authorized" and not ineligible.pending)
         or resolve_target(config, runtime_paths, link.requester_id, link.agent_name).worker_key != link.worker_key
-        or (link.enrolled_at is None and now - link.created_at >= _UNENROLLED_SECONDS)
+        or (expires and now - link.created_at >= _UNENROLLED_SECONDS)
     ):
         return "removing"
     return "on" if ineligible is None else "suspended"
@@ -220,6 +227,7 @@ def desired_links(
     status: GatewayStatus,
     *,
     now: float,
+    monotonic: float,
 ) -> list[dict[str, object]]:
     """Bring the stored links in line with the config, and return the gateway's ``GET /links`` rows. Blocking.
 
@@ -229,10 +237,12 @@ def desired_links(
     from the config, closes their open sessions.
     """
     workers: list[WorkerHandle] = []
-    # The backend is asked outside the store's lock, which connects and the portal wait for.
+    # The backend and the shared directories are read outside the store's lock, which connects and the portal wait for.
     if now - status.operator_sync_at >= _OPERATOR_SYNC_SECONDS and read_links(runtime_paths).enrollment == "auth_key":
         status.operator_sync_at = now
         workers = listed_workers(runtime_paths)
+    directories = load_shared_directories(runtime_paths)
+    nodes = fresh_link_statuses(status.report, monotonic=monotonic)
     agent_names: dict[str, str | None] = {}
     for name in config.agents:
         part = normalize_worker_key_part(name)
@@ -240,7 +250,8 @@ def desired_links(
         agent_names[part] = None if part in agent_names else name
 
     def desired(link: Link) -> Literal["on", "suspended", "removing"]:
-        return _desired(config, runtime_paths, membership_index, link, now=now)
+        node = nodes.get(link.id)
+        return _desired(config, runtime_paths, membership_index, link, now=now, node=node, directories=directories)
 
     def reconcile(book: LinkBook) -> list[dict[str, object]]:
         for handle in workers if book.enrollment == "auth_key" else []:

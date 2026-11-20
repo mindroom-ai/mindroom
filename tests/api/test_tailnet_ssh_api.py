@@ -685,7 +685,15 @@ def test_a_disconnect_right_after_a_restart_stays_disconnected(portal: _Portal, 
     links.record_status(portal.paths, portal.status, removed, now=time.time(), monotonic=time.monotonic())
     portal.manager.handles = [_handle(link.worker_key, ssh_dir=tmp_path / "ssh")]
     config, paths = config_lifecycle.read_app_committed_runtime_config(main.app)
-    rows = links.desired_links(config, paths, AgentReplyMembershipIndex(), portal.status, now=time.time() + 61)
+    memberships = AgentReplyMembershipIndex()
+    rows = links.desired_links(
+        config,
+        paths,
+        memberships,
+        portal.status,
+        now=time.time() + 61,
+        monotonic=time.monotonic(),
+    )
 
     assert rows == []
     assert [(stored.id, stored.desired) for stored in read_links(portal.paths).links] == [(link.id, "off")]

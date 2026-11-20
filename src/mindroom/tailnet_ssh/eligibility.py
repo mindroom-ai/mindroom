@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.shared_directories.store import SharedDirectory
     from mindroom.workers.backends._dedicated_worker_common import SharedDirectoryMount
     from mindroom.workers.models import WorkerLaunchConfig
 
@@ -72,10 +73,10 @@ def _key_agent(worker_key: str, agent_names: Iterable[str]) -> str | None:
     return names[0] if len(names) == 1 else None
 
 
-def _joined_directory(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> str | None:
-    """Return the first stored shared directory the agent joined but does not own, as ``owner/name``."""
+def _joined_directory(config: Config, agent_name: str, directories: Iterable[SharedDirectory]) -> str | None:
+    """Return the first shared directory the agent joined but does not own, as ``owner/name``."""
     is_shareable = partial(is_shareable_agent, config)
-    for directory in load_shared_directories(runtime_paths):
+    for directory in directories:
         if shared_directory_access(directory, (agent_name,), is_shareable) is False:
             return f"{directory.owner}/{directory.name}"
     return None
@@ -137,8 +138,12 @@ def link_ineligibility(
     agent_name: str,
     worker_key: str | None,
     membership_index: AgentReplyMembershipIndex,
+    directories: Sequence[SharedDirectory] | None = None,
 ) -> Ineligible | None:
-    """Return the first condition a link of ``requester_id`` to ``agent_name`` over ``worker_key`` fails, or None."""
+    """Return the first condition a link of ``requester_id`` to ``agent_name`` over ``worker_key`` fails, or None.
+
+    ``directories`` are the stored shared directories, for a caller that checks many links and reads them once.
+    """
     if not worker_backend_kind(runtime_paths).dedicated:
         return Ineligible("backend")
     agent = config.agents.get(agent_name)
@@ -156,7 +161,9 @@ def link_ineligibility(
         return denied
     if not policy.is_private and _concrete_users_alone(config, agent_name) != (requester_id,):
         return Ineligible("shared_workspace")
-    joined = _joined_directory(config, runtime_paths, agent_name)
+    if directories is None:
+        directories = load_shared_directories(runtime_paths)
+    joined = _joined_directory(config, agent_name, directories)
     return None if joined is None else Ineligible("joined_directory", joined)
 
 

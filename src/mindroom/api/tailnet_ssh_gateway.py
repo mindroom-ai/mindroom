@@ -135,7 +135,15 @@ def gateway_app(api_app: FastAPI, token: str) -> FastAPI:
     @app.get("/links")
     async def links() -> list[dict[str, object]]:
         config, runtime_paths, memberships, status = _link_service(api_app)
-        return await asyncio.to_thread(desired_links, config, runtime_paths, memberships, status, now=time.time())
+        return await asyncio.to_thread(
+            desired_links,
+            config,
+            runtime_paths,
+            memberships,
+            status,
+            now=time.time(),
+            monotonic=time.monotonic(),
+        )
 
     @app.post("/status", status_code=204)
     async def post_status(request: Request) -> None:

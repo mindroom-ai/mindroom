@@ -189,7 +189,15 @@ def _overview(person: _Person, nodes: Mapping[str, LinkStatus]) -> dict[str, obj
         else:
             # The agent's target is built only for a person who may use it; their link names its worker.
             worker_key = None if link is None else link.worker_key
-        ineligible = link_ineligibility(config, runtime_paths, requester_id, name, worker_key, person.memberships)
+        ineligible = link_ineligibility(
+            config,
+            runtime_paths,
+            requester_id,
+            name,
+            worker_key,
+            person.memberships,
+            directories,
+        )
         row = None
         if link is not None:
             row = _link_row(link, nodes.get(link.id), suspended=ineligible is not None)

@@ -19,7 +19,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, tracking_dir
 from mindroom.file_locks import advisory_file_lock, release_file_lock, try_exclusive_file_lock
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
-from mindroom.tailnet_ssh import links, store
+from mindroom.tailnet_ssh import eligibility, links, store
 from mindroom.tailnet_ssh.links import (
     ConnectRefused,
     GatewayReport,
@@ -175,8 +175,10 @@ def _rows(
     status: GatewayStatus | None = None,
     *,
     now: float = NOW,
+    monotonic: float = 100.0,
 ) -> list[dict[str, object]]:
-    return desired_links(config, paths, AgentReplyMembershipIndex(), status or GatewayStatus(), now=now)
+    memberships = AgentReplyMembershipIndex()
+    return desired_links(config, paths, memberships, status or GatewayStatus(), now=now, monotonic=monotonic)
 
 
 def _report(state: str = "running", **fields: object) -> dict[str, object]:
@@ -354,7 +356,7 @@ def test_pending_room_membership_suspends_and_never_removes(
     _store(paths, link)
     memberships = _pending_index(room_config, index)
 
-    rows = desired_links(room_config, paths, memberships, GatewayStatus(), now=NOW)
+    rows = desired_links(room_config, paths, memberships, GatewayStatus(), now=NOW, monotonic=100.0)
 
     assert [(row["id"], row["desired"], row["closed_before"]) for row in rows] == [(link.id, "suspended", NOW - 5)]
     assert _stored(paths, link) == link
@@ -372,6 +374,7 @@ async def test_a_known_room_denial_removes_a_room_granted_link(room_config: Conf
         await membership_index(room_config, {"lobby": {ALICE}}),
         GatewayStatus(),
         now=NOW + 1,
+        monotonic=100.0,
     )
     left = desired_links(
         room_config,
@@ -379,6 +382,7 @@ async def test_a_known_room_denial_removes_a_room_granted_link(room_config: Conf
         await membership_index(room_config, {"lobby": {BOB}}),
         GatewayStatus(),
         now=NOW + 2,
+        monotonic=100.0,
     )
 
     assert [(row["id"], row["desired"]) for row in member] == [(link.id, "on")]
@@ -441,6 +445,41 @@ def test_removal_triggers_set_removing(config: Config, paths: RuntimePaths, trig
     # A removal already under way is not started again.
     _rows(config, paths, now=NOW + 5)
     assert _stored(paths, link) == removed
+
+
+def test_a_node_waiting_for_approval_is_not_dropped_at_a_day(config: Config, paths: RuntimePaths) -> None:
+    """An admin may take more than a day to approve a node, so its link waits; without a fresh report it is dropped."""
+    link = _link(now=NOW - DAY)
+    _store(paths, link)
+    status = GatewayStatus()
+    _post(paths, status, {link.id: _report("needs_approval", login_name=None)}, now=NOW - 10, monotonic=100.0)
+
+    assert [(row["id"], row["desired"]) for row in _rows(config, paths, status, monotonic=150.0)] == [(link.id, "on")]
+    assert [(row["id"], row["desired"]) for row in _rows(config, paths, status, monotonic=191.0)] == [
+        (link.id, "removing"),
+    ]
+
+
+def test_shared_directories_are_read_once_per_reconcile(
+    config: Config,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """However many links there are, one reconcile reads the stored shared directories once."""
+    _store(paths, _enrolled(), _enrolled(agent="mind"), _link(BOB, "mind"))
+    reads: list[RuntimePaths] = []
+    load = eligibility.load_shared_directories
+
+    def counted(runtime_paths: RuntimePaths) -> object:
+        reads.append(runtime_paths)
+        return load(runtime_paths)
+
+    monkeypatch.setattr(eligibility, "load_shared_directories", counted)
+    monkeypatch.setattr(links, "load_shared_directories", counted)
+
+    _rows(config, paths)
+
+    assert reads == [paths]
 
 
 def test_removed_report_drops_or_parks(config: Config, paths: RuntimePaths) -> None:
