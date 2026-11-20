@@ -163,6 +163,32 @@ def test_overleaf_preset_sends_the_git_token_as_basic_auth_for_user_git() -> Non
     assert headers == [(b"authorization", b"Basic " + base64.b64encode(b"git:olp_token"))]
 
 
+@pytest.mark.parametrize(
+    "sent",
+    [
+        [(b"authorization", b"Bearer mindroom-brokered")],
+        [(b"x-api-key", b"mindroom-brokered")],
+        [(b"Authorization", b"Bearer mindroom-brokered"), (b"x-api-key", b"mindroom-brokered")],
+    ],
+    ids=["sdk-2-bearer", "x-api-key", "both"],
+)
+def test_anthropic_preset_sends_one_key_whichever_header_the_client_used(sent: list[tuple[bytes, bytes]]) -> None:
+    """The Anthropic SDK sends its key as a bearer token since version 2; the API gets the key in ``x-api-key`` alone."""
+    config = EgressBrokerConfig(services={"anthropic": EgressService(preset="anthropic")})
+    match = match_rule(config, "api.anthropic.com", 443, "/v1/messages")
+    assert match is not None
+    other = (b"authorization-hint", b"Bearer something-else")
+
+    headers, _ = inject_credentials(
+        [*sent, other],
+        b"/v1/messages",
+        match.rule.auth,
+        "sk-ant-real",
+        placeholders=match.definition.placeholder_env.values(),
+    )
+    assert headers == [other, (b"x-api-key", b"sk-ant-real")]
+
+
 def test_presets_declare_read_only() -> None:
     """The Google presets and Atlassian offer read-only access; git hosts do not, and only Calendar reads with POST."""
     read_only = {name for name in _EXPECTED if EgressService(preset=name).read_only is not None}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import threading
 import time
@@ -14,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from anthropic.resources.messages import Messages
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import TextBlock
 from anthropic.types import Usage as AnthropicUsage
@@ -319,36 +321,28 @@ class TestMemoryConfig:
         assert ("temperature" in create_completion.call_args.kwargs) is (expected_reasoning_model is not True)
 
     @pytest.mark.parametrize(
-        ("authored_config", "expected_sampling"),
+        "authored_config",
         [
-            ({"model": "claude-sonnet-5-5"}, {}),
-            ({"model": "claude-opus-5-5", "temperature": 0.3}, {}),
-            ({"model": "claude-fable-5-1", "top_p": 0.8}, {}),
-            ({"model": "claude-sonnet-5-5", "temperature": None}, {}),
-            ({"model": "claude-sonnet-5-5", "temperature": 0.3, "top_p": 0.8, "top_k": 5}, {}),
-            # Models that accept sampling values keep Mem0's default temperature and the authored values.
-            ({"model": "claude-sonnet-4-5"}, {"temperature": 0.1}),
-            ({"model": "claude-sonnet-4-5", "temperature": None, "top_p": 0.8}, {"top_p": 0.8}),
-            ({}, {"temperature": 0.1}),
+            {"model": "claude-sonnet-5-5"},
+            {"model": "claude-opus-5-5", "temperature": 0.3},
+            {"model": "claude-fable-5-1", "top_p": 0.8},
+            {"model": "claude-sonnet-5-5", "temperature": 0.3, "top_p": 0.8, "top_k": 5},
+            {"model": "claude-sonnet-4-5"},
+            {"model": "claude-sonnet-4-5", "temperature": None, "top_p": 0.8},
+            {},
         ],
         ids=[
             "sonnet-5.5-default",
             "opus-5.5-temperature",
             "fable-5.1-top-p",
-            "sonnet-5.5-null-temperature",
             "sonnet-5.5-all-three",
             "sonnet-4.5-default",
             "sonnet-4.5-top-p",
             "mem0-default-model",
         ],
     )
-    def test_mem0_anthropic_sends_sampling_only_to_models_that_accept_it(
-        self,
-        tmp_path: Path,
-        authored_config: dict[str, object],
-        expected_sampling: dict[str, float],
-    ) -> None:
-        """A Claude memory LLM sends no ``temperature``, ``top_p``, or ``top_k`` to the models that reject them."""
+    def test_mem0_anthropic_sends_no_sampling(self, tmp_path: Path, authored_config: dict[str, object]) -> None:
+        """A Claude memory LLM sends no ``temperature``, ``top_p``, or ``top_k``, which the SDK and API reject."""
         config = Config(
             memory={"llm": {"provider": "anthropic", "config": {"api_key": "sk-ant-test", **authored_config}}},
             router=RouterConfig(model="default"),
@@ -369,9 +363,9 @@ class TestMemoryConfig:
 
         assert mem0_llm.generate_response([{"role": "user", "content": "remember this"}]) == '{"memory": []}'
 
-        request_params = create_message.call_args.kwargs
-        sampling_names = ("temperature", "top_p", "top_k")
-        assert {name: request_params[name] for name in sampling_names if name in request_params} == expected_sampling
+        sent = create_message.call_args.kwargs
+        assert not {"temperature", "top_p", "top_k"} & sent.keys()
+        inspect.signature(Messages.create).bind(mem0_llm.client.messages, **sent)  # the SDK takes every argument
 
     def test_mem0_openai_memory_llm_keeps_its_authored_sampling_for_claude_models(self, tmp_path: Path) -> None:
         """Only Mem0's Anthropic LLM omits a sampling value set to None; its OpenAI LLM would send it as null."""

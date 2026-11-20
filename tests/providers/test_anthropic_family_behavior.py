@@ -495,8 +495,8 @@ async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(tmp_path: Path) -> None:
-    """One-off summary requests send no thinking setting and no cache writes, with their own limits."""
+async def test_summary_overrides_drop_thinking_cache_markers_and_sampling(tmp_path: Path) -> None:
+    """One-off summary requests send no thinking setting, no cache writes, and no sampling, with their own limits."""
     wire = Wire(sse_reply([{"type": "text", "text": "Summary."}]))
     provider = route_provider(
         "anthropic",
@@ -516,8 +516,7 @@ async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(
     body = wire.body()
     assert "thinking" not in body
     assert body["max_tokens"] == 512
-    assert body["temperature"] == 0.1
-    assert body["top_k"] == 4
+    assert not {"temperature", "top_p", "top_k"} & body.keys()
     assert "cache_control" not in json.dumps(body)
     # Sonnet 4.5 accepts prefill, and thinking is off, so the history may end with the assistant turn.
     assert body["messages"][-1]["role"] == "assistant"
@@ -555,19 +554,27 @@ async def test_default_sampling_models_lose_sampling_controls_everywhere(
 
 
 @pytest.mark.asyncio
-async def test_vertex_keeps_an_older_claude_s_authored_sampling_and_ignores_the_override(tmp_path: Path) -> None:
-    """Vertex leaves overriding sampling to the provider, but only the newest generations lose the authored values."""
+@pytest.mark.parametrize(
+    ("route", "model_id"),
+    [
+        ("anthropic", "claude-sonnet-4-5"),
+        ("bedrock_claude", "anthropic.claude-sonnet-4-5"),
+        ("vertexai_claude", "claude-sonnet-4-5"),
+    ],
+)
+async def test_older_claude_models_lose_sampling_controls_too(tmp_path: Path, route: str, model_id: str) -> None:
+    """API version 2026-10-21 rejects sampling on every model, so an older one that took it gets none either."""
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     provider = route_provider(
-        "vertexai_claude",
+        route,
         tmp_path,
         wire,
-        id="claude-sonnet-4-5",
-        extra_kwargs={"temperature": 0.7, "top_k": 3},
+        id=model_id,
+        extra_kwargs={"temperature": 0.7, "top_k": 3, "request_params": {"top_p": 0.9}},
     )
+    assert provider.capabilities.provider_default_sampling is True
     await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
-    body = wire.body()
-    assert (body["temperature"], body["top_k"]) == (0.7, 3)
+    assert not {"temperature", "top_p", "top_k"} & wire.body().keys()
 
 
 @pytest.mark.asyncio
@@ -673,7 +680,7 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
         ModelRequest(messages=_user(), tools=tools, output_schema=_Answer),
     )
     request = wire.requests[0]
-    assert str(request.url) == "https://api.anthropic.com/v1/messages?beta=true"
+    assert str(request.url) == "https://api.anthropic.com/v1/messages"
     assert request.headers["anthropic-beta"] == f"structured-outputs-2025-11-13,{_THINKING_BINDING_BETA}"
     body = wire.body()
     assert body["stream"] is True
@@ -1247,9 +1254,9 @@ def test_forced_tool_use_is_left_out_for_models_that_reject_it(model_id: str, *,
 @pytest.mark.parametrize(
     ("route", "strict_sent", "url_suffix", "beta_header"),
     [
-        ("anthropic", True, "/v1/messages?beta=true", f"structured-outputs-2025-11-13,{_THINKING_BINDING_BETA}"),
+        ("anthropic", True, "/v1/messages", f"structured-outputs-2025-11-13,{_THINKING_BINDING_BETA}"),
         ("vertexai_claude", False, ":streamRawPredict", _THINKING_BINDING_BETA),
-        ("bedrock_claude", True, "/v1/messages?beta=true", None),
+        ("bedrock_claude", True, "/v1/messages", None),
     ],
 )
 async def test_tool_definitions_send_each_schema_as_authored(
@@ -1264,7 +1271,7 @@ async def test_tool_definitions_send_each_schema_as_authored(
     A strict tool, on a route that takes it, closes its objects as strict tool use requires.
 
     The direct API adds the structured-outputs beta header for a strict tool; Bedrock sends the strict tool
-    through the beta endpoint without one.
+    without one.
     """
     wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
     provider = route_provider(route, tmp_path, wire, extra_kwargs={"cache_system_prompt": False})
@@ -1455,7 +1462,6 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
     )
     request = wire.requests[0]
     assert request.headers["anthropic-beta"] == f"compact-2026-01-12,{_THINKING_BINDING_BETA}"
-    assert str(request.url).endswith("?beta=true")
     edit = wire.body(0)["context_management"]["edits"][0]
     assert (edit["type"], edit["trigger"], edit["pause_after_compaction"]) == (
         "compact_20260112",
@@ -1533,7 +1539,6 @@ async def test_an_authored_context_edit_records_what_the_response_applied(tmp_pa
     authored = {"edits": [{"type": "clear_tool_uses_20250919"}]}
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": authored})
     completed = await claude_turn(provider, ModelRequest(messages=_user()))
-    assert str(wire.requests[0].url).endswith("?beta=true")
     assert wire.body()["context_management"] == authored
     assert (completed.message.provider_data or {})["context_management"] == applied
 
@@ -1662,7 +1667,7 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
             runtime_paths,
         )
         await claude_turn(replace(direct, http_client=wire.client), ModelRequest(messages=_user()))
-        assert wire.requests[-1].headers["x-api-key"] == "config-key"
+        assert wire.requests[-1].headers["authorization"] == "Bearer config-key"
 
         bedrock = build_provider(
             ModelConfig(provider="bedrock_claude", id="anthropic.claude-sonnet-5-5"),
@@ -1885,8 +1890,8 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
     )
     await claude_turn(direct, ModelRequest(messages=_user()))
     request = wire.requests[-1]
-    assert str(request.url) == "https://gateway.example/anthropic/v1/messages?beta=true"
-    assert request.headers["x-api-key"] == "params-key"
+    assert str(request.url) == "https://gateway.example/anthropic/v1/messages"
+    assert request.headers["authorization"] == "Bearer params-key"
     assert request.headers["x-mindroom"] == "authored"
 
     vertex = route_provider(
@@ -2092,6 +2097,44 @@ async def test_the_stable_prompt_stays_cacheable_when_the_turn_context_changes(
     assert monday["system"][1] != tuesday["system"][1]
     assert monday["messages"][-1]["content"][-1]["cache_control"] == cache_control
     assert len(_markers(monday)) <= 4
+
+
+def _unmarked(payload: object) -> object:
+    if isinstance(payload, dict):
+        return {key: _unmarked(value) for key, value in payload.items() if key != "cache_control"}
+    if isinstance(payload, list):
+        return [_unmarked(item) for item in payload]
+    return payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", sorted(ROUTE_CONFIGS))
+async def test_the_next_turn_resends_the_cached_prefix_byte_for_byte(tmp_path: Path, route: str) -> None:
+    """A follow-up turn resends the tools, system, and earlier messages as sent, under the same version and betas.
+
+    Only the message cache marker moves to the new last turn; the API matches a cached prefix by content, not by its
+    markers. Each turn's usage, cache reads and writes included, reaches the turn's metrics.
+    """
+    wire = Wire(
+        sse_reply([{"type": "text", "text": "First answer."}]),
+        sse_reply([{"type": "text", "text": "Second answer."}], usage={**CLAUDE_USAGE, "cache_read_input_tokens": 30}),
+    )
+    provider = route_provider(route, tmp_path, wire)
+    tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}})]
+    history = [Message(role="system", content="Shared instructions."), *_user("First request.")]
+    first = await claude_turn(provider, ModelRequest(messages=history, tools=tools))
+    history = [*history, first.message, *_user("Follow-up request.")]
+    second = await claude_turn(provider, ModelRequest(messages=history, tools=tools))
+
+    one, two = wire.body(0), wire.body(1)
+    assert json.dumps(one["tools"]) == json.dumps(two["tools"])
+    assert json.dumps(one["system"]) == json.dumps(two["system"])
+    sent = len(one["messages"])
+    assert json.dumps(_unmarked(one["messages"])) == json.dumps(_unmarked(two["messages"][:sent]))
+    for name in ("anthropic-version", "anthropic-beta"):
+        assert wire.requests[0].headers.get(name) == wire.requests[1].headers.get(name)
+    tokens = (first.message.metrics.tokens, second.message.metrics.tokens)
+    assert [(t.cache_read_tokens, t.cache_write_tokens) for t in tokens] == [(5, 3), (30, 3)]
 
 
 @pytest.mark.asyncio

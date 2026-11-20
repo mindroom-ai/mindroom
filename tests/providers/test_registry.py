@@ -539,7 +539,7 @@ async def test_api_key_precedence(
 
 # The header each keyed family sends its key in, and how it formats it.
 _KEY_HEADERS: dict[str, tuple[dict[str, Any], str, str]] = {
-    "anthropic": ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, "x-api-key", "{key}"),
+    "anthropic": ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, "authorization", "Bearer {key}"),
     "azure": (
         {"provider": "azure", "id": "gpt-6-astra", "extra_kwargs": {"azure_endpoint": "https://r.openai.azure.com"}},
         "api-key",
