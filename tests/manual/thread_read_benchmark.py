@@ -5,9 +5,9 @@ A turn in a thread has three readers of the whole thread: the dispatch snapshot
 turn holds the reply lock (`reply_turn/locked_turn.py` -> `refresh_model_history`)
 and the summary gate after the reply (`thread_summary/automatic.py`), each with
 `limit=HYDRATED_PROMPT_WINDOW_MESSAGES`. Between them the thread changes: the
-user's message lands, then the reply and its stream edits. The later two keep
-the earlier read when `thread_is_unchanged` says the thread is as it was, which
-the summary gate cannot say once the reply's echo landed.
+user's message lands, then the reply and its stream edits. The prompt read keeps
+the dispatch read when `thread_is_unchanged` says the thread is as it was; the
+summary gate always loads.
 
 This runs that sequence against a real store and reports, per turn, how many
 reads loaded content, how many rows they loaded and how long the reads took.
@@ -16,7 +16,7 @@ Run it with::
 
     uv run python tests/manual/thread_read_benchmark.py [sqlite|postgres://...] [--reload]
 
-``--reload`` makes every reader load the thread, as each did before they shared a read.
+``--reload`` makes the prompt read load the thread too, as it did before it shared the dispatch read.
 """
 
 from __future__ import annotations
@@ -177,7 +177,7 @@ async def _measure(
                 root=root,
                 replaces=reply,
             )
-        await read(held)  # summary gate after the reply, whose echo is a change
+        await read()  # summary gate after the reply
     turn_reads = loaded[reads_before:]
     return (
         sum(1 for rows in turn_reads if rows) / TURNS,

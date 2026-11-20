@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import nio
@@ -2650,8 +2650,6 @@ class TestAgentBot(AgentBotTestBase):
             # The answer that queued this pass, which the projection cannot
             # hold until sync echoes it back.
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
-            # The thread as the reply read it, which the pass keeps while the thread is unchanged.
-            held=ANY,
             entity_name=bot.agent_name,
             membership_index=bot._runtime_view.agent_reply_memberships,
             retitle=False,
@@ -2772,7 +2770,6 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths=bot.runtime_paths,
             conversation_reader=bot._conversation_reader,
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
-            held=ANY,
             entity_name=bot.agent_name,
             membership_index=bot._runtime_view.agent_reply_memberships,
             retitle=False,

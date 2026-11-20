@@ -1,8 +1,8 @@
 """One turn loads its thread from the journal once, and again only when the thread changed since.
 
-A turn reads its thread when it is dispatched, again once it holds the reply lock, and again when its answer queues
-the summary pass. The later two must see what arrived since the first, so they check the journal's row index and load
-the thread again only when it shows a change.
+A turn reads its thread when it is dispatched and again once it holds the reply lock. The second read must see what
+arrived since the first, so it checks the journal's row index and loads the thread again only when that shows a change.
+The summary pass after the answer always loads the thread, and is left out here.
 """
 
 from __future__ import annotations
@@ -23,14 +23,13 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import complete_thread_history, thread_is_unchanged
 from mindroom.matrix.thread_history_result import thread_history_result
-from mindroom.thread_summary import automatic
 from tests.conftest import drain_coalescing
 from tests.journal_helpers import record_room_history_recovery
 from tests.response_runner_helpers import streamed_answer
 from tests.threading_helpers import ThreadingBehaviorTestBase, _matrix_room, _message, seed_thread_history
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.bot import AgentBot
 
@@ -113,11 +112,10 @@ async def _refetch_restores_two(bot: AgentBot, body: str) -> None:
 
 @dataclass
 class _Turn:
-    """What one turn loaded and what its model and its summary pass were given."""
+    """How often one turn loaded its thread before answering, and the history its model was given."""
 
     loads: int = 0
     model_history: list[str] = field(default_factory=list)
-    summary_history: list[str] = field(default_factory=list)
 
 
 @asynccontextmanager
@@ -137,12 +135,11 @@ async def _run_turn(
     bot: AgentBot,
     *,
     after_placeholder: Callable[[], Awaitable[None]] | None = None,
-    while_answering: Callable[[], Awaitable[None]] | None = None,
 ) -> _Turn:
-    """Run one mentioned follow-up through dispatch, the reply and the summary pass.
+    """Run one mentioned follow-up through dispatch and the reply.
 
     ``after_placeholder`` runs once the turn holds the reply lock and sent its placeholder, before it refreshes the
-    thread for the model. ``while_answering`` runs while the model answers, before the summary pass.
+    thread for the model.
     """
     turn = _Turn()
     event = nio.RoomMessageText.from_dict(
@@ -177,12 +174,7 @@ async def _run_turn(
     async def answer(context: Any, *_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
         # The model's copy of a message carries its time in front of its text.
         turn.model_history = [message.body.split("] ", 1)[-1] for message in context.thread_history]
-        if while_answering is not None:
-            await while_answering()
         return "the answer"
-
-    def summary_state(history: Sequence[ResolvedVisibleMessage], **_kwargs: Any) -> None:  # noqa: ANN401
-        turn.summary_history = [message.body for message in history]
 
     bot.client.room_send = AsyncMock(side_effect=send_then_land)
     # Sync lands a message in the journal before the bot is handed it.
@@ -190,7 +182,7 @@ async def _run_turn(
     with (
         patch.object(ConversationReadView, "read_conversation", counted_load),
         patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(answer)),
-        patch.object(automatic, "summary_state", summary_state),
+        patch("mindroom.post_response_effects.maybe_generate_thread_summary", new=AsyncMock()),
     ):
         await bot._on_message(_matrix_room(name="Test Room"), event)
         await drain_coalescing(bot)
@@ -203,20 +195,16 @@ class TestOneTurnLoadsItsThreadOnce(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     async def test_an_unchanged_thread_is_loaded_once(self, bot: AgentBot) -> None:
-        """Dispatch loads the thread; the reply lock and the summary pass find it unchanged and load nothing."""
+        """Dispatch loads the thread; the turn finds it unchanged once it holds the reply lock and loads nothing."""
         async with _thread(bot):
             turn = await _run_turn(bot)
 
         assert turn.loads == 1
         assert turn.model_history == [*_SEEDED, _FOLLOW_UP]
-        assert turn.summary_history == [*_SEEDED, _FOLLOW_UP, "the answer"]
 
     @pytest.mark.asyncio
-    async def test_the_echo_of_the_turns_own_reply_is_no_change_for_the_model(self, bot: AgentBot) -> None:
-        """The placeholder's echo lands before the lock refresh; the model never reads it, so that read is kept.
-
-        The summary pass does read it, at the place the projection gives it, so that pass loads the thread.
-        """
+    async def test_the_echo_of_the_turns_own_reply_is_no_change(self, bot: AgentBot) -> None:
+        """The placeholder's echo lands before the lock refresh; the model never reads it, so nothing is loaded again."""
         async with _thread(bot):
             turn = await _run_turn(
                 bot,
@@ -224,22 +212,7 @@ class TestOneTurnLoadsItsThreadOnce(ThreadingBehaviorTestBase):
             )
 
         assert turn.model_history == [*_SEEDED, _FOLLOW_UP]
-        assert turn.summary_history == [*_SEEDED, _FOLLOW_UP, "the answer"]
-        assert turn.loads == 2
-
-    @pytest.mark.asyncio
-    async def test_an_echoed_reply_keeps_its_place_before_a_later_stamped_message(self, bot: AgentBot) -> None:
-        """A message the reply read can carry a later timestamp than the reply's echo, and then sorts after it."""
-
-        async def land() -> None:
-            await _admit(bot, "$skewed:localhost", "skewed", ts=500)
-            await _admit(bot, _REPLY, "Thinking...", ts=101, sender=_BOT)
-
-        async with _thread(bot):
-            turn = await _run_turn(bot, after_placeholder=land)
-
-        assert turn.model_history == [*_SEEDED, _FOLLOW_UP, "skewed"]
-        assert turn.summary_history == [*_SEEDED, _FOLLOW_UP, "the answer", "skewed"]
+        assert turn.loads == 1
 
     @pytest.mark.asyncio
     async def test_a_settled_refetch_before_the_lock_refresh_reaches_the_model(self, bot: AgentBot) -> None:
@@ -248,17 +221,6 @@ class TestOneTurnLoadsItsThreadOnce(ThreadingBehaviorTestBase):
             turn = await _run_turn(bot, after_placeholder=lambda: _refetch_restores_two(bot, "owt"))
 
         assert turn.model_history == ["Root", "one", "owt", "three", _FOLLOW_UP]
-        assert turn.summary_history == ["Root", "one", "owt", "three", _FOLLOW_UP, "the answer"]
-        assert turn.loads == 2
-
-    @pytest.mark.asyncio
-    async def test_a_settled_refetch_while_the_model_answers_reaches_the_summary_pass(self, bot: AgentBot) -> None:
-        """The summary pass reads the refetched text, not the text the reply read under the same revision."""
-        async with _thread(bot):
-            turn = await _run_turn(bot, while_answering=lambda: _refetch_restores_two(bot, "owt"))
-
-        assert turn.model_history == [*_SEEDED, _FOLLOW_UP]
-        assert turn.summary_history == ["Root", "one", "owt", "three", _FOLLOW_UP, "the answer"]
         assert turn.loads == 2
 
     @pytest.mark.asyncio
@@ -268,8 +230,6 @@ class TestOneTurnLoadsItsThreadOnce(ThreadingBehaviorTestBase):
             turn = await _run_turn(bot, after_placeholder=lambda: _admit(bot, "$late:localhost", "late", ts=101))
 
         assert turn.model_history == [*_SEEDED, _FOLLOW_UP, "late"]
-        assert turn.summary_history == [*_SEEDED, _FOLLOW_UP, "late", "the answer"]
-        # Dispatch and the lock refresh; the summary pass finds the refreshed thread unchanged.
         assert turn.loads == 2
 
     @pytest.mark.asyncio
@@ -294,40 +254,6 @@ class TestOneTurnLoadsItsThreadOnce(ThreadingBehaviorTestBase):
             )
 
         assert turn.model_history == ["Root", "one", "three", _FOLLOW_UP]
-        assert turn.summary_history == ["Root", "one", "three", _FOLLOW_UP, "the answer"]
-        assert turn.loads == 2
-
-    @pytest.mark.asyncio
-    async def test_a_message_landing_while_the_model_answers_reaches_the_summary_pass(self, bot: AgentBot) -> None:
-        """The summary pass counts a message the reply never read."""
-        async with _thread(bot):
-            turn = await _run_turn(bot, while_answering=lambda: _admit(bot, "$during:localhost", "during", ts=102))
-
-        assert turn.model_history == [*_SEEDED, _FOLLOW_UP]
-        assert turn.summary_history == [*_SEEDED, _FOLLOW_UP, "during", "the answer"]
-        # Dispatch and the summary pass; the lock refresh found the thread unchanged.
-        assert turn.loads == 2
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("change", "summarized"),
-        [
-            ({"replaces": "$two:localhost", "body": "TWO"}, ["Root", "one", "TWO", "three"]),
-            ({"redacts": "$two:localhost", "body": ""}, ["Root", "one", "three"]),
-        ],
-    )
-    async def test_an_edit_or_redaction_while_the_model_answers_reaches_the_summary_pass(
-        self,
-        bot: AgentBot,
-        change: dict[str, str],
-        summarized: list[str],
-    ) -> None:
-        """The summary pass reads the thread as it is after the reply, not as the reply read it."""
-        async with _thread(bot):
-            turn = await _run_turn(bot, while_answering=lambda: _admit(bot, "$change:localhost", ts=102, **change))
-
-        assert turn.model_history == [*_SEEDED, _FOLLOW_UP]
-        assert turn.summary_history == [*summarized, _FOLLOW_UP, "the answer"]
         assert turn.loads == 2
 
 

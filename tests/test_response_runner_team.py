@@ -81,7 +81,7 @@ from tests.runtime_fakes import ready_runtime
 from tests.team_turn_helpers import scripted_team_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -124,7 +124,6 @@ class _RecordedPostResponseEffects(PostResponseEffectsSupport):
             thread_id: str,
             _entity_name: str | None,
             delivered_response: DeliveredResponse,
-            _held: Sequence[ResolvedVisibleMessage],
         ) -> None:
             self.queued_summaries.append((room_id, thread_id, delivered_response.event_id))
 
