@@ -619,11 +619,11 @@
           "title": "Dedicated Subagent Workers",
           "type": "boolean"
         },
-        "extra_workers": {
+        "named_workers": {
           "default": 0,
           "description": "How many named workers this agent's shell calls may run at once for one requester on the kubernetes worker backend; 0 turns them off",
           "minimum": 0,
-          "title": "Extra Workers",
+          "title": "Named Workers",
           "type": "integer"
         }
       },

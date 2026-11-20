@@ -4236,7 +4236,6 @@ def test_script_recovery_contract_ignores_named_worker_limits() -> None:
         named_workers_max=1,
     )
 
-    assert backend.named_workers_max == 1
     assert backend.script_recovery_signature() == initial
 
 

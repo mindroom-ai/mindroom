@@ -133,7 +133,7 @@ def _add_workers_run(groups: argparse._SubParsersAction[argparse.ArgumentParser]
     run = workers.add_parser("run", usage="mindroom-agent workers run NAME [options] -- COMMAND [ARG ...]")
     run.add_argument("name", help="the worker's name: 1 to 32 lowercase letters, digits, or hyphens")
     run.add_argument(
-        "--profile",
+        "--resource-profile",
         choices=("small", "standard", "large"),
         help="CPU and memory size of the worker, set by the first command that names it",
     )
@@ -215,8 +215,8 @@ def _run_in_worker(args: argparse.Namespace) -> int:
         "timeout": args.timeout,
         "tail": args.tail,
     }
-    if args.profile is not None:
-        arguments["resource_profile"] = args.profile
+    if args.resource_profile is not None:
+        arguments["resource_profile"] = args.resource_profile
     call_id = str(uuid4())
     try:
         client = AgentCliClient()

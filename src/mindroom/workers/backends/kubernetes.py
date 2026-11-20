@@ -233,6 +233,7 @@ class KubernetesWorkerBackend:
         self.auth_token = auth_token
         self.storage_root = storage_root.expanduser().resolve()
         self.idle_timeout_seconds = config.idle_timeout_seconds
+        self.named_workers_max = config.named_workers_max
         self._resources = resources.KubernetesResourceManager(
             runtime_paths=runtime_paths,
             config=config,
@@ -245,11 +246,6 @@ class KubernetesWorkerBackend:
         self._ready_workers_lock = threading.Lock()
         # When each worker directory was first seen without a Deployment, infinity for one no pass removes.
         self._stateless_since: dict[str, float] = {}
-
-    @property
-    def named_workers_max(self) -> int:
-        """How many named workers may run at once for every requester and agent together."""
-        return self.config.named_workers_max
 
     def shutdown(self) -> None:
         """Kubernetes workers are persistent; manager replacement leaves them running."""

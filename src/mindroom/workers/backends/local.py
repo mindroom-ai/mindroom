@@ -240,6 +240,7 @@ class _LocalWorkerBackend:
 
     backend_name = "local_sandbox_runner"
     cleanup_locator: str | None = None
+    named_workers_max = 0
 
     def __init__(
         self,

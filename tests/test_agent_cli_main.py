@@ -321,7 +321,7 @@ def test_workers_run_sends_one_shell_call_that_names_the_worker(capsys, monkeypa
         _completed("[worker: e2e-3, started]\n[cwd: /workspace]\nshard 3 ok"),
     )
 
-    argv = ["workers", "run", "e2e-3", "--profile", "large", "--timeout", "900", "--tail", "20"]
+    argv = ["workers", "run", "e2e-3", "--resource-profile", "large", "--timeout", "900", "--tail", "20"]
     assert main([*argv, "--", "bash", "e2e/shard.sh", "--timeout", "3"]) == 0
 
     [call] = sent
@@ -414,7 +414,7 @@ def test_workers_run_exits_125_when_mindroom_cannot_be_reached(capsys, monkeypat
         ["workers", "run", "--", "true"],
         ["workers", "run", "w", "--timeout", "0", "--", "true"],
         ["workers", "run", "w", "--tail", "-1", "--", "true"],
-        ["workers", "run", "w", "--profile", "huge", "--", "true"],
+        ["workers", "run", "w", "--resource-profile", "huge", "--", "true"],
     ],
 )
 def test_workers_run_needs_a_name_a_command_and_usable_limits(argv) -> None:

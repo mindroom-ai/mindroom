@@ -55,7 +55,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   Teaching the proxy to match a pinned key's normal key would carry grants over to named and subagent workers alike, and is the place to fix it, so MindRoom mints no extra grants meanwhile.
 - While the primary is down nothing is removed; commands stop because their connections drop, and the workers go once the primary is back and they have been idle.
 - A turn that resumes after its fleet was released, such as after an approval that outlived the reply and its jobs, gets new workers.
-- A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `extra_workers`.
+- A subagent owns the named workers its own turn starts, not its caller's, and only when its own agent sets `named_workers`.
 - Background scripts, OpenAI-compatible API requests, and other calls without a reply's turn cannot name a worker.
 - Each named worker starts with empty package caches and costs a cold start, and nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
 - With a `ReadWriteOnce` storage claim every worker runs on the runtime's node, so named workers add isolation and their own resource limits there, not capacity.

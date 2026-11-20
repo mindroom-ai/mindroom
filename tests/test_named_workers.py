@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from mindroom.workers.models import WorkerStatus
 
 _TURN = "turn-1"
-_CONFIG = Config(agents={"code": AgentConfig(display_name="Code", extra_workers=2)})
+_CONFIG = Config(agents={"code": AgentConfig(display_name="Code", named_workers=2)})
 _ALICE = "v1:default:user_agent:@alice:example.org:code"
 _BOB = "v1:default:user_agent:@bob:example.org:code"
 
@@ -512,8 +512,7 @@ def test_a_backend_without_named_workers_refuses_them(runtime_paths: RuntimePath
     """Only a backend that limits and removes named workers runs them."""
 
     class _PlainBackend:
-        def list_workers(self) -> list[WorkerHandle]:
-            return []
+        named_workers_max = 0
 
     call = NamedWorkerCall("a", None, 2, runtime_paths, named_module._NamedWorkerFleet(_TURN))
 
@@ -708,13 +707,13 @@ async def test_a_refused_shell_call_fails_with_the_reason_and_starts_nothing(
     assert (backend.specs, posts) == ([], [])
 
 
-@pytest.mark.parametrize("extra_workers", [0, 2])
+@pytest.mark.parametrize("named_workers", [0, 2])
 def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
     runtime_paths: RuntimePaths,
-    extra_workers: int,
+    named_workers: int,
 ) -> None:
     """The model sees ``worker`` and ``resource_profile``, and how to use them, only when its agent may name workers."""
-    config = Config(agents={"code": AgentConfig(display_name="Code", extra_workers=extra_workers)})
+    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=named_workers)})
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
     shell = get_tool_by_name(
         "shell",
@@ -728,9 +727,9 @@ def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
     assert function is not None
 
     offered = set(function.parameters["properties"])
-    assert ({"worker", "resource_profile"} <= offered) is bool(extra_workers)
+    assert ({"worker", "resource_profile"} <= offered) is bool(named_workers)
     assert {"args", "tail", "timeout"} <= offered
-    assert ("mindroom-agent workers run" in (function.description or "")) is bool(extra_workers)
+    assert ("mindroom-agent workers run" in (function.description or "")) is bool(named_workers)
 
 
 @pytest.mark.asyncio
@@ -741,7 +740,7 @@ async def test_a_shell_outside_a_worker_refuses_to_name_one(tmp_path: Path) -> N
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    config = Config(agents={"code": AgentConfig(display_name="Code", extra_workers=2)})
+    config = Config(agents={"code": AgentConfig(display_name="Code", named_workers=2)})
     config.defaults.allow_shell_without_worker = True
     shell = get_tool_by_name(
         "shell",

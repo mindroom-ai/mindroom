@@ -51,6 +51,7 @@ class StaticSandboxRunnerBackend:
 
     backend_name = WorkerBackendKind.STATIC_RUNNER.value
     cleanup_locator: str | None = None
+    named_workers_max = 0
 
     def __init__(
         self,

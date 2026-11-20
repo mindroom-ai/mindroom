@@ -146,12 +146,12 @@ After exit code `4`, check the original call ID before retrying, because submitt
 It is the agent's own `run_shell_command` call with `worker` set, under the same approval rules and limits as every other CLI call, and it is available only where the agent is offered `worker`.
 
 ```bash
-mindroom-agent workers run NAME [--profile small|standard|large] [--timeout SECONDS] [--tail LINES] -- COMMAND [ARG...]
+mindroom-agent workers run NAME [--resource-profile small|standard|large] [--timeout SECONDS] [--tail LINES] -- COMMAND [ARG...]
 ```
 
 The command is everything after `--`: several arguments run as that exact argument list, and a single argument runs as a `bash -c` command line.
 The CLI waits until the command ends and prints the last `--tail` lines (default 100) of its output; for a failed command it prints stdout under `Output:` and stderr under `Stderr:`.
-`--timeout` (default 3600 seconds) stops the command, and `--profile` sizes the worker when its name is first used.
+`--timeout` (default 3600 seconds) stops the command, and `--resource-profile` sizes the worker when its name is first used.
 
 | Code | Meaning |
 | --- | --- |
@@ -166,7 +166,7 @@ This script runs eight shards at once, each in a worker of its own, and fails if
 out="runs/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out"
 for i in $(seq 0 7); do
-  mindroom-agent workers run "shard-$i" --profile large -- bash ci/shard.sh "$i" 8 > "$out/$i.log" 2>&1 &
+  mindroom-agent workers run "shard-$i" --resource-profile large -- bash ci/shard.sh "$i" 8 > "$out/$i.log" 2>&1 &
 done
 failed=0
 for pid in $(jobs -p); do wait "$pid" || failed=1; done

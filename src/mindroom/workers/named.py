@@ -17,7 +17,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
@@ -70,13 +70,8 @@ class NamedWorkerError(RuntimeError):
     """Why a call cannot run in the worker it names, in words for the agent that made the call."""
 
 
-@runtime_checkable
 class _NamedWorkerBackend(Protocol):
-    """What a backend adds to run named workers: a limit on how many run, and their removal."""
-
-    @property
-    def named_workers_max(self) -> int:
-        """How many named workers may run at once for every requester and agent together."""
+    """What a backend whose ``named_workers_max`` is above 0 adds to run named workers."""
 
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact worker and all backend-owned state."""
@@ -205,13 +200,13 @@ async def reply_named_workers(turn_id: str | None) -> AsyncIterator[None]:
 def _agent_limit(agent_name: str | None, config: Config | None) -> int:
     """Return how many named workers ``agent_name`` may run at once for one requester, 0 for none."""
     agent = config.agents.get(agent_name) if config is not None and agent_name is not None else None
-    return 0 if agent is None else agent.extra_workers
+    return 0 if agent is None else agent.named_workers
 
 
 def named_workers_refusal(agent_name: str | None, config: Config | None, runtime_paths: RuntimePaths) -> str | None:
     """Return why ``agent_name``'s calls cannot run in named workers, or None when they can."""
     if _agent_limit(agent_name, config) < 1:
-        return "Named workers are off for this agent; extra_workers in its config allows them."
+        return "Named workers are off for this agent; named_workers in its config allows them."
     if worker_backend_kind(runtime_paths) is not WorkerBackendKind.KUBERNETES or not idle_worker_cleanup_runs(
         runtime_paths,
     ):
@@ -280,7 +275,7 @@ def ensure_named_worker(
     started count against the agent's limit for this requester and the backend's limit for everyone. The backend
     replaces a stopped worker of this name with an empty one.
     """
-    if not isinstance(backend, _NamedWorkerBackend):
+    if backend.named_workers_max < 1:
         msg = "Named workers need the kubernetes worker backend."
         raise NamedWorkerError(msg)
     worker_key = spec.worker_key
@@ -332,12 +327,13 @@ def _retire_workers(runtime_paths: RuntimePaths, worker_keys: tuple[str, ...]) -
     if lease is None:
         return
     with lease as backend:
-        if not isinstance(backend, _NamedWorkerBackend):
+        if backend.named_workers_max < 1:
             return
+        named_backend = cast("_NamedWorkerBackend", backend)
 
         def retire(worker_key: str) -> None:
             try:
-                backend.retire_worker(worker_key)
+                named_backend.retire_worker(worker_key)
             except WorkerBackendError:
                 logger.warning("named_worker_retire_failed", worker=worker_log_id(worker_key), exc_info=True)
 

@@ -449,6 +449,7 @@ class DockerWorkerBackend:
 
     backend_name = WorkerBackendKind.DOCKER.value
     cleanup_locator: str | None = None
+    named_workers_max = 0
 
     def __init__(
         self,

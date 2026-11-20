@@ -475,7 +475,7 @@ class AgentConfig(BaseModel):
         default=False,
         description="Allow run_subagent to run a subagent in its own dedicated worker on the docker or kubernetes worker backend",
     )
-    extra_workers: int = Field(
+    named_workers: int = Field(
         default=0,
         ge=0,
         description="How many named workers this agent's shell calls may run at once for one requester on the kubernetes worker backend; 0 turns them off",

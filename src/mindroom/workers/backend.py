@@ -49,6 +49,9 @@ class WorkerBackend(Protocol):
     backend_name: str
     cleanup_locator: str | None
     idle_timeout_seconds: float
+    # How many named workers (``workers.named``) may exist at once for every requester and agent together; 0 for a
+    # backend that runs none.
+    named_workers_max: int
 
     def shutdown(self) -> None:
         """Release backend-owned runtime resources before discarding this manager."""

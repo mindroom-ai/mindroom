@@ -175,7 +175,7 @@ run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ### Named workers
 
 On the Kubernetes worker backend, an agent's shell commands can run in extra workers that the agent names, so one reply runs several isolated environments side by side, such as end-to-end test stacks that listen on the same ports, or the shards of a test suite or a build.
-Set [`extra_workers`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent to the most named workers it may run at once; MindRoom then offers `worker` and `resource_profile` in its `run_shell_command`.
+Set [`named_workers`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent to the most named workers it may run at once; MindRoom then offers `worker` and `resource_profile` in its `run_shell_command`.
 The runtime must also run idle-worker cleanup, as for [dedicated subagent workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers).
 
 ```yaml
@@ -184,7 +184,7 @@ agents:
     display_name: Code
     tools: [shell]
     worker_tools: [shell]
-    extra_workers: 8
+    named_workers: 8
 ```
 
 ```python
@@ -209,15 +209,15 @@ Stopping the reply or cancelling a job stops its command in the named worker, as
 A MindRoom restart ends a reply's use of its named workers: they are removed once idle, and a later reply's calls start new ones.
 If a named worker crashes, the call that ran in it fails, and the next call with its name starts a new one.
 
-A call that would start more named workers than `extra_workers` allows for its requester, or than `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` allows for the whole deployment, fails instead of waiting; calls to workers that already run always go through.
+A call that would start more named workers than `named_workers` allows for its requester, or than `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX` allows for the whole deployment, fails instead of waiting; calls to workers that already run always go through.
 Only calls of a reply in a Matrix conversation can name a worker, so [background scripts](https://docs.mindroom.chat/tools/background-scripts/) and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) requests cannot.
 [Approved egress](https://docs.mindroom.chat/deployment/approved-egress/#requesting-access) grants do not reach named workers.
 
 Errors:
 
-- `Named workers are off for this agent; extra_workers in its config allows them.` - set `extra_workers` on the agent.
+- `Named workers are off for this agent; named_workers in its config allows them.` - set `named_workers` on the agent.
 - `Named workers need the kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use the Kubernetes worker backend, run the API server, and set the cleanup interval.
-- `Cannot start worker '<name>': <n> of the <n> named workers this agent may run for you are running.` - run the command in a worker that already runs, wait until an idle one is removed, or raise `extra_workers`.
+- `Cannot start worker '<name>': <n> of the <n> named workers this agent may run for you are running.` - run the command in a worker that already runs, wait until an idle one is removed, or raise `named_workers`.
 - `Cannot start worker '<name>': this deployment runs its limit of <n> named workers.` - try again later, or raise `MINDROOM_KUBERNETES_NAMED_WORKERS_MAX`.
 - `Worker '<name>' was started with resource_profile <profile> in this reply; omit resource_profile, or name another worker.` - a name keeps the size its first call gave it.
 - `A named worker belongs to a reply in a conversation, and this call runs outside one, or after its reply and that reply's background jobs ended.` - the call came from a background script, an API request, or a job that outlived a restart.
