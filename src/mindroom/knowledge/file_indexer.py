@@ -31,12 +31,20 @@ from mindroom.embeddings.errors import (
     embedder_failure_is_transient,
 )
 from mindroom.knowledge.chunk_context import chunk_contexts
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.knowledge.chunking import LegacyDocumentChunking, SafeFixedSizeChunking
 from mindroom.knowledge.collections import KnowledgeChunk, write_file_rows
 from mindroom.knowledge.corpus_signature import file_signature
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.memory_entries import split_memory_entries
-from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
+from mindroom.knowledge.readers import (
+    Document,
+    DocumentChunking,
+    JSONReader,
+    MarkdownReader,
+    Reader,
+    ReaderFactory,
+    TextReader,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -298,6 +306,11 @@ class FileIndexer:
             # Carry the factory reader's configuration (encoding, chunking) onto
             # the subclass that tags its own decode failures for the text fallback.
             return _FallbackAwareJSONReader(**vars(reader))
+
+        strategy = reader.chunking_strategy
+        if type(strategy) is DocumentChunking:
+            # PDF, DOCX, and PPTX readers keep their paragraph chunking and its size, with the legacy whitespace.
+            reader.chunking_strategy = LegacyDocumentChunking(chunk_size=strategy.chunk_size, overlap=strategy.overlap)
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
         if not isinstance(reader, (TextReader, MarkdownReader)):

@@ -39,8 +39,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.embeddings.batching import RefreshEmbedder
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.knowledge.chunking import LegacyDocumentChunking, SafeFixedSizeChunking
 from mindroom.knowledge.file_indexer import FileIndexer, _InMemoryTextReader, _MalformedJSONSourceError
+from mindroom.knowledge.readers import Document
 from mindroom.knowledge.vector_store import KnowledgeCollection
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.knowledge_test_support import _FakeEmbedder
@@ -155,6 +156,25 @@ def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(indexer: F
 
     assert reader is not cached
     assert reader.chunking_strategy is not cached.chunking_strategy
+
+
+@pytest.mark.parametrize("suffix", [".pdf", ".docx", ".pptx"])
+def test_document_readers_chunk_paragraphs_as_agno_3_0_did(suffix: str, indexer: FileIndexer) -> None:
+    """PDF, DOCX, and PPTX keep Agno's paragraph chunking at its size, and its chunks keep 3.0.9's whitespace.
+
+    Agno 3.2 keeps the line breaks inside a paragraph, which would change every chunk of a re-indexed document.
+    """
+    paragraphs = ["\n".join(f"Paragraph {n}, line {i}:\tsome  words\there." for i in range(70)) for n in range(3)]
+    reader = indexer._build_reader(Path(f"source{suffix}"))
+    strategy = reader.chunking_strategy
+
+    assert isinstance(strategy, LegacyDocumentChunking)
+    assert (strategy.chunk_size, strategy.overlap) == (5000, 0)
+    chunks = strategy.chunk(Document(name="source", content="\n\n".join(paragraphs)))
+    # What Agno 3.0.9's DocumentChunking returned for this input: one chunk per 2719-character paragraph.
+    assert [chunk.content for chunk in chunks] == [
+        " ".join(f"Paragraph {n}, line {i}: some words here." for i in range(70)) for n in range(3)
+    ]
 
 
 @pytest.mark.parametrize("suffix", _CHUNKED_SUFFIXES)
