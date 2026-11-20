@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -29,9 +30,8 @@ _MAX_INLINE_RESULT_BYTES = 8 * 1024 * 1024
 _RESULT_PREVIEW_BYTES = 64 * 1024
 _RUN_JSON_FIELDS = frozenset({"execution_identity", "persona", "args", "result"})
 _NODE_JSON_FIELDS = frozenset({"request", "handle", "members", "result", "error", "links"})
-# A redelivered start returns the run it made only when these and the arguments are the same.
-_RESERVE_IDENTITY_COLUMNS = ("agent_name", "owner_user_id", "room_id", "thread_root_event_id", "source_digest")
-_RUN_FIELDS = frozenset(field.name for field in fields(WorkflowRun))
+# The origin key belongs to the reservation, which stays as it was made.
+_RUN_UPDATE_FIELDS = frozenset(field.name for field in fields(WorkflowRun)) - {"run_id", "origin_job_id"}
 _ENDED_NODE_STATES = frozenset(WorkflowNodeState) - {
     WorkflowNodeState.QUEUED,
     WorkflowNodeState.RUNNING,
@@ -76,7 +76,7 @@ class WorkflowRunStore:
     def reserve_run(self, run: WorkflowRun) -> tuple[WorkflowRun, bool]:
         """Store *run*, or return the run its `origin_job_id` already reserved and `False`."""
         validated_workflow_run_id(run.run_id)
-        values = _row_values(run, _RUN_JSON_FIELDS)
+        values = {**_row_values(run, _RUN_JSON_FIELDS), "reservation_digest": _reservation_digest(run)}
         with self._write_transaction() as connection:
             if run.origin_job_id is not None:
                 row = connection.execute(
@@ -84,8 +84,7 @@ class WorkflowRunStore:
                     (run.origin_job_id,),
                 ).fetchone()
                 if row is not None:
-                    same_args = json.loads(row["args_json"]) == json.loads(_dumps(run.args))
-                    if not same_args or any(row[column] != values[column] for column in _RESERVE_IDENTITY_COLUMNS):
+                    if row["reservation_digest"] != values["reservation_digest"]:
                         msg = f"This call already started workflow run {row['run_id']} with another owner, script or arguments."
                         raise WorkflowRunConflictError(msg)
                     return _run_from_row(row), False
@@ -112,7 +111,7 @@ class WorkflowRunStore:
 
     def update_run(self, run_id: str, **changes: object) -> WorkflowRun:
         """Write the named fields of one run and return the stored run."""
-        unknown = changes.keys() - _RUN_FIELDS
+        unknown = changes.keys() - _RUN_UPDATE_FIELDS
         if unknown:
             msg = f"Workflow runs have no field to update named {', '.join(sorted(unknown))}."
             raise WorkflowRunStoreError(msg)
@@ -436,6 +435,7 @@ def _record_fields(row: sqlite3.Row) -> dict[str, Any]:
 
 def _run_from_row(row: sqlite3.Row) -> WorkflowRun:
     values = _record_fields(row)
+    del values["reservation_digest"]
     values["state"] = WorkflowRunState(values["state"])
     return WorkflowRun(**values)
 
@@ -455,6 +455,16 @@ def _select_run(connection: sqlite3.Connection, run_id: str) -> WorkflowRun:
     if row is None:
         raise WorkflowRunNotFoundError(run_id)
     return _run_from_row(row)
+
+
+def _reservation_digest(run: WorkflowRun) -> str:
+    """Return the digest of what a redelivered start must share with the run it hits.
+
+    It is taken once, when the run is reserved: the owner, the script as first submitted, and the
+    arguments in canonical JSON, in which key order does not matter and `true` is not `1`.
+    """
+    identity = [run.agent_name, run.owner_user_id, run.room_id, run.thread_root_event_id, run.source_digest, run.args]
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _totals(entries: Iterable[dict[str, Any]]) -> UsageTotals:
@@ -484,7 +494,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 _SCHEMA_STATEMENTS = (
     """
     CREATE TABLE workflow_runs (
-        run_id TEXT PRIMARY KEY, origin_job_id TEXT UNIQUE, parent_run_id TEXT, parent_node_key TEXT,
+        run_id TEXT PRIMARY KEY, origin_job_id TEXT UNIQUE, reservation_digest TEXT NOT NULL,
+        parent_run_id TEXT, parent_node_key TEXT,
         agent_name TEXT NOT NULL, owner_user_id TEXT NOT NULL, room_id TEXT NOT NULL, thread_root_event_id TEXT,
         execution_identity_json TEXT NOT NULL, persona_json TEXT NOT NULL, title TEXT,
         source TEXT NOT NULL, source_digest TEXT NOT NULL, previous_source_digest TEXT, args_json TEXT NOT NULL,

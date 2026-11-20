@@ -163,6 +163,37 @@ def test_reserve_hit_with_another_owner_or_other_args_is_refused(tmp_path: Path,
     assert store.list_runs() == [first]
 
 
+def test_redelivered_start_hits_its_run_after_an_edited_resume(tmp_path: Path) -> None:
+    """The reservation is compared as it was made, so a resume with an edited script does not change it."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    store.reserve_run(_run(_RUN_A, origin_job_id="job-1"))
+    resumed = store.update_run(
+        _RUN_A,
+        source="def main(args):\n    return 1\n",
+        source_digest="edited-digest",
+        previous_source_digest="source-digest",
+        attempt=2,
+    )
+    assert store.reserve_run(_run(_RUN_B, origin_job_id="job-1")) == (resumed, False)
+    with pytest.raises(WorkflowRunConflictError):
+        store.reserve_run(_run(_RUN_B, origin_job_id="job-1", source_digest="edited-digest"))
+    with pytest.raises(WorkflowRunStoreError, match="origin_job_id"):
+        store.update_run(_RUN_A, origin_job_id="job-2")
+    assert store.get_run(_RUN_A) == resumed
+
+
+def test_reservation_compares_canonical_json_arguments(tmp_path: Path) -> None:
+    """Key order does not matter, and a boolean is not the number it equals in Python."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    first, _ = store.reserve_run(_run(_RUN_A, origin_job_id="job-1", args={"flag": True, "items": [1, 2], "n": 1}))
+    reordered = _run(_RUN_B, origin_job_id="job-1", args={"n": 1, "items": [1, 2], "flag": True})
+    assert store.reserve_run(reordered) == (first, False)
+    for other in ({"flag": 1, "items": [1, 2], "n": 1}, {"flag": True, "items": [1, 2], "n": True}):
+        with pytest.raises(WorkflowRunConflictError):
+            store.reserve_run(_run(_RUN_B, origin_job_id="job-1", args=other))
+    assert store.list_runs() == [first]
+
+
 def test_reserve_refuses_a_run_id_that_exists_or_is_malformed(tmp_path: Path) -> None:
     """Run IDs are generated, validated and never reused."""
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
