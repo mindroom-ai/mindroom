@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from copy import deepcopy
@@ -299,6 +300,31 @@ def test_kubernetes_config_names_sidecar_fields_the_client_rejects_without_their
         f"{_EXTRA_CONTAINERS_ENV}[0] is not a valid Kubernetes Container: env.0: unknown field; securityContext: unknown field"
     )
     assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("env_name", "item"),
+    [
+        (_EXTRA_CONTAINERS_ENV, {"name": "trigger-listener", "image": "busybox", "hunter2-key": True}),
+        (
+            _EXTRA_CONTAINERS_ENV,
+            {"name": "trigger-listener", "image": "busybox", "resources": {"limits": {"hunter2": True}}},
+        ),
+        (
+            _EXTRA_CONTAINERS_ENV,
+            {"name": "trigger-listener", "image": "busybox", "resources": {"limits": {"hunter2": []}}},
+        ),
+        (_EXTRA_VOLUMES_ENV, {"name": "trigger-state", "emptyDir": {}, "hunter2-key": True}),
+    ],
+)
+def test_kubernetes_config_never_echoes_rejected_sidecar_keys(tmp_path: Path, env_name: str, item: object) -> None:
+    """A rejected key can be a pasted credential, so the error names only its parent and our own field names."""
+    runtime_paths = _runtime_paths(tmp_path, _base_env(**{env_name: json.dumps([item])}))
+
+    with pytest.raises(WorkerBackendError, match=re.escape(f"{env_name}[0]")) as raised:
+        KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert "hunter2" not in str(raised.value)
 
 
 def test_worker_pod_template_appends_trigger_sidecar_and_volume_without_main_mount(tmp_path: Path) -> None:
