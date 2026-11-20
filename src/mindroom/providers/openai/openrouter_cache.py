@@ -30,7 +30,7 @@ __all__ = [
 _ANTHROPIC_MODEL_PREFIXES = ("anthropic/", "~anthropic/")
 _SYSTEM_ROLES = frozenset({"system", "developer"})
 # Roles whose non-empty string content is sent as a text part on the automatic cache path.
-_RUNG_ROLES = frozenset({"user", "assistant", "tool"})
+_TEXT_PART_ROLES = frozenset({"user", "assistant", "tool"})
 
 
 def openrouter_prompt_cache_control(
@@ -62,8 +62,9 @@ def _with_marked_system_prompt(
 
 
 def _with_text_part_content(message: dict[str, Any]) -> dict[str, Any]:
+    """Use text parts so a message's wire form never depends on where cache markers sit."""
     content = message.get("content")
-    if message.get("role") not in _RUNG_ROLES or not isinstance(content, str) or not content:
+    if message.get("role") not in _TEXT_PART_ROLES or not isinstance(content, str) or not content:
         return message
     return {**message, "content": [{"type": "text", "text": content}]}
 
