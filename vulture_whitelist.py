@@ -499,3 +499,4 @@ node_digest  # Workflow replay API the workflow engine calls from B2b on (src/mi
 DirtyLanes  # Workflow replay API the workflow engine calls from B2b on (src/mindroom/workflow_runs/replay.py)
 _.mark_after  # Workflow replay API the workflow engine calls from B2b on (src/mindroom/workflow_runs/replay.py)
 _.is_dirty  # Workflow replay API the workflow engine calls from B2b on (src/mindroom/workflow_runs/replay.py)
+_.update_node  # Workflow run API the workflow engine calls from B2b on (src/mindroom/workflow_runs/store.py)

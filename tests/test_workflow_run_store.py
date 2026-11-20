@@ -92,7 +92,9 @@ def test_put_node_assigns_stable_sequence(tmp_path: Path) -> None:
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     run, _ = store.reserve_run(_run(origin_job_id="job-1"))
     first, second = store.put_node(_node(key="@0")), store.put_node(_node(key="@1"))
-    again = store.put_node(replace(first, state=WorkflowNodeState.COMPLETED, result={"big": "x" * 200_000}))
+    again = store.put_node(
+        replace(first, generation=2, state=WorkflowNodeState.COMPLETED, result={"big": "x" * 200_000}),
+    )
     assert (first.seq, second.seq, again.seq) == (1, 2, 1)
     assert _saved(store).request == first.request
     assert _saved(store).result == {"big": "x" * 200_000}
@@ -281,6 +283,90 @@ def test_settle_records_the_end_of_the_current_generation(tmp_path: Path) -> Non
     assert not store.settle_node(node.run_id, "@9", 1, state=WorkflowNodeState.COMPLETED)
 
 
+def _two_stores(tmp_path: Path) -> tuple[WorkflowRunStore, WorkflowRunStore]:
+    """Two writers on one database, as an engine and a late callback are."""
+    path = tmp_path / "w.sqlite3"
+    first = WorkflowRunStore(path)
+    first.reserve_run(_run())
+    return first, WorkflowRunStore(path)
+
+
+def test_old_snapshot_cannot_replace_or_settle_a_newer_generation(tmp_path: Path) -> None:
+    """A writer that read generation 1 changes nothing once generation 2 is claimed."""
+    engine, late = _two_stores(tmp_path)
+    claimed = engine.put_node(_node(state=WorkflowNodeState.RUNNING))
+    snapshot = _saved(late)
+    newer = engine.put_node(replace(claimed, generation=2, digest="edited"))
+
+    with pytest.raises(WorkflowRunConflictError, match="generation 2"):
+        late.put_node(replace(snapshot, attempt=2))
+    assert not late.update_node(snapshot.run_id, snapshot.key, 1, attempt=2)
+    assert not late.settle_node(snapshot.run_id, snapshot.key, 1, state=WorkflowNodeState.COMPLETED, result="late")
+    assert _saved(engine) == newer
+
+
+def test_a_key_and_each_generation_are_claimed_once(tmp_path: Path) -> None:
+    """Of two writers that claim the same new key or the same next generation, the second is refused."""
+    engine, other = _two_stores(tmp_path)
+    first = engine.put_node(_node())
+    with pytest.raises(WorkflowRunConflictError):
+        other.put_node(_node(digest="other"))
+    second = engine.put_node(replace(first, generation=2))
+    for generation in (1, 2, 4):
+        with pytest.raises(WorkflowRunConflictError):
+            other.put_node(replace(first, generation=generation, digest="other"))
+    assert _saved(engine) == second
+    assert (second.seq, second.digest) == (first.seq, "digest")
+
+
+def test_late_receipt_never_replaces_a_definitive_outcome(tmp_path: Path) -> None:
+    """Once a generation has a proven outcome, a second settlement of it is a no-op."""
+    engine, late = _two_stores(tmp_path)
+    node = engine.put_node(_node(state=WorkflowNodeState.RUNNING))
+    assert engine.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result="done")
+    settled = _saved(engine)
+    error = {"kind": "indeterminate", "message": "placeholder"}
+    assert not late.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.INDETERMINATE, error=error)
+    assert not late.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result="other")
+    assert not late.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.FAILED, error=error)
+    assert _saved(late) == settled
+
+
+def test_late_receipt_resolves_an_indeterminate_node(tmp_path: Path) -> None:
+    """A call whose end was unknown takes the proven outcome when its receipt does arrive."""
+    engine, late = _two_stores(tmp_path)
+    node = engine.put_node(_node(state=WorkflowNodeState.RUNNING))
+    error = {"kind": "indeterminate", "message": "placeholder"}
+    assert engine.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.INDETERMINATE, error=error)
+    assert not engine.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.INDETERMINATE, error={})
+    assert _saved(engine).error == error
+    assert late.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result="done")
+    resolved = _saved(engine)
+    assert (resolved.state, resolved.result, resolved.error) == (WorkflowNodeState.COMPLETED, "done", None)
+    with pytest.raises(WorkflowRunStoreError, match="waiting"):
+        engine.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.WAITING)
+
+
+def test_stamps_change_named_fields_and_never_an_outcome(tmp_path: Path) -> None:
+    """A stamp updates the current generation's fields, and cannot reopen or rewrite a node that ended."""
+    store, node = _store_with_node(tmp_path)
+    handle = DispatchHandle("job", "job-7", dispatched=True)
+    stamp = {"state": WorkflowNodeState.WAITING, "waiting_on": "user", "handle": handle, "links": {"job_id": "job-7"}}
+    assert store.update_node(node.run_id, node.key, 1, **stamp)
+    assert _saved(store) == replace(node, **stamp)
+    assert not store.update_node(node.run_id, "@9", 1, attempt=2)
+
+    assert store.settle_node(node.run_id, node.key, 1, state=WorkflowNodeState.COMPLETED, result={"lines": 1})
+    settled = _saved(store)
+    assert store.update_node(node.run_id, node.key, 1, attempt=2, stale=True, members=("/0:a", "/0:b"))
+    assert _saved(store) == replace(settled, attempt=2, stale=True, members=("/0:a", "/0:b"))
+    assert not store.update_node(node.run_id, node.key, 1, state=WorkflowNodeState.RUNNING, attempt=3)
+    assert _saved(store).attempt == 2
+    for outcome in ({"state": WorkflowNodeState.FAILED}, {"result": "x"}, {"error": {}}, {"digest": "x"}, {}):
+        with pytest.raises(WorkflowRunStoreError):
+            store.update_node(node.run_id, node.key, 1, **outcome)
+
+
 def test_stale_nodes_leave_the_current_view(tmp_path: Path) -> None:
     """Nodes are listed in sequence order, and stale ones only on request."""
     store, first = _store_with_node(tmp_path)
@@ -347,7 +433,9 @@ def test_large_result_spills_to_a_file_and_prune_removes_it(tmp_path: Path) -> N
     assert len(settled.result) == 64 * 1024
     assert settled.result.startswith('{"text":"xxx')
 
-    assert store.put_node(replace(settled, attempt=2)) == replace(settled, attempt=2)
+    assert store.update_node(node.run_id, node.key, 1, attempt=2)
+    settled = replace(settled, attempt=2)
+    assert _saved(store) == settled
     assert json.loads(spilled.read_text()) == big
 
     bigger = {"text": "é" * (5 * 1024 * 1024)}

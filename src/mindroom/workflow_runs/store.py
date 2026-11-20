@@ -32,6 +32,17 @@ _NODE_JSON_FIELDS = frozenset({"request", "handle", "members", "result", "error"
 # A redelivered start returns the run it made only when these and the arguments are the same.
 _RESERVE_IDENTITY_COLUMNS = ("agent_name", "owner_user_id", "room_id", "thread_root_event_id", "source_digest")
 _RUN_FIELDS = frozenset(field.name for field in fields(WorkflowRun))
+_ENDED_NODE_STATES = frozenset(WorkflowNodeState) - {
+    WorkflowNodeState.QUEUED,
+    WorkflowNodeState.RUNNING,
+    WorkflowNodeState.WAITING,
+}
+# What a stamp may change on a node: never its identity, its generation, or its outcome.
+_NODE_STAMP_FIELDS = frozenset(
+    {"state", "waiting_on", "handle", "attempt", "stale", "label", "name", "phase", "group_key", "members"}
+    | {"session_key", "cached", "started_at", "links"},
+)
+_BLANK_NODE = WorkflowNode(run_id="", key="", kind="", lane="", idx=0, digest="", request={}, attempt=0)
 _TERMINAL_STATE_VALUES = tuple(sorted(TERMINAL_RUN_STATES))
 _TERMINAL_STATE_PLACEHOLDERS = ", ".join("?" * len(_TERMINAL_STATE_VALUES))
 
@@ -152,14 +163,15 @@ class WorkflowRunStore:
         return self._select_runs("parent_run_id = ?", [run_id])
 
     def put_node(self, node: WorkflowNode) -> WorkflowNode:
-        """Write one node and return it as stored; a new key gets the run's next sequence number.
+        """Claim a new key, or the next generation of a saved one, and return the node as stored.
 
-        A result over the inline limit moves to a file, and a node that already names its
-        result file is written as it is.
+        A new key gets the run's next sequence number and a saved one keeps its own.
+        Any other generation is refused, so a writer that read an older row cannot replace a newer one.
+        A result over the inline limit moves to a file.
         """
         with self._write_transaction() as connection:
             saved = connection.execute(
-                "SELECT seq FROM workflow_nodes WHERE run_id = ? AND key = ?",
+                "SELECT seq, generation FROM workflow_nodes WHERE run_id = ? AND key = ?",
                 (node.run_id, node.key),
             ).fetchone()
             if saved is None:
@@ -167,12 +179,32 @@ class WorkflowRunStore:
                     "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM workflow_nodes WHERE run_id = ?",
                     (node.run_id,),
                 ).fetchone()
-            node = replace(node, seq=saved["seq"])
-            if node.result_file is None:
-                result, result_file = self._inline_result(node.run_id, node.seq, node.generation, node.result)
-                node = replace(node, result=result, result_file=result_file)
+            elif node.generation != saved["generation"] + 1:
+                msg = f"Node {node.key} is at generation {saved['generation']}; generation {node.generation} cannot replace it."
+                raise WorkflowRunConflictError(msg)
+            result, result_file = self._inline_result(node.run_id, saved["seq"], node.generation, node.result)
+            node = replace(node, seq=saved["seq"], result=result, result_file=result_file)
             _insert(connection, "INSERT OR REPLACE INTO workflow_nodes", _row_values(node, _NODE_JSON_FIELDS))
         return node
+
+    def update_node(self, run_id: str, key: str, generation: int, **changes: object) -> bool:
+        """Stamp fields on *generation* of a node; false and no change when the node has moved on.
+
+        A stamp never writes an outcome, and it cannot change the state of a node that has ended.
+        """
+        if not changes or changes.keys() - _NODE_STAMP_FIELDS or changes.get("state") in _ENDED_NODE_STATES:
+            msg = f"A node stamp cannot set {sorted(changes)}; outcomes go through settle_node."
+            raise WorkflowRunStoreError(msg)
+        values = _row_values(replace(_BLANK_NODE, **changes), _NODE_JSON_FIELDS)
+        columns = [_column(name, _NODE_JSON_FIELDS) for name in changes]
+        unsettled = " AND state IN ('queued', 'running', 'waiting')" if "state" in changes else ""
+        with self._write_transaction() as connection:
+            updated = connection.execute(
+                f"UPDATE workflow_nodes SET {', '.join(f'{column} = ?' for column in columns)} "  # noqa: S608
+                f"WHERE run_id = ? AND key = ? AND generation = ?{unsettled}",
+                (*(values[column] for column in columns), run_id, key, generation),
+            )
+        return updated.rowcount == 1
 
     def get_node(self, run_id: str, key: str) -> WorkflowNode | None:
         """Return the node at *key*, if the run has one."""
@@ -198,13 +230,22 @@ class WorkflowRunStore:
         result: object | None = None,
         error: dict[str, object] | None = None,
     ) -> bool:
-        """Record how *generation* of a node ended; false and no change when the node has moved on."""
+        """Record how *generation* of a node ended; false and no change when it has moved on or has an outcome.
+
+        An unsettled node takes any end, and an `indeterminate` one takes the proven outcome of a late receipt.
+        """
+        if state not in _ENDED_NODE_STATES:
+            msg = f"A node settles into an ended state, not {state}."
+            raise WorkflowRunStoreError(msg)
         with self._write_transaction() as connection:
             saved = connection.execute(
-                "SELECT seq, result_file FROM workflow_nodes WHERE run_id = ? AND key = ? AND generation = ?",
+                "SELECT seq, state, result_file FROM workflow_nodes WHERE run_id = ? AND key = ? AND generation = ?",
                 (run_id, key, generation),
             ).fetchone()
             if saved is None or saved["result_file"] is not None:
+                return False
+            proven = saved["state"] == WorkflowNodeState.INDETERMINATE and state is not WorkflowNodeState.INDETERMINATE
+            if saved["state"] in _ENDED_NODE_STATES and not proven:
                 return False
             stored, result_file = self._inline_result(run_id, saved["seq"], generation, result)
             connection.execute(
