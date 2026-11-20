@@ -20,7 +20,7 @@ from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     import nio
 
@@ -210,26 +210,11 @@ def get_agents_in_thread(
 
     Preserves the order of first participation while preventing duplicates.
     """
-    agents: list[MatrixID] = []
-    seen_ids: set[str] = set()
     registry = entity_identity_registry(config, runtime_paths)
-
-    for msg in thread_history:
-        sender = msg.sender
-        agent_name = registry.current_entity_name_for_user_id(sender, include_router=False)
-
-        # Skip the owner account and invalid senders
-        if agent_name is None:
-            continue
-
-        if sender not in seen_ids:
-            agents.append(registry.current_id(agent_name))
-            seen_ids.add(sender)
-
-    return agents
+    return _agents_from_user_ids(dict.fromkeys(msg.sender for msg in thread_history), registry)
 
 
-def _agents_from_user_ids(user_ids: list[str], registry: EntityIdentityRegistry) -> list[MatrixID]:
+def _agents_from_user_ids(user_ids: Iterable[str], registry: EntityIdentityRegistry) -> list[MatrixID]:
     """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
     agents: list[MatrixID] = []
     for user_id in user_ids:
