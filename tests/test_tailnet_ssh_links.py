@@ -963,6 +963,13 @@ async def test_connect_writes_the_keys_stored_when_the_worker_is_up(
     assert manager.calls == ["eligibility", "ensure_worker"]
 
 
+async def _ended(connecting: asyncio.Task[tuple[str, int]], revocation: threading.Thread) -> None:
+    """Wait for a connect and a revocation thread to end, whatever failed before, so no work outlives the test."""
+    await asyncio.wait([connecting], timeout=30)
+    if revocation.ident is not None:
+        await asyncio.to_thread(revocation.join, 30)
+
+
 @pytest.mark.asyncio
 async def test_a_key_removed_while_connect_writes_is_not_left_in_the_worker(
     config: Config,
@@ -1024,8 +1031,8 @@ async def test_a_key_removed_while_connect_writes_is_not_left_in_the_worker(
         waits_for_connect = met_taken_lock.is_set() and revocation.is_alive() and writes == []
     finally:
         release_connect.set()
-    await connecting
-    await asyncio.to_thread(revocation.join, 30)
+        await _ended(connecting, revocation)
+    assert (connecting.result(), revocation.is_alive()) == (("10.0.0.5", 2222), False)
 
     assert read_links(paths).keys == {}
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""

@@ -66,7 +66,9 @@ def _text(lines: Sequence[str]) -> bytes:
 def write_projection(projection_dir: Path, link: Link, key_lines: Sequence[str]) -> None:
     """Replace ``sshd_config``, ``authorized_keys`` and the link's host key, each atomically, so sshd never reads half a file.
 
-    sshd's ``StrictModes`` requires the host key to be 0600 and owned by the worker's uid, which the primary's uid is.
+    The host key is 0600: sshd refuses a private key file of its own that others may read, whatever ``StrictModes``
+    says, which governs the ``authorized_keys`` file and its directories. The primary's uid is the worker's, so sshd
+    owns and reads it.
     """
     create_directory_durable(projection_dir, mode=0o755)
     directory_fd = os.open(projection_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

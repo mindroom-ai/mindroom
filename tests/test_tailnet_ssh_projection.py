@@ -133,13 +133,16 @@ def test_host_key_is_0600_and_matches_link(tmp_path: Path) -> None:
 
 
 def test_rewrite_replaces_removed_key(tmp_path: Path) -> None:
-    """A second write without a key drops its line, and leaves no temporary file behind."""
+    """A second write of the same link without a key drops its line, keeps the host key, and leaves no temporary file."""
     kept, removed = f"restrict,pty {_public_key()}", f"restrict,pty {_public_key()}"
     projection = tmp_path / "ssh"
-    write_projection(projection, _link(), [kept, removed])
-    write_projection(projection, _link(), [kept])
+    link = _link()
+    write_projection(projection, link, [kept, removed])
+    host_key = (projection / "ssh_host_ed25519_key").read_bytes()
+    write_projection(projection, link, [kept])
 
     assert _lines(projection / "authorized_keys") == [kept]
+    assert (projection / "ssh_host_ed25519_key").read_bytes() == host_key == link.host_key.encode()
     assert sorted(path.name for path in projection.iterdir()) == [
         "authorized_keys",
         "ssh_host_ed25519_key",

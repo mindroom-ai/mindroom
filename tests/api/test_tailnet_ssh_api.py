@@ -478,13 +478,21 @@ class _CountedStream(httpx.AsyncByteStream):
 
 @pytest.mark.asyncio
 async def test_github_keys_stop_reading_at_64_kib(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reading GitHub's answer stops at 64 KiB: the rest of a longer answer is never taken from the connection."""
-    first = _public_key()
-    stream = _CountedStream([f"{first}\n".encode(), *([b"#" * 4096] * 100)])
-    _github(monkeypatch, lambda _request: httpx.Response(200, stream=stream))
+    """Reading GitHub's answer stops at 64 KiB: no read follows the one that reaches it.
 
-    assert await tailnet_ssh_api._fetch_github_keys("alice-gh") == [first]
-    assert stream.taken <= 64 * 1024 + 4096
+    The read that reaches 64 KiB is taken whole, so a read that ends there takes nothing past it.
+    """
+    first = f"{_public_key()}\n".encode()
+    filler = b"#" * 4096
+    crossing = _CountedStream([first, *([filler] * 100)])
+    ending = _CountedStream([*([filler] * 16), first])
+    answers = [crossing, ending]
+    _github(monkeypatch, lambda _request: httpx.Response(200, stream=answers.pop(0)))
+
+    assert await tailnet_ssh_api._fetch_github_keys("alice-gh") == [first.decode().strip()]
+    assert crossing.taken == len(first) + 16 * len(filler)
+    assert await tailnet_ssh_api._fetch_github_keys("alice-gh") == []
+    assert ending.taken == 64 * 1024
 
 
 @pytest.mark.asyncio

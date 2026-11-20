@@ -269,7 +269,8 @@ async def _fetch_github_keys(login: str) -> list[str]:
             if response.status_code != 200 or encoding != "identity":
                 logger.warning("tailnet_ssh_github_keys_refused", status=response.status_code, encoding=encoding)
                 raise _refusal(502, _GITHUB_FAILED)
-            # The body as it arrives, never decompressed, so no more than one network read past the limit is taken.
+            # The body as it arrives, never decompressed. No read follows the one that reaches the limit; that read
+            # is taken whole, as httpx cannot ask for fewer bytes, and httpcore reads at most 64 KiB at once.
             async for chunk in response.aiter_raw():
                 content += chunk[: _GITHUB_KEYS_MAX_BYTES - len(content)]
                 if len(content) == _GITHUB_KEYS_MAX_BYTES:
