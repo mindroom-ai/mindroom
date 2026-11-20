@@ -15,7 +15,7 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno==3.0.9",
+  "agno==3.2.1",
   "aiohttp>=3.13.3",
   # Claude SDK 2 moves requests to API version 2026-10-21, a migration of its own.
   "anthropic>=1.17,<2",
