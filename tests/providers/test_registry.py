@@ -728,7 +728,8 @@ async def test_an_implicit_claude_key_never_goes_out_beside_a_gateway_key(
 
 @pytest.mark.asyncio
 async def test_an_empty_default_header_map_clears_the_client_params_one(
-    runtime_paths: RuntimePaths, wire: Wire,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
 ) -> None:
     """An explicit empty ``default_headers`` replaces ``client_params.default_headers``, as an unset one would not."""
     extra_kwargs = {"api_key": "sk-own", "default_headers": {}, "client_params": {"default_headers": {"X-Label": "x"}}}
