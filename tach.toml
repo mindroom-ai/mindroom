@@ -4669,6 +4669,7 @@ depends_on = []
 path = "mindroom.matrix.room_history_reads"
 depends_on = [
     "mindroom.matrix.event_info",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.approval.transport",

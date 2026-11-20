@@ -43,6 +43,10 @@ from mindroom.matrix.large_messages import (
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.message_content import extract_edit_body, resolve_event_source_content
+from mindroom.matrix.room_history_reads import (
+    find_outbox_delivery_event_id_via_room_messages,
+    missing_outbox_delivery_copy_indices_via_room_messages,
+)
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     _html_block_spans,
@@ -406,6 +410,39 @@ async def test_every_way_into_the_backend_reads_the_reply_as_it_was_built(case: 
         ([_event(wire), _event(wire_edit, "$edit")], [_event(sent), _event(edit, "$edit")]),
     ):
         assert _message_lines(wire_events) == _message_lines(sent_events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+async def test_recovery_finds_in_the_room_the_reply_an_earlier_device_sent(edit: bool) -> None:
+    """Recovery looks in the room for the exact content of an outbox row, which Matrix got without its markers."""
+    sent = _sent(_case(_BETWEEN))
+    frozen = build_edit_event_content(event_id="$reply", new_content=sent, new_text=sent["body"]) if edit else sent
+    client = _client()
+    await send_message_outcome(client, _ROOM, frozen, transaction_id="tx", content_is_prepared=True)
+    wire = _on_the_wire(client)
+    assert wire != frozen
+    in_room = nio.RoomMessage.parse_event(_event(wire, "$sent"))
+    client.room_messages = AsyncMock(return_value=nio.RoomMessagesResponse(_ROOM, [in_room], start="", end=None))
+
+    found = await find_outbox_delivery_event_id_via_room_messages(
+        client,
+        _ROOM,
+        delivery_sender=_AGENT,
+        source_event_ids=(),
+        delivery_content=frozen,
+        delivery_event_type="m.room.message",
+    )
+    missing = await missing_outbox_delivery_copy_indices_via_room_messages(
+        client,
+        _ROOM,
+        delivery_sender=_AGENT,
+        delivery_contents=[frozen, frozen],
+        delivery_event_type="m.room.message",
+    )
+
+    assert found == "$sent"
+    assert missing == [1]
 
 
 @pytest.mark.asyncio
