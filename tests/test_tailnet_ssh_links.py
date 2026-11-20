@@ -151,6 +151,11 @@ def _store(paths: RuntimePaths, *stored: Link) -> None:
     update_links(paths, lambda book: book.links.extend(stored))
 
 
+def _give_alice_a_key(paths: RuntimePaths) -> None:
+    """Store Alice's key, without which a connect starts no sshd."""
+    update_links(paths, lambda book: set_keys(book, ALICE, [PUBLIC_KEY], now=NOW))
+
+
 def _stored(paths: RuntimePaths, link: Link) -> Link | None:
     return read_links(paths).by_id(link.id)
 
@@ -324,6 +329,7 @@ async def fake_runner() -> AsyncIterator[FakeRunner]:
     runner = FakeRunner()
     app = web.Application()
     app.router.add_post("/api/sandbox-runner/ssh/stop", runner.answer)
+    app.router.add_post("/api/sandbox-runner/ssh/start", runner.answer)
     served = web.AppRunner(app, access_log=None)
     await served.setup()
     try:
@@ -804,6 +810,7 @@ async def test_operator_mode_survives_a_primary_restart(
     """After a restart the gateway's last mode is known before it reports again, so operator links admit their login."""
     link = _link()
     _store(paths, link)
+    _give_alice_a_key(paths)
     _post(paths, GatewayStatus(), {link.id: _report()}, enrollment="auth_key")
     _wire_connect(monkeypatch, tmp_path, link)
 
@@ -1200,6 +1207,7 @@ async def test_connect_refuses_without_the_agents_own_shell(
     """The session is the agent's shell in the link's worker; without that shell there is no session."""
     link = _enrolled()
     _store(paths, link)
+    _give_alice_a_key(paths)
     manager = _wire_connect(monkeypatch, tmp_path, link, call=_worker_call(_key(BOB, "mind")))
     if shell == "no_terminals":
         monkeypatch.setattr(links, "agent_terminals", lambda *_args, **_kwargs: None)
@@ -1233,8 +1241,11 @@ async def test_connect_writes_the_keys_stored_when_the_worker_is_up(
         return ensure_worker(spec)
 
     monkeypatch.setattr(manager, "ensure_worker", removes_the_key)
-    await _connect(config, paths, link.id)
+    with pytest.raises(ConnectRefused) as refused:
+        await _connect(config, paths, link.id)
+    assert (refused.value.status_code, refused.value.detail) == (409, "Add an SSH public key first.")
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""
+    assert "ssh_start" not in manager.calls
 
     def disconnects(spec: WorkerSpec) -> WorkerHandle:
         update_links(paths, lambda book: book.links.clear())
@@ -1246,6 +1257,74 @@ async def test_connect_writes_the_keys_stored_when_the_worker_is_up(
         await _connect(config, paths, link.id)
     assert refused.value.status_code == 404
     assert manager.calls == ["eligibility", "ensure_worker"]
+
+
+@pytest.mark.asyncio
+async def test_a_connect_whose_keys_admit_nobody_starts_no_sshd(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A person without a key gets the card's sentence and no sshd, so every sshd a connect starts admits someone."""
+    link = _enrolled()
+    _store(paths, link)
+    manager = _wire_connect(monkeypatch, tmp_path, link)
+
+    with pytest.raises(ConnectRefused) as refused:
+        await _connect(config, paths, link.id)
+
+    assert (refused.value.status_code, refused.value.detail) == (409, "Add an SSH public key first.")
+    assert manager.calls == ["eligibility", "ensure_worker", "projection"]
+    assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_a_removals_late_stop_finds_no_sshd_a_keyless_connect_started(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: FakeRunner,
+) -> None:
+    """A removal's stop is under way when the link is on again and its person has no key; their connect starts nothing.
+
+    Before, that connect wrote an empty ``authorized_keys`` and started sshd, which the late stop, finding the file
+    empty, then ended. Now no connect starts an sshd that admits nobody, so the runner's fence, a file that admits
+    someone, tells every connect's sshd from a removal's.
+    """
+    link = _enrolled(desired="removing", park_when_removed=True)
+    _store(paths, link)
+    update_links(paths, lambda book: book.revoked_workers.append(link.worker_key))
+    _projected_keys(tmp_path / "ssh", link)
+    start_sshd = links._start_sshd
+    call = _worker_call(link.worker_key, f"{fake_runner.url}/api/sandbox-runner")
+    manager = _wire_connect(monkeypatch, tmp_path, link, call=call)
+    monkeypatch.setattr(links, "_start_sshd", start_sshd)
+    manager.handles = [fake_runner.handle(link.worker_key, tmp_path / "ssh")]
+    fake_runner.release.clear()
+
+    stopping = await links.revoke_removed_workers(paths)
+    assert stopping is not None
+    async with asyncio.timeout(10):
+        while not fake_runner.posts:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    def back_on(book: LinkBook) -> None:
+        current = book.by_id(link.id)
+        assert current is not None
+        current.desired, current.park_when_removed = "on", False
+
+    update_links(paths, back_on)
+    try:
+        with pytest.raises(ConnectRefused) as refused:
+            await _connect(config, paths, link.id)
+    finally:
+        fake_runner.release.set()
+        await stopping
+
+    assert refused.value.status_code == 409
+    assert fake_runner.posts == [_STOP]
 
 
 async def _ended(connecting: asyncio.Task[tuple[str, int]], revocation: threading.Thread) -> None:
@@ -1364,6 +1443,7 @@ async def test_connect_logs_peer_but_never_a_login_url(
     """
     link = _enrolled()
     _store(paths, link)
+    _give_alice_a_key(paths)
     _wire_connect(monkeypatch, tmp_path, link)
     status = GatewayStatus()
 
@@ -1404,6 +1484,7 @@ async def test_a_connect_waits_for_its_worker_on_a_pool_of_its_own(
     """A worker that takes minutes to start holds a connect thread, never one of the pool the primary shares."""
     link = _enrolled()
     _store(paths, link)
+    _give_alice_a_key(paths)
     manager = _wire_connect(monkeypatch, tmp_path, link)
     threads: list[str] = []
     ensure_worker = manager.ensure_worker
@@ -1457,6 +1538,7 @@ async def test_runner_503_becomes_connect_refused_with_its_detail(
         port = runner.addresses[0][1]
         link = _enrolled()
         _store(paths, link)
+        _give_alice_a_key(paths)
         call = _worker_call(link.worker_key, f"http://127.0.0.1:{port}/api/sandbox-runner")
         start_sshd = links._start_sshd
         _wire_connect(monkeypatch, tmp_path, link, call=call)
@@ -1486,6 +1568,7 @@ async def test_an_unreachable_runner_refuses_the_connect(
     """A runner that does not answer is a refusal that names the kind of failure, not the worker's address."""
     link = _enrolled()
     _store(paths, link)
+    _give_alice_a_key(paths)
     start_sshd = links._start_sshd
     _wire_connect(monkeypatch, tmp_path, link, call=_worker_call(link.worker_key, "http://127.0.0.1:1/api"))
     monkeypatch.setattr(links, "_start_sshd", start_sshd)

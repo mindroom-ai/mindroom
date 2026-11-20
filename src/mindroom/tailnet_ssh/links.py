@@ -80,6 +80,7 @@ _NO_SSH_PORT = (
     "This worker has no SSH port; with Docker, MINDROOM_DOCKER_WORKER_PUBLISH_HOST must not be a wildcard address."
 )
 _NO_SHELL = "This agent has no shell tool."
+_NO_KEY = "Add an SSH public key first."
 _MEMBERSHIP_PENDING = "Whether you may use this agent is not known yet; try again in a few seconds."
 # A connect may wait as long as the worker ready timeout (600 s hosted) for its worker to start. Those waits get
 # threads of their own, so a few sleeping or failing workers cannot fill the default pool the rest of the primary
@@ -478,12 +479,16 @@ def _admit(
     def project(book: LinkBook) -> Link:
         # The worker may have taken minutes to start: sshd gets the keys stored now, and none for a link removed since.
         current = _on_link(book, link_id)
+        key_lines = authorized_key_lines(config, book, current.requester_id)
         try:
-            write_projection(endpoint.projection_dir, current, authorized_key_lines(config, book, current.requester_id))
+            write_projection(endpoint.projection_dir, current, key_lines)
         except OSError as error:
             # The error names the primary's path to the worker's files, and the refusal reaches the card.
             logger.warning("tailnet_ssh_projection_not_written", link_id=link_id, error=str(error))
             raise ConnectRefused(503, "The worker's SSH files could not be written.") from None
+        if not key_lines:
+            # So every sshd a connect starts admits someone, which is how a removal's late stop tells it from its own.
+            raise ConnectRefused(409, _NO_KEY)
         return current
 
     return endpoint, _shell_call(config, runtime_paths, _projected(runtime_paths, project))
@@ -537,7 +542,7 @@ async def connect(
     """Return the host and port of the sshd that serves one connection the gateway accepted, or raise ``ConnectRefused``.
 
     In order: the link is on and admits the peer's login, it is eligible now, its worker starts and has an SSH port,
-    sshd's files are written, and the runner starts sshd. It may take as long as a worker takes to start. Each
+    sshd's files are written and admit at least one key, and the runner starts sshd. It may take as long as a worker takes to start. Each
     connect and each refusal is logged with the link and the peer.
     """
     admit = partial(_admit, config, runtime_paths, membership_index, link_id, peer_login)
