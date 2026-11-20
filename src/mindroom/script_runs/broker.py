@@ -266,7 +266,7 @@ class ScriptToolBroker:
         authenticated: bool,
     ) -> ScriptCallClaim:
         if not authenticated:
-            self.authenticate(request.run_id, authorization)
+            self._authenticate_plain(request.run_id, authorization)
         self._require_call_admission()
         return self.store.claim_call(
             run_id=request.run_id,
@@ -384,6 +384,13 @@ class ScriptToolBroker:
             raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
         return run
 
+    def _authenticate_plain(self, run_id: str, authorization: str | None) -> ScriptRunRecord:
+        """Authenticate a plain script's call; a workflow attempt's calls enter only as its nodes, so each has one claim."""
+        run = self.authenticate(run_id, authorization)
+        if run.workflow_run_id is not None:
+            raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
+        return run
+
     async def cancel_run(self, run_id: str) -> None:
         """Cancel this broker's work for a run whose capability is already revoked."""
         while any(key[0] == run_id for key in self._preparing):
@@ -445,7 +452,7 @@ class ScriptToolBroker:
         authorization: str | None,
     ) -> ScriptCallRecord:
         """Authenticate a receipt and settle approval debt discovered as orphaned."""
-        run = await asyncio.to_thread(self.authenticate, run_id, authorization)
+        run = await asyncio.to_thread(self._authenticate_plain, run_id, authorization)
         self._require_call_admission()
         receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
         if receipt.state is ScriptCallState.INDETERMINATE:

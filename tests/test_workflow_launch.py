@@ -269,6 +269,15 @@ async def _call_add(
         grant=ScriptToolGrant("calculator", "add"),
         arguments={"a": 1, "b": 2},
     )
+    if workflow:
+        # A workflow attempt's calls enter through its engine, which the workflow routes authenticated.
+        call = await broker.execute_for_workflow(
+            run,
+            call_id=request.call_id,
+            grant=request.grant,
+            arguments=request.arguments,
+        )
+        return call, asks
     token = worker_client.launch_paths[run.run_id][1].read_text(encoding="utf-8")
     return await _call_through_gateway(broker, request, token), asks
 

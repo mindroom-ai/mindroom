@@ -15,7 +15,7 @@ import pytest_asyncio
 
 from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
-from mindroom.script_runs.broker import ScriptBrokerAuthenticationError
+from mindroom.script_runs.broker import ScriptBrokerAuthenticationError, ScriptToolCallRequest
 from mindroom.script_runs.launch_contract import digest_arguments
 from mindroom.script_runs.manager import ScriptRunLimits
 from mindroom.script_runs.models import ScriptCallState, ScriptRunState, ScriptToolGrant
@@ -456,6 +456,25 @@ async def test_shell_answer_without_an_exit_status_may_have_run(stack: WorkflowS
     )
 
     assert _settled(stack, node) == (WorkflowNodeState.INDETERMINATE, None, "indeterminate")
+
+
+@pytest.mark.asyncio
+async def test_workflow_attempt_cannot_use_the_plain_call_routes(stack: WorkflowStack) -> None:
+    """A workflow call enters through its node and nowhere else, so no plain claim can stand in for a dispatch."""
+    authorization = f"Bearer {stack.token}"
+    assert await stack.result("@0", "tool", _APPEND) == "appended"
+    plain = ScriptToolCallRequest(
+        stack.attempt.run_id, "call-plain", ScriptToolGrant("counter", "append"), {"line": "b"}
+    )
+
+    with pytest.raises(ScriptBrokerAuthenticationError):
+        await stack.broker.accept_authenticated(plain, authorization)
+    with pytest.raises(ScriptBrokerAuthenticationError):
+        await stack.broker.get_authenticated(stack.attempt.run_id, _broker_call(stack).call_id, authorization)
+
+    assert stack.counting_tool.lines == ["a"]
+    assert stack.script_store.pending_calls(stack.attempt.run_id) == []
+    assert stack.broker.authenticate(stack.attempt.run_id, authorization).run_id == stack.attempt.run_id
 
 
 @pytest.mark.asyncio
