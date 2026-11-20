@@ -396,9 +396,7 @@ def _planned(functions: dict, *calls: object) -> list[PlannedCall]:
 
 @pytest.mark.asyncio
 async def test_a_success_without_text_is_stored_saying_so() -> None:
-    """An empty success says it had no text output, since providers show an empty result differently; a failure keeps
-    its own text.
-    """
+    """An empty success says it had no text output, and a failure keeps its own text."""
 
     def quiet() -> str:
         """Return nothing."""
