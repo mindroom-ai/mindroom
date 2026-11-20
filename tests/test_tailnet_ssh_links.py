@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from copy import deepcopy
@@ -15,8 +16,9 @@ from structlog.testing import capture_logs
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, tracking_dir
+from mindroom.file_locks import advisory_file_lock, release_file_lock, try_exclusive_file_lock
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
-from mindroom.tailnet_ssh import links
+from mindroom.tailnet_ssh import links, store
 from mindroom.tailnet_ssh.links import (
     ConnectRefused,
     GatewayStatus,
@@ -38,6 +40,7 @@ from mindroom.workers.protocol import ExecuteRequest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
 ALICE = "@alice:example.org"
@@ -746,37 +749,65 @@ async def test_a_key_removed_while_connect_writes_is_not_left_in_the_worker(
 ) -> None:
     """A connect that has read the keys writes them before a revocation's refresh reads and writes, never after.
 
-    The revocation arrives when connect has read the keys and not yet written them. It has to wait for that
-    write, or the removed key, written last, would stay in the worker.
+    Connect is held where it has read the keys and not yet written them, and the revocation starts then. The
+    revocation must find the store's lock taken, or it would finish first and connect would write the removed key
+    last. Every step waits for the one before it, so no outcome here depends on how fast a thread runs; the
+    timeouts only end a run that hangs.
     """
     link = _enrolled()
     _store(paths, link)
     update_links(paths, lambda book: set_keys(book, ALICE, [PUBLIC_KEY], now=NOW))
     _wire_connect(monkeypatch, tmp_path, link)
     write_projection = links.write_projection
-    first = iter([True])
-    waited: list[bool] = []
+    connect_holds_keys, release_connect = threading.Event(), threading.Event()
+    # The revocation is settled once it has met a taken lock, where it waits, or has finished.
+    met_taken_lock, revocation_settled = threading.Event(), threading.Event()
+    writes: list[str] = []
 
     def revoke() -> None:
-        update_links(paths, lambda book: set_keys(book, ALICE, [], now=NOW + 1))
-        refresh_projections(config, paths, ALICE)
+        try:
+            update_links(paths, lambda book: set_keys(book, ALICE, [], now=NOW + 1))
+            refresh_projections(config, paths, ALICE)
+        finally:
+            revocation_settled.set()
 
     revocation = threading.Thread(target=revoke)
 
-    def overlapped(projection_dir: Path, link: Link, key_lines: list[str]) -> None:
-        if next(first, False):
-            revocation.start()
-            revocation.join(timeout=0.5)
-            waited.append(revocation.is_alive())
+    def watched_lock(lock_path: Path) -> AbstractContextManager[None]:
+        if threading.current_thread() is revocation:
+            free = try_exclusive_file_lock(lock_path)
+            if free is None:
+                met_taken_lock.set()
+                revocation_settled.set()
+            else:
+                release_file_lock(free)
+        return advisory_file_lock(lock_path)
+
+    def held_write(projection_dir: Path, link: Link, key_lines: list[str]) -> None:
+        writer = "revocation" if threading.current_thread() is revocation else "connect"
+        if writer == "connect":
+            connect_holds_keys.set()
+            assert release_connect.wait(30)
         write_projection(projection_dir, link, key_lines)
+        writes.append(writer)
 
-    monkeypatch.setattr(links, "write_projection", overlapped)
-    await _connect(config, paths, link.id)
-    revocation.join(timeout=10)
+    monkeypatch.setattr(store, "advisory_file_lock", watched_lock)
+    monkeypatch.setattr(links, "write_projection", held_write)
+    connecting = asyncio.create_task(_connect(config, paths, link.id))
+    try:
+        assert await asyncio.to_thread(connect_holds_keys.wait, 30)
+        revocation.start()
+        assert await asyncio.to_thread(revocation_settled.wait, 30)
+        waits_for_connect = met_taken_lock.is_set() and revocation.is_alive() and writes == []
+    finally:
+        release_connect.set()
+    await connecting
+    await asyncio.to_thread(revocation.join, 30)
 
-    assert waited == [True]
-    assert not revocation.is_alive()
+    assert read_links(paths).keys == {}
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == ""
+    assert writes == ["connect", "revocation"]
+    assert waits_for_connect
 
 
 @pytest.mark.asyncio
