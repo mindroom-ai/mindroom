@@ -219,8 +219,10 @@ def _require_matching_semantic_event(
         raise IngestionBatchIntegrityError
     # An opaque history marker identifies an envelope, whose encrypted kind
     # and thread are unknown. It never owns a callback or becomes actionable.
+    # An edit of a pending message can turn its file into a text or back (revise_pending); it is the same event.
+    revised = {row["kind"], event.kind.value} <= {EventKind.MEDIA.value, EventKind.MESSAGE.value}
     if EventKind.OPAQUE_HISTORY not in (row["kind"], event.kind) and (
-        row["kind"] != event.kind.value or row["thread_id"] != encode_thread_id(event.thread_id)
+        (row["kind"] != event.kind.value and not revised) or row["thread_id"] != encode_thread_id(event.thread_id)
     ):
         raise IngestionBatchIntegrityError
     return row
