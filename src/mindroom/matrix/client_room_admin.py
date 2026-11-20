@@ -311,7 +311,10 @@ async def room_encryption_enable_failure(
             cached_room.encrypted = True
         logger.info("matrix_room_encryption_enabled", room_id=room_id)
         return None
-    logger.error("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
+    # A refusal the homeserver states, such as an account without the power, is expected and told to the person.
+    refused = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+    log = logger.warning if refused else logger.error
+    log("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
     return "" if response is None else _describe_matrix_response_error(response)
 
 

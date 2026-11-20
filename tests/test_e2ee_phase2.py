@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 from nio.store import SqliteStore
+from structlog.testing import capture_logs
 
 from mindroom.access_policy import resolve_room_policy
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
@@ -125,6 +126,22 @@ class TestEnsureRoomEncryptionEnabled:
         )
 
         assert await ensure_room_encryption_enabled(client, "!room:localhost") is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("errcode", "level"), [("M_FORBIDDEN", "warning"), ("M_UNKNOWN", "error")])
+    async def test_a_refusal_the_homeserver_states_is_no_error(self, errcode: str, level: str) -> None:
+        """An account without the power is refused as expected and told so; only another failure is an error."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
+        client.room_put_state.return_value = nio.RoomPutStateError.from_dict(
+            {"errcode": errcode, "error": "refused"},
+            "!room:localhost",
+        )
+
+        with capture_logs() as logs:
+            assert await ensure_room_encryption_enabled(client, "!room:localhost") is False
+
+        assert [(log["event"], log["log_level"]) for log in logs] == [("matrix_room_encryption_enable_failed", level)]
 
 
 class TestManagedRoomEncryptionConfig:
