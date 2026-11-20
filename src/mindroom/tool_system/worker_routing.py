@@ -617,8 +617,8 @@ def user_agent_worker_key_requester(worker_key: str) -> str | None:
     """Return the requester an unpinned ``user_agent`` key names, or None for any other key.
 
     The requester part may itself contain ``:``, so it is everything between the scope and the agent part, and it
-    counts only when encoding it again reproduces the key. A subagent or script-run pin before the agent part means
-    the key is not the requester's own worker.
+    counts only when ``resolve_worker_key`` for that requester, tenant, and agent part reproduces the key exactly.
+    A subagent or script-run pin before the agent part means the key is not the requester's own worker.
     """
     parts = worker_key.split(":")
     if resolved_worker_key_scope(worker_key) != "user_agent" or len(parts) < 5:
@@ -629,8 +629,17 @@ def user_agent_worker_key_requester(worker_key: str) -> str | None:
     if not encoded.startswith("~"):
         return None
     requester = unquote(encoded[1:])
-    rebuilt = ":".join((*parts[:3], _encode_worker_requester_part(requester), parts[-1]))
-    return requester if requester and rebuilt == worker_key else None
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=parts[-1],
+        requester_id=requester,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id=parts[1],
+    )
+    return requester if resolve_worker_key("user_agent", identity) == worker_key else None
 
 
 def _resolve_execution_identity_for_worker_scope(

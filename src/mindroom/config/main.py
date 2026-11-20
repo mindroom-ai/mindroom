@@ -745,6 +745,8 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_tailnet_ssh_agents(self) -> Config:
         """Require every agent with tailnet_ssh to have a worker and workspace per person."""
+        if not any(agent.tailnet_ssh for agent in self.agents.values()):
+            return self
         # why-lazy: the eligibility rule imports authorization, which loads nio and Matrix modules config import must not.
         from mindroom.tailnet_ssh.eligibility import config_error  # noqa: PLC0415
 

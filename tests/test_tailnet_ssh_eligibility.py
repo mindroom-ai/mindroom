@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -272,6 +273,11 @@ def test_user_agent_worker_key_requester_refuses_other_keys() -> None:
     # A requester part spelled differently from how worker routing encodes it is not the same key.
     assert user_agent_worker_key_requester("v1:default:user_agent:~@alice%3Aexample.org:mine") is None
     assert user_agent_worker_key_requester("v1:default:user_agent:@alice:example.org:mine") is None
+    # Worker routing never writes an empty or unnormalized tenant or agent part.
+    assert user_agent_worker_key_requester("v1::user_agent:~@alice:example.org:mine") is None
+    assert user_agent_worker_key_requester("v1:default:user_agent:~@alice:example.org:") is None
+    assert user_agent_worker_key_requester("v1:a b:user_agent:~@alice:example.org:mine") is None
+    assert user_agent_worker_key_requester("v1:default:user_agent:~@alice:example.org:_mine") is None
 
 
 def test_normalize_public_key_shapes() -> None:
@@ -283,6 +289,16 @@ def test_normalize_public_key_shapes() -> None:
         normalize_public_key(f'command="x" {key}')
     with pytest.raises(ValueError, match="private key"):
         normalize_public_key("-----BEGIN OPENSSH PRIVATE KEY-----")
+    with pytest.raises(ValueError, match="private key"):
+        normalize_public_key("-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----")
+    # Only the armor line marks a private key; a comment may say anything.
+    assert normalize_public_key(f"{key} PRIVATE KEY backup") == f"{key} PRIVATE KEY backup"
+    # OpenSSH decodes the blob strictly, so a character outside base64 makes the key unusable.
+    key_type, blob = key.split()
+    with pytest.raises(ValueError, match=r"not an SSH public key"):
+        normalize_public_key(f"{key_type} {blob[:20]}!{blob[20:]}")
+    with pytest.raises(ValueError, match=r"not an SSH public key"):
+        normalize_public_key(f"{key_type} {blob[:-1]}")
     with pytest.raises(ValueError, match=r"\."):
         normalize_public_key("")
     with pytest.raises(ValueError, match=r"\."):
@@ -318,6 +334,19 @@ def test_empty_tailnet_ssh_section_is_left_out_of_authored_config(tmp_path: Path
     config = _load(_paths(tmp_path), data)
     assert config.tailnet_ssh.logins == {}
     assert "tailnet_ssh" not in config.authored_model_dump()
+
+
+def test_config_without_opted_in_agents_skips_the_eligibility_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rule pulls in authorization and Matrix modules, which a config no agent opts in from never needs."""
+    monkeypatch.setitem(sys.modules, "mindroom.tailnet_ssh.eligibility", None)
+    data = _data()
+    data["agents"] = {"plain": _DATA["agents"]["plain"]}
+    assert _load(_paths(tmp_path), data).agents["plain"].tailnet_ssh is False
+    with pytest.raises(ImportError):
+        _load(_paths(tmp_path), _data())
 
 
 def _launch(config: Config) -> WorkerLaunchConfig:
@@ -357,23 +386,15 @@ def test_ssh_eligible_launch_matrix(tmp_path: Path) -> None:
     assert ssh_eligible_launch(mind_key, launch, frozenset({"mind"}), (joined,)) is False
 
 
-def test_ssh_eligible_launch_refuses_an_ambiguous_agent_part(tmp_path: Path) -> None:
-    """A key's agent part must name exactly one agent of the launch."""
+def test_names_that_share_a_key_are_no_ones(tmp_path: Path) -> None:
+    """`mine` and `mine_` both load and resolve to one worker key, so neither a link nor a launch may claim it."""
+    paths = _paths(tmp_path)
     data = _data()
-    data["agents"]["my_desk"] = _mine_like()
-    launch = _launch(_load(_paths(tmp_path), data))
-    policies = dict(launch.agent_policies)
-    # Configured names cannot collide this way; a launch must still refuse to guess.
-    policies["my desk"] = policies["my_desk"]
-    ambiguous = WorkerLaunchConfig(
-        config=launch.config,
-        config_data={},
-        agent_policies=policies,
-        tool_validation_snapshot={},
-        grantable_credentials=frozenset(),
-        digest="digest",
-    )
-    key = _key(ALICE, "my_desk")
-    assert ssh_eligible_launch(key, launch, None, ()) is True
-    assert ssh_eligible_launch(key, ambiguous, None, ()) is False
+    data["agents"]["mine_"] = _mine_like()
+    config = _load(paths, data)
+    assert _key(ALICE, "mine_") == _key(ALICE, "mine") == _ALICE_MINE_KEY
+    assert _ineligibility(paths, config, ALICE, "mine") == Ineligible("scope")
+    assert _ineligibility(paths, config, ALICE, "mine_") == Ineligible("scope")
+    launch = _launch(config)
+    assert ssh_eligible_launch(_ALICE_MINE_KEY, launch, None, ()) is False
     assert ssh_eligible_launch(_key(ALICE, "nobody"), launch, None, ()) is False

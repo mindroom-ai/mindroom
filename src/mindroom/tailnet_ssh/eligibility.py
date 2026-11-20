@@ -24,7 +24,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend_kinds import worker_backend_kind
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
@@ -56,10 +56,16 @@ def _concrete_users_alone(config: Config, agent_name: str) -> tuple[str, ...] | 
     return access.users
 
 
-def _is_own_key(worker_key: str, agent_name: str) -> bool:
-    """Return whether a key is an unpinned ``user_agent`` key of this agent."""
-    agent_part = normalize_worker_key_part(agent_name)
-    return user_agent_worker_key_requester(worker_key) is not None and worker_key_agent_name(worker_key) == agent_part
+def _key_agent(worker_key: str, agent_names: Iterable[str]) -> str | None:
+    """Return the one agent an unpinned ``user_agent`` key's agent part encodes, or None when none or several do.
+
+    Configured names such as ``mine`` and ``mine_`` normalize to the same part, so such a key is no one agent's.
+    """
+    agent_part = worker_key_agent_name(worker_key)
+    if user_agent_worker_key_requester(worker_key) is None or agent_part is None:
+        return None
+    names = [name for name in agent_names if normalize_worker_key_part(name) == agent_part]
+    return names[0] if len(names) == 1 else None
 
 
 def _joined_directory(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> str | None:
@@ -108,7 +114,7 @@ def link_ineligibility(
     if (
         policy.effective_execution_scope != "user_agent"
         or worker_key is None
-        or not _is_own_key(worker_key, agent_name)
+        or _key_agent(worker_key, config.agents) != agent_name
     ):
         return Ineligible("scope")
     if (
@@ -133,14 +139,10 @@ def ssh_eligible_launch(
     The person is the key's requester and the agent the one launch agent whose name the key's agent part encodes;
     a private agent must be one the worker may see. A read-only shared mount is a directory another agent owns.
     """
+    agent_name = _key_agent(worker_key, launch.agent_policies)
+    if agent_name is None:
+        return False
     requester_id = user_agent_worker_key_requester(worker_key)
-    agent_part = worker_key_agent_name(worker_key)
-    if requester_id is None or agent_part is None:
-        return False
-    names = [name for name in launch.agent_policies if normalize_worker_key_part(name) == agent_part]
-    if len(names) != 1:
-        return False
-    agent_name = names[0]
     policy = launch.agent_policies[agent_name]
     agent = launch.config.agents.get(agent_name)
     if agent is None or not agent.tailnet_ssh or policy.effective_execution_scope != "user_agent":

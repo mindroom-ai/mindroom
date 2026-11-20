@@ -1,5 +1,7 @@
 """The root `tailnet_ssh` config section: who may sign in to their worker from their tailnet, and with which keys."""
 
+import base64
+import binascii
 import re
 
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -11,6 +13,17 @@ from mindroom.config.schema_hints import dashboard_hint
 
 # OpenSSH key type names, such as ssh-ed25519, ecdsa-sha2-nistp256, or sk-ssh-ed25519@openssh.com.
 _KEY_TYPE_PATTERN = re.compile(r"(?:ssh|ecdsa|sk)-[A-Za-z0-9.@-]+")
+# The armor line a pasted OpenSSH, PEM, or PKCS#8 private key starts with.
+_PRIVATE_KEY_HEADER = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_NOT_A_KEY = "That is not an SSH public key line; paste one line from a .pub file."
+
+
+def _is_canonical_base64(token: str) -> bool:
+    """Return whether a key blob is padded base64 in OpenSSH's spelling; the loader skips characters OpenSSH refuses."""
+    try:
+        return base64.b64encode(base64.b64decode(token, validate=True)).decode() == token
+    except binascii.Error:
+        return False
 
 
 def normalize_public_key(line: str) -> str:
@@ -22,7 +35,7 @@ def normalize_public_key(line: str) -> str:
     if not text:
         msg = "The key is empty; paste one line from a .pub file."
         raise ValueError(msg)
-    if "PRIVATE KEY" in text:
+    if _PRIVATE_KEY_HEADER.match(text):
         msg = "That is a private key; paste the .pub file."
         raise ValueError(msg)
     if any(character in text for character in "\r\n\0"):
@@ -32,14 +45,12 @@ def normalize_public_key(line: str) -> str:
     if not _KEY_TYPE_PATTERN.fullmatch(fields[0]) and any(_KEY_TYPE_PATTERN.fullmatch(field) for field in text.split()):
         msg = "Key options such as command= are not accepted; paste the key line without them."
         raise ValueError(msg)
-    if len(fields) < 2:
-        msg = "That is not an SSH public key line; paste one line from a .pub file."
-        raise ValueError(msg)
+    if len(fields) < 2 or not _is_canonical_base64(fields[1]):
+        raise ValueError(_NOT_A_KEY)
     try:
         load_ssh_public_key(f"{fields[0]} {fields[1]}".encode())
     except (ValueError, UnsupportedAlgorithm):
-        msg = "That is not an SSH public key line; paste one line from a .pub file."
-        raise ValueError(msg) from None
+        raise ValueError(_NOT_A_KEY) from None
     return " ".join(fields)
 
 
