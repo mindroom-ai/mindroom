@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
-import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -147,12 +146,6 @@ _VERTEX_ENDPOINTS = {
 }
 # API version 2026-10-21, which every route of the SDK sends, rejects these on every model, even at their defaults.
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
-# Bedrock serves 2026-10-21 for Claude 4.7 and later only
-# (https://platform.claude.com/docs/en/api/migration-2026-10-21#upgrade), so an older model there keeps 2023-06-01,
-# which takes sampling controls. A model id's first one or two short numbers after ``claude-`` are its version.
-_BEDROCK_LEGACY_API_VERSION = "2023-06-01"
-_FIRST_API_2026_BEDROCK_VERSION = (4, 7)
-_CLAUDE_VERSION_NUMBERS = re.compile(r"(?<![0-9])[0-9]{1,2}(?![0-9])")
 # The models whose dropped sampling controls were already logged, once each.
 _SAMPLING_WARNED: set[tuple[str, str]] = set()
 # The SDK's ``messages.stream`` arguments that are request options or headers, not body fields. The SDK adds its own
@@ -248,11 +241,6 @@ class ClaudeProvider:
     def native_history_route(self) -> NativeHistoryRoute:
         """Claude compacts history on the provider side where the route supports it or the model config authored it."""
         return self
-
-    @property
-    def keeps_legacy_api_version(self) -> bool:
-        """Return whether the model is a Claude older than 4.7 on Bedrock, which sends API version 2023-06-01."""
-        return _keeps_legacy_api_version(self.route, self.identity.id, self.settings)
 
     @property
     def model_params(self) -> dict[str, Any]:
@@ -385,10 +373,6 @@ class ClaudeProvider:
             params["output_config"] = dict(settings.output_config)
         if settings.stop_sequences:
             params["stop_sequences"] = list(settings.stop_sequences)
-        if self.keeps_legacy_api_version:
-            temperature = settings.temperature if overrides.temperature is None else overrides.temperature
-            sampling = {"temperature": temperature, "top_p": settings.top_p, "top_k": settings.top_k}
-            params.update({name: value for name, value in sampling.items() if value is not None})
         if settings.context_management is not None:
             params["context_management"] = dict(settings.context_management)
         replay = request.native_compaction
@@ -439,8 +423,7 @@ class ClaudeProvider:
 
         Only the direct API gets the structured-outputs beta header; Bedrock sends strict tools without it.
         """
-        params = _sampling_in_extra_body(self._authored_params(request), keep=self.keeps_legacy_api_version)
-        params = self._with_thinking_binding(params, request)
+        params = self._with_thinking_binding(_without_sampling(self._authored_params(request)), request)
         extra_body = params.get("extra_body") or {}
         compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
         extra_headers, header_betas = _split_beta_header(params.pop("extra_headers", None))
@@ -569,8 +552,6 @@ class ClaudeProvider:
         kwargs.update(settings.client_params or {})
         # The winning map replaces the one in ``client_params``, an explicit empty one included.
         default_headers = dict(self._authored_default_headers() or {})
-        if self.keeps_legacy_api_version:
-            default_headers = {"anthropic-version": _BEDROCK_LEGACY_API_VERSION, **default_headers}
         kwargs["default_headers"] = default_headers
         kwargs["http_client"] = self.http_client
         kwargs["max_retries"] = 0
@@ -798,37 +779,13 @@ def send_key_as_x_api_key[ClientT: anthropic.Anthropic | AsyncAnthropic](client:
     return client
 
 
-def predates_bedrock_api_2026(model_id: str) -> bool:
-    """Return whether a Claude model id names a model older than 4.7, which Bedrock serves on API version 2023-06-01.
-
-    The version is the first one or two short numbers after ``claude-``, as in ``anthropic.claude-haiku-4-5`` or
-    ``claude-3-5-sonnet-20240620``; a date, an ARN, or an id without a version counts as current.
-    """
-    _, found, name = model_id.casefold().partition("claude-")
-    numbers = [int(number) for number in _CLAUDE_VERSION_NUMBERS.findall(name.split(":")[0])[:2]] if found else []
-    return bool(numbers) and (numbers[0], numbers[1] if len(numbers) > 1 else 0) < _FIRST_API_2026_BEDROCK_VERSION
-
-
-def _sent_model_id(model_id: str, settings: ClaudeSettings) -> str:
-    """Return the model the body names: the raw ``model`` override, ``extra_body`` first as the SDK merges, else the id."""
-    request_params = settings.request_params or {}
-    return str((request_params.get("extra_body") or {}).get("model") or request_params.get("model") or model_id)
-
-
-def _keeps_legacy_api_version(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> bool:
-    """Return whether the request goes to a Claude older than 4.7 on Bedrock, which sends API version 2023-06-01."""
-    return route == "bedrock_claude" and predates_bedrock_api_2026(_sent_model_id(model_id, settings))
-
-
-def _sampling_in_extra_body(params: dict[str, Any], *, keep: bool) -> dict[str, Any]:
-    """Move sampling controls into ``extra_body``, which the SDK's methods have no argument for, or drop them all.
-
-    Only a model on API version 2023-06-01 keeps them (``keep``); 2026-10-21 rejects them (``_SAMPLING_CONTROL_NAMES``).
-    """
-    moved = {name: params.pop(name) for name in _SAMPLING_CONTROL_NAMES if name in params}
-    extra_body: dict[str, Any] = {**moved, **(params.get("extra_body") or {})}
-    if not keep:
-        extra_body = {key: value for key, value in extra_body.items() if key not in _SAMPLING_CONTROL_NAMES}
+def _without_sampling(params: dict[str, Any]) -> dict[str, Any]:
+    """Drop the sampling controls (``_SAMPLING_CONTROL_NAMES``) from the params and their ``extra_body``."""
+    for name in _SAMPLING_CONTROL_NAMES:
+        params.pop(name, None)
+    extra_body = {
+        key: value for key, value in (params.get("extra_body") or {}).items() if key not in _SAMPLING_CONTROL_NAMES
+    }
     if extra_body:
         params["extra_body"] = extra_body
     else:
@@ -902,8 +859,8 @@ def _claude_capabilities(
             settings=settings,
             endpoint=endpoint,
         ),
-        # Only a model that keeps API version 2023-06-01 sends sampling controls (``_SAMPLING_CONTROL_NAMES``).
-        provider_default_sampling=not _keeps_legacy_api_version(route, model_id, settings),
+        # API version 2026-10-21 takes no sampling controls (``_SAMPLING_CONTROL_NAMES``).
+        provider_default_sampling=True,
     )
 
 
@@ -1018,8 +975,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     endpoint = _route_endpoint(route, settings)
     identity = model_identity(model_config, endpoint=endpoint)
     capabilities = _claude_capabilities(route, model_config.id, settings, endpoint)
-    if capabilities.provider_default_sampling:
-        _warn_dropped_sampling(route, model_config.id, settings)
+    _warn_dropped_sampling(route, model_config.id, settings)
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
 
 
@@ -1041,7 +997,6 @@ def _warn_dropped_sampling(route: ClaudeRouteKind, model_id: str, settings: Clau
 __all__ = [
     "ClaudeProvider",
     "build_provider",
-    "predates_bedrock_api_2026",
     "send_key_as_x_api_key",
     "vertex_project_and_region",
 ]

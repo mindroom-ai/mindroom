@@ -531,7 +531,7 @@ A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its max
 Some models reject sampling controls:
 
 - Claude API version `2026-10-21`, which MindRoom sends on Anthropic, Bedrock, and Vertex requests, rejects `temperature`, `top_p`, and `top_k` on every model, so MindRoom omits them there, from `request_params` too, and logs a warning once per model that sets them; a Claude model's `extra_kwargs` still accepts them, and they have no effect.
-  Bedrock serves `2026-10-21` only for Claude 4.7 and later, so a `bedrock_claude` model older than 4.7, such as `anthropic.claude-haiku-4-5`, keeps API version `2023-06-01` and its sampling controls.
+  Bedrock serves `2026-10-21` only for Claude 4.7 and later, so MindRoom supports Claude 4.7 and later on `bedrock_claude`.
 - MindRoom also omits those controls for direct Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
 - [GPT-6.2 Astra and GPT-6.2 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 

@@ -556,23 +556,20 @@ async def test_default_sampling_models_lose_sampling_controls_everywhere(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("route", "model_id", "version", "sampling"),
+    ("route", "model_id"),
     [
-        ("anthropic", "claude-sonnet-4-5", "2026-10-21", {}),
-        ("vertexai_claude", "claude-sonnet-4-5", "2026-10-21", {}),
-        ("bedrock_claude", "anthropic.claude-haiku-5-5", "2026-10-21", {}),
-        # Bedrock serves 2026-10-21 for Claude 4.7 and later only, so an older model keeps 2023-06-01 and sampling.
-        ("bedrock_claude", "anthropic.claude-haiku-4-5", "2023-06-01", {"temperature": 0.2, "top_k": 3, "top_p": 0.9}),
+        ("anthropic", "claude-sonnet-4-5"),
+        ("vertexai_claude", "claude-sonnet-4-5"),
+        ("bedrock_claude", "anthropic.claude-haiku-5-5"),
+        ("bedrock_claude", "anthropic.claude-haiku-4-5"),
     ],
 )
-async def test_only_an_older_claude_on_bedrock_keeps_the_old_api_version_and_sampling(
+async def test_every_route_sends_api_version_2026_10_21_without_sampling(
     tmp_path: Path,
     route: str,
     model_id: str,
-    version: str,
-    sampling: dict[str, float],
 ) -> None:
-    """API version 2026-10-21 rejects sampling on every model; Bedrock keeps a model older than 4.7 on 2023-06-01."""
+    """API version 2026-10-21 rejects sampling on every model, so no route sends it, an older Bedrock model included."""
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     provider = route_provider(
         route,
@@ -581,14 +578,14 @@ async def test_only_an_older_claude_on_bedrock_keeps_the_old_api_version_and_sam
         id=model_id,
         extra_kwargs={"temperature": 0.7, "top_k": 3, "request_params": {"top_p": 0.9}},
     )
-    assert provider.capabilities.provider_default_sampling == (not sampling)
+    assert provider.capabilities.provider_default_sampling
     await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
     body = wire.body()
-    assert {name: body[name] for name in ("temperature", "top_p", "top_k") if name in body} == sampling
+    assert not {"temperature", "top_p", "top_k"} & body.keys()
     sent = (
         body.get("anthropic_version") if route == "vertexai_claude" else wire.requests[0].headers["anthropic-version"]
     )
-    assert sent == version
+    assert sent == "2026-10-21"
 
 
 @pytest.mark.asyncio
@@ -608,31 +605,11 @@ async def test_env_custom_headers_reach_only_the_direct_api(tmp_path: Path, rout
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "request_params",
-    [{"model": "anthropic.claude-haiku-4-5"}, {"extra_body": {"model": "anthropic.claude-haiku-4-5"}}],
-    ids=["model", "extra-body-model"],
-)
-async def test_the_bedrock_api_version_follows_the_model_the_body_names(
-    tmp_path: Path,
-    request_params: dict[str, Any],
-) -> None:
-    """A raw ``model`` override decides the Bedrock API version and sampling, not the configured id."""
-    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
-    authored = {"temperature": 0.7, "request_params": request_params}
-    provider = route_provider("bedrock_claude", tmp_path, wire, id="anthropic.claude-haiku-5-5", extra_kwargs=authored)
-    await claude_turn(provider, ModelRequest(messages=_user()))
-    body = wire.body()
-    assert (body["model"], body.get("temperature")) == ("anthropic.claude-haiku-4-5", 0.7)
-    assert wire.requests[0].headers["anthropic-version"] == "2023-06-01"
-
-
-@pytest.mark.asyncio
 async def test_dropped_sampling_controls_are_logged_once_per_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A config whose sampling controls go unsent hears so once, naming them; a model that sends them hears nothing."""
+    """A config whose sampling controls go unsent hears so once per model, naming them."""
     monkeypatch.setattr(claude_messages, "_SAMPLING_WARNED", set())
     authored = {"temperature": 0.7, "request_params": {"extra_body": {"top_k": 3}}}
     with capture_logs() as logs:
@@ -640,7 +617,10 @@ async def test_dropped_sampling_controls_are_logged_once_per_model(
             route_provider("anthropic", tmp_path, Wire(), extra_kwargs=authored)
             route_provider("bedrock_claude", tmp_path, Wire(), id="anthropic.claude-haiku-4-5", extra_kwargs=authored)
     warnings = [log for log in logs if log["event"] == "claude_sampling_controls_dropped"]
-    assert [(log["route"], log["names"]) for log in warnings] == [("anthropic", ["temperature", "top_k"])]
+    assert [(log["route"], log["names"]) for log in warnings] == [
+        ("anthropic", ["temperature", "top_k"]),
+        ("bedrock_claude", ["temperature", "top_k"]),
+    ]
 
 
 @pytest.mark.asyncio
