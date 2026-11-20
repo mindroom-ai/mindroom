@@ -3,10 +3,11 @@
 The preamble is part of the system prompt, so a changed preamble makes the provider re-read the whole
 conversation after it. A conversation therefore keeps the preamble it last sent while the whole file still holds
 every line of its copy in order, so lines added anywhere, or pushed out of a preload cap by newer entries, keep it,
-until its framing prompts change, the caps would cut it, it idles past the cache lifetime or its history is
-compacted; the conversation already shows the agent its own memory writes as tool calls. Each conversation's copy is a file in its agent's state root, so a restart keeps
-it and one requester's private memory stays out of another's; the file's modification time is the last model request
-of a turn that took the copy from it. A missing or unreadable file starts the conversation from MEMORY.md again.
+until its framing prompts or caps change, it idles past the cache lifetime or its history is compacted; the
+conversation already shows the agent its own memory writes as tool calls. Each conversation's copy is a file in its
+agent's state root, so a restart keeps it and one requester's private memory stays out of another's; the file's
+modification time is the last model request of a turn that took the copy from it. A missing or unreadable file
+starts the conversation from MEMORY.md again.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from mindroom.file_locks import advisory_file_lock
 from mindroom.yaml_io import write_text_atomic
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
 # A copy no turn reuses any more is deleted once it has been idle this long.
@@ -66,9 +67,8 @@ def stamp_entrypoint_snapshot(path: Path, *, now: float) -> None:
 def _kept_preamble(
     conversation: ConversationRef,
     source_path: Path,
-    frame: Sequence[str],
+    frame: Sequence[str | int],
     file_lines: Sequence[str],
-    fits: Callable[[Sequence[str]], bool],
     now: float,
 ) -> str | None:
     """Return the preamble the conversation's file keeps when this turn may reuse it, else None."""
@@ -88,7 +88,6 @@ def _kept_preamble(
         and kept_frame == list(frame)
         and isinstance(shown, list)
         and all(line in remaining for line in shown)
-        and fits(shown)
     )
     return str(preamble) if reusable else None
 
@@ -98,19 +97,19 @@ def stable_entrypoint_preamble(
     source_path: Path,
     fresh_preamble: str,
     *,
-    frame: Sequence[str],
+    frame: Sequence[str | int],
     shown: Sequence[str],
     file_lines: Sequence[str],
-    fits: Callable[[Sequence[str]], bool],
     now: float,
 ) -> str:
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
 
     ``shown`` holds the file lines ``fresh_preamble`` inlines, ``file_lines`` all of the file's lines, and ``frame``
-    the prompts that frame them. The copy is kept while ``file_lines`` holds every line it shows in order, so lines
-    inserted anywhere or withheld by a cap for newer ones keep it, while ``fits`` says the preload caps would still
-    keep all of them, and while each prompt in ``frame`` is unchanged, so an edited prompt override loads again. Its
-    truncation marker keeps the counts of its last load, and an empty ``fresh_preamble`` always replaces it.
+    the prompts that frame them and the caps that cut them. The copy is kept while ``file_lines`` holds every line it
+    shows in order, so lines inserted anywhere or withheld by a cap for newer ones keep it, and while each part of
+    ``frame`` is unchanged, so an edited prompt override or cap loads again. The copy is not measured again, so a
+    model switch or a cold token encoder does not cut it. Its truncation marker keeps the counts of its last load, and
+    an empty ``fresh_preamble`` always replaces it.
     A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
     anyway, and the turn after one costs only its compacted history.
     An edited or deleted line loads at once. A route that holds the system prompt tells that as a system prompt
@@ -125,7 +124,7 @@ def stable_entrypoint_preamble(
             for other in path.parent.glob("*.json"):
                 if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:
                     other.unlink()
-            kept = _kept_preamble(conversation, source_path, frame, file_lines, fits, now) if fresh_preamble else None
+            kept = _kept_preamble(conversation, source_path, frame, file_lines, now) if fresh_preamble else None
             if kept is None:
                 row = [str(source_path), fresh_preamble, list(frame), list(shown), *conversation.compaction]
                 write_text_atomic(path, json.dumps(row))

@@ -33,12 +33,10 @@ def _preamble(
     root: str = "agent",
     whole: str | None = None,
     frame: tuple[str, ...] = ("header",),
-    fits: bool = True,
 ) -> str:
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text.
 
-    ``whole`` is the text of the whole file when a preload cap cut ``text`` from it, and ``fits`` whether the caps
-    would keep every line the conversation's copy shows.
+    ``whole`` is the text of the whole file when a preload cap cut ``text`` from it.
     """
     return snapshots.stable_entrypoint_preamble(
         ConversationRef((summary, None), _snapshot(session, root)),
@@ -47,7 +45,6 @@ def _preamble(
         frame=frame,
         shown=text.splitlines(),
         file_lines=(text if whole is None else whole).splitlines(),
-        fits=lambda _lines: fits,
         now=now,
     )
 
@@ -106,12 +103,6 @@ def test_a_line_moved_between_framing_prompts_loads_the_file_again() -> None:
     """Moving an instruction from the notice into the truncation marker removes it from a copy shown whole."""
     _preamble("a", frame=("header", "notice\nrule", "marker"))
     assert _preamble("a\nb", frame=("header", "notice", "rule\nmarker")) == "preamble of 'a\\nb'"
-
-
-def test_a_copy_the_caps_would_cut_loads_the_file_again() -> None:
-    """A lowered cap must shrink the conversation's copy, not keep the lines it now withholds."""
-    _preamble("a\nb")
-    assert _preamble("b", whole="a\nb", fits=False) == "preamble of 'b'"
 
 
 def test_empty_copy_loads_the_file_once_it_gains_lines() -> None:

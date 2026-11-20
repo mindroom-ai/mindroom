@@ -13,7 +13,7 @@ from mindroom.timing import timed
 
 from ._backend import resolve_memory_backend
 from ._entrypoint_snapshots import stable_entrypoint_preamble
-from ._file_backend import append_agent_daily_file_memory, cap_entrypoint, entrypoint_lines_fit
+from ._file_backend import append_agent_daily_file_memory, cap_entrypoint
 from ._prompting import format_memories_as_context
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
 
@@ -199,7 +199,7 @@ def _render_truncation_notice(entrypoint: MemoryEntrypointContext, config: Confi
         return ""
     return render_prompt_template(
         config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
-        included_lines=entrypoint.included_lines,
+        included_lines=len(entrypoint.included),
         total_lines=entrypoint.total_lines,
         max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
         max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
@@ -234,15 +234,15 @@ async def _entrypoint_preamble(
     if conversation is None or entrypoint.source_path is None:
         return preamble
     framing = ("HEADER_TEMPLATE", "KEPT_COPY_NOTICE", "TRUNCATION_TEMPLATE")
+    caps = (config.memory.file.max_entrypoint_lines, config.memory.file.max_entrypoint_tokens)
     return await asyncio.to_thread(
         stable_entrypoint_preamble,
         conversation,
         entrypoint.source_path,
         preamble,
-        frame=[config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{name}") for name in framing],
+        frame=[*(config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{name}") for name in framing), *caps],
         shown=entrypoint.included,
         file_lines=entrypoint.lines,
-        fits=lambda lines: entrypoint_lines_fit(lines, config, counter),
         now=time.time(),
     )
 

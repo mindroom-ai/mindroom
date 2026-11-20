@@ -706,7 +706,7 @@ def cap_entrypoint(
 ) -> MemoryEntrypointContext:
     """Cut the preload to both caps, as the model the preload goes to counts it."""
     kept = _lines_within_caps(entrypoint.lines, config, counter)
-    return replace(entrypoint, text=_entrypoint_text(kept), included_lines=len(kept), included=tuple(kept))
+    return replace(entrypoint, text=_entrypoint_text(kept), included=tuple(kept))
 
 
 def entrypoint_tokens(text: str, counter: TokenCounter) -> int:
@@ -716,12 +716,8 @@ def entrypoint_tokens(text: str, counter: TokenCounter) -> int:
 
 def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter) -> bool:
     """Return whether the MEMORY.md preload would leave out any line of ``text``, its size counted with ``counter``."""
-    return not entrypoint_lines_fit(text.splitlines(), config, counter)
-
-
-def entrypoint_lines_fit(lines: Sequence[str], config: Config, counter: TokenCounter) -> bool:
-    """Return whether the MEMORY.md preload keeps every one of ``lines``, their size counted with ``counter``."""
-    return len(_lines_within_caps(lines, config, counter)) == len(lines)
+    lines = text.splitlines()
+    return len(_lines_within_caps(lines, config, counter)) < len(lines)
 
 
 @timed("system_prompt_assembly.memory_file_entrypoint_read")

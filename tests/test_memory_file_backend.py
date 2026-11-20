@@ -1895,7 +1895,11 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
     assert (await preamble(thread)).startswith("Edited header")
 
 
-async def _conversation_preamble(config: Config, conversation: ConversationRef | None) -> str:
+async def _conversation_preamble(
+    config: Config,
+    conversation: ConversationRef | None,
+    counter: TokenCounter | None = None,
+) -> str:
     prompt_parts = await public_build_memory_prompt_parts(
         "What should I remember?",
         "general",
@@ -1903,7 +1907,7 @@ async def _conversation_preamble(config: Config, conversation: ConversationRef |
         runtime_paths_for(config),
         current_execution_identity(),
         conversation=conversation,
-        counter=fake_token_counter(),
+        counter=counter or fake_token_counter(),
     )
     return prompt_parts.session_preamble
 
@@ -1926,7 +1930,7 @@ async def test_file_backend_conversation_keeps_its_capped_entrypoint_after_a_mem
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A new entry pushes the oldest kept one out of a capped preload, which must leave the conversation's copy as sent."""
+    """A new entry pushes the oldest kept one out of a capped preload, which must leave the conversation's copy."""
     memory_path = _capped_memory_file(storage_path, config)
     thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
     first = await _conversation_preamble(config, thread)
@@ -1966,22 +1970,43 @@ async def test_file_backend_conversation_reloads_its_entrypoint_when_its_framing
 
 
 @pytest.mark.asyncio
-async def test_file_backend_conversation_reloads_its_entrypoint_when_a_cap_is_lowered(
+async def test_file_backend_conversation_reloads_its_entrypoint_when_a_cap_changes(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A lowered line or token cap must shrink a conversation's copy as it shrinks a fresh preload."""
+    """A raised or lowered line or token cap must reach a conversation's copy, whose marker states the caps."""
     _capped_memory_file(storage_path, config)
-    by_lines = ConversationRef((None, None), storage_path / "snapshots" / "lines.json")
-    by_tokens = ConversationRef((None, None), storage_path / "snapshots" / "tokens.json")
-    assert "Fact two." in await _conversation_preamble(config, by_lines)
-    assert "Fact two." in await _conversation_preamble(config, by_tokens)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "Fact one." not in await _conversation_preamble(config, thread)
 
-    config.memory.file.max_entrypoint_lines = 2
-    assert "Fact two." not in await _conversation_preamble(config, by_lines)
+    config.memory.file.max_entrypoint_lines = 50
+    raised = await _conversation_preamble(config, thread)
+    assert "Fact one." in raised
+    assert "truncated" not in raised
     config.memory.file.max_entrypoint_lines = 3
+    assert "Fact one." not in await _conversation_preamble(config, thread)
     config.memory.file.max_entrypoint_tokens = 10
-    assert "Fact two." not in await _conversation_preamble(config, by_tokens)
+    assert "Fact two." not in await _conversation_preamble(config, thread)
+    config.memory.file.max_entrypoint_tokens = 50000
+    assert "Fact two." in await _conversation_preamble(config, thread)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_cold_token_encoder_does_not_cut_a_warm_copy(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Before its encoder loads, a counter takes UTF-8 bytes, which must not truncate a copy a warm counter sized."""
+    _capped_memory_file(storage_path, config)
+    config.memory.file.max_entrypoint_lines = 50
+    config.memory.file.max_entrypoint_tokens = 30
+    cold = TokenCounter(estimate=lambda _text: None)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await _conversation_preamble(config, thread)
+    assert "Fact one." in first
+
+    assert await _conversation_preamble(config, thread, cold) == first
+    assert "Fact one." not in await _conversation_preamble(config, None, cold)
 
 
 @pytest.mark.asyncio
