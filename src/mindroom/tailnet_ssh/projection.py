@@ -43,15 +43,20 @@ _SSHD_CONFIG = (
 )
 
 
-def authorized_key_lines(config: Config, book: LinkBook, requester_id: str) -> list[str]:
-    """Return the person's portal keys, then the operator's, each once and each prefixed ``restrict,pty``.
+def signin_keys(config: Config, book: LinkBook, requester_id: str) -> dict[str, str]:
+    """Return the person's portal keys, then the operator's, each once, by identity.
 
     A key in both counts once, its portal line kept: two lines are one key when type and base64 match.
     """
     keys: dict[str, str] = {}
     for line in [*book.keys.get(requester_id, []), *config.tailnet_ssh.authorized_keys.get(requester_id, [])]:
         keys.setdefault(key_identity(line), line)
-    return [f"restrict,pty {line}" for line in keys.values()]
+    return keys
+
+
+def authorized_key_lines(config: Config, book: LinkBook, requester_id: str) -> list[str]:
+    """Return the lines of ``signin_keys``, each prefixed ``restrict,pty``."""
+    return [f"restrict,pty {line}" for line in signin_keys(config, book, requester_id).values()]
 
 
 def _text(lines: Sequence[str]) -> bytes:

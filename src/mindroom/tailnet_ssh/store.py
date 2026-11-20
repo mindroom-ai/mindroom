@@ -16,7 +16,7 @@ from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -51,6 +51,8 @@ class LinkBook(BaseModel):
 
     ``enrollment`` is what the gateway's last report said, None before its first. It is stored, not kept in memory,
     so after a primary restart an operator key's links admit their login and are parked on disconnect at once.
+    ``seen_keys`` holds, for each person with a link, the identities of every key they could sign in with at the last
+    reconcile, so a key the operator removes from the config closes their sessions, also when a restart came with it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -58,6 +60,7 @@ class LinkBook(BaseModel):
     links: list[Link] = Field(default_factory=list)
     keys: dict[str, list[str]] = Field(default_factory=dict)
     enrollment: Literal["login", "auth_key"] | None = None
+    seen_keys: dict[str, list[str]] = Field(default_factory=dict)
 
     def link(self, requester_id: str, agent_name: str) -> Link | None:
         """Return the person's link to the agent, of which there is at most one."""
@@ -126,10 +129,26 @@ def set_keys(book: LinkBook, requester_id: str, lines: Sequence[str], *, now: fl
         for link in book.links:
             if link.requester_id == requester_id:
                 link.closed_before = now
+        # Every session of theirs is closed, whatever key it used, so no key seen before is left to close one for.
+        book.seen_keys.pop(requester_id, None)
     if keys:
         book.keys[requester_id] = list(keys.values())
     else:
         book.keys.pop(requester_id, None)
+
+
+def close_sessions_of_gone_keys(book: LinkBook, current: Mapping[str, Collection[str]], *, now: float) -> None:
+    """Close the sessions of each person a key of whom is gone since the last call, and remember the keys of now.
+
+    ``current`` holds, for each person with a link, the identities of every key they may sign in with now; a person
+    not in it is forgotten. A key the person removes in the portal closed their sessions in ``set_keys`` already.
+    """
+    for requester_id, identities in current.items():
+        if any(identity not in identities for identity in book.seen_keys.get(requester_id, [])):
+            for link in book.links:
+                if link.requester_id == requester_id and link.desired == "on":
+                    link.closed_before = now
+    book.seen_keys = {requester_id: sorted(identities) for requester_id, identities in current.items() if identities}
 
 
 def remove_links(book: LinkBook, where: Callable[[Link], bool], *, now: float, park: bool = False) -> list[Link]:

@@ -639,6 +639,40 @@ def test_operator_mode_adds_no_link_for_a_key_two_agents_share(
     assert read_links(paths).links == []
 
 
+def test_an_operator_key_removed_from_the_config_closes_the_sessions(config: Config, paths: RuntimePaths) -> None:
+    """A key the operator takes out of ``tailnet_ssh.authorized_keys`` closes the person's open sessions at once.
+
+    Each reconcile here starts from a fresh status, as after a restart, so the keys last seen are stored.
+    """
+    link = _enrolled(closed_before=NOW - 5)
+    _store(paths, link)
+    config.tailnet_ssh.authorized_keys[ALICE] = [PUBLIC_KEY]
+    assert [row["closed_before"] for row in _rows(config, paths)] == [NOW - 5]
+
+    config.tailnet_ssh.authorized_keys.clear()
+
+    assert [row["closed_before"] for row in _rows(config, paths, now=NOW + 5)] == [NOW + 5]
+    assert [row["closed_before"] for row in _rows(config, paths, now=NOW + 10)] == [NOW + 5]
+
+
+def test_a_key_still_in_the_portal_or_already_closed_for_closes_nothing_more(
+    config: Config,
+    paths: RuntimePaths,
+) -> None:
+    """An operator key the person also added is still theirs; a key removed in the portal closed the sessions then."""
+    link = _enrolled(closed_before=NOW - 5)
+    _store(paths, link)
+    update_links(paths, lambda book: set_keys(book, ALICE, [PUBLIC_KEY], now=NOW))
+    config.tailnet_ssh.authorized_keys[ALICE] = [PUBLIC_KEY]
+    _rows(config, paths)
+
+    config.tailnet_ssh.authorized_keys.clear()
+    assert [row["closed_before"] for row in _rows(config, paths, now=NOW + 5)] == [NOW - 5]
+
+    update_links(paths, lambda book: set_keys(book, ALICE, [], now=NOW + 6))
+    assert [row["closed_before"] for row in _rows(config, paths, now=NOW + 10)] == [NOW + 6]
+
+
 def test_a_steady_gateway_rewrites_nothing(config: Config, paths: RuntimePaths) -> None:
     """A reconcile or a report that changes no link leaves the stored file untouched."""
     link = _enrolled()

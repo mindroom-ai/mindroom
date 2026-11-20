@@ -21,8 +21,9 @@ from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tailnet_ssh.eligibility import link_ineligibility
-from mindroom.tailnet_ssh.projection import authorized_key_lines, write_projection
+from mindroom.tailnet_ssh.projection import authorized_key_lines, signin_keys, write_projection
 from mindroom.tailnet_ssh.store import (
+    close_sessions_of_gone_keys,
     default_hostname,
     finish_removal,
     new_link,
@@ -217,7 +218,8 @@ def desired_links(
 
     With an operator key, at most once a minute, every worker that serves SSH and has no link gets one, unless the
     link would be removed at once; one that is not eligible now is added and suspended. A link its person parked as
-    ``off`` is a link, so it is not added again.
+    ``off`` is a link, so it is not added again. A key gone from a person's keys, as when the operator removes one
+    from the config, closes their open sessions.
     """
     workers: list[WorkerHandle] = []
     # The backend is asked outside the store's lock, which connects and the portal wait for.
@@ -243,6 +245,12 @@ def desired_links(
                 link = new_link(requester_id, agent_name, handle.worker_key, default_hostname(agent_name), now=now)
                 if desired(link) != "removing":
                     book.links.append(link)
+        people = {link.requester_id for link in book.links}
+        close_sessions_of_gone_keys(
+            book,
+            {person: signin_keys(config, book, person).keys() for person in people},
+            now=now,
+        )
         verdicts = {link.id: desired(link) for link in book.links if link.desired == "on"}
         remove_links(book, lambda link: verdicts.get(link.id) == "removing", now=now)
         return [
