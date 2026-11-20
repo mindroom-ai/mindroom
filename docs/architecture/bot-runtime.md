@@ -79,7 +79,7 @@ An approved run's resume saves no checkpoint, since the paused row is what an ap
 A subagent job's child is the exception: its job asks for its approvals and resumes each paused row once, so nothing settles from that row, and its approved resume checkpoints as its fresh run does, and before each approved call, because a crash that left the paused row would end its job where a restart continues it.
 An interrupted edit regeneration also stays pending: a retry of the same edit recovers its attempts as above, and a newer edit's regeneration starts fresh, because it replaced the prompt the stopped attempts answered; a regeneration's approved resume that was cut short continues below what it showed, as an interrupted turn does.
 
-A chat command runs on the bot it is aimed at, which `TurnPolicy.owns_command` decides from the bot's own copy of the room and the room's joined candidates.
+A chat command runs on the bot it is aimed at, which `TurnPolicy.aims_command_at_me` decides from the bot's own copy of the room and the room's joined candidates.
 A Desktop agent alone with the requester runs `/desktop`; a command that mentions agents or teams goes to the lowest Matrix ID among the mentioned candidates; a command in a thread with one agent goes to that agent; any other command goes to the lowest Matrix ID among the room's candidates, whatever the reply mode, where `router.access` admits the requester.
 Bots can disagree while a join or a thread reaches them, so the first bot that decides saves the owner per event (`claim_room_event`, purpose `command`), and only the saved owner runs the command or says that its conversation is not resolved yet.
 A saved owner that never receives the command leaves it unanswered.

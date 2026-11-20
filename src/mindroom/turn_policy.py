@@ -573,26 +573,6 @@ class TurnPolicy:
             return False
         return not saved.endswith(_UNTARGETED) or self._routing_admits(requester_user_id, room.room_id)
 
-    async def owns_command(
-        self,
-        room: nio.MatrixRoom,
-        dispatch: PreparedDispatch,
-        command: Command,
-        *,
-        source_event_id: str,
-        names_me: bool = False,
-    ) -> bool:
-        """Return whether this bot runs one command: it is the command's saved owner."""
-        return await self.aims_command_at_me(
-            room,
-            dispatch.requester_user_id,
-            command,
-            dispatch.context.mentioned_agents,
-            dispatch.context.planning_thread_history,
-            source_event_id=source_event_id,
-            names_me=names_me,
-        )
-
     def is_room_steward(self, room_id: str) -> bool:
         """Return whether this bot is the room's steward, the one bot that routes there."""
         steward = self.deps.runtime.orchestrator.room_steward(room_id)

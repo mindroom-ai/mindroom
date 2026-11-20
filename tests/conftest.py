@@ -4511,10 +4511,9 @@ def enforce_turn_authorization() -> None:
 def commands_aimed_at_bot_under_test(monkeypatch: pytest.MonkeyPatch) -> None:
     """Aim every command at the bot under test, whatever its entity.
 
-    Whom a command is aimed at is `TurnPolicy.owns_command`'s own test; these tests are about what running one does.
+    Whom a command is aimed at is `TurnPolicy.aims_command_at_me`'s own test; these tests are about what running one does.
     """
     monkeypatch.setattr(TurnPolicy, "aims_command_at_me", AsyncMock(return_value=True))
-    monkeypatch.setattr(TurnPolicy, "owns_command", AsyncMock(return_value=True))
 
 
 @pytest.fixture

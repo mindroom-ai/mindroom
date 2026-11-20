@@ -902,7 +902,14 @@ async def _command_owners(
         policy = _policy_for(config, name)
         policy.deps.runtime.orchestrator.journal_store = journal_store or _claims()
         dispatch = _dispatch(context or _context(), agent_name=name)
-        if await policy.owns_command(room, dispatch, command, source_event_id=_EVENT_ID):
+        if await policy.aims_command_at_me(
+            room,
+            dispatch.requester_user_id,
+            command,
+            dispatch.context.mentioned_agents,
+            dispatch.context.planning_thread_history,
+            source_event_id=_EVENT_ID,
+        ):
             owners.append(name)
     return owners
 
@@ -1006,9 +1013,11 @@ async def test_named_model_device_claims_its_selection_while_another_responder_i
     assert command is not None
     dispatch = _dispatch(_context(), agent_name="general")
 
+    context = dispatch.context
+    aimed_at = (room, dispatch.requester_user_id, command, context.mentioned_agents, context.planning_thread_history)
     with pytest.raises(ReplyMembershipPendingError):
-        await policy.owns_command(room, dispatch, command, source_event_id="$unnamed:localhost")
-    assert await policy.owns_command(room, dispatch, command, source_event_id=_EVENT_ID, names_me=True)
+        await policy.aims_command_at_me(*aimed_at, source_event_id="$unnamed:localhost")
+    assert await policy.aims_command_at_me(*aimed_at, source_event_id=_EVENT_ID, names_me=True)
 
 
 def _router_access_denies_everyone(tmp_path: Path, **general: Any) -> Config:  # noqa: ANN401

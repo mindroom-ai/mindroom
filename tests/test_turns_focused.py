@@ -442,9 +442,6 @@ class _SpyTurnPolicy:
     async def aims_command_at_me(self, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
         return await self.inner.aims_command_at_me(*args, **kwargs)
 
-    async def owns_command(self, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
-        return await self.inner.owns_command(*args, **kwargs)
-
     def not_for_this_agent(self, *args: Any) -> bool:  # noqa: ANN401
         return self.inner.not_for_this_agent(*args)
 
