@@ -18,6 +18,8 @@ import pytest
 
 from mindroom.shell.execution import (
     ProcessRecord,
+    _idle_launch_argv,
+    _idle_launcher,
     _schedule_process_tree_idle,
     check_command,
     kill_all_records,
@@ -395,6 +397,75 @@ async def test_a_command_and_the_children_it_starts_run_at_the_lowest_cpu_priori
     message = await _run(registry, ["/bin/sh", "-c", f"sleep 0.2; {child}"], tmp_path)
 
     assert message == "19 True"
+
+
+def _exited(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
+@pytest.mark.asyncio
+async def test_a_process_the_command_leaves_behind_before_its_policy_could_be_set_runs_at_the_idle_policy(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A busy event loop can let a shell background a build and exit before MindRoom gets to the command."""
+    _idle_launcher.cache_clear()  # another test may have run the first command with a PATH that has no chrt
+    if _idle_launcher() is None:
+        pytest.skip("needs a chrt that can set SCHED_IDLE; without one only the walk after spawn runs")
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def spawn_then_let_the_shell_exit(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await original_spawn(*args, **kwargs)
+        deadline = time.monotonic() + 10
+        while not _exited(process.pid):
+            assert time.monotonic() < deadline, "the shell never exited"
+            await asyncio.sleep(0.01)
+        return process
+
+    monkeypatch.setattr("mindroom.shell.execution.asyncio.create_subprocess_exec", spawn_then_let_the_shell_exit)
+    orphan = int(await _run(registry, ["/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"], tmp_path))
+    try:
+        assert os.sched_getscheduler(orphan) == os.SCHED_IDLE
+    finally:
+        os.kill(orphan, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
+@pytest.mark.asyncio
+async def test_a_missing_program_reports_the_same_error_as_a_direct_spawn(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """Starting commands behind chrt must not turn a missing program into a command that exits 127."""
+    with pytest.raises(FileNotFoundError) as direct:
+        await asyncio.create_subprocess_exec("./no-such-program", cwd=tmp_path)
+
+    assert await _run(registry, ["./no-such-program"], tmp_path) == f"Error: {direct.value}"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
+def test_a_relative_path_entry_is_searched_from_the_command_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Popen finds a program on a relative PATH entry from the command's directory, so the lookup must too."""
+    for directory in ("workspace/scripts/only-in-workspace", "mindroom/scripts/only-in-mindroom"):
+        program = tmp_path / directory
+        program.parent.mkdir(parents=True)
+        program.write_text("#!/bin/sh\n")
+        program.chmod(0o755)
+    monkeypatch.chdir(tmp_path / "mindroom")
+    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: "/chrt")
+    env = {"PATH": "scripts"}
+    workspace = str(tmp_path / "workspace")
+
+    assert _idle_launch_argv(["only-in-workspace"], env, workspace) == ["/chrt", "-i", "0", "only-in-workspace"]
+    assert _idle_launch_argv(["only-in-mindroom"], env, workspace) == ["only-in-mindroom"]
 
 
 def _process_group_threads(pgid: int) -> list[int]:

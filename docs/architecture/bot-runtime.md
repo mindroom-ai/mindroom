@@ -105,6 +105,10 @@ Pure-policy ignores, such as unmentioned managed senders, blocked deep synthetic
 A global scan only discovers rooms; each room's lane runs its pending callbacks in receipt order, and a failure pauses only that room.
 Revisiting a receipt at or before the room's latest admitted receipt also backs off, because immediate downstream handoffs would otherwise trap recovery in a retry loop.
 A periodic liveness sweep exists because a downstream owner can vanish without a completion notification.
+A running turn stays a pending row until its owner hands it back, so discovery does not page through running turns again on every wake: while turns are in flight it reads only what was admitted after its last finished scan.
+A lane still starts each pass at the front of its room, because a commit is visible before anything announces it, and an older source it made runnable has to run before the room's newer ones.
+A retry or a lost owner rewinds its room, and so does a departing router that fails a reply paused on its approval card, so the freed source still runs before later messages in its room.
+The same sweep, which starts with the first turn in flight, sends discovery over the whole backlog again, which reopens a room for work that became runnable with nothing to announce it.
 
 ### Shutdown, replacement, and crash
 

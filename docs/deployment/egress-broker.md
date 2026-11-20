@@ -27,17 +27,21 @@ The TTL applies to new requests: an expired token gets 407 on every new request,
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
 That includes LAN and Tailscale addresses and names that resolve to them, unless [`private_networks`](#private-networks) lists them.
 Without that, a command that needs one can bypass the broker, for example with `curl --noproxy '*'`, where the worker's network allows direct connections.
+A `shell` call that runs in the primary process can always bypass the broker that way, so the broker does not refuse private addresses for it; see [Private networks](#private-networks).
 
 ## Configuration
 
 ### Environment variables
 
-Set these on the primary runtime to enable the broker:
+The broker is on by default.
+With none of these set, it listens on `127.0.0.1` on a free port the system picks, and only `shell` calls that run in the primary process use it: no worker-facing URL is known, so worker-routed calls get no broker environment.
+The port is picked at each start, so two MindRoom instances on one machine never collide; nothing outside the primary needs to know it.
+Set the port and URL to serve workers too:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MINDROOM_EGRESS_BROKER_PORT` | Yes (when using the broker) | Unset (broker disabled) | Port the broker listens on, such as 8768; when unset the broker stays off |
-| `MINDROOM_EGRESS_BROKER_HOST` | No | `0.0.0.0` | Bind address for the broker listener |
+| `MINDROOM_EGRESS_BROKER_PORT` | Yes (to serve workers) | Unset (loopback broker for primary shells) | Port the broker listens on, such as 8768; `off` or `0` turns the broker off |
+| `MINDROOM_EGRESS_BROKER_HOST` | No | `0.0.0.0` (`127.0.0.1` when the port is unset) | Bind address for the broker listener; used only when the port is set |
 | `MINDROOM_EGRESS_BROKER_URL` | Yes (when port is set) | None | Worker-facing first hop, such as `http://host.docker.internal:8768` for Docker workers or `http://squid:3128` in an approved-egress chain |
 | `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` | No | `604800` (7 days) | How long each minted worker token remains valid |
 
@@ -46,11 +50,12 @@ Its CA variables (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_
 Every tool gets the same files, and their system roots are the file the primary's exported `SSL_CERT_FILE` names when one is set, otherwise OpenSSL's default file or certifi, so a tool that used roots of its own before, such as Python Requests with certifi, trusts these instead.
 On macOS, Go programs such as `gh` verify certificates with the system keychain and ignore these variables, so from a primary shell there they do not trust the broker CA.
 
-When `MINDROOM_EGRESS_BROKER_PORT` is unset, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
-Keys and accounts can only be entered while the port is set.
-With the port set, the request log and CA download routes return 409 while the broker is not running.
+With `MINDROOM_EGRESS_BROKER_PORT=off`, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
+Keys and accounts can only be entered while the broker is on.
+While it is on, the request log and CA download routes return 409 when the broker is not running.
 
-Running MindRoom with `--no-api` disables the broker along with the API.
+Running MindRoom with `--no-api` disables the broker along with the API, since nobody could answer a key request; with a set port, MindRoom logs a warning and keeps running.
+Without a port, the broker is also off when the primary's `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is set in any case, exported or in the `.env` beside `config.yaml`, so shell calls on a proxied network keep using that proxy as before; set a port to use the broker there. It is off as well when it fails to start, for example on an invalid token TTL, unreadable broker state, or a loopback port it cannot bind. MindRoom stops whatever the broker started, logs a warning, and keeps running without it. With a set port, a failure to start stops startup instead.
 
 ### Service rules
 
@@ -87,13 +92,14 @@ The service name is yours to choose; it names the stored `egress_<name>` credent
 | `google_docs` | `google_docs` | `docs.googleapis.com` bearer | None |
 | `google_tasks` | `google_tasks` | `tasks.googleapis.com` bearer; `www.googleapis.com` path `/tasks/`, bearer | None |
 | `atlassian` | `atlassian` | `api.atlassian.com` bearer | None |
+| `overleaf` | None | `git.overleaf.com` basic with username `git` | None |
 | `openai` | None | `api.openai.com` bearer | `OPENAI_API_KEY` |
 | `anthropic` | None | `api.anthropic.com` header `x-api-key` | `ANTHROPIC_API_KEY` |
 
 Placeholder values are `mindroom-brokered`.
 Presets without a connected account take an API key only.
 A preset's connected account is used only after someone allows Agent Keys to use it; see [Using a connected account](#using-a-connected-account).
-The Google presets and `atlassian` also set [`read_only`](#read-only-accounts), with `google_calendar` listing `/calendar/v3/freeBusy`, so their accounts can be allowed read only; `github` does not, because git clone and fetch read with `POST`.
+The Google presets and `atlassian` also set [`read_only`](#read-only-accounts), with `google_calendar` listing `/calendar/v3/freeBusy`, so their accounts can be allowed read only; `github` and `overleaf` do not, because git clone and fetch read with `POST`.
 
 Several Google presets share `www.googleapis.com`.
 Longest path prefix matching picks the right service, and a request to another path on that host is forwarded without injection, because the host has rules and so does not count as unmatched.
@@ -101,6 +107,27 @@ Longest path prefix matching picks the right service, and a request to another p
 Any field you set next to `preset` replaces the preset's value for that field as a whole, such as `display_name: Work GitHub`, or `placeholder_env: {}` to drop the `github` preset's `GH_TOKEN` and `GITHUB_TOKEN`.
 Fields you leave out keep coming from the preset, so MindRoom updates to a preset reach your service, and an authored `rules` list replaces all of the preset's rules.
 A service must end up with at least one rule, from `rules` or from its preset.
+
+#### Overleaf
+
+Overleaf has no API for agents, only its Git bridge at `https://git.overleaf.com/<project_id>`, which takes a Git authentication token as the password of user `git`.
+The token comes from **Git integration** in Overleaf's [Account Settings](https://www.overleaf.com/user/settings), and Git access needs an Overleaf premium plan.
+Add the `overleaf` preset, on the Agent Keys page with **Add service** or in `config.yaml`, and store the token as its key, or let the agent ask for it with [`request_secret`](#asking-in-chat).
+The agent's `git clone`, `git pull`, and `git push` then authenticate without the token in the URL or the agent's environment.
+Give the agent the bundled `overleaf` skill, which covers cloning, pushing to `master`, and Overleaf's errors:
+
+```yaml
+egress_broker:
+  services:
+    overleaf:
+      preset: overleaf
+agents:
+  writer:
+    tools: [shell, egress_credentials]
+    skills: [overleaf]
+```
+
+For a self-hosted Overleaf Server Pro, define a custom service for its host with `auth: {type: basic, username: git}`.
 
 #### Custom services
 
@@ -237,7 +264,11 @@ On the personal page, users who can manage the agent get **Limit to repositories
 ### Private networks
 
 The broker refuses private addresses, so by default worker calls through it cannot reach your LAN or your Tailscale network.
-List the ranges agents may reach in `private_networks`:
+`shell` calls that run in the primary process are the exception: they can reach any address directly, so the guard would protect nothing and only break Home Assistant, a NAS, or Ollama.
+The broker dials private, unique-local, and Tailscale addresses for them as if every range were listed, and still refuses loopback, link-local, and cloud metadata addresses.
+It also resolves `*.local` names for them, such as `homeassistant.local`, and checks the addresses they resolve to by the same rule.
+The token of each call says which kind it is, signed by the broker, so a worker cannot claim the primary's rule.
+List the ranges worker calls may reach in `private_networks`:
 
 ```yaml
 egress_broker:
@@ -267,7 +298,7 @@ A service can take its secret from two sources in a worker's scope:
 
 - **API key**: a key stored for the scope, set by hand.
 - **Connected account**: an OAuth login that the user connected through MindRoom's OAuth providers (the GitHub App user login, the Google providers, Atlassian).
-  A service uses this source when it has an `oauth_provider`, which every preset except `openai` and `anthropic` sets, and only after someone allows Agent Keys to use the account; see [Using a connected account](#using-a-connected-account).
+  A service uses this source when it has an `oauth_provider`, which every preset except `openai`, `anthropic`, and `overleaf` sets, and only after someone allows Agent Keys to use the account; see [Using a connected account](#using-a-connected-account).
 
 A [GitHub App](#github-app) service uses only tokens of its App instead.
 

@@ -97,11 +97,19 @@ _PAGE_SERVED = {"MINDROOM_EGRESS_BROKER_PORT": "8768", "MINDROOM_TRUSTED_UPSTREA
 
 
 def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
-    """Return a runtime on the Docker worker backend unless `env` names another, so `user_agent` workers are private."""
+    """Return a runtime on the Docker worker backend unless `env` names another, so `user_agent` workers are private.
+
+    The broker is off unless `env` sets its port.
+    """
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
-        process_env={"MINDROOM_NAMESPACE": "", "MINDROOM_WORKER_BACKEND": "docker", **env},
+        process_env={
+            "MINDROOM_NAMESPACE": "",
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_EGRESS_BROKER_PORT": "off",
+            **env,
+        },
     )
 
 
@@ -531,7 +539,7 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
 @pytest.mark.parametrize("broker_on", [False, True])
 def test_an_agent_gets_the_tool_only_while_the_broker_is_on(tmp_path: Path, *, broker_on: bool) -> None:
     """With the broker off a config that lists the tool stays valid, and the agent's tools leave it out."""
-    runtime_paths = _runtime_paths(tmp_path, **({"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}))
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_EGRESS_BROKER_PORT="8768" if broker_on else "off")
     agent = AgentConfig(display_name="Code", tools=["shell", "egress_credentials"], worker_scope="user_agent")
     config = bind_runtime_paths(Config(agents={"code": agent}), runtime_paths)
 
@@ -1096,6 +1104,21 @@ async def test_a_key_card_shows_a_link_and_a_field_hint(tmp_path: Path) -> None:
     assert (content["url"], content["placeholder"]) == ("https://github.com/settings/tokens", "ghp_…")
     assert card["body"].endswith("Where to get it: https://github.com/settings/tokens")
     _final_card(context, "declined")
+
+
+@pytest.mark.asyncio
+async def test_a_key_card_asks_for_the_overleaf_git_token(tmp_path: Path) -> None:
+    """The Overleaf preset takes a key, so the card names Overleaf and the Git bridge host the token goes to."""
+    tool, context = _asking(tmp_path, {"overleaf": {"preset": "overleaf"}})
+
+    task = _start(tool, context, "overleaf", url="https://www.overleaf.com/user/settings")
+    card = await _posted_card(context, task)
+    secret_request_registry().resolve(_request_id(card), "declined")
+    await task
+
+    content = card[SECRET_REQUEST_CONTENT_KEY]
+    assert (content["service"], content["display_name"]) == ("overleaf", "Overleaf")
+    assert content["hosts"] == ["git.overleaf.com"]
 
 
 @pytest.mark.asyncio

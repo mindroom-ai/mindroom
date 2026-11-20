@@ -2028,6 +2028,10 @@ async def _run_runtime(  # noqa: PLR0915
 
         shorten_gil_switch_interval()
         stall_detector = start_event_loop_stall_detector(runtime_paths)
+        # Deferred: the broker loads h11 and its TLS stack.
+        from mindroom.egress_broker.service import turn_off_unusable_default_broker  # noqa: PLC0415
+
+        runtime_paths = turn_off_unusable_default_broker(runtime_paths, api=api)
 
         # The first start after an upgrade converts every conversation database before the API binds, which can take
         # minutes, so probes meanwhile see a live process that is not ready yet instead of a closed port.
