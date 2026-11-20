@@ -1593,7 +1593,10 @@ class DeliveryGateway:
         return outcome.event_id if isinstance(outcome, DeliveredMatrixEvent) else None
 
     async def sent_route(self, room_id: str, source_event_ids: Sequence[str]) -> str | None:
-        """Return the route this bot sent for exactly these messages, when the room's history since them holds one."""
+        """Return the route this bot sent for exactly these messages, when the room's history since them holds one.
+
+        Raises ``UnresolvedOpaqueRoomHistoryError`` when an event of this bot's that it cannot read may be that route.
+        """
         return await find_route_event_id_via_room_messages(
             self._ready_client(),
             room_id,

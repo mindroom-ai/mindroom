@@ -113,6 +113,7 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
 from mindroom.matrix.journal_ingress import _inbound_event
 from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.room_history_reads import UnresolvedOpaqueRoomHistoryError
 from mindroom.matrix.segmented_messages import segment_matrix_content
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
@@ -6294,6 +6295,49 @@ async def test_rejection_replay_adopts_durable_response(config: Config, tmp_path
     assert record is not None
     assert record.completed is True
     assert record.response_event_id == "$sent-1:localhost"
+
+
+@pytest.mark.asyncio
+async def test_router_relay_replay_picks_nobody_new_past_its_own_unreadable_history(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replay that cannot read its own events since the message may have routed it: it waits and routes nobody."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("route this", event_id="$router-replay:localhost")
+    handled_turn = TurnRecord.create([event.event_id], completed=False)
+
+    async def route() -> bool:
+        return await execute_router_relay(
+            harness.dispatcher.deps,
+            room,
+            event,
+            (),
+            requester_user_id=_SENDER,
+            handled_turn=handled_turn,
+        )
+
+    # The first attempt stops after its send, before it records the route it sent.
+    with (
+        patch.object(harness.turn_store, "record_placeholder", side_effect=RuntimeError("stopped")),
+        pytest.raises(RuntimeError, match="stopped"),
+    ):
+        await route()
+    assert len(harness.gateway.routes) == 1
+    unreadable = AsyncMock(side_effect=UnresolvedOpaqueRoomHistoryError("own ciphertext"))
+    monkeypatch.setattr(harness.gateway, "sent_route", unreadable)
+
+    assert await route() is False
+
+    unreadable.assert_awaited_once()
+    assert len(harness.gateway.routes) == 1
+    # The turn stays pending, so a replay that can read the room again adopts the route or picks anew.
+    record = await harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.completed is False
+    assert harness.ignored_dispatch_sources == []
 
 
 @pytest.mark.asyncio

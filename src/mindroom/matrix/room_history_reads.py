@@ -33,7 +33,7 @@ _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
 
 
-class _UnresolvedOpaqueRoomHistoryError(RuntimeError):
+class UnresolvedOpaqueRoomHistoryError(RuntimeError):
     """Raised when undecryptable events from a delivery's sender could hide the exact delivery a scan must prove."""
 
 
@@ -172,9 +172,12 @@ async def find_route_event_id_via_room_messages(
 
     The walk starts at the room's newest event and ends at the route, at the oldest of the messages, which every route
     of them follows, or at the scan's page bound: a route older than that was lost long ago.
+    Raises ``UnresolvedOpaqueRoomHistoryError`` when it finds no route and passed an event of the account that this
+    device cannot read, which may be that route.
     """
     sources = sorted(source_event_ids)
     remaining = set(sources)
+    opaque = False
     from_token: str | None = None
     for _page in range(_MAX_EXACT_DELIVERY_SCAN_PAGES):
         response = await client.room_messages(
@@ -192,19 +195,19 @@ async def find_route_event_id_via_room_messages(
             content = event_source.get("content")
             route = content.get(ROUTE_EVENT_TYPE) if isinstance(content, dict) else None
             routed = route.get("event_ids") if isinstance(route, dict) else None
-            if (
-                event_source.get("sender") == client.user_id
-                and event_source.get("type") == ROUTE_EVENT_TYPE
-                and isinstance(routed, list)
-                and sorted(map(str, routed)) == sources
-            ):
+            own_type = event_source.get("type") if event_source.get("sender") == client.user_id else None
+            if own_type == ROUTE_EVENT_TYPE and isinstance(routed, list) and sorted(map(str, routed)) == sources:
                 return event.event_id
+            opaque = opaque or own_type == "m.room.encrypted"
             remaining.discard(event_source.get("event_id"))
             if not remaining:
-                return None
-        if not response.end:
-            return None
+                break
+        if not remaining or not response.end:
+            break
         from_token = response.end
+    if opaque:
+        msg = f"route recovery room scan for {room_id} passed events of its sender that this device cannot read"
+        raise UnresolvedOpaqueRoomHistoryError(msg)
     return None
 
 
@@ -220,7 +223,7 @@ def _refuse_opaque_exact_delivery_candidate(
         return
     if event_source.get("type") == "m.room.encrypted":
         msg = f"exact delivery room scan for {room_id} contains undecryptable events from its sender"
-        raise _UnresolvedOpaqueRoomHistoryError(msg)
+        raise UnresolvedOpaqueRoomHistoryError(msg)
 
 
 async def find_outbox_delivery_event_id_via_room_messages(

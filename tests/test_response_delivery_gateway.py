@@ -70,6 +70,7 @@ from mindroom.matrix.large_messages import (
     calculate_event_size,
     fit_reasoning_to_ordinary_event,
 )
+from mindroom.matrix.room_history_reads import UnresolvedOpaqueRoomHistoryError
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
 from mindroom.reply_scope import current_span, initial_write
@@ -4324,6 +4325,25 @@ def _history(gateway: DeliveryGateway, *pages: list[nio.Event]) -> AsyncMock:
     ]
     gateway.deps.runtime.client.room_messages = AsyncMock(side_effect=responses)
     return gateway.deps.runtime.client.room_messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readable_route", [False, True])
+async def test_an_unreadable_event_of_its_own_may_be_the_route_a_steward_sent(
+    tmp_path: Path,
+    readable_route: bool,
+) -> None:
+    """A route the steward can read is adopted; without one, its own ciphertext since the message may hide it."""
+    gateway = _gateway(tmp_path)
+    own_ciphertext = _history_event("$opaque", "m.room.encrypted", sender=_AGENT_USER_ID, ciphertext="opaque")
+    route = [_own_route("$route", "$question")] if readable_route else []
+    _history(gateway, [own_ciphertext, *route, _history_event("$question", "m.room.message", body="who can help?")])
+
+    if readable_route:
+        assert await gateway.sent_route(_ROOM_ID, ["$question"]) == "$route"
+    else:
+        with pytest.raises(UnresolvedOpaqueRoomHistoryError, match="cannot read"):
+            await gateway.sent_route(_ROOM_ID, ["$question"])
 
 
 @pytest.mark.asyncio

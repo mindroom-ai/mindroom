@@ -7177,6 +7177,7 @@ from = ["mindroom.matrix.client_visible_messages"]
 [[interfaces]]
 expose = [
     "RoomThreadsPageError",
+    "UnresolvedOpaqueRoomHistoryError",
     "enumerate_room_thread_root_ids",
     "find_outbox_delivery_event_id_via_room_messages",
     "find_response_event_ids_via_room_messages",

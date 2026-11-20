@@ -29,6 +29,7 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.media import is_matrix_media_dispatch_event
+from mindroom.matrix.room_history_reads import UnresolvedOpaqueRoomHistoryError
 from mindroom.routing import suggest_responder_for_message
 from mindroom.turn_origin import original_sender_for_router_relay
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
@@ -121,14 +122,22 @@ async def _earlier_attempt_outcome(deps: _RouterRelaySupport, room_id: str, even
     """Return what an earlier attempt at this turn decided, or None when it decided nothing that still holds.
 
     A replay keeps that decision and selects nobody anew. True means that attempt selected this steward, which
-    answers again. False means it sent its route and stopped before it recorded it, and the route is adopted.
+    answers again. False means it sent its route and stopped before it recorded it, and the route is adopted, or
+    that an event of this steward's since the turn, which it cannot read, may be that route: the turn stays pending.
     """
     earlier = await deps.turn_store.get_turn_record(event_id)
     if earlier is None or earlier.completed or earlier.response_owner is None:
         return None
     if earlier.history_scope is not None:
         return await _still_steward(deps, room_id, earlier)
-    sent_route = earlier.response_event_id or await deps.delivery_gateway.sent_route(room_id, earlier.source_event_ids)
+    try:
+        sent_route = earlier.response_event_id or await deps.delivery_gateway.sent_route(
+            room_id,
+            earlier.source_event_ids,
+        )
+    except UnresolvedOpaqueRoomHistoryError:
+        deps.logger.warning("Cannot read whether this turn was routed; routing nobody again", event_id=event_id)
+        return False
     if sent_route is None:
         return None
     await deps.turn_store.record_responded_turn(canonicalize_turn_record(earlier, response_event_id=sent_route))
