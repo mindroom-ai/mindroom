@@ -50,7 +50,7 @@ Two read-only explorations of `origin/main` 55646059a, written independently on 
    A room-scoped hook runs once per event; a service-scoped hook runs once per process.
    Room-scoped message and reaction hooks run on the first eligible emitter, the first bot that admitted the sender and emits the event, not on the steward.
    Room-scoped member hooks, and emissions without a Matrix event, run on the room's steward.
-   `agents=(ROUTER_AGENT_NAME,)` stays as a deprecated alias: service scope on `bot:ready` and `config:reloaded`, room scope on every other event.
+   `agents=(ROUTER_AGENT_NAME,)` stays as a deprecated alias: service scope on `bot:ready`, room scope on every other event but `config:reloaded`, where the filter stays and, as before, never matches.
 6. **Config keeps the `router:` section.**
    `model` and `judgment` configure routing.
    `access`, when set, stays an extra restriction on routing, because dropping it would widen access on deployments that set it.
