@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV
 from mindroom.script_runs import launch_contract
@@ -67,10 +67,14 @@ async def launch_supervised_script(
     snapshot: ScriptSnapshot,
     workspace: Path,
     max_runtime_seconds: int,
+    entry: Literal["script", "workflow"],
 ) -> str | None:
     """Start the shim on one run's snapshot; return None once the supervisor owns its handle, else the refusal."""
     script_environment = {
         **environment,
+        # A workflow replays its calls on resume, so a prompt built from a set must come out the same each time.
+        **({"PYTHONHASHSEED": "0"} if entry == "workflow" else {}),
+        launch_contract.ENTRY_ENV: entry,
         launch_contract.GATEWAY_URL_ENV: gateway_url.rstrip("/"),
         launch_contract.RUN_ID_ENV: run_id,
         launch_contract.SOURCE_DIGEST_ENV: source_digest,

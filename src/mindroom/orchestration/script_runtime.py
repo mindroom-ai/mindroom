@@ -49,6 +49,7 @@ from mindroom.script_runs.reasons import (
     RUNTIME_SHUTDOWN,
     SCRIPT_TOOL_REMOVED,
     WORKER_CONFIGURATION_CHANGED,
+    WORKFLOW_TOOL_REMOVED,
 )
 from mindroom.script_runs.recovery import run_matches_recovery_signature, script_process_authority
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
@@ -595,10 +596,12 @@ class ScriptRuntimeLifecycle:
             for agent_name in continuing_agents
             if current_config.agents[agent_name].private != new_config.agents[agent_name].private
         }
+        # A run's entry is also the name of the tool that launches it, so each tool's removal revokes its own runs.
         script_tool_removals = {
-            agent_name
+            (agent_name, entry)
             for agent_name in continuing_agents
-            if _agent_has_script_tool(current_config, agent_name) and not _agent_has_script_tool(new_config, agent_name)
+            for entry in ("script", "workflow")
+            if _agent_has_tool(current_config, agent_name, entry) and not _agent_has_tool(new_config, agent_name, entry)
         }
         process_authority_changes = {
             agent_name
@@ -652,7 +655,7 @@ class ScriptRuntimeLifecycle:
         *,
         removed_agents: set[str],
         isolation_changes: set[str],
-        script_tool_removals: set[str],
+        script_tool_removals: set[tuple[str, str]],
         process_authority_changes: set[str],
         authorization_config: Config | None,
         plugins_changed: bool,
@@ -664,11 +667,17 @@ class ScriptRuntimeLifecycle:
             if authorization_config is not None
             and self.resolver.is_authorized(run, config=authorization_config) is not True
         }
-        affected_agents = removed_agents | isolation_changes | script_tool_removals | process_authority_changes
+        affected_agents = removed_agents | isolation_changes | process_authority_changes
         affected = (
             runs
             if plugins_changed
-            else [run for run in runs if run.run_id in unauthorized_ids or run.agent_name in affected_agents]
+            else [
+                run
+                for run in runs
+                if run.run_id in unauthorized_ids
+                or run.agent_name in affected_agents
+                or (run.agent_name, run.entry) in script_tool_removals
+            ]
         )
         await self._interrupt_runs(
             affected,
@@ -1200,9 +1209,9 @@ def _run_execution_identity(run: ScriptRunRecord) -> ToolExecutionIdentity:
     )
 
 
-def _agent_has_script_tool(config: Config, agent_name: str) -> bool:
-    """Return whether one agent's effective tool surface includes script controls."""
-    return "script" in config.resolve_agent(agent_name).tools.tool_names
+def _agent_has_tool(config: Config, agent_name: str, tool_name: str) -> bool:
+    """Return whether one agent's effective tool surface includes the tool that launches its scripts or workflows."""
+    return tool_name in config.resolve_agent(agent_name).tools.tool_names
 
 
 def _reload_reason_for(
@@ -1210,7 +1219,7 @@ def _reload_reason_for(
     *,
     removed_agents: set[str],
     isolation_changes: set[str],
-    script_tool_removals: set[str],
+    script_tool_removals: set[tuple[str, str]],
     process_authority_changes: set[str],
     plugins_changed: bool,
 ) -> str:
@@ -1220,8 +1229,8 @@ def _reload_reason_for(
         return OWNER_AGENT_REMOVED
     if run.agent_name in isolation_changes:
         return AGENT_ISOLATION_CHANGED
-    if run.agent_name in script_tool_removals:
-        return SCRIPT_TOOL_REMOVED
+    if (run.agent_name, run.entry) in script_tool_removals:
+        return SCRIPT_TOOL_REMOVED if run.entry == "script" else WORKFLOW_TOOL_REMOVED
     if run.agent_name in process_authority_changes:
         return WORKER_CONFIGURATION_CHANGED
     return OWNER_AUTHORIZATION_REVOKED

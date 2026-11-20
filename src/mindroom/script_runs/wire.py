@@ -81,6 +81,7 @@ class SandboxScriptRunRequest(BaseModel):
     source_digest: str = Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
     gateway_url: str = Field(min_length=1, max_length=2048)
     max_runtime_seconds: int = Field(gt=0, strict=True)
+    entry: Literal["script", "workflow"] = "script"
     private_agent_names: list[str] | None = Field(default=None, max_length=128)
     config_snapshot: dict[str, Any] | None = None
 

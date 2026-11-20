@@ -315,6 +315,25 @@ def test_run_store_migrates_existing_table_without_recovery_signature(runtime_pa
     assert ScriptRunStore(runtime_paths).get_run(recoverable.run_id).recovery_signature == "launch-contract-digest"
 
 
+def test_run_store_migrates_existing_table_without_workflow_run_id(runtime_paths: RuntimePaths) -> None:
+    """A database from before workflows gains the column; its runs read as plain scripts, new attempts name their run."""
+    legacy = ScriptRunStore(runtime_paths).create_run(_new_run())
+    database_path = runtime_paths.control_state_root / "script_runs" / "script_runs.sqlite3"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("ALTER TABLE script_runs DROP COLUMN workflow_run_id")
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = ScriptRunStore(runtime_paths)
+    attempt = store.create_run(replace(_new_run(), run_id="attempt-1", workflow_run_id="wf-" + "a" * 32))
+
+    assert (store.get_run(legacy.run_id).workflow_run_id, store.get_run(legacy.run_id).entry) == (None, "script")
+    reopened = ScriptRunStore(runtime_paths).get_run(attempt.run_id)
+    assert (reopened.workflow_run_id, reopened.entry) == ("wf-" + "a" * 32, "workflow")
+
+
 def test_write_transaction_closes_connection_when_begin_fails(
     runtime_paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,

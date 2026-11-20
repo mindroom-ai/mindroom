@@ -2407,12 +2407,17 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.script_runs.shim"
-depends_on = ["mindroom.path_confinement", "mindroom.script_runs.launch_contract"]
+depends_on = ["mindroom.path_confinement", "mindroom.workflow", "mindroom.script_runs.launch_contract"]
 
 # The shim and the script SDK import it inside script processes, so it stays standard-library only.
 [[modules]]
 path = "mindroom.script_runs.launch_contract"
 depends_on = []
+
+# The workflow SDK runs inside script processes too, under the same rule.
+[[modules]]
+path = "mindroom.workflow"
+depends_on = ["mindroom.script_runs.launch_contract"]
 
 [[modules]]
 path = "mindroom.script_runs.supervised"

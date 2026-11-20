@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 from mindroom.workers.models import process_worker_key
@@ -67,6 +68,8 @@ class ScriptRunRecord:
     worker_backend_locator: str | None = None
     snapshot_locator: str | None = None
     recovery_signature: str | None = None
+    workflow_run_id: str | None = None
+    """The workflow run this script run is an attempt of; `None` for a plain script."""
     name: str | None = None
     local_unsafe: bool = False
     resource_profile: str | None = None
@@ -83,6 +86,11 @@ class ScriptRunRecord:
     output: str = ""
     cancel_requested_at: str | None = None
     cancellation_reason: str | None = None
+
+    @property
+    def entry(self) -> Literal["script", "workflow"]:
+        """What the shim does with the source: run it as `__main__`, or hand it to the workflow SDK."""
+        return "script" if self.workflow_run_id is None else "workflow"
 
     @property
     def accepts_calls(self) -> bool:
