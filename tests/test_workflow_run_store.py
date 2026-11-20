@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -169,6 +170,20 @@ def test_reserve_refuses_a_run_id_that_exists_or_is_malformed(tmp_path: Path) ->
     with pytest.raises(ValueError, match="wf- followed by 32"):
         store.reserve_run(_run("wf-short"))
     assert validated_workflow_run_id(new_workflow_run_id()) != new_workflow_run_id()
+
+
+def test_concurrent_writers_reserve_one_run_and_number_nodes_without_gaps(tmp_path: Path) -> None:
+    """Racing starts of one job make one run, and racing nodes each get their own sequence number."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    run_ids = [f"wf-{number:032x}" for number in range(8)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        reserved = list(pool.map(lambda run_id: store.reserve_run(_run(run_id, origin_job_id="job-1")), run_ids))
+        winner = reserved[0][0].run_id
+        nodes = list(pool.map(lambda number: store.put_node(_node(key=f"@{number}", run_id=winner)), range(16)))
+    assert [created for _run_record, created in reserved].count(True) == 1
+    assert {run.run_id for run, _created in reserved} == {winner}
+    assert [run.run_id for run in store.list_runs()] == [winner]
+    assert sorted(node.seq for node in nodes) == list(range(1, 17))
 
 
 def test_delete_intent_removes_only_a_run_that_never_started(tmp_path: Path) -> None:
