@@ -313,7 +313,7 @@ class _QueuedLogHandler(logging.handlers.QueueHandler):
         # Unlike `queue.Queue`, `SimpleQueue` is reentrant, so a finalizer that logs during a put cannot deadlock it.
         super().__init__(queue.SimpleQueue())
         self._target = target
-        self._output = output
+        self.output = output
         self._dropped_records = 0
         # A later `dictConfig`, such as uvicorn's, drops this handler from the list `logging.shutdown` closes at exit.
         atexit.register(self.close)
@@ -353,7 +353,7 @@ class _QueuedLogHandler(logging.handlers.QueueHandler):
                 "levelno": logging.WARNING,
                 "levelname": "WARNING",
                 "msg": "Log output dropped records while its writes were stalled",
-                "log_output": self._output,
+                "log_output": self.output,
                 "dropped_records": self._dropped_records,
             },
         )
@@ -384,9 +384,12 @@ def _flush_logs_before_excepthook(
     exc: BaseException,
     tb: TracebackType | None,
 ) -> None:
-    """Write queued records before the traceback of an uncaught exception, which would otherwise come first."""
+    """Write queued stderr records before the traceback of an uncaught exception, which would otherwise come first.
+
+    The log file drains at exit, so a stalled file cannot hold back the traceback.
+    """
     for handler in logging.getLogger().handlers:
-        if isinstance(handler, _QueuedLogHandler):
+        if isinstance(handler, _QueuedLogHandler) and handler.output == "stderr":
             handler.flush()
     assert _previous_excepthook is not None
     _previous_excepthook(exc_type, exc, tb)

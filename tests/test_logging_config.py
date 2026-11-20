@@ -1194,6 +1194,33 @@ raise RuntimeError("uncaught_after_logging")
     assert lines[-1] == "RuntimeError: uncaught_after_logging"
 
 
+def test_stalled_log_file_does_not_hold_back_an_uncaught_exception_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stalling_log_files: list[_StallingLogStream],
+) -> None:
+    """The exception hook writes queued stderr records only, so a stalled log file cannot delay the traceback."""
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    [log_stream] = stalling_log_files
+    log_stream.writable.clear()
+    hooked: list[type[BaseException]] = []
+    monkeypatch.setattr(logging_config, "_previous_excepthook", lambda exc_type, *_: hooked.append(exc_type))
+    try:
+        get_logger("tests.logging").info("logged_during_file_stall")
+        assert log_stream.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+        hook = threading.Thread(
+            target=logging_config._flush_logs_before_excepthook,
+            args=(RuntimeError, RuntimeError(), None),
+        )
+        hook.start()
+        hook.join(SETTLE_TIMEOUT_SECONDS)
+        assert not hook.is_alive()
+        assert hooked == [RuntimeError]
+    finally:
+        log_stream.writable.set()
+    logging.shutdown()
+
+
 def test_log_file_keeps_its_records_after_another_logging_config(tmp_path: Path) -> None:
     """A later `dictConfig`, like the one uvicorn runs for the API server, leaves the file receiving records to exit."""
     child = """
