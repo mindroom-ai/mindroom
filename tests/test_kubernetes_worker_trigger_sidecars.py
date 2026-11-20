@@ -297,7 +297,8 @@ def test_kubernetes_config_names_sidecar_fields_the_client_rejects_without_their
         KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
 
     assert str(raised.value) == (
-        f"{_EXTRA_CONTAINERS_ENV}[0] is not a valid Kubernetes Container: env.0: unknown field; securityContext: unknown field"
+        f"{_EXTRA_CONTAINERS_ENV}[0] is not a valid Kubernetes Container: "
+        "env.0: invalid value (extra_forbidden); securityContext: invalid value (extra_forbidden)"
     )
     assert raised.value.__context__ is None
 
@@ -314,7 +315,30 @@ def test_kubernetes_config_names_sidecar_fields_the_client_rejects_without_their
             _EXTRA_CONTAINERS_ENV,
             {"name": "trigger-listener", "image": "busybox", "resources": {"limits": {"hunter2": []}}},
         ),
+        (
+            _EXTRA_CONTAINERS_ENV,
+            {"name": "trigger-listener", "image": "busybox", "resources": {"limits": {"hunter2": None}}},
+        ),
+        (_EXTRA_CONTAINERS_ENV, {"name": "trigger-listener", "image": "busybox", "securityContext": {"hunter2": 1}}),
         (_EXTRA_VOLUMES_ENV, {"name": "trigger-state", "emptyDir": {}, "hunter2-key": True}),
+        (
+            _EXTRA_VOLUMES_ENV,
+            {
+                "name": "pod-info",
+                "projected": {
+                    "sources": [
+                        {"clusterTrustBundle": {"path": "ca", "labelSelector": {"matchLabels": {"hunter2": True}}}},
+                        {
+                            "podCertificate": {
+                                "signerName": "x",
+                                "keyType": "RSA3072",
+                                "userAnnotations": {"hunter2": True},
+                            }
+                        },
+                    ],
+                },
+            },
+        ),
     ],
 )
 def test_kubernetes_config_never_echoes_rejected_sidecar_keys(tmp_path: Path, env_name: str, item: object) -> None:

@@ -9,7 +9,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from types import UnionType
+from typing import TYPE_CHECKING, Literal, TypedDict, Union, cast, get_args, get_origin
 
 import pydantic
 
@@ -47,6 +48,8 @@ from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from pydantic_core import ErrorDetails
 
     from mindroom.constants import RuntimePaths
 
@@ -319,7 +322,7 @@ def _validate_unique_names(
 def _with_string_quantity(value: object, path: tuple[str, ...], location: str) -> object:
     """Return ``value`` with the quantity at ``path`` as a string: the API server takes a JSON number, the client not."""
     if not path:
-        if value is not None and (isinstance(value, bool) or not isinstance(value, str | int | float)):
+        if isinstance(value, bool):
             msg = f"{location}: quantities must be strings or numbers such as 1, 0.5, or 512Mi."
             raise WorkerBackendError(msg)
         return str(value) if isinstance(value, int | float) else value
@@ -335,6 +338,36 @@ def _with_string_quantity(value: object, path: tuple[str, ...], location: str) -
     return value
 
 
+def _schema_error(model_class: type, error: ErrorDetails) -> str:
+    """Describe one validation error by schema field names and list indices only, never by a user-supplied key."""
+    path: list[str] = []
+    annotation: object = model_class
+    for segment in error["loc"]:
+        while get_origin(annotation) in {Union, UnionType}:
+            annotation = next(arg for arg in get_args(annotation) if arg is not type(None))
+        fields = _field_annotations(annotation)
+        if isinstance(segment, int) and get_origin(annotation) is list:
+            annotation = get_args(annotation)[0]
+        elif segment in fields:
+            annotation = fields[segment]
+        else:
+            # An unknown key or a free-form map key is user input and can be a pasted credential.
+            return f"{'.'.join(path) or 'top level'}: invalid value ({error['type']})"
+        path.append(str(segment))
+    return f"{'.'.join(path)}: {error['msg']}"
+
+
+def _field_annotations(annotation: object) -> dict[object, object]:
+    """Map every name a model accepts for one of its fields, wire or Python, to that field's type."""
+    if not (isinstance(annotation, type) and issubclass(annotation, pydantic.BaseModel)):
+        return {}
+    return {
+        name: field.annotation
+        for python_name, field in annotation.model_fields.items()
+        for name in (python_name, field.alias, *getattr(field.validation_alias, "choices", [field.validation_alias]))
+    }
+
+
 def validated_kubernetes_object(model_name: str, value: dict[str, object], *, what: str) -> dict[str, object]:
     """Return ``value`` in the wire form the installed client sends, naming each field it rejects but no values."""
     try:
@@ -342,21 +375,16 @@ def validated_kubernetes_object(model_name: str, value: dict[str, object], *, wh
     except ModuleNotFoundError as exc:
         msg = "The Kubernetes worker backend needs the 'kubernetes' package: install mindroom[kubernetes]."
         raise WorkerBackendError(msg) from exc
+    model_class = getattr(kubernetes_client, model_name)
     try:
-        model = getattr(kubernetes_client, model_name).model_validate(value)
+        model = model_class.model_validate(value)
     except pydantic.ValidationError as exc:
         errors = exc.errors(include_input=False, include_url=False)
     else:
         # Unlike the client's own serialization, this keeps explicit nulls, which clear fields in a patch.
         return model.model_dump(mode="json", by_alias=True, exclude_unset=True)
     # Raised outside the handler, so no chained exception carries the rejected values into logs.
-    # An unknown key is not named either: it can be a credential pasted in the wrong place.
-    fields = "; ".join(
-        f"{'.'.join(map(str, error['loc'][:-1])) or 'top level'}: unknown field"
-        if error["type"] == "extra_forbidden"
-        else f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
-        for error in errors
-    )
+    fields = "; ".join(_schema_error(model_class, error) for error in errors)
     msg = f"{what} is not a valid Kubernetes {model_name.removeprefix('V1')}: {fields}"
     raise WorkerBackendError(msg)
 

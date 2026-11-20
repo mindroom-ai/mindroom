@@ -1534,7 +1534,7 @@ def test_kubernetes_worker_manifest_the_client_rejects_keeps_the_running_deploym
         )
 
     assert [request.method for request in server.sent] == ["GET"]
-    assert "spec.template.spec.containers.1.env.0: unknown field" in str(raised.value)
+    assert "spec.template.spec.containers.1.env.0: invalid value (extra_forbidden)" in str(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
     assert "hunter2" not in str(raised.value)
@@ -1548,7 +1548,7 @@ def test_kubernetes_auth_secret_the_client_rejects_fails_before_any_request(monk
     monkeypatch.setattr(resources, "_auth_secret_manifest", lambda **_kwargs: {**manifest, "stringdata": {}})
     with (
         _installed_kubernetes_client(backend) as server,
-        pytest.raises(WorkerBackendError, match="top level: unknown field") as raised,
+        pytest.raises(WorkerBackendError, match=r"top level: invalid value \(extra_forbidden\)") as raised,
     ):
         resources.apply_auth_secret(worker_key=_TEST_SCOPED_WORKER_KEY_A, worker_id="mindroom-worker-a")
 
