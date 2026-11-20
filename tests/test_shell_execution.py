@@ -37,7 +37,7 @@ class _RecordingCapture(ShellOutputCapture):
     """Keep the spool readable after the engine reports completion."""
 
     def __init__(self, directory: Path) -> None:
-        super().__init__(ShellOutputDestination(workspace_root=str(directory), path="", max_bytes=1024), None)
+        super().__init__(ShellOutputDestination(workspace_root=str(directory), path="", max_bytes=1024))
         self.return_codes: list[int | None] = []
 
     def publish(self, return_code: int | None) -> str:
@@ -150,9 +150,9 @@ async def test_default_streams_stay_separate_and_merge_seam_interleaves(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,
 ) -> None:
-    """Merged stderr keeps terminal order in one stream; the default reply still omits stderr on success."""
+    """Merged stderr keeps terminal order in one stream; by default a success's stderr follows its stdout."""
     argv = ["/bin/sh", "-c", "echo first; echo second >&2; echo third"]
-    assert await _run(registry, argv, tmp_path) == "first\nthird"
+    assert await _run(registry, argv, tmp_path) == "first\nthird\nStderr:\nsecond"
     assert await _run(registry, argv, tmp_path, stderr=asyncio.subprocess.STDOUT) == "first\nsecond\nthird"
 
 
@@ -448,7 +448,7 @@ async def test_a_running_command_reports_its_latest_output_as_progress(
         on_progress=reports.append,
     )
 
-    assert result.message == "one\ntwo"
+    assert result.message == "one\ntwo\nStderr:\nwarn"
     assert reports[0] == "one"
     assert reports[-1] == "one\ntwo\nStderr:\nwarn"
     assert all(earlier != later for earlier, later in itertools.pairwise(reports))
