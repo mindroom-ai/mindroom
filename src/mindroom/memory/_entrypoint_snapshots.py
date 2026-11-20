@@ -66,7 +66,7 @@ def stamp_entrypoint_snapshot(path: Path, *, now: float) -> None:
 def _kept_preamble(
     conversation: ConversationRef,
     source_path: Path,
-    frame: str,
+    frame: Sequence[str],
     file_lines: Sequence[str],
     fits: Callable[[Sequence[str]], bool],
     now: float,
@@ -85,7 +85,7 @@ def _kept_preamble(
         and (summary, checkpoint) == conversation.compaction
         # An empty copy sends no header that points at the file, so the file loads once it gains lines.
         and bool(preamble)
-        and kept_frame == frame
+        and kept_frame == list(frame)
         and isinstance(shown, list)
         and all(line in remaining for line in shown)
         and fits(shown)
@@ -98,7 +98,7 @@ def stable_entrypoint_preamble(
     source_path: Path,
     fresh_preamble: str,
     *,
-    frame: str,
+    frame: Sequence[str],
     shown: Sequence[str],
     file_lines: Sequence[str],
     fits: Callable[[Sequence[str]], bool],
@@ -109,8 +109,8 @@ def stable_entrypoint_preamble(
     ``shown`` holds the file lines ``fresh_preamble`` inlines, ``file_lines`` all of the file's lines, and ``frame``
     the prompts that frame them. The copy is kept while ``file_lines`` holds every line it shows in order, so lines
     inserted anywhere or withheld by a cap for newer ones keep it, while ``fits`` says the preload caps would still
-    keep all of them, and while ``frame`` is unchanged, so an edited prompt override loads again. Its truncation
-    marker keeps the counts of its last load.
+    keep all of them, and while each prompt in ``frame`` is unchanged, so an edited prompt override loads again. Its
+    truncation marker keeps the counts of its last load, and an empty ``fresh_preamble`` always replaces it.
     A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
     anyway, and the turn after one costs only its compacted history.
     An edited or deleted line loads at once. A route that holds the system prompt tells that as a system prompt
@@ -125,8 +125,9 @@ def stable_entrypoint_preamble(
             for other in path.parent.glob("*.json"):
                 if now - other.stat().st_mtime >= _PRUNE_IDLE_SECONDS:
                     other.unlink()
-            if (kept := _kept_preamble(conversation, source_path, frame, file_lines, fits, now)) is None:
-                row = [str(source_path), fresh_preamble, frame, list(shown), *conversation.compaction]
+            kept = _kept_preamble(conversation, source_path, frame, file_lines, fits, now) if fresh_preamble else None
+            if kept is None:
+                row = [str(source_path), fresh_preamble, list(frame), list(shown), *conversation.compaction]
                 write_text_atomic(path, json.dumps(row))
             os.utime(path, (now, now))
     except OSError:

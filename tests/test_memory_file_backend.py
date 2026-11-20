@@ -1985,6 +1985,23 @@ async def test_file_backend_conversation_reloads_its_entrypoint_when_a_cap_is_lo
 
 
 @pytest.mark.asyncio
+async def test_file_backend_conversation_clears_its_entrypoint_once_memory_is_emptied(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A copy whose token cap showed no line keeps only a header and marker, which an emptied file must clear."""
+    config.memory.file.max_entrypoint_tokens = 1
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text("A fact longer than the token cap.\n", encoding="utf-8")
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "showing 0 of 1 lines" in await _conversation_preamble(config, thread)
+
+    (workspace / "MEMORY.md").write_text("", encoding="utf-8")
+    assert await _conversation_preamble(config, thread) == ""
+
+
+@pytest.mark.asyncio
 async def test_file_backend_conversation_keeps_a_headless_capped_window_whose_first_line_is_indented(
     storage_path: Path,
     config: Config,

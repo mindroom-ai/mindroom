@@ -239,7 +239,7 @@ async def _entrypoint_preamble(
         conversation,
         entrypoint.source_path,
         preamble,
-        frame="\n".join(config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{name}") for name in framing),
+        frame=[config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{name}") for name in framing],
         shown=entrypoint.included,
         file_lines=entrypoint.lines,
         fits=lambda lines: entrypoint_lines_fit(lines, config, counter),

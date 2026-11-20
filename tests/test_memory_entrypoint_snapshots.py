@@ -32,7 +32,7 @@ def _preamble(
     now: float = 0.0,
     root: str = "agent",
     whole: str | None = None,
-    frame: str = "header",
+    frame: tuple[str, ...] = ("header",),
     fits: bool = True,
 ) -> str:
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text.
@@ -98,8 +98,14 @@ def test_lines_a_cap_withholds_keep_the_preamble() -> None:
 
 def test_a_changed_frame_loads_the_file_again() -> None:
     """A prompt override that only adds a header line still changes what frames the copy."""
-    _preamble("a", frame="header")
-    assert _preamble("a\nb", frame="header\nadded") == "preamble of 'a\\nb'"
+    _preamble("a", frame=("header",))
+    assert _preamble("a\nb", frame=("header\nadded",)) == "preamble of 'a\\nb'"
+
+
+def test_a_line_moved_between_framing_prompts_loads_the_file_again() -> None:
+    """Moving an instruction from the notice into the truncation marker removes it from a copy shown whole."""
+    _preamble("a", frame=("header", "notice\nrule", "marker"))
+    assert _preamble("a\nb", frame=("header", "notice", "rule\nmarker")) == "preamble of 'a\\nb'"
 
 
 def test_a_copy_the_caps_would_cut_loads_the_file_again() -> None:
