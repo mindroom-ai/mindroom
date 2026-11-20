@@ -522,6 +522,7 @@ class TestAgentBot(AgentBotTestBase):
         source_turn = TurnRecord.create([event.event_id])
         visible_responses = MagicMock()
         visible_responses.settle_deleted_sources = AsyncMock(return_value=False)
+        visible_responses.settle_source_events_ignored = AsyncMock()
         turn_store = MagicMock()
         turn_store.get_turn_record = AsyncMock(return_value=None)
         turn_store.attach_response_context.return_value = source_turn

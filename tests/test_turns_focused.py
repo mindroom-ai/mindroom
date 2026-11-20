@@ -4332,6 +4332,24 @@ async def test_owner_ingress_admits_route_work_and_never_a_reply_turn(
 
 
 @pytest.mark.asyncio
+async def test_a_steward_settles_the_message_it_routed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A route ends its steward's work on the message, which it settles instead of leaving it for recovery to find."""
+    config = _two_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    monkeypatch.setattr(
+        "mindroom.router.relay.suggest_responder_for_message",
+        AsyncMock(return_value=ResponderSelection("general")),
+    )
+    event = _text_event("who can help with this?", event_id="$routed:localhost")
+
+    await harness.deliver(room, event)
+
+    assert len(harness.gateway.routes) == 1
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
 async def test_policy_decision_reserves_config_until_response_handoff(
     config: Config,
     tmp_path: Path,
@@ -6378,6 +6396,8 @@ async def test_router_relay_replay_adopts_durable_response(config: Config, tmp_p
     assert record is not None
     assert record.completed is True
     assert record.response_event_id == "$route-1:localhost"
+    # The adopted route ends the message's journal work, as the route's own send does.
+    assert harness.ignored_dispatch_sources[-1] == (event.event_id,)
 
 
 @pytest.mark.asyncio

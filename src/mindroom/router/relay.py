@@ -141,6 +141,7 @@ async def _earlier_attempt_outcome(deps: _RouterRelaySupport, room_id: str, even
     if sent_route is None:
         return None
     await deps.turn_store.record_responded_turn(canonicalize_turn_record(earlier, response_event_id=sent_route))
+    await deps.visible_responses.settle_source_events_ignored(earlier)
     return False
 
 
@@ -365,4 +366,6 @@ async def execute_router_relay(  # noqa: PLR0911
         await deps.turn_store.record_responded_turn(
             canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
         )
+        # The route is this steward's whole answer: nothing else settles the messages it routed.
+        await deps.visible_responses.settle_source_events_ignored(tracked_handled_turn)
     return False
