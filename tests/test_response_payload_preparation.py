@@ -147,12 +147,13 @@ def _held(
     revision: str | None = None,
     edited_at: int = 2_000,
     whole: bool = True,
+    msgtype: str = "m.text",
 ) -> ResolvedVisibleMessage:
     """Return one message as this responder's thread holds it, at ``revision`` when its own sender edited it.
 
     One that is not ``whole`` is marked as the thread's read marks a text it could not read all of.
     """
-    content = {"body": body} if whole else {"body": body, INCOMPLETE_TEXT_KEY: True}
+    content = {"msgtype": msgtype, "body": body} | ({} if whole else {INCOMPLETE_TEXT_KEY: True})
     message = ResolvedVisibleMessage.from_message_data(
         {"sender": "@user:localhost", "body": body, "timestamp": 1, "event_id": event_id, "content": content},
         thread_id="$thread",
@@ -178,12 +179,22 @@ def _held(
         ),
         # An edit whose file, or whose own later edit, could not be read leaves the route's whole prompt standing.
         pytest.param([_held("$first", "the preview", revision="$edit", whole=False)], ("$first",), "raw prompt"),
+        # A voice message's transcript is not replaced by the filename of an audio edit.
+        pytest.param([_held("$first", "clip.ogg", revision="$edit", msgtype="m.audio")], ("$first",), "raw prompt"),
         # Another message's edit is not the routed one's.
         pytest.param([_held("$other", "an edited neighbour", revision="$edit")], ("$first",), "raw prompt"),
         # An unrouted turn's prompt is its own.
         pytest.param([_held("$event", "the corrected text", revision="$edit")], (), "raw prompt"),
     ],
-    ids=["edited", "unedited-or-replaced-by-another", "batch", "edit-not-whole", "neighbour-edited", "unrouted"],
+    ids=[
+        "edited",
+        "unedited-or-replaced-by-another",
+        "batch",
+        "edit-not-whole",
+        "edit-not-text",
+        "neighbour-edited",
+        "unrouted",
+    ],
 )
 @pytest.mark.asyncio
 async def test_a_lone_routed_message_is_answered_as_its_sender_last_edited_it(

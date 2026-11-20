@@ -120,7 +120,8 @@ class ResponsePayloadPreparer:
         read = preparation.routed_revision
         read = tuple(read) if isinstance(read, list) and [type(part) for part in read] == [int, str] else (0, "")
         held = [m for m in request.thread_history if m.event_id in lone and INCOMPLETE_TEXT_KEY not in m.content]
-        newer = [m.body for m in held if m.edited_timestamp and (m.edited_timestamp, m.latest_event_id) > read]
+        text = [m for m in held if m.content.get("msgtype") == "m.text" and m.edited_timestamp]
+        newer = [m.body for m in text if (m.edited_timestamp, m.latest_event_id) > read]
         preparation = replace(preparation, prompt=newer[0]) if newer else preparation
         payload = await self._build_payload(preparation, thread_history=request.thread_history)
 
