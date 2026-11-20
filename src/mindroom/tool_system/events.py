@@ -736,7 +736,8 @@ def tool_markers_out_of_text(content: dict[str, Any]) -> dict[str, Any]:
 def body_with_tool_markers(body: str, content: Mapping[str, object]) -> str:
     """Return a version-3 message's body with its marker lines back as Chat puts them back; other bodies unchanged.
 
-    A call goes before the body block ``at`` names, or at the end when ``at`` is no HTML block or before an earlier one.
+    A call goes before the body block ``at`` names, or at the end when ``at`` is no HTML block or before an earlier one;
+    a call without ``at`` never had a line.
     """
     payload = content.get(_TOOL_TRACE_KEY)
     trace = cast("dict[str, Any]", payload) if isinstance(payload, dict) else {}
@@ -749,7 +750,8 @@ def body_with_tool_markers(body: str, content: Mapping[str, object]) -> str:
     previous = 0
     for index, event in enumerate(trace.get("events") or [], start=1):
         name = event.get("tool_name") if isinstance(event, dict) else None
-        if not isinstance(name, str) or not name:
+        # A call without a position had no line in the text, as a version-2 trace's call without a marker.
+        if not isinstance(name, str) or not name or "at" not in event:
             continue
         at = event.get("at")
         if type(at) is int and previous <= at <= blocks:

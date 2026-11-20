@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -66,7 +66,12 @@ from mindroom.streaming import (
 )
 from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
+from mindroom.tool_system.events import (
+    StructuredStreamChunk,
+    ToolTraceEntry,
+    body_with_tool_markers,
+    format_tool_started_event,
+)
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.access_schema_support import with_current_room_member_access
@@ -97,6 +102,12 @@ if TYPE_CHECKING:
 
 IN_PROGRESS_MARKER = " ⋯"
 _INTERRUPTION_SUMMARY = "(turn stopped before completion)"
+
+
+def _shown_body(content: dict[str, Any]) -> str:
+    """Return the body MindRoom Chat reads from one sent payload: its replacement's, with its tool markers back."""
+    shown = content.get("m.new_content", content)
+    return body_with_tool_markers(shown["body"], shown)
 
 
 async def _aiter(*events: object) -> AsyncIterator[object]:
@@ -947,10 +958,7 @@ class TestStreamingBehavior:
             await streaming.finalize(mock_client)
 
             assert mock_client.room_send.call_count == 2
-            return [
-                call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-                for call in mock_client.room_send.call_args_list
-            ]
+            return [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
 
         visible_bodies = await run_case(show_tool_calls=True)
         assert visible_bodies[0].startswith("Hello, this is a partial wo")
@@ -1003,10 +1011,7 @@ class TestStreamingBehavior:
         await streaming.finalize(mock_client)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert bodies[0].startswith("x" * 40)
         assert "search_web" in bodies[0]
         assert "search_web" in bodies[1]
@@ -1206,10 +1211,7 @@ class TestStreamingBehavior:
         await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "search_web" in bodies[0]
         assert "save_file" in bodies[1]
 
@@ -1273,10 +1275,7 @@ class TestStreamingBehavior:
             await _consume_streaming_chunks_for_test(mock_client, second_response_stream(), streaming)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "search_web" in bodies[0]
         assert "save_file" in bodies[1]
 
@@ -1330,10 +1329,7 @@ class TestStreamingBehavior:
         await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
 
         assert mock_client.room_send.call_count == 3
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "search_web" in bodies[0]
         assert "save_file" not in bodies[1]
         assert "save_file" in bodies[2]
@@ -1456,10 +1452,7 @@ class TestStreamingBehavior:
             await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 1
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "search_web" in bodies[-1]
         assert "save_file" in bodies[-1]
 
@@ -1512,10 +1505,7 @@ class TestStreamingBehavior:
             await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "⏳" in bodies[0]
         assert "⏳" not in bodies[1]
 
@@ -1682,10 +1672,7 @@ class TestStreamingBehavior:
             _queue_delivery_request(delivery_queue, progress_hint=True)
             await _finish_delivery(delivery_queue, delivery_task)
 
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert bodies == ["0123456789", "abcdefghij"]
 
     @pytest.mark.asyncio
@@ -1749,10 +1736,7 @@ class TestStreamingBehavior:
             _queue_delivery_request(delivery_queue, progress_hint=True)
             await _finish_delivery(delivery_queue, delivery_task)
 
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert len(bodies) == 2
         assert "⏳" in bodies[0]
         assert "⏳" not in bodies[1]
@@ -1855,10 +1839,7 @@ class TestStreamingBehavior:
             await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert bodies == ["A", "AB"]
 
     @pytest.mark.asyncio
@@ -4155,7 +4136,7 @@ class TestStreamingBehavior:
         await streaming.finalize(mock_client)
 
         assert mock_client.room_send.call_count == 2
-        first_body = mock_client.room_send.call_args_list[0].kwargs["content"]["body"]
+        first_body = _shown_body(mock_client.room_send.call_args_list[0].kwargs["content"])
         assert "save_file" in first_body
         assert "Worker startup failed" not in first_body
 
@@ -4206,7 +4187,7 @@ class TestStreamingBehavior:
         await streaming.finalize(mock_client)
 
         assert mock_client.room_send.call_count == 2
-        first_body = mock_client.room_send.call_args_list[0].kwargs["content"]["body"]
+        first_body = _shown_body(mock_client.room_send.call_args_list[0].kwargs["content"])
         assert first_body == "Thinking..."
 
     @pytest.mark.asyncio
@@ -4286,10 +4267,7 @@ class TestStreamingBehavior:
             await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "Worker startup failed" in bodies[0]
         assert bodies[1] == "Thinking..."
 

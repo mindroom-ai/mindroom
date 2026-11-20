@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
@@ -69,7 +70,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg
-from mindroom.tool_system.events import FailedReply, StructuredStreamChunk
+from mindroom.tool_system.events import FailedReply, StructuredStreamChunk, body_with_tool_markers
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -3398,9 +3399,15 @@ async def _approve(bot: AgentBot, card_event_id: str) -> None:
 
 
 def _shown(bot: AgentBot) -> str:
-    """Return what the reply shows now: the body of its last send or edit."""
+    """Return what the reply shows now: the body of its last send or edit, with its tool markers back."""
     content = bot.client.room_send.await_args_list[-1].kwargs["content"]
-    return str(content.get("m.new_content", content)["body"])
+    shown = content.get("m.new_content", content)
+    return _tidy(body_with_tool_markers(str(shown["body"]), shown))
+
+
+def _tidy(text: str) -> str:
+    """Return text as it reads: blank lines collapse, which sending a reply without its tool markers does too."""
+    return re.sub(r"\n{3,}", "\n\n", text).strip("\n")
 
 
 @pytest.mark.asyncio
@@ -3430,8 +3437,8 @@ async def test_a_member_s_gated_delegation_posts_its_card_and_the_approved_reply
         )
 
         assert _card_calls(cards) == [("run_subagent", "writer:call-sub")]
-        assert _shown(bot) == (
-            f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1] ⏳\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]"
+        assert _shown(bot) == _tidy(
+            f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1] ⏳\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]",
         )
         continuation = await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID)
         assert continuation is not None
@@ -3439,9 +3446,9 @@ async def test_a_member_s_gated_delegation_posts_its_card_and_the_approved_reply
 
         await _approve(bot, "$card-1")
 
-    assert _shown(bot) == (
+    assert _shown(bot) == _tidy(
         f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: dug.\n\n\n"
-        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus."
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus.",
     )
     assert await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID) is None
     record, member, state = _delegation_state(team)
@@ -3476,9 +3483,9 @@ async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next
         await _approve(bot, "$card-1")
 
         assert _card_calls(cards) == [("run_subagent", "writer:call-sub"), ("run_subagent", "writer:call-sub-2")]
-        assert _shown(bot) == (
+        assert _shown(bot) == _tidy(
             f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `run_subagent` [2] ⏳\n\n\n"
-            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]"
+            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]",
         )
         continuation = await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID)
         assert continuation is not None
@@ -3486,9 +3493,9 @@ async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next
 
         await _approve(bot, "$card-2")
 
-    assert _shown(bot) == (
+    assert _shown(bot) == _tidy(
         f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `run_subagent` [2]\n\nWriter: dug twice.\n\n\n"
-        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]\n\nConsensus."
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]\n\nConsensus.",
     )
     assert await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID) is None
     record, member, state = _delegation_state(team)
@@ -3530,17 +3537,17 @@ async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_sl
             ("run_subagent", f"{child.delegation_id}:call-deep"),
         ]
         # The writer's call still waits on its child; the child's call shows in the team's slot.
-        assert _shown(bot) == (
+        assert _shown(bot) == _tidy(
             f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1] ⏳\n\n\n"
-            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n\n\n🔧 `run_subagent` [3] ⏳"
+            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n\n\n🔧 `run_subagent` [3] ⏳",
         )
         assert team.models["checker-model"].requests == []
 
         await _approve(bot, "$card-2")
 
-    assert _shown(bot) == (
+    assert _shown(bot) == _tidy(
         f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: dug.\n\n\n"
-        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n\n\n🔧 `run_subagent` [3]\n\nConsensus."
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n\n\n🔧 `run_subagent` [3]\n\nConsensus.",
     )
     assert await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID) is None
     assert len(team.models["checker-model"].requests) == 1

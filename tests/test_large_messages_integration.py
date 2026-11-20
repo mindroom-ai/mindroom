@@ -37,7 +37,7 @@ from mindroom.streaming import (
     StreamInputChunk,
     send_streaming_response,
 )
-from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry, body_with_tool_markers
 from tests.conftest import push_stream_chunk
 from tests.streaming_helpers import reply_hooks
 
@@ -578,12 +578,13 @@ async def test_message_with_formatted_body_no_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_large_message_with_plain_tool_markers_uploads_full_content_json() -> None:
-    """Large-message sidecar stores full source content including tool trace metadata."""
+    """Large-message sidecar stores the content as sent, tool trace included and markers out of its text."""
     client = MockClient()
 
-    body = "Here is the result:\n\n🔧 `web_search` [1]\n"
+    result_line = "Here is the result: " + "x" * 200
+    body = f"{result_line}\n\n🔧 `web_search` [1]\n"
     body = body * 500  # Make it large enough to trigger long text
-    formatted_body = "<p>Here is the result:</p>\n<p>🔧 <code>web_search</code> [1]</p>\n"
+    formatted_body = f"<p>{result_line}</p>\n<p>🔧 <code>web_search</code> [1]</p>\n"
     formatted_body = formatted_body * 500
 
     content = {
@@ -599,14 +600,19 @@ async def test_large_message_with_plain_tool_markers_uploads_full_content_json()
     assert result["msgtype"] == "m.file"
     assert result["info"]["mimetype"] == "application/json"
     assert result["formatted_body"] == markdown_to_html(result["body"])
-    assert "🔧 <code>web_search</code> [1]" in result["formatted_body"]
+    assert "🔧" not in result["body"]
     assert _TOOL_TRACE_KEY not in result
 
-    # Uploaded sidecar should preserve full original content.
+    # The uploaded sidecar holds the whole content as sent.
     uploaded_data = client.uploads[0]
     uploaded_payload = json.loads(uploaded_data.read().decode("utf-8"))
-    assert uploaded_payload["formatted_body"] == formatted_body
-    assert uploaded_payload[_TOOL_TRACE_KEY]["events"][0]["tool_name"] == "web_search"
+    assert uploaded_payload["formatted_body"] == f"<p>{result_line}</p>\n" * 500
+    assert uploaded_payload[_TOOL_TRACE_KEY]["version"] == 3
+    assert uploaded_payload[_TOOL_TRACE_KEY]["events"][0] == {
+        "type": "tool_call_started",
+        "tool_name": "web_search",
+        "at": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -812,7 +818,7 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
 
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert target_content["body"].startswith("hello")
-    assert "save_file" in target_content["body"]
+    assert "save_file" in body_with_tool_markers(target_content["body"], target_content)
 
 
 @pytest.mark.asyncio
@@ -849,8 +855,9 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
 
     target_content = client.messages_sent[-1][2].get("m.new_content", client.messages_sent[-1][2])
     assert target_content["body"].startswith("hello world")
-    assert "save_file" in target_content["body"]
-    assert "⏳" not in target_content["body"]
+    shown = body_with_tool_markers(target_content["body"], target_content)
+    assert "save_file" in shown
+    assert "⏳" not in shown
 
 
 @pytest.mark.asyncio

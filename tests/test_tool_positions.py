@@ -134,3 +134,11 @@ def test_a_position_of_the_wrong_kind_reads_back_at_the_end(at: object) -> None:
     content = _wire(_CASES[0])
     content[_TRACE_KEY]["events"][0]["at"] = at
     assert body_with_tool_markers("Let me check.\n\nFound it.", content).endswith("Found it.\n\n🔧 `shell` [1]")
+
+
+def test_a_call_whose_marker_the_text_never_showed_gets_no_line() -> None:
+    """A sent trace can hold calls without a marker, which a version-2 reply never showed either."""
+    sent = {**_sent(_CASES[0]), "body": "Done.", "formatted_body": "<p>Done.</p>\n"}
+    wire = tool_markers_out_of_text(sent)
+    assert all("at" not in event for event in wire[_TRACE_KEY]["events"])
+    assert body_with_tool_markers("Done.", wire) == "Done."

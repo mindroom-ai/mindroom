@@ -68,6 +68,7 @@ from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_p
 from mindroom.response_sources import Owned, SourceFate
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, _flush_phase_boundary_if_needed
 from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.events import body_with_tool_markers
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
@@ -213,8 +214,14 @@ class _Homeserver:
 
 
 def _body(content: Mapping[str, Any]) -> str:
-    """Return the body a reader would see, following an edit into its replacement."""
-    return str(visible_content_from_content(content).get("body", ""))
+    """Return the body MindRoom Chat reads, following an edit into its replacement, with its tool markers back."""
+    shown = visible_content_from_content(content)
+    return body_with_tool_markers(str(shown.get("body", "")), shown)
+
+
+def _tidy(text: str) -> str:
+    """Return text as it reads: blank lines collapse, which sending a reply without its tool markers does too."""
+    return re.sub(r"\n{3,}", "\n\n", text).strip("\n")
 
 
 def _trace_events(content: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1052,7 +1059,7 @@ async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its
     assert reply.state is rl.ReplyState.COMPLETED
     # The pause's message is the only one, and its end is an edit of it.
     assert turn.homeserver.statuses == ["pending", "completed"]
-    assert turn.homeserver.bodies[-1] == (f"\n\n{shown_calls}" if show_tool_calls else "Done.")
+    assert _tidy(turn.homeserver.bodies[-1]) == _tidy(f"\n\n{shown_calls}" if show_tool_calls else "Done.")
     assert turn.bot.client.room_redact.await_args_list == []
     assert turn.bot.client.room_typing.await_args_list == []
     assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
@@ -1143,7 +1150,7 @@ async def test_a_silent_schedule_replayed_after_a_restart_stopped_its_approved_r
         if show_tool_calls
         else ("Let me check.", answer_calls_hidden)
     )
-    assert turn.homeserver.bodies[-1] == f"{shown}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\n{answered}"
+    assert _tidy(turn.homeserver.bodies[-1]) == _tidy(f"{shown}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\n{answered}")
     # The edit carries a tool call for each marker it shows, in order.
     shown_calls = [event["tool_name"] for event in _trace_events(turn.homeserver.writes[-1])]
     assert shown_calls == re.findall(r"🔧 `(\w+)`", turn.homeserver.bodies[-1])
@@ -1297,7 +1304,7 @@ async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_ap
         ended = f"{_TEAM_HEADER}{members_hidden}\n\n\n*No team consensus - showing individual responses only*"
     # The pause's message is the only one, and its end is an edit of it.
     assert len(turn.homeserver.writes) == 2
-    assert turn.homeserver.bodies[-1] == ended
+    assert _tidy(turn.homeserver.bodies[-1]) == _tidy(ended)
     assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
     assert not await turn.pending()
 
@@ -1344,7 +1351,7 @@ async def test_a_silent_schedule_s_team_waiting_message_never_shows_a_member_s_n
         ]
     else:
         waiting = ["Thinking...", "Thinking..."]
-    assert turn.homeserver.bodies == [*waiting, "Done."]
+    assert [*map(_tidy, turn.homeserver.bodies)] == [*map(_tidy, waiting), "Done."]
 
 
 @pytest.mark.usefixtures("echo_tool")

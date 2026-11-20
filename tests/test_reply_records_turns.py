@@ -58,7 +58,7 @@ from mindroom.streaming import (
     ProgressPermission,
     format_stream_error_note,
 )
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import ToolTraceEntry, body_with_tool_markers
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import RevisionSnapshotChangedError, TurnRecord
@@ -154,7 +154,8 @@ def _sent_bodies(bot: AgentBot) -> list[str]:
     bodies = []
     for call in bot.client.room_send.await_args_list:
         content = call.kwargs["content"]
-        bodies.append(str(content.get("m.new_content", content).get("body", "")))
+        shown = content.get("m.new_content", content)
+        bodies.append(body_with_tool_markers(str(shown.get("body", "")), shown))
     return bodies
 
 
@@ -2142,8 +2143,9 @@ async def test_a_replay_no_longer_shows_the_call_its_stopped_attempt_left_runnin
         account = prompt.split('<item key="interrupted_attempt" cache_policy="volatile">\n', 1)[1]
         assert ("The `counter` tool was still running" in account) is runs
         assert "The `counter` tool finished" not in account
+        # Read back with its marker, which no longer keeps the blank lines before it.
         assert _sent_bodies(restarted)[-1] == (
-            f"\n\n🔧 `counter` [1]\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+            f"🔧 `counter` [1]\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
         )
         assert _last_trace_types(restarted) == ["tool_call_completed"]
     finally:
@@ -2163,7 +2165,7 @@ async def test_a_stop_during_a_tool_call_no_longer_shows_it_as_running(tmp_path:
     assert await bot._user_stop_reconciler.finalize(reply.event_id, 7, room_id=_target().room_id)
     await asyncio.wait_for(response, timeout=5)
 
-    assert _sent_bodies(bot)[-1] == "\n\n🔧 `counter` [1]\n\n**[Response cancelled by user]**"
+    assert _sent_bodies(bot)[-1] == "🔧 `counter` [1]\n\n**[Response cancelled by user]**"
     assert _last_trace_types(bot) == ["tool_call_completed"]
 
 

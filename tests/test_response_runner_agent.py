@@ -1790,6 +1790,8 @@ class TestAgentBot(AgentBotTestBase):
                 "args_preview": "cmd=git status",
                 "result_preview": "clean",
                 "tool_call_id": "call-1",
+                # The call's marker opened the reply, before its first block.
+                "at": 0,
             },
         ]
 
