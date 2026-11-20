@@ -47,7 +47,7 @@ from mindroom.runtime_env_policy import (
     sandbox_runner_startup_process_env,
     worker_extra_env,
 )
-from mindroom.tailnet_ssh.links import ConnectRefused, GatewayReport, GatewayStatus, LinkStatus, resolve_target
+from mindroom.tailnet_ssh.links import ConnectRefused, GatewayStatus, LinkStatus, _GatewayReport, _resolve_target
 from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
 from mindroom.worker_computer.sessions import ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
@@ -141,7 +141,7 @@ def _stored_link(api_app: FastAPI, agent: str = "mine") -> Link:
     """Store Alice's link to the agent, enrolled, for the worker her turns run in."""
     config, paths = config_lifecycle.read_app_committed_runtime_config(api_app)
     now = time.time()
-    link = new_link(ALICE, agent, resolve_target(config, paths, ALICE, agent).worker_key, agent, now=now)
+    link = new_link(ALICE, agent, _resolve_target(config, paths, ALICE, agent).worker_key, agent, now=now)
     link = link.model_copy(update={"enrolled_login": "alice@github", "enrolled_at": now})
     update_links(paths, lambda book: book.links.append(link))
     return link
@@ -532,9 +532,9 @@ def test_only_a_fresh_report_with_open_connections_holds_a_worker(api_app: FastA
     assert status is not None
     links = {"busy": _link_status("worker-busy", 1), "quiet": _link_status("worker-quiet", 0)}
 
-    status.report = GatewayReport(time.monotonic(), links, "login")
+    status.report = _GatewayReport(time.monotonic(), links, "login")
     assert active_tailnet_ssh_worker_keys(api_app) == {"worker-busy"}
-    status.report = GatewayReport(time.monotonic() - 91, links, "login")
+    status.report = _GatewayReport(time.monotonic() - 91, links, "login")
     assert active_tailnet_ssh_worker_keys(api_app) == frozenset()
 
 
@@ -550,7 +550,7 @@ async def test_both_maintenance_paths_touch_ssh_workers(api_app: FastAPI, monkey
     """
     status = tailnet_ssh_status(api_app)
     assert status is not None
-    status.report = GatewayReport(time.monotonic(), {"abc": _link_status("worker-ssh", 1)}, "login")
+    status.report = _GatewayReport(time.monotonic(), {"abc": _link_status("worker-ssh", 1)}, "login")
     computer_sessions = ComputerSessionStore()
     # A viewer whose stream is open holds its worker, which `authorized_target` names "worker".
     computer_sessions.create(authorized_target()).stream = asyncio.Event()

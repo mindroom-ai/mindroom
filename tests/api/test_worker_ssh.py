@@ -74,7 +74,7 @@ def test_session_interactive_is_bash_in_workspace() -> None:
 
     Not as a login shell, whose ``/etc/profile`` replaces the launch's ``PATH``.
     """
-    argv, env, cwd = session.session_command(_LAUNCH, {"TERM": "xterm", "SSH_CONNECTION": "c"})
+    argv, env, cwd = session._session_command(_LAUNCH, {"TERM": "xterm", "SSH_CONNECTION": "c"})
 
     assert argv == ["bash"]
     assert cwd == "/data/ws"
@@ -93,7 +93,7 @@ def test_session_interactive_is_bash_in_workspace() -> None:
 
 def test_session_command_runs_through_bash_c() -> None:
     """A command the client names, as rsync and scp do, runs in Bash with the launch's own terminal type."""
-    argv, env, cwd = session.session_command(_LAUNCH, {"SSH_ORIGINAL_COMMAND": "rsync --server ."})
+    argv, env, cwd = session._session_command(_LAUNCH, {"SSH_ORIGINAL_COMMAND": "rsync --server ."})
 
     assert argv == ["bash", "-c", "rsync --server ."]
     assert (cwd, env["HOME"], env["TERM"]) == ("/data/ws", "/data/ws", "dumb")
@@ -102,7 +102,7 @@ def test_session_command_runs_through_bash_c() -> None:
 
 def test_session_sftp_runs_the_sftp_server() -> None:
     """The SFTP subsystem, which sshd_config names internal-sftp, is the image's SFTP server."""
-    argv, _, cwd = session.session_command(_LAUNCH, {"SSH_ORIGINAL_COMMAND": "internal-sftp"})
+    argv, _, cwd = session._session_command(_LAUNCH, {"SSH_ORIGINAL_COMMAND": "internal-sftp"})
 
     assert argv == ["/usr/lib/openssh/sftp-server"]
     assert cwd == "/data/ws"
@@ -123,7 +123,7 @@ def test_session_module_imports_only_stdlib() -> None:
 
 
 def test_session_main_runs_the_stored_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``main`` reads the launch file, enters its directory, and becomes the session's program."""
+    """``_main`` reads the launch file, enters its directory, and becomes the session's program."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     launch_path = tmp_path / "launch.json"
@@ -138,7 +138,7 @@ def test_session_main_runs_the_stored_launch(tmp_path: Path, monkeypatch: pytest
         lambda file, argv, env: executed.append((file, argv, env, str(Path.cwd()))),
     )
 
-    session.main()
+    session._main()
 
     [(file, argv, env, cwd)] = executed
     assert (file, argv, cwd) == ("bash", ["bash", "-c", "true"], str(workspace))
@@ -266,7 +266,7 @@ async def test_start_writes_launch_0600_and_spawns_sshd(
     assert [entry.name for entry in session.LAUNCH_PATH.parent.iterdir()] == ["launch.json"]
     assert json.loads(session.LAUNCH_PATH.read_text(encoding="utf-8")) == _LAUNCH
     projection = tmp_path / "worker" / ".runtime" / "ssh"
-    assert fake_sshd.argvs == [worker_ssh.sshd_argv(projection)]
+    assert fake_sshd.argvs == [worker_ssh._sshd_argv(projection)]
     assert fake_sshd.argvs[0] == [
         "/usr/sbin/sshd",
         "-D",
@@ -307,7 +307,7 @@ async def test_start_503_when_image_has_no_sshd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A worker image built without openssh-server says so."""
-    monkeypatch.setattr(worker_ssh, "sshd_argv", lambda _projection: [str(tmp_path / "usr" / "sbin" / "sshd"), "-D"])
+    monkeypatch.setattr(worker_ssh, "_sshd_argv", lambda _projection: [str(tmp_path / "usr" / "sbin" / "sshd"), "-D"])
 
     response = await client.post("/api/sandbox-runner/ssh/start", json=_BODY)
 

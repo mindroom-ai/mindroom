@@ -29,7 +29,7 @@ _TERMINAL_ONLY = ("PROMPT_COMMAND", "INPUTRC")
 _FROM_SSHD = ("TERM", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
 
 
-def session_command(launch: Mapping[str, Any], environ: Mapping[str, str]) -> tuple[list[str], dict[str, str], str]:
+def _session_command(launch: Mapping[str, Any], environ: Mapping[str, str]) -> tuple[list[str], dict[str, str], str]:
     """Return the program, environment and directory of the session sshd started with ``environ``.
 
     ``launch`` is the stored launch of the agent's shell. The session runs the command the client named, the SFTP
@@ -49,12 +49,12 @@ def session_command(launch: Mapping[str, Any], environ: Mapping[str, str]) -> tu
     return argv, env, cwd
 
 
-def main() -> None:
+def _main() -> None:
     """Become the session's program."""
-    argv, env, cwd = session_command(json.loads(LAUNCH_PATH.read_text(encoding="utf-8")), os.environ)
+    argv, env, cwd = _session_command(json.loads(LAUNCH_PATH.read_text(encoding="utf-8")), os.environ)
     os.chdir(cwd)
     os.execvpe(argv[0], argv, env)  # noqa: S606
 
 
 if __name__ == "__main__":
-    main()
+    _main()

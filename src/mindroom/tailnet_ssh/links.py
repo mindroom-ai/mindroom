@@ -116,7 +116,7 @@ class LinkStatus:
 
 
 @dataclass(frozen=True)
-class GatewayReport:
+class _GatewayReport:
     """One report of the gateway, whole: when it came (monotonic), each link's node, and how the gateway enrols.
 
     ``enrollment`` is None until the gateway reports in this primary session.
@@ -135,7 +135,7 @@ class GatewayStatus:
     never changed, and whoever reads more than one of its fields takes it once.
     """
 
-    report: GatewayReport = field(default_factory=GatewayReport)
+    report: _GatewayReport = field(default_factory=_GatewayReport)
     operator_sync_at: float = 0.0
 
 
@@ -148,7 +148,7 @@ class ConnectRefused(Exception):  # noqa: N818 - a refusal the gateway is answer
         self.detail = detail
 
 
-def resolve_target(
+def _resolve_target(
     config: Config,
     runtime_paths: RuntimePaths,
     requester_id: str,
@@ -206,7 +206,7 @@ def _desired(
     expires = reported and link.enrolled_at is None and (node is None or node.state != "needs_approval")
     if (
         (ineligible is not None and ineligible.reason == "not_authorized" and not ineligible.pending)
-        or resolve_target(config, runtime_paths, link.requester_id, link.agent_name).worker_key != link.worker_key
+        or _resolve_target(config, runtime_paths, link.requester_id, link.agent_name).worker_key != link.worker_key
         or (expires and now - link.created_at >= _UNENROLLED_SECONDS)
     ):
         return "removing"
@@ -348,7 +348,7 @@ def record_status(
             )
         return reported
 
-    status.report = GatewayReport(monotonic, update_links(runtime_paths, settle), payload.enrollment)
+    status.report = _GatewayReport(monotonic, update_links(runtime_paths, settle), payload.enrollment)
 
 
 def link_state(link: Link, status: LinkStatus | None, *, suspended: bool) -> str:
@@ -455,7 +455,7 @@ def _admit(
         raise ConnectRefused(503, _MEMBERSHIP_PENDING)
     if ineligible is not None:
         raise ConnectRefused(409, ineligible.reason)
-    target = resolve_target(config, runtime_paths, link.requester_id, link.agent_name)
+    target = _resolve_target(config, runtime_paths, link.requester_id, link.agent_name)
     if target.worker_key != link.worker_key:
         raise ConnectRefused(409, "This link's worker is no longer the agent's.")
     endpoint = _ready_endpoint(runtime_paths, target, link.worker_key)
@@ -551,12 +551,12 @@ def refresh_projections(config: Config, runtime_paths: RuntimePaths, requester_i
     _projected(runtime_paths, project)
 
 
-def _is_fresh(report: GatewayReport, *, monotonic: float) -> bool:
+def _is_fresh(report: _GatewayReport, *, monotonic: float) -> bool:
     """Return whether the gateway reported in this primary session, recently enough to say what its nodes are."""
     return report.enrollment is not None and monotonic - report.received_at <= _STATUS_SECONDS
 
 
-def fresh_link_statuses(report: GatewayReport, *, monotonic: float) -> Mapping[str, LinkStatus]:
+def fresh_link_statuses(report: _GatewayReport, *, monotonic: float) -> Mapping[str, LinkStatus]:
     """Return what a gateway report says of each link's node, or nothing when the report is too old to say it."""
     return report.links if _is_fresh(report, monotonic=monotonic) else {}
 

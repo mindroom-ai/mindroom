@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-MAX_KEYS = 20
+_MAX_KEYS = 20
 HOSTNAME = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 
 
@@ -122,8 +122,8 @@ def set_keys(book: LinkBook, requester_id: str, lines: Sequence[str], *, now: fl
             if line.strip():
                 key = normalize_public_key(line)
                 keys.setdefault(key_identity(key), key)
-    if len(keys) > MAX_KEYS:
-        msg = f"At most {MAX_KEYS} SSH keys are allowed per person; {len(keys)} were given."
+    if len(keys) > _MAX_KEYS:
+        msg = f"At most {_MAX_KEYS} SSH keys are allowed per person; {len(keys)} were given."
         raise ValueError(msg)
     if any(key_identity(line) not in keys for line in book.keys.get(requester_id, [])):
         for link in book.links:

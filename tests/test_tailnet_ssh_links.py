@@ -22,17 +22,17 @@ from mindroom.shared_directories.store import add_shared_directory_member, creat
 from mindroom.tailnet_ssh import eligibility, links, store
 from mindroom.tailnet_ssh.links import (
     ConnectRefused,
-    GatewayReport,
     GatewayStatus,
     LinkStatus,
     StatusReport,
+    _GatewayReport,
+    _resolve_target,
     active_worker_keys,
     connect,
     desired_links,
     link_state,
     record_status,
     refresh_projections,
-    resolve_target,
 )
 from mindroom.tailnet_ssh.store import Link, LinkBook, new_link, read_links, set_keys, update_links
 from mindroom.tool_system.sandbox_proxy import WorkerCall
@@ -310,8 +310,8 @@ async def _connect(
 
 def test_resolve_target_is_the_persons_own_worker(config: Config, paths: RuntimePaths) -> None:
     """A link's worker is the one a turn of the agent for that person runs in."""
-    assert resolve_target(config, paths, ALICE, "mine").worker_key == _key(ALICE, "mine")
-    private = resolve_target(config, paths, ALICE, "mind")
+    assert _resolve_target(config, paths, ALICE, "mine").worker_key == _key(ALICE, "mine")
+    private = _resolve_target(config, paths, ALICE, "mind")
     assert private.worker_key == _key(ALICE, "mind")
     assert private.private_agent_names == frozenset({"mind"})
 
@@ -563,7 +563,7 @@ def test_status_records_the_workers_of_stored_links_only(paths: RuntimePaths) ->
     """A report is kept with its link's worker key, and one for a link the store does not hold is ignored."""
     link = _enrolled()
     _store(paths, link)
-    stale = GatewayReport(links={"stale": LinkStatus("running", None, None, None, None, None, 1, None, "key")})
+    stale = _GatewayReport(links={"stale": LinkStatus("running", None, None, None, None, None, 1, None, "key")})
     status = GatewayStatus(stale)
 
     _post(paths, status, {link.id: _report(open_connections=2), "f" * 16: _report()}, monotonic=42.0)
@@ -1261,13 +1261,13 @@ def test_active_worker_keys_window(paths: RuntimePaths) -> None:
 class _ChangingStatus:
     """A status whose report is replaced, as a gateway's post replaces it, after each time it is read."""
 
-    def __init__(self, *reports: GatewayReport) -> None:
+    def __init__(self, *reports: _GatewayReport) -> None:
         self.reports = list(reports)
         self.reads = 0
         self.operator_sync_at = NOW
 
     @property
-    def report(self) -> GatewayReport:
+    def report(self) -> _GatewayReport:
         self.reads += 1
         return self.reports[min(self.reads, len(self.reports)) - 1]
 
@@ -1292,7 +1292,7 @@ def test_a_report_is_published_whole_and_never_changed(paths: RuntimePaths) -> N
 
     assert assigned == ["report"]
     assert first == kept
-    assert status.report == GatewayReport(
+    assert status.report == _GatewayReport(
         20.0,
         {link.id: replace(kept.links[link.id], open_connections=0)},
         "auth_key",
@@ -1306,7 +1306,7 @@ def test_a_report_is_published_whole_and_never_changed(paths: RuntimePaths) -> N
 def test_active_worker_keys_reads_one_report() -> None:
     """A report that comes in while the workers in use are read does not lend its age to the last one's links."""
     held = {"abc": LinkStatus("running", None, None, None, None, None, 1, None, "worker")}
-    status = _ChangingStatus(GatewayReport(1000.0, {}, "login"), GatewayReport(0.0, held, "login"))
+    status = _ChangingStatus(_GatewayReport(1000.0, {}, "login"), _GatewayReport(0.0, held, "login"))
 
     keys = active_worker_keys(cast("GatewayStatus", status), monotonic=1001.0)
 

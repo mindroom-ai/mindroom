@@ -192,7 +192,7 @@ class KubernetesDeployment(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class AppliedDeployment:
+class _AppliedDeployment:
     """What applying one worker Deployment did; ``ssh`` says the template it rendered has the tailnet SSH mark."""
 
     recreated: bool
@@ -768,7 +768,7 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
         recreate: bool = False,
-    ) -> AppliedDeployment:
+    ) -> _AppliedDeployment:
         """Create-or-patch one worker Deployment, recreating it for pod-template drift or when asked.
 
         Returns whether the Deployment was recreated, and the tailnet SSH mark of the template rendered for it,
@@ -796,7 +796,7 @@ class KubernetesResourceManager:
                 or existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]
             ):
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
-                return AppliedDeployment(recreated=True, ssh=ssh)
+                return _AppliedDeployment(recreated=True, ssh=ssh)
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -804,7 +804,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
-        return AppliedDeployment(recreated=False, ssh=ssh)
+        return _AppliedDeployment(recreated=False, ssh=ssh)
 
     def patch_deployment(
         self,

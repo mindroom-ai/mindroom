@@ -21,7 +21,7 @@ from mindroom.api import tailnet_ssh as tailnet_ssh_api
 from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tailnet_ssh import links
-from mindroom.tailnet_ssh.links import GatewayReport, GatewayStatus, LinkReport, LinkStatus, StatusReport
+from mindroom.tailnet_ssh.links import GatewayStatus, LinkReport, LinkStatus, StatusReport, _GatewayReport
 from mindroom.tailnet_ssh.store import Link, new_link, read_links, update_links
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerSshEndpoint
 from tests.api.conftest import api_snapshot, publish_api_payload, trusted_upstream_env
@@ -155,7 +155,7 @@ class _Portal:
             "worker_key": self.link_by_id(link_id).worker_key,
         }
         status = LinkStatus(**(report | fields))  # type: ignore[arg-type]
-        self.status.report = GatewayReport(time.monotonic() - age, {link_id: status}, enrollment)
+        self.status.report = _GatewayReport(time.monotonic() - age, {link_id: status}, enrollment)
 
         def store(book: LinkBook) -> None:
             book.enrollment = enrollment
@@ -560,7 +560,7 @@ def test_connect_creates_link_with_session_worker_key(portal: _Portal) -> None:
     assert snapshot.runtime_config is not None
     session_key = resolve_connection_agent(user, "mind").worker_target.worker_key
     assert link.worker_key == session_key
-    assert link.worker_key == links.resolve_target(snapshot.runtime_config, portal.paths, ALICE, "mind").worker_key
+    assert link.worker_key == links._resolve_target(snapshot.runtime_config, portal.paths, ALICE, "mind").worker_key
     assert (link.requester_id, link.hostname, link.desired) == (ALICE, "mind-alice", "on")
     assert portal.agent("mind")["link"] == {
         "hostname": "mind-alice",
@@ -784,7 +784,7 @@ def test_a_room_granted_link_waits_suspended_while_membership_is_pending(portal:
     config = api_snapshot(main.app).runtime_config
     assert config is not None
     now = time.time()
-    worker_key = links.resolve_target(config, portal.paths, ALICE, "research").worker_key
+    worker_key = links._resolve_target(config, portal.paths, ALICE, "research").worker_key
     link = new_link(ALICE, "research", worker_key, "research", now=now - 60).model_copy(
         update={"enrolled_login": "alice@github", "enrolled_at": now - 30},
     )

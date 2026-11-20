@@ -13,8 +13,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from mindroom.constants import tracking_dir
 from mindroom.tailnet_ssh.store import (
+    _MAX_KEYS,
     HOSTNAME,
-    MAX_KEYS,
     LinkBook,
     default_hostname,
     finish_removal,
@@ -52,7 +52,7 @@ def test_set_keys_splits_pasted_lines_dedupes_and_caps_at_twenty() -> None:
     assert book.keys == {ALICE: [first, second]}
 
     with pytest.raises(ValueError, match="20"):
-        set_keys(book, ALICE, [_public_key() for _ in range(MAX_KEYS + 1)], now=2.0)
+        set_keys(book, ALICE, [_public_key() for _ in range(_MAX_KEYS + 1)], now=2.0)
     assert book.keys == {ALICE: [first, second]}
 
     with pytest.raises(ValueError, match="private key"):

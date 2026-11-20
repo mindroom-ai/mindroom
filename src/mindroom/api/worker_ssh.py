@@ -88,7 +88,7 @@ def _worker_ssh(app: FastAPI) -> _WorkerSsh:
         return state
 
 
-def sshd_argv(projection_dir: Path) -> list[str]:
+def _sshd_argv(projection_dir: Path) -> list[str]:
     """Return the sshd command that serves from the files the primary wrote into ``projection_dir``.
 
     Only the worker knows where that folder is mounted and which interpreter it runs, so the paths and the session
@@ -199,7 +199,7 @@ async def _ensure_sshd(app: FastAPI, state: _WorkerSsh) -> None:
             await _end(sshd)
         root = runner_dedicated_worker_root(app_runtime_paths(app))
         try:
-            sshd = state.sshd = await _run(sshd_argv(sandbox_startup_manifest_path(root).parent / "ssh"))
+            sshd = state.sshd = await _run(_sshd_argv(sandbox_startup_manifest_path(root).parent / "ssh"))
         except FileNotFoundError:
             raise HTTPException(503, "The worker image has no SSH server.") from None
     if await _accepts(sshd):

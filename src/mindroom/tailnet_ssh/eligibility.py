@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from mindroom.access_policy import resolve_responder_access
 from mindroom.config.resolution import agent_policy
@@ -29,23 +29,29 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.shared_directories.store import SharedDirectory
-    from mindroom.workers.backends._dedicated_worker_common import SharedDirectoryMount
     from mindroom.workers.models import WorkerLaunchConfig
 
-Reason = Literal["backend", "not_enabled", "scope", "shared_workspace", "joined_directory", "not_authorized"]
+_Reason = Literal["backend", "not_enabled", "scope", "shared_workspace", "joined_directory", "not_authorized"]
 
 
 @dataclass(frozen=True)
-class Ineligible:
+class _Ineligible:
     """The first condition a link fails; ``detail`` names a joined directory as ``owner/name``.
 
     ``pending`` marks a ``not_authorized`` that only says the person's room membership is not known yet, as after a
     primary's start or a reload: it may turn out either way, so it suspends a link and never removes it.
     """
 
-    reason: Reason
+    reason: _Reason
     detail: str | None = None
     pending: bool = False
+
+
+class _SharedMount(Protocol):
+    """A shared directory a worker mounts; the rule reads only whether it is read-only."""
+
+    @property
+    def read_only(self) -> bool: ...
 
 
 def _concrete_users_alone(config: Config, agent_name: str) -> tuple[str, ...] | None:
@@ -108,14 +114,14 @@ def _not_authorized(
     agent_name: str,
     worker_key: str,
     membership_index: AgentReplyMembershipIndex,
-) -> Ineligible | None:
+) -> _Ineligible | None:
     """Return ``not_authorized`` unless the key is the person's and they may use the agent, pending while not known."""
     # why-lazy: authorization loads nio; the worker backends import this module for the launch rule, and the
     # sandbox runner imports them.
     from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder  # noqa: PLC0415
 
     if user_agent_worker_key_requester(worker_key) != requester_id:
-        return Ineligible("not_authorized")
+        return _Ineligible("not_authorized")
     try:
         allowed = is_sender_allowed_for_responder(
             requester_id,
@@ -127,8 +133,8 @@ def _not_authorized(
             require_resolved_membership=True,
         )
     except ReplyMembershipPendingError:
-        return Ineligible("not_authorized", pending=True)
-    return None if allowed else Ineligible("not_authorized")
+        return _Ineligible("not_authorized", pending=True)
+    return None if allowed else _Ineligible("not_authorized")
 
 
 def link_ineligibility(
@@ -139,39 +145,39 @@ def link_ineligibility(
     worker_key: str | None,
     membership_index: AgentReplyMembershipIndex,
     directories: Sequence[SharedDirectory] | None = None,
-) -> Ineligible | None:
+) -> _Ineligible | None:
     """Return the first condition a link of ``requester_id`` to ``agent_name`` over ``worker_key`` fails, or None.
 
     ``directories`` are the stored shared directories, for a caller that checks many links and reads them once.
     """
     if not worker_backend_kind(runtime_paths).dedicated:
-        return Ineligible("backend")
+        return _Ineligible("backend")
     agent = config.agents.get(agent_name)
     if agent is None or not agent.tailnet_ssh:
-        return Ineligible("not_enabled")
+        return _Ineligible("not_enabled")
     policy = agent_policy(config, agent_name)
     if (
         policy.effective_execution_scope != "user_agent"
         or worker_key is None
         or _key_agent(worker_key, config.agents) != agent_name
     ):
-        return Ineligible("scope")
+        return _Ineligible("scope")
     denied = _not_authorized(config, runtime_paths, requester_id, agent_name, worker_key, membership_index)
     if denied is not None:
         return denied
     if not policy.is_private and _concrete_users_alone(config, agent_name) != (requester_id,):
-        return Ineligible("shared_workspace")
+        return _Ineligible("shared_workspace")
     if directories is None:
         directories = load_shared_directories(runtime_paths)
     joined = _joined_directory(config, agent_name, directories)
-    return None if joined is None else Ineligible("joined_directory", joined)
+    return None if joined is None else _Ineligible("joined_directory", joined)
 
 
 def ssh_eligible_launch(
     worker_key: str,
     launch: WorkerLaunchConfig,
     private_agent_names: frozenset[str] | None,
-    shared_mounts: Sequence[SharedDirectoryMount],
+    shared_mounts: Sequence[_SharedMount],
 ) -> bool:
     """Return whether a worker about to launch with ``shared_mounts`` gets the tailnet SSH mark.
 
