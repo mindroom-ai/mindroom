@@ -168,14 +168,37 @@ async def test_a_saved_success_keeps_stdout_in_the_file_and_names_its_stderr_in_
     shell_toolkit: AnyToolkit,
     tmp_path: Path,
 ) -> None:
-    """The file holds stdout exactly, and the receipt says how much stderr there was and how it ended."""
+    """The file holds stdout exactly, and the receipt says how much stderr there was and nothing else of it."""
     result = await _run(shell_toolkit, {"args": "echo out; echo warn >&2", "mindroom_output_path": "out.txt"})
 
     receipt = json.loads(str(result.result))["mindroom_tool_output"]
     assert (tmp_path / "out.txt").read_text() == "out\n"
-    assert (receipt["stderr_bytes"], receipt["stderr_tail"]) == (5, "warn")
+    assert {key: value for key, value in receipt.items() if key.startswith("stderr")} == {"stderr_bytes": 5}
     quiet = await _run(shell_toolkit, {"args": "echo out", "mindroom_output_path": "quiet.txt"})
     assert "stderr_bytes" not in json.loads(str(quiet.result))["mindroom_tool_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("shell_toolkit")
+async def test_a_saved_success_counts_all_its_stderr_past_the_capture_cap(tmp_path: Path) -> None:
+    """Stderr larger than the redirect cap, read in several chunks, is counted whole and the stdout file is saved."""
+    tool = shell_tools()(
+        base_dir=tmp_path,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={},
+        ),
+    )
+    configure_toolkit_functions(tool, output_files=ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=64))
+    result = await _run(
+        tool,
+        {"args": "echo out; head -c 30005 /dev/zero | tr '\\0' x >&2", "mindroom_output_path": "out.txt"},
+    )
+
+    receipt = json.loads(str(result.result))["mindroom_tool_output"]
+    assert (receipt["status"], receipt["stderr_bytes"]) == ("saved_to_file", 30005)
+    assert (tmp_path / "out.txt").read_text() == "out\n"
 
 
 @pytest.mark.asyncio

@@ -46,15 +46,16 @@ class ShellOutputDestination:
         return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes, tools_use_workdir=tools_use_workdir)
 
 
-def format_shell_completion(stdout: str, stderr: str, *, return_code: int) -> str:
+def format_shell_completion(stdout: str, stderr: str | None, *, return_code: int) -> str:
     """Format completed output: stdout, then any stderr under ``Stderr:``; a failure leads with its exit code.
 
     The exit code comes first so a bounded job summary still shows that the command failed.
+    ``stderr`` is None when the command printed nothing to it, so stderr of only blank lines keeps its section.
     """
     lines = [f"Exit code {return_code}"] if return_code else []
     if stdout:
         lines += ["Output:", stdout] if return_code else [stdout]
-    if stderr:
+    if stderr is not None:
         lines += ["Stderr:", stderr]
     return "\n".join(lines)
 
@@ -70,11 +71,11 @@ class CapturedShellStream:
         self.reached_eof = False
 
     def append(self, text: str) -> None:
-        """Append decoded output until the cap or a storage error is reached."""
-        if self.error is not None or self.file.closed:
-            return
+        """Count decoded output, and spool it until the cap or a storage error is reached."""
         payload = text.encode("utf-8", errors="replace")
         self.byte_count += len(payload)
+        if self.error is not None or self.file.closed:
+            return
         if self.byte_count > self.max_bytes:
             self.error = f"Redirected shell output exceeds the {self.max_bytes} byte limit."
             return
@@ -87,11 +88,6 @@ class CapturedShellStream:
         """Read the retained complete stream for atomic publication."""
         self.file.seek(0)
         return self.file.read().decode("utf-8")
-
-    def tail(self, max_bytes: int = 2048, max_lines: int = 20) -> str:
-        """Return the end of the retained stream: its last ``max_lines`` lines within its last ``max_bytes``."""
-        self.file.seek(max(0, self.file.seek(0, 2) - max_bytes))
-        return "\n".join(self.file.read().decode("utf-8", errors="ignore").rstrip("\n").split("\n")[-max_lines:])
 
 
 class ShellOutputCapture:
@@ -118,10 +114,8 @@ class ShellOutputCapture:
             # exited. A command its owner stopped, such as at its timeout, is explained by the interruption instead.
             receipt["mindroom_tool_output"]["exit_code"] = return_code
         if return_code == 0 and self.stderr.byte_count:
-            # A success saves its stdout alone, so the receipt says what it printed to stderr.
+            # A success saves its stdout alone, so the receipt says how much it printed to stderr.
             receipt["mindroom_tool_output"]["stderr_bytes"] = self.stderr.byte_count
-            if self.stderr.error is None:
-                receipt["mindroom_tool_output"]["stderr_tail"] = self.stderr.tail()
         return json.dumps(receipt)
 
     def _publish_receipt(self, return_code: int | None) -> dict[str, dict[str, object]]:
@@ -165,7 +159,7 @@ class ShellOutputCapture:
             output = (
                 selected.read()
                 if selected is not None
-                else format_shell_completion(self.stdout.read(), self.stderr.read(), return_code=return_code)
+                else format_shell_completion(self.stdout.read(), self.stderr.read() or None, return_code=return_code)
             )
             return cast("dict[str, dict[str, object]]", finalize_tool_output_file(request, output))
         except OSError:

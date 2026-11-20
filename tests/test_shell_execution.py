@@ -300,6 +300,31 @@ async def test_checking_a_finished_success_shows_its_stderr_after_its_output(
 
 
 @pytest.mark.asyncio
+async def test_checking_a_running_command_counts_its_blank_lines_as_its_notice_does(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """The buffered line count of a running command and the notice above its tail count blank lines alike."""
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "echo text; yes '' | head -n 60; sleep 30"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=1,
+    )
+    assert result.handle is not None
+
+    status, rest = check_command(registry, namespace="test", handle=result.handle).split("\n", 1)
+    assert status.startswith("Status: RUNNING (PID ")
+    assert rest == (
+        "Partial output (61 lines buffered):\n"
+        "[Showing the last 50 of 61 lines. Pass a larger tail, or narrow the command.]\n" + "\n" * 49
+    )
+
+
+@pytest.mark.asyncio
 async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_finished_record(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,

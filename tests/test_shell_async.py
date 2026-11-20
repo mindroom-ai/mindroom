@@ -472,14 +472,31 @@ def test_a_notice_counts_blank_lines_and_a_missing_final_newline_alike(newline: 
     unterminated = _OutputBuffer()
     unterminated.append(f"a{newline}b")
 
-    assert buffer.render(tail=1).splitlines()[0] == (
-        "[Showing the last 1 of 3 lines. Pass a larger tail, or narrow the command.]"
+    # The one line shown is the blank one, which holds a carriage return when the command ended lines with CRLF.
+    assert buffer.render(tail=1) == (
+        f"[Showing the last 1 of 3 lines. Pass a larger tail, or narrow the command.]\n{newline[:-1]}"
     )
+    assert len(buffer) == 3
     assert buffer.render() == f"a{newline}b{newline}{newline}".rstrip("\n")
     assert unterminated.render(tail=1).splitlines() == [
         "[Showing the last 1 of 2 lines. Pass a larger tail, or narrow the command.]",
         "b",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_keeps_blank_stderr_and_trims_only_whole_stdout(tmp_path: Path) -> None:
+    """Stderr that holds only blank lines keeps its section, with LF as with CRLF; whole stdout is as it always was."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.functions["run_shell_command"]
+    notice = "[Showing the last 1 of 2 stderr lines. Pass a larger tail, or narrow the command.]"
+
+    assert await entrypoint("echo out; echo >&2") == "out\nStderr:\n"
+    assert await entrypoint("echo >&2; exit 1") == "Exit code 1\nStderr:\n"
+    assert await entrypoint(r"printf 'a\n\n' >&2", tail=1) == f"{notice}\nStderr:\n"
+    assert await entrypoint(r"printf 'a\r\n\r\n' >&2", tail=1) == f"{notice}\nStderr:\n\r"
+    assert await entrypoint(r"printf 'a\n\n\n'") == "a"
+    assert await entrypoint("echo") == ""
 
 
 def test_the_line_cap_keeps_line_boundaries_across_appends() -> None:
