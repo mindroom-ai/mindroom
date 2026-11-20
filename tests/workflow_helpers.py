@@ -494,6 +494,10 @@ class WorkflowStack:
 
     async def start(self, source: str = "", args: object = None, **options: object) -> WorkflowRun:
         """Reserve a run for the owner and launch its first attempt."""
+        return await self.engine.launch(self.reserve(source, args, **options).run_id, self.context)
+
+    def reserve(self, source: str = "", args: object = None, **options: object) -> WorkflowRun:
+        """Write the intent of a run for the owner, which nothing has launched yet."""
         context = self.context
         run = WorkflowRun(
             run_id=new_workflow_run_id(),
@@ -513,9 +517,8 @@ class WorkflowStack:
             runtime_seconds_left=None,
             origin_job_id=None,
         )
-        self.store.reserve_run(replace(run, **options))
         self.run_id = run.run_id
-        return await self.engine.launch(run.run_id, context)
+        return self.store.reserve_run(replace(run, **options))[0]
 
     async def submit(
         self,

@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import NAMESPACE_OID, uuid5
 from weakref import WeakValueDictionary
 
-from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.delegation.personas import persona_allows
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
@@ -94,6 +93,7 @@ class WorkflowEngine:
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._waiting: Counter[str] = Counter()
         self._closed = False
+        self._launching: dict[asyncio.Task[WorkflowRun], str] = {}
 
     async def launch(
         self,
@@ -103,43 +103,40 @@ class WorkflowEngine:
     ) -> WorkflowRun:
         """Start the next attempt of a reserved run; a script that cannot start ends the run failed with the reason.
 
-        The engine owns a launch once it began, so a caller that goes away leaves no process its run does not name.
+        The engine owns a launch once it began: a caller that goes away leaves no process its run does not name, and
+        only the engine's stop ends a launch, which ends its run interrupted.
         """
-        launch = self._spawn(_ADMISSIONS, self._owned_launch(run_id, context, limits or WorkflowLimits()))
+        if self._closed:
+            return await asyncio.to_thread(self._stop_starting, run_id)
+        launch = self._spawn(_ADMISSIONS, self._launch(run_id, context, limits or WorkflowLimits()))
+        self._launching[launch] = run_id
+        launch.add_done_callback(self._launching.pop)
         try:
             return await asyncio.shield(launch)
         except asyncio.CancelledError:
             caller = asyncio.current_task()
             if not launch.cancelled() or (caller is not None and caller.cancelling()):
                 raise
-            # The stopping engine ended the launch and its run, which the caller reads as any ended run.
+            # The stopping engine ended the run and then the launch; the caller reads the run as any ended run.
             return self.store.get_run(run_id)
 
-    async def _owned_launch(self, run_id: str, context: ToolRuntimeContext, limits: WorkflowLimits) -> WorkflowRun:
-        """Launch unless the engine stopped, which ends a run that names no attempt yet as interrupted."""
-        stopped = partial(
-            self.store.update_run,
+    def _stop_starting(self, run_id: str) -> WorkflowRun:
+        """End a run that names no attempt yet as interrupted, for the engine's stop; any other run stays as it is."""
+        return self.store.update_run(
             run_id,
             when={WorkflowRunState.STARTING},
             state=WorkflowRunState.INTERRUPTED,
             error=_STOPPED_STARTING,
             finished_at=utc_timestamp(),
         )
-        if self._closed:
-            return await asyncio.to_thread(stopped)
-        try:
-            return await self._launch(run_id, context, limits)
-        except asyncio.CancelledError:
-            # Only the engine's stop cancels its launch: the run ends with it, so none stays `starting` for nobody.
-            await run_blocking_until_complete(stopped)
-            raise
 
     async def _launch(self, run_id: str, context: ToolRuntimeContext, limits: WorkflowLimits) -> WorkflowRun:
         # Held until the run names the attempt, so the new process's first request waits instead of being refused.
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
-            if run.state is not WorkflowRunState.STARTING:
-                # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none.
+            if run.state is not WorkflowRunState.STARTING or self._closed:
+                # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none,
+                # and a stopping engine starts none.
                 return run
             try:
                 attempt = await self.scripts.run(
@@ -224,6 +221,9 @@ class WorkflowEngine:
     async def close(self) -> None:
         """Stop the engine's own tasks and start no more; unsettled nodes keep their handles for the next start."""
         self._closed = True
+        # Before its launches stop, so a run one of them was starting ends here even if its task never ran a step.
+        stops = [asyncio.to_thread(self._stop_starting, run_id) for run_id in set(self._launching.values())]
+        await asyncio.gather(*stops, return_exceptions=True)
         tasks = [task for run_tasks in self._tasks.values() for task in run_tasks]
         self._tasks.clear()
         for task in tasks:
