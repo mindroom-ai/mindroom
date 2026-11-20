@@ -61,7 +61,7 @@ from tests.slack.test_toolkit import _connect_alice as connect_slack_requester
 from tests.slack.test_toolkit import _tools as slack_tools
 from tests.test_attachments_tool import _tool_context
 from tests.test_browser_upload_safety import _capture_uploads, _upload, _upload_tool
-from tests.test_e2b_tools import _FakeSandbox
+from tests.test_e2b_tools import _install_fake_e2b
 from tests.test_google_drive_oauth_tool import (
     _FakeDriveService,
     _FakeMediaIoBaseUpload,
@@ -205,11 +205,10 @@ async def _upload_to_e2b(
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    monkeypatch.setattr("agno.tools.e2b.Sandbox", _FakeSandbox)
+    service = _install_fake_e2b(monkeypatch)
     tool = MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
-    assert isinstance(tool.sandbox, _FakeSandbox)
     tool.upload_file(raw_path, "upload.bin")
-    return tool.sandbox.files.stored.get("upload.bin") == _PNG
+    return service.files.stored.get("upload.bin") == _PNG
 
 
 class _AudioEndpoint:
