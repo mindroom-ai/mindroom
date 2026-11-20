@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Literal
 from unittest.mock import AsyncMock, patch
@@ -18,11 +20,15 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry, HookRegistryState
-from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal
+from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, ProviderUnavailable
 from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
+from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline.retry import retrying_stream
+from mindroom.providers.pipeline.wrapped import WrappedProvider
+from mindroom.scheduling import tasks as scheduling_tasks
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import execute_scheduled_workflow, send_scheduled_failure_notice
 from mindroom.scheduling.tasks import (
@@ -494,6 +500,45 @@ class TestParseWorkflowSchedule:
             str(exc_info.value)
             == f"The schedule parser model declined this request ({MODEL_SAFEGUARD_REFUSAL_MESSAGE})."
         )
+
+    async def test_parse_past_its_deadline_cancels_the_retried_request_and_says_so(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
+    ) -> None:
+        """A parser model that never answers, even after a retry, fails at the deadline and its request is cancelled."""
+        cancelled = asyncio.Event()
+
+        async def fail_transiently() -> None:
+            msg = "overloaded"
+            raise ProviderUnavailable(msg, provider="Synthetic", status_code=503)
+
+        async def hang() -> None:
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        monkeypatch.setattr(scheduling_tasks, "_PARSE_DEADLINE_SECONDS", 0.2)
+        monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+        model = ScriptedModel([[Await(fail_transiently)], [Await(hang)]])
+        provider = WrappedProvider(model, partial(retrying_stream, idle_timeout_seconds=None))
+        install_model_providers(monkeypatch, {"default": provider})
+
+        with pytest.raises(SchedulingError) as exc_info:
+            await _parse_workflow_schedule(
+                "Every day at 9am, summarize the news",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
+
+        error, _suggestion = str(exc_info.value).split("\n\n💡 ")
+        assert error == "The schedule parser model did not answer within 0.2 s"
+        assert len(model.requests) == 2
+        assert cancelled.is_set()
 
     async def test_parse_formats_available_agents_without_double_at(
         self,

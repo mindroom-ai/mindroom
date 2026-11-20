@@ -72,6 +72,10 @@ _MESSAGE_PREVIEW_LENGTH = 50
 # Reasons shown on a scheduled tool call's approval card when its task changes.
 SCHEDULE_CANCELLED_REASON = "Schedule cancelled."
 
+# Wall-clock limit on one schedule parse, provider retries included. The answer is a few hundred tokens, under a
+# minute even on a slow local route, so 3 minutes still waits out one queued request but stops a looping model.
+_PARSE_DEADLINE_SECONDS = 180
+
 # Shared validation message for edit attempts that change task type.
 _SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
 
@@ -964,19 +968,27 @@ async def _parse_workflow_schedule(
 
     provider = provider_registry.build_model_provider(config, runtime_paths, "default")
 
+    deadline = asyncio.timeout(_PARSE_DEADLINE_SECONDS)
     try:
-        response = await complete_prompt(
-            provider,
-            prompt,
-            instructions=["Parse scheduling requests into structured workflows"],
-            schema=ScheduledWorkflow,
-        )
+        async with deadline:
+            response = await complete_prompt(
+                provider,
+                prompt,
+                instructions=["Parse scheduling requests into structured workflows"],
+                schema=ScheduledWorkflow,
+            )
         await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="schedule_parse")
     except ModelSafeguardRefusal as refusal:
         logger.warning("Schedule parser model refused the request", request=request)
         msg = f"The schedule parser model declined this request ({refusal})."
         raise SchedulingError(msg) from refusal
     except Exception as e:
+        if deadline.expired():
+            logger.warning("schedule_parse_timed_out", deadline_seconds=_PARSE_DEADLINE_SECONDS, request=request)
+            _raise_parse_failure(
+                f"The schedule parser model did not answer within {_PARSE_DEADLINE_SECONDS:g} s",
+                "The model may be busy; try again in a few minutes",
+            )
         logger.exception("Error parsing workflow schedule", error=str(e), request=request)
         _raise_parse_failure(
             f"Error parsing schedule: {failure_text(e)}",
