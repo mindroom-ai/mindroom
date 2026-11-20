@@ -65,12 +65,13 @@ def _snapshot(
     )
 
 
-def test_runtime_coordinator_binds_any_running_bot_with_snapshot_readiness_gate() -> None:
+def test_runtime_coordinator_binds_any_running_bot() -> None:
     """Coordinator binds delivery through each trigger's target once any bot runs, the owner account or not."""
     coordinator = ExternalTriggerRuntimeCoordinator()
     code_bot = MagicMock(agent_name="code", running=True, client=object())
     stopped_bot = MagicMock(agent_name="idle", running=False, client=object())
-    bots = {"code": code_bot, "idle": stopped_bot}
+    clientless_bot = MagicMock(agent_name="clientless", running=True, client=None)
+    bots = {"code": code_bot, "idle": stopped_bot, "clientless": clientless_bot}
 
     with patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind:
         coordinator.bind_if_ready(_config(), bots)
@@ -80,8 +81,8 @@ def test_runtime_coordinator_binds_any_running_bot_with_snapshot_readiness_gate(
     target_bot = mock_bind.call_args.kwargs["target_bot"]
     assert target_bot("code") is code_bot
     assert target_bot("idle") is None
+    assert target_bot("clientless") is None
     assert target_bot("missing") is None
-    assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
 
 
 def test_runtime_coordinator_does_not_bind_while_no_bot_runs() -> None:
@@ -118,17 +119,12 @@ async def test_trigger_posted_and_answered_by_target_without_owner(tmp_path: Pat
         poster = runtime.target_bot("code")
         assert poster is target_bot
         with (
-            patch(
-                "mindroom.orchestration.external_trigger_runtime.get_joined_rooms",
-                AsyncMock(return_value=["!campground:example.org"]),
-            ),
             patch("mindroom.external_triggers.executor.send_matrix_message", send),
             patch(
                 "mindroom.external_triggers.executor.format_entity_mention",
                 return_value=("@code", ["@mindroom_code:example.org"], "[@code](https://matrix.to/#/x)"),
             ),
         ):
-            assert await runtime.is_trigger_snapshot_ready(_snapshot()) is True
             event_id = await execute_external_trigger(
                 client=poster.client,
                 snapshot=_snapshot(),
@@ -172,46 +168,3 @@ def test_runtime_coordinator_leaves_delivery_unavailable_until_the_bots_run_the_
         assert runtime.config_generation == snapshot.generation
     finally:
         coordinator.unbind()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("joined_room_ids", "ready"),
-    [(["!campground:example.org"], True), (["!other:example.org"], False)],
-)
-async def test_runtime_coordinator_is_ready_when_target_is_joined(joined_room_ids: list[str], ready: bool) -> None:
-    """Coordinator readiness comes from the target's live Matrix joined rooms alone."""
-    coordinator = ExternalTriggerRuntimeCoordinator()
-    target_bot = MagicMock(agent_name="code", client=object(), running=True)
-
-    with patch(
-        "mindroom.orchestration.external_trigger_runtime.get_joined_rooms",
-        AsyncMock(return_value=joined_room_ids),
-    ) as mock_get_joined_rooms:
-        assert await coordinator._is_ready(_snapshot(), {"code": target_bot}) is ready
-
-    mock_get_joined_rooms.assert_awaited_once_with(target_bot.client)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("snapshot", "target_running", "target_client"),
-    [
-        (_snapshot(target_agent="missing"), True, object()),
-        (_snapshot(), False, object()),
-        (_snapshot(), True, None),
-    ],
-)
-async def test_runtime_coordinator_is_ready_rejects_inactive_target(
-    snapshot: TriggerDeliverySnapshot,
-    target_running: bool,
-    target_client: object | None,
-) -> None:
-    """Coordinator rejects a stopped, client-less or missing target."""
-    coordinator = ExternalTriggerRuntimeCoordinator()
-    target_bot = MagicMock(agent_name="code", client=target_client, running=target_running)
-
-    with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms") as mock_get_joined_rooms:
-        assert await coordinator._is_ready(snapshot, {"code": target_bot}) is False
-
-    mock_get_joined_rooms.assert_not_called()

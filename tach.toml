@@ -1850,6 +1850,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.delivery_replay",
     "mindroom.external_triggers.executor",
+    "mindroom.matrix.client_room_admin",
     "mindroom.response_admission",
 ]
 
@@ -3323,7 +3324,6 @@ depends_on = [
 path = "mindroom.orchestration.external_trigger_runtime"
 depends_on = [
     "mindroom.api.main",
-    "mindroom.matrix.client_room_admin",
 ]
 
 [[modules]]
@@ -4303,7 +4303,7 @@ visibility = [
     "mindroom.hooks.matrix_admin",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
-    "mindroom.orchestration.external_trigger_runtime",
+    "mindroom.api.external_triggers",
     "mindroom.orchestration.rooms",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.custom_tools.matrix_api",

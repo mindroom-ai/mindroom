@@ -90,13 +90,12 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Callable
 
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
-    from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
@@ -402,7 +401,6 @@ def bind_external_trigger_runtime(
     api_app: FastAPI,
     *,
     runtime_config: Config,
-    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
     target_bot: Callable[[str], AgentBot | None],
 ) -> None:
     """Attach Matrix delivery through each trigger's target to one API app while it serves the config the bots run.
@@ -420,7 +418,6 @@ def bind_external_trigger_runtime(
     app_state.external_trigger_runtime = ExternalTriggerRuntime(
         target_bot=target_bot,
         config_generation=snapshot.generation,
-        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
     )
 
 
