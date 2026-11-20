@@ -1176,9 +1176,15 @@ Each call to `power()` or `history()` reads again, and `members` is read anew fo
 `is_direct()` keeps its answer for a few minutes; it answers 503 with `Direct message lookup failed; try again.` when the bot's direct-message list or the room's state cannot be read and nothing else marks the room as direct, or when the lookup raises or times out.
 
 `set_modes()` takes `thread` as `"thread"` or `"room"` and `reply` as `"auto"` or `"mentions"`; `None` clears that override, and one left out stays.
-Before it changes anything, it answers 403 with `Only room admins change the room's modes.` unless the caller holds room admin power by a `power()` read, 503 when that read fails, and 403 with `I need moderator rights in this room to change the thread mode.` when the room refuses the thread mode for lack of power, which changes nothing.
+Before it changes anything, it answers 403 with `Only room admins change the room's modes.` unless the caller holds room admin power by a `power()` read, and 503 when that read fails or no running MindRoom bot is in the room.
+The room's steward writes both modes, the reply mode first.
+When the room refuses the reply mode for lack of power, `set_modes()` answers 403 with `I need moderator rights in this room to change the reply mode.`.
+When the room does not take the reply mode for another reason, it answers 503 with `The room did not take its reply mode; nothing was changed.`.
+Both answers come before the thread mode is touched, so neither mode changes.
 As with `!thread_mode`, MindRoom then updates the room's [`io.mindroom.thread_mode`](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) state, which clients choose the room's view by, before `set_modes()` returns.
-When it cannot, as without permission to send state events in the room, `set_modes()` answers 503 with `The modes were saved, but the room's thread mode is not published yet; try again.`: the change stays saved, and calling it again retries the update.
+When the room refuses that update for lack of power, `set_modes()` answers 403 with `I need moderator rights in this room to change the thread mode.` and the thread mode stays as it was.
+When the update fails for another reason, as when the homeserver cannot be reached, `set_modes()` answers 503 with `The modes were saved, but the room's thread mode is not published yet; try again.`: the change stays saved, and calling it again retries the update.
+A reply mode given in the same call is already changed when the thread mode answers 403 or 503.
 
 ```python
 from typing import Literal
