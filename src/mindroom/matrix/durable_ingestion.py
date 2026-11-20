@@ -33,6 +33,8 @@ class IngestionStats:
     records: int = 0
     admit_seconds: float = 0.0
     ack_seconds: float = 0.0
+    # Set when the loop's first new frame was logged, whatever the bot's readiness was then.
+    first_frame_logged: bool = False
 
 
 class _OwnedIngestionSession(Protocol):

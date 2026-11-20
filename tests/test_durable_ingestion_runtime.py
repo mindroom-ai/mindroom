@@ -177,6 +177,33 @@ async def test_first_sync_frame_logs_one_line_with_what_the_pump_admitted(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_first_sync_frame_line_is_logged_once_in_every_sync_loop(tmp_path: Path) -> None:
+    """Each sync loop logs its own first new frame once, whether or not the bot was ready before or accepts work."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            await bot._on_ingestion_frame_completion(True)
+            await bot._on_ingestion_frame_completion(True)
+            # A restarted sync loop of the same bot: `sync_forever` starts its pump with fresh counters.
+            bot._ingestion_stats = IngestionStats()
+            await bot._on_ingestion_frame_completion(False)
+            await bot._on_ingestion_frame_completion(True)
+        assert [log["event"] for log in logs].count("first_sync_frame_completed") == 2
+        # A bot that drains before its first new frame logs it once too, though it never becomes ready.
+        bot._first_sync_done = False
+        bot._ingestion_stats = IngestionStats()
+        bot._runtime_view.begin_draining()
+        with structlog.testing.capture_logs() as logs:
+            await bot._on_ingestion_frame_completion(True)
+            await bot._on_ingestion_frame_completion(True)
+        assert [log["event"] for log in logs].count("first_sync_frame_completed") == 1
+        assert bot._first_sync_done is False
+    finally:
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("slow_side_effect", ["bot_ready_hook", "room_state_reconcile"])
 async def test_slow_first_frame_side_effect_does_not_delay_router_dispatch(
     tmp_path: Path,

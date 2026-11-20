@@ -1534,10 +1534,11 @@ class AgentBot:
         """
         first_sync_response = receipt_new and not self._first_sync_done
         self._mark_sync_progress()
-        if first_sync_response:
-            # Until this frame the bot dispatches nothing, so one line says where a slow start spent its time. The
-            # completing batch's acknowledgement follows this call and is not counted.
-            stats = self._ingestion_stats
+        stats = self._ingestion_stats
+        if receipt_new and not stats.first_frame_logged:
+            # Once per sync loop: a bot dispatches nothing new until this frame, so one line says where a slow start
+            # spent its time. The completing batch's acknowledgement follows this call and is not counted.
+            stats.first_frame_logged = True
             self.logger.info(
                 "first_sync_frame_completed",
                 elapsed_ms=round((time.monotonic() - stats.started) * 1000),
