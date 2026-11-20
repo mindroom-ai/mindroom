@@ -7,7 +7,7 @@ import json
 import os
 import re
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from functools import partial
@@ -73,6 +73,10 @@ _MAX_EVENTS = 65536
 _FINISH_EVENT_HEADROOM_BYTES = 1 << 20
 # A new run.json keeps room for the three inline values and timestamps finish adds.
 _FINISH_RUN_HEADROOM_BYTES = 3 * _MAX_INLINE_VALUE_BYTES + 256
+# The state snapshot, run.json, and the receipt catch up on each status change, every this many events, and each time
+# the event log grows past a multiple of this many bytes, which bounds the log a load replays past the snapshot.
+_REFRESH_EVERY_EVENTS = 32
+_REFRESH_EVERY_BYTES = 256 << 10
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 # Writers of one record exclude each other in this process, without a lock file worker code could hold.
 _RECORD_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
@@ -211,7 +215,7 @@ class DelegationEvent:
 
 @dataclass
 class _RecordState:
-    """One record's committed state, kept beside its event log in primary-only storage."""
+    """One record's state as of a snapshot, kept beside its event log in primary-only storage."""
 
     # The run.json document the workspace receives.
     run: dict[str, Any]
@@ -351,6 +355,7 @@ class DelegationRecordOwner:
                     event_id="delegation_started",
                 ),
             )
+            _write_state(handle, state)
             _write_exports(handle, state, line)
         return handle
 
@@ -376,7 +381,9 @@ class DelegationRecordOwner:
             if isinstance(state, WorkspaceOnlyRecord):
                 return
             if event.event_id is not None and _event_id_digest(event.event_id) in state.event_ids:
-                _write_exports(handle, state)
+                # A replayed status change repairs the views a crash may have left stale.
+                if event.status is not None:
+                    _write_exports(handle, state)
                 return
             _ensure_active(state.run)
             sequence = state.run["event_count"] + 1
@@ -389,7 +396,15 @@ class DelegationRecordOwner:
                 status=event.status,
                 event_id=event.event_id,
             )
-            _write_exports(handle, state, _commit_event(handle, state, payload), artifacts)
+            line = _commit_event(handle, state, payload)
+            refresh = (
+                event.status is not None
+                or sequence % _REFRESH_EVERY_EVENTS == 0
+                or (state.log_bytes - len(line)) // _REFRESH_EVERY_BYTES != state.log_bytes // _REFRESH_EVERY_BYTES
+            )
+            if refresh:
+                _write_state(handle, state)
+            _write_exports(handle, state, line, artifacts, refresh=refresh)
 
     def _finish(
         self,
@@ -426,6 +441,7 @@ class DelegationRecordOwner:
                     event_id="delegation_finished",
                 )
                 line = _commit_event(handle, state, payload, terminal=True)
+                _write_state(handle, state)
             # Every finish, a replayed one included, rewrites the exports and renders transcript.md.
             _write_exports(handle, state, line, artifacts, final=True)
 
@@ -554,12 +570,27 @@ def _record_lock(handle: DelegationRecordHandle) -> Iterator[None]:
 
 
 def _load_state(handle: DelegationRecordHandle) -> _RecordState | WorkspaceOnlyRecord:
-    """Return the record's committed state, or the marker of a record that predates primary-owned state."""
+    """Return the record's committed state, or the marker of a record that predates primary-owned state.
+
+    The event log is the commit point: the state snapshot plus each whole event logged after it.
+    """
     try:
         payload = (handle.state_dir / _STATE_FILE).read_bytes()
     except FileNotFoundError:
         return read_workspace_only_record(handle.child_workspace, handle.scoped_path)
-    return _RecordState(**json.loads(payload))
+    state = _RecordState(**json.loads(payload))
+    with (handle.state_dir / _EVENT_LOG).open("rb") as log:
+        log.seek(state.log_bytes)
+        for line in log:
+            # A torn or garbled tail never counts, and the next append truncates it.
+            try:
+                event = json.loads(line) if line.endswith(b"\n") else None
+            except ValueError:
+                event = None
+            if not isinstance(event, dict) or event.get("sequence") != state.run["event_count"] + 1:
+                break
+            _fold_event(state, event, len(line))
+    return state
 
 
 def _event_id_digest(event_id: str) -> str:
@@ -600,7 +631,7 @@ def _commit_event(
     *,
     terminal: bool = False,
 ) -> bytes:
-    """Append one event to the primary log, then commit the state that counts it, and return the event's line."""
+    """Commit one event by a durable append to the primary log, count it in the state, and return its line."""
     line = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     log_limit = _MAX_EVENT_LOG_BYTES if terminal else _MAX_EVENT_LOG_BYTES - _FINISH_EVENT_HEADROOM_BYTES
     event_limit = _MAX_EVENTS if terminal else _MAX_EVENTS - 1
@@ -613,18 +644,33 @@ def _commit_event(
         raise DelegationRecordLimitError(msg)
     descriptor = os.open(handle.state_dir / _EVENT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
-        # The state file is the commit point, so an append whose state never committed is dropped first.
+        # Bytes past the committed events, a torn or failed append, are dropped first.
         os.ftruncate(descriptor, state.log_bytes)
-        _write_all(descriptor, line)
-        os.fsync(descriptor)
+        try:
+            _write_all(descriptor, line)
+            os.fsync(descriptor)
+        except BaseException:
+            # An append that failed must not count when the record is next loaded.
+            with suppress(OSError):
+                os.ftruncate(descriptor, state.log_bytes)
+            raise
     finally:
         os.close(descriptor)
-    _apply_event(state.run, payload)
-    state.log_bytes += len(line)
-    if payload["event_id"] is not None:
-        state.event_ids.append(_event_id_digest(payload["event_id"]))
-    write_json_file_durable(handle.state_dir / _STATE_FILE, asdict(state), strict_atomic_replace=True)
+    _fold_event(state, payload, len(line))
     return line
+
+
+def _write_state(handle: DelegationRecordHandle, state: _RecordState) -> None:
+    """Snapshot the state, so a load replays only the events logged after it."""
+    write_json_file_durable(handle.state_dir / _STATE_FILE, asdict(state), strict_atomic_replace=True)
+
+
+def _fold_event(state: _RecordState, event: Mapping[str, Any], line_bytes: int) -> None:
+    """Count one committed event of ``line_bytes`` log bytes in the state."""
+    _apply_event(state.run, event)
+    state.log_bytes += line_bytes
+    if event["event_id"] is not None:
+        state.event_ids.append(_event_id_digest(event["event_id"]))
 
 
 def _ensure_active(run: Mapping[str, Any]) -> None:
@@ -675,9 +721,11 @@ def _write_exports(
     artifacts: Mapping[str, bytes] | None = None,
     *,
     final: bool = False,
+    refresh: bool = True,
 ) -> None:
-    """Rewrite the workspace exports and the caller's receipt from the committed state, never reading them back.
+    """Write the workspace exports and the caller's receipt from the committed state, never reading them back.
 
+    The event export is appended for each event; run.json and the receipt are rewritten only with ``refresh``.
     Worker code can replace these files or their directories at will, so a failed write is only logged.
     """
     try:
@@ -686,7 +734,8 @@ def _write_exports(
                 with open_directory_within_root(record_fd, "artifacts", create=True, mode=0o700) as artifacts_fd:
                     for artifact_name, encoded in artifacts.items():
                         atomic_write_bytes_at(artifacts_fd, artifact_name, encoded)
-            atomic_write_bytes_at(record_fd, "run.json", _json_bytes(state.run))
+            if refresh:
+                atomic_write_bytes_at(record_fd, "run.json", _json_bytes(state.run))
             if final or not _append_export(record_fd, line, size_before=state.log_bytes - len(line)):
                 with atomic_write_file_at(record_fd, _EVENT_LOG) as export:
                     export.writelines(_committed_lines(handle, state))
@@ -694,6 +743,8 @@ def _write_exports(
                 _write_transcript(handle, record_fd, state)
     except (OSError, ValueError) as exc:
         logger.warning("delegation_record_export_failed", delegation_id=handle.locator.delegation_id, error=str(exc))
+    if not refresh:
+        return
     try:
         _write_receipt(handle, state.run)
     except (OSError, ValueError) as exc:
