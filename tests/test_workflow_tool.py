@@ -22,6 +22,7 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.llm.runs import RunStatus
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.manager import ScriptRunManagerError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.tool_jobs.execution import assembled_job_tools
@@ -54,6 +55,12 @@ if TYPE_CHECKING:
 
 SCRIPT = "def main(args):\n    return 'counted'\n"
 _UNKNOWN = "No workflow run {} in your runs."
+
+
+@pytest.fixture(autouse=True)
+def _scripts_can_run_here(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the placement check pass on every platform; the stack starts no process."""
+    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
 
 
 @pytest_asyncio.fixture

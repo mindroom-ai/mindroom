@@ -44,7 +44,6 @@ _._profile_or_prompt  # Pydantic model validator (src/mindroom/dynamic_workflows
 _._no_overrides  # Pydantic model validator (src/mindroom/dynamic_workflows/spec.py)
 _._one_template  # Pydantic model validator (src/mindroom/dynamic_workflows/spec.py)
 _._one_source  # Pydantic model validator (src/mindroom/dynamic_workflows/spec.py)
-_.max_concurrent_agents  # Workflow permission accepted and checked but never read, because steps run one at a time (src/mindroom/dynamic_workflows/spec.py)
 _.matrix_history  # Workflow data grant accepted only as 'none' and never read, because data grants are unsupported (src/mindroom/dynamic_workflows/spec.py)
 _.fetch_response  # Trafilatura spider download binding replaced by the server-fetch guard (src/mindroom/tools/agno_compat_trafilatura.py)
 _.fetch_images  # Newspaper4k Article.parse step overridden to skip image downloads (src/mindroom/tools/agno_compat_newspaper4k.py)

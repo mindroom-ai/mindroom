@@ -2542,7 +2542,6 @@ depends_on = [
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.store",
 ]
-visibility = ["mindroom.tools.workflow"]
 
 [[modules]]
 path = "mindroom.api.schedules"
