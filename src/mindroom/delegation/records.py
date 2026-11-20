@@ -215,7 +215,7 @@ class DelegationEvent:
 
 @dataclass
 class _RecordState:
-    """One record's state as of a snapshot, kept beside its event log in primary-only storage."""
+    """One record's committed state; state.json holds a snapshot of it that the event log beside it extends."""
 
     # The run.json document the workspace receives.
     run: dict[str, Any]
@@ -681,8 +681,19 @@ def _write_state(handle: DelegationRecordHandle, state: _RecordState) -> None:
 
 
 def _fold_event(state: _RecordState, event: Mapping[str, Any], line_bytes: int) -> None:
-    """Count one committed event of ``line_bytes`` log bytes in the state."""
-    _apply_event(state.run, event)
+    """Fold one committed event of ``line_bytes`` log bytes into the state and its run view."""
+    run = state.run
+    run["event_count"] = event["sequence"]
+    run["updated_at"] = event["timestamp"]
+    if event["status"] is not None:
+        run["status"] = event["status"]
+    if event["kind"] == "delegation_finished":
+        terminal_data = event["data"]
+        run["status"] = terminal_data["status"]
+        run["finished_at"] = event["timestamp"]
+        run["output"] = terminal_data["output"]
+        run["error"] = terminal_data["error"]
+        run["usage"] = terminal_data["usage"]
     state.log_bytes += line_bytes
     if event["event_id"] is not None:
         state.event_ids.append(_event_id_digest(event["event_id"]))
@@ -712,21 +723,6 @@ def _event_payload(
         "status": status,
         "event_id": event_id,
     }
-
-
-def _apply_event(run: dict[str, Any], event: Mapping[str, Any]) -> None:
-    """Fold one committed event into the run view."""
-    run["event_count"] = event["sequence"]
-    run["updated_at"] = event["timestamp"]
-    if event["status"] is not None:
-        run["status"] = event["status"]
-    if event["kind"] == "delegation_finished":
-        terminal_data = event["data"]
-        run["status"] = terminal_data["status"]
-        run["finished_at"] = event["timestamp"]
-        run["output"] = terminal_data["output"]
-        run["error"] = terminal_data["error"]
-        run["usage"] = terminal_data["usage"]
 
 
 def _write_exports(
