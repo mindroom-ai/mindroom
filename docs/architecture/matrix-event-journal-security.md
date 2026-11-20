@@ -54,7 +54,10 @@ A redaction one login observes is applied to the projection, pending journal row
   An ended job, read or not, is deleted 30 days after its last change, or one day after it when the call that started the job returned its result inline, once its turn has finished and no approval in its session is pending; redacting the message that started it or the bot leaving the room does not delete it sooner.
   `tool_job_owner` holds only the runtime generation that owns the jobs.
 
-There is no plaintext table keyed by media URL, and no runtime-wide process-local plaintext cache shared across bots.
+There is no plaintext table keyed by media URL.
+Each journal store keeps one process-local cache of stored message content for conversation reads (`event_journal/reads.py` `PageCache`), shared by the bots of that runtime and keyed by principal, room, logical event, visible revision, revision time and stored size, so a read never returns another principal's rows or an outdated revision.
+It holds at most 256 MiB of stored content, evicting the least recently read rows first.
+A redacted body or the bodies of a room the bot left are never returned again, but they stay in process memory until evicted or the process restarts.
 
 ## Known gaps
 
