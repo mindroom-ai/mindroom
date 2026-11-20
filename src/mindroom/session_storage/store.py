@@ -541,9 +541,10 @@ class _Rows:
     """What a save of an unfinished run left in its rows, so the run's next save in this process sends only changes.
 
     It holds the run's ``seq``, each message row's ``ord`` and data digest by id, and each tool row's data digest. Each
-    save of the run takes it out before writing and records its own only once it commits, under the database's lock
-    in ``_WRITTEN``, so it exists only while the save that recorded it is the run's latest; a deleted run has no row,
-    and a fold that recreates one moves its ``seq``. Other processes do not write a running run's rows.
+    save of the run takes it out before writing and records its own before committing, holding the database's lock in
+    ``_WRITTEN`` until it commits or, rolled back, drops it, so it exists only while the save that recorded it is the
+    run's latest; a deleted run has no row, and a fold that recreates one moves its ``seq``. Other processes do not
+    write a running run's rows.
     """
 
     seq: int
