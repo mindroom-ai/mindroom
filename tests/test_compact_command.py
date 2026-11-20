@@ -19,10 +19,20 @@ from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import has_queued_force_compaction, new_scope_session
 from mindroom.history.types import HistoryScope
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from tests import response_runner_helpers
 from tests.authorization_helpers import isolated_membership_index, make_test_command_handler_context
-from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, seed_session_row
+from tests.bot_helpers import make_test_agent_bot
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    seed_session_row,
+    unwrap_extracted_collaborator,
+    wrap_extracted_collaborators,
+)
 from tests.history_helpers import _runtime_paths
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -31,6 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.response_runner import ResponseRunner
 
 ALICE = "@alice:example.test"
 ROOM = "!room:example.test"
@@ -224,10 +235,70 @@ async def test_bare_compact_outside_a_thread_reaches_room_mode_entities(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_bare_compact_without_sessions_says_nothing_to_compact(tmp_path: Path) -> None:
+async def test_bare_compact_without_sessions_says_nothing_to_compact_and_provisions_nothing(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
+    config.agents["code"].private = AgentPrivateConfig(per="user")
+
+    def stored_files() -> set[Path]:
+        return {path for path in paths.storage_root.rglob("*") if path.is_file()}
+
+    before = stored_files()
     assert await _compact(config, paths, "") == "Nothing to compact here."
-    assert not _storage(config, paths, "code").has_session(_target().session_id)
+    # No conversation database and no private owner record for the entities that never spoke here.
+    assert stored_files() == before
+
+
+REQUESTER = "@user:localhost"
+
+
+def _reply_runner(tmp_path: Path, entity_name: str) -> ResponseRunner:
+    """Return the response runner of ``entity_name``'s bot: the private agent `general`, or the configured team `squad`."""
+    config = response_runner_helpers._config(tmp_path)
+    config.models["default"].context_window = 48_000
+    config.administrators = [REQUESTER]
+    config.agents["general"].private = AgentPrivateConfig(per="user")
+    config.agents["helper"] = AgentConfig(display_name="Helper", rooms=["!room:localhost"])
+    config.teams["squad"] = TeamConfig(
+        display_name="Squad", role="Pair up", agents=["helper"], rooms=["!room:localhost"]
+    )
+    agent_user = AgentMatrixUser(
+        agent_name=entity_name,
+        password=TEST_PASSWORD,
+        display_name=entity_name,
+        user_id=f"@mindroom_{entity_name}:localhost",
+    )
+    bot = make_test_agent_bot(agent_user, config, rooms=["!room:localhost"])
+    wrap_extracted_collaborators(bot)
+    return unwrap_extracted_collaborator(bot._response_runner)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entity_name", ["general", "squad"])
+async def test_the_reply_path_reads_the_flag_the_command_writes(tmp_path: Path, entity_name: str) -> None:
+    runner = _reply_runner(tmp_path, entity_name)
+    result = await handle_compact_command(
+        entity_name,
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+        target=MessageTarget.resolve("!room:localhost", "$thread", "$command"),
+        requester_id=REQUESTER,
+        membership_index=runner.deps.runtime.agent_reply_memberships,
+    )
+    assert result.startswith("✅"), result
+
+    async def reply_path_queued(requester_id: str) -> bool:
+        # The next reply's target, identity, scope, and store, each resolved as the reply path does.
+        target = MessageTarget.resolve("!room:localhost", "$thread", "$next")
+        identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_id)
+        return await runner._has_queued_forced_compaction(
+            session_id=target.session_id,
+            scope=runner.deps.state_writer.history_scope(),
+            execution_identity=identity,
+        )
+
+    assert await reply_path_queued(REQUESTER)
+    # The private agent's request is the requester's own; the configured team's history is shared.
+    assert await reply_path_queued("@other:localhost") is (entity_name == "squad")
 
 
 def _event(body: str) -> nio.RoomMessageText:

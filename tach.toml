@@ -6926,6 +6926,7 @@ from = ["mindroom.session_storage.legacy_conversion_backup"]
 
 [[interfaces]]
 expose = [
+    "agent_session_database_path",
     "create_agent_state_storage",
     "create_session_storage",
     "create_state_storage",

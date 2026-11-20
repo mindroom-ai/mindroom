@@ -6,7 +6,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
-from mindroom.history.session_context import create_scope_session_storage
+from mindroom.history.session_context import create_scope_session_storage, scope_session_database_path
 from mindroom.history.storage import new_scope_session, set_force_compaction
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -61,7 +61,19 @@ async def scope_has_session(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
 ) -> bool:
-    """Return whether ``scope`` has a stored session ``session_id``, without loading its runs."""
+    """Return whether ``scope`` has a stored session ``session_id``, without loading its runs.
+
+    A scope whose database file does not exist has none, and its store is never opened, which would create the file
+    and, for a private agent, its owner record.
+    """
+    database = scope_session_database_path(
+        scope=scope,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    if not database.is_file():
+        return False
     return await run_session_storage_operation(
         partial(
             create_scope_session_storage,
