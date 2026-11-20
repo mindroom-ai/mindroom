@@ -4,7 +4,6 @@ import re
 from collections.abc import Callable, Mapping
 from html import escape, unescape
 from html.parser import HTMLParser
-from itertools import accumulate
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -499,60 +498,43 @@ def _build_markdown_renderer() -> MarkdownIt:
 _MARKDOWN_RENDERER = _build_markdown_renderer()
 
 
-_IMAGE_SCANNER = _build_markdown_renderer()
-
-
 def _recording_image(state: StateInline, silent: bool) -> bool:
-    """Parse one image like markdown-it and record where its source sits in the inline text."""
     start = state.pos
-    if not image(state, silent):
-        return False
-    if not silent:
+    if (found := image(state, silent)) and not silent:
         state.env.setdefault("images", []).append((start, state.pos, state.tokens[-1]))
-    return True
+    return found
 
 
+_IMAGE_SCANNER = _build_markdown_renderer()
 _IMAGE_SCANNER.inline.ruler.at("image", _recording_image)
 
 
-def _is_loadable_image_url(url: object) -> bool:
-    scheme, separator, rest = str(url).partition("://")
-    web = scheme.lower() in {"http", "https"} and separator and rest[:1] not in {"", "/"}
-    return bool(web) or validated_mxc_url(url) is not None
+def _unloadable(image_token: Token) -> bool:
+    src = str(image_token.attrs["src"])
+    return not re.match(r"https?://[^/]", src, re.IGNORECASE) and validated_mxc_url(src) is None
 
 
 def replace_unsendable_images(text: str) -> str:
-    """Replace each Markdown image no client can load, such as ``![logo](mxc://placeholder)``, with a visible note.
-
-    Only ``mxc://server/media_id`` and ``http(s)://`` images can show; image syntax inside code stays as written.
-    """
+    """Replace each image that is not ``mxc://server/media_id`` or ``http(s)://`` with a note; code stays as written."""
     if "![" not in text:
         return text
     env: dict[str, list[tuple[int, int, Token]]] = {}
-    blocks = _IMAGE_SCANNER.parse(text, env)
-    line_starts = list(accumulate((len(line) + 1 for line in text.split("\n")), initial=0))
-    cursors: dict[int, int] = {}
+    cursors = dict(enumerate([0, *(newline.end() for newline in re.finditer("\n", text))]))
     edits: list[tuple[int, int, str]] = []
-    for block in blocks:
-        if block.type != "inline" or not block.map:
-            continue
+    for block in (block for block in _IMAGE_SCANNER.parse(text, env) if block.type == "inline" and block.map):
         # The inline text starts on its first source line, after any quote, list, or table-cell markup before it.
         first_line = block.content.split("\n", 1)[0]
-        base = text.find(first_line, cursors.get(block.map[0], line_starts[block.map[0]]))
+        base = text.find(first_line, cursors.get(block.map[0], 0))
         if base < 0:
             continue
         cursors[block.map[0]] = base + len(first_line)
         for start, end, token in env.get("images", []):
-            if not any(child is token for child in block.children or ()) or _is_loadable_image_url(token.attrs["src"]):
-                continue
-            source = block.content[start:end]
-            skip = block.content.count(source, 0, start)
-            if len(parts := text[base:].split(source, skip + 1)) == skip + 2:
-                at = base + len(source.join(parts[: skip + 1]))
-                note = f"\u26a0\ufe0f Image not sent: {token.content or 'image'} (no uploaded file)"
-                edits.append((at, at + len(source), note))
-    for start, end, note in reversed(edits):
-        text = text[:start] + note + text[end:]
+            if any(child is token for child in block.children or ()) and _unloadable(token):
+                source, skip = block.content[start:end], block.content.count(block.content[start:end], 0, start)
+                if len(parts := text[base:].split(source, skip + 1)) == skip + 2:
+                    edits.append((at := base + len(source.join(parts[: skip + 1])), at + len(source), token.content))
+    for start, end, alt in reversed(edits):
+        text = f"{text[:start]}\u26a0\ufe0f Image not sent: {alt or 'image'} (no uploaded file){text[end:]}"
     return text
 
 
