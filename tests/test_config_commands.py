@@ -1407,6 +1407,45 @@ async def test_config_preview_recovery_preserves_committed_decision(
 
 
 @pytest.mark.asyncio
+async def test_config_preview_with_a_visible_decision_is_not_set_up_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A preview whose decision was answered and forgotten counts as recovered and gets no new pending change."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_assistant:example.org"
+
+    with (
+        patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=("$response",))),
+        patch.object(config_confirmation, "_add_confirmation_reactions", new_callable=AsyncMock) as add_reactions,
+    ):
+        recovered = await config_confirmation.recover_confirmation_setup(
+            client,
+            runtime_paths,
+            "!room:example.org",
+            "$preview",
+        )
+        await config_confirmation.ensure_pending_change(
+            client,
+            runtime_paths,
+            event_id="$preview",
+            room_id="!room:example.org",
+            thread_id=None,
+            config_path="defaults.markdown",
+            new_value=True,
+            new_value_withheld=False,
+            requester="@alice:example.org",
+        )
+
+    assert recovered is True
+    assert config_confirmation._pending_changes == {}
+    add_reactions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_confirmation_recovery_adopts_untracked_visible_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
