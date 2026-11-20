@@ -334,6 +334,50 @@ def test_run_store_migrates_existing_table_without_workflow_run_id(runtime_paths
     assert (reopened.workflow_run_id, reopened.entry) == ("wf-" + "a" * 32, "workflow")
 
 
+def test_run_store_migrates_existing_call_table_without_effect_columns(runtime_paths: RuntimePaths) -> None:
+    """A database from before workflows gains both call columns; an old claim reads as never proven to have run."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+    _claim(store)
+    connection = sqlite3.connect(runtime_paths.control_state_root / "script_runs" / "script_runs.sqlite3")
+    try:
+        connection.execute("ALTER TABLE script_calls DROP COLUMN effect_started_at")
+        connection.execute("ALTER TABLE script_calls DROP COLUMN metadata_json")
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = ScriptRunStore(runtime_paths)
+    old = store.get_call("run-1", "call-1")
+    store.mark_call_effect_started("run-1", "call-1")
+    store.publish_call_result(
+        run_id="run-1",
+        call_id="call-1",
+        state=ScriptCallState.COMPLETED,
+        result="out",
+        metadata={"exit_code": 3},
+    )
+
+    assert (old.effect_started_at, old.metadata) == (None, None)
+    reopened = ScriptRunStore(runtime_paths).get_call("run-1", "call-1")
+    assert reopened.effect_started_at is not None
+    assert (reopened.result, reopened.metadata) == ("out", {"exit_code": 3})
+
+
+def test_workflow_attempt_claims_a_grant_outside_its_launch_snapshot(runtime_paths: RuntimePaths) -> None:
+    """A workflow attempt answers to its owner's live tools at the call; a plain script keeps its launch snapshot."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(replace(_new_run(), run_id="attempt-1", workflow_run_id="wf-" + "a" * 32))
+    store.create_run(_new_run())
+    outside = ScriptToolGrant("memory", "add_memory")
+
+    claim = store.claim_call(run_id="attempt-1", call_id="call-1", grant=outside, arguments_digest="digest")
+
+    assert claim.created
+    with pytest.raises(ScriptCapabilityError, match="not granted at launch"):
+        store.claim_call(run_id="run-1", call_id="call-1", grant=outside, arguments_digest="digest")
+
+
 def test_write_transaction_closes_connection_when_begin_fails(
     runtime_paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,

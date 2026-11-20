@@ -242,6 +242,7 @@ Matrix sync callback
 | `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the router it reads and posts through, the loop that checks calls every 15 seconds (while call transcripts are off, only holding calls to the one-day limit), the service the API routes reach, and the agent call in a room, read through the agent answering calls there |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
+| `orchestration/workflow_runtime.py` | Builds the workflow store and engine on the script runtime, ties the engine's life to the orchestrator's, and follows each script-runtime pass by ending runs whose attempts ended and pruning runs past the script retention |
 | `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
 | `script_runs/manager.py` | Starts, polls, and cancels script runs in a worker or unsafe-local, and finalizes their cleanup |
 | `script_runs/store.py` | The primary-only SQLite store of script runs and their tool-call receipts, with atomic state transitions |
@@ -259,8 +260,10 @@ Matrix sync callback
 | `workflow_runs/models.py` | Workflow run and node records, their states, dispatch handles, and the run ID |
 | `workflow_runs/store.py` | The SQLite store of workflow runs, nodes, usage entries, and log lines, with versioned migrations and spilled large results |
 | `workflow_runs/replay.py` | Pure replay rules: a call's digest, lane keys, what a submitted call does with the node saved at its key, dirty lanes, and stale nodes |
+| `workflow_runs/engine.py` | The workflow engine: a run's attempts on the script runtime, tool nodes with their dispatch handles, settling a node from its broker receipt, and the run's state from its attempt |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
+| `api/workflow_gateway.py` | Capability-authenticated routes a workflow attempt's script calls for its run, nodes, results, log, and report, served on both listeners |
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
 | `workflow.py` | The standard-library SDK a workflow script imports: lanes and call keys, the gateway client, `tool`, `shell`, `phase`, `log`, and the loader that calls `main(args)` |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
@@ -528,7 +531,7 @@ Matrix sync callback
 | `plugin_worker_relay.py` | The primary's client of a dedicated worker's runner relay, which plugin routes and tools open through `plugin_http.worker_relay` to reach their worker services by name or the agent's servers by port |
 | `worker_computer/agent_browser.py` | A worker service's own CDP session on the agent's browser page: an allowlist of watching commands, acting ones only under the Computer's control lease, following the agent between pages, and releasing held input |
 | `plugin_worker_services.py` | The primary's side of plugin worker services: the declaration plugins import, ensure and stop through the target's worker, and stopping the started ones when plugins reload or MindRoom stops |
-| `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
+| `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it, and the facts about its result, such as an exit status, that a caller storing the result whole collects |
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
 | `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |
 | `workers/placements.py` | The sessions whose worker-routed calls run in a dedicated subagent worker, bound for each attempt of such a child |

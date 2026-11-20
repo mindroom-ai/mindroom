@@ -35,11 +35,24 @@ _SCRIPT_RUN_COLUMN_MIGRATIONS = (
         "ALTER TABLE script_runs ADD COLUMN resource_limits_json TEXT NOT NULL DEFAULT '{}'",
     ),
 )
+_SCRIPT_CALL_COLUMN_MIGRATIONS = (
+    # LEGACY_COMPAT: Script-call rows without the effect stamp and result metadata columns.
+    # Legacy format: Script-call rows lacked effect_started_at and metadata_json.
+    # Last legacy release: v2026.11.476; replacement: the next release adds both columns for workflow tool nodes.
+    # Handling: Add the absent columns in place; old rows read both as null, so an old unfinished call stays unproven.
+    # Coverage: tests/test_script_run_store.py::test_run_store_migrates_existing_call_table_without_effect_columns.
+    ("effect_started_at", "ALTER TABLE script_calls ADD COLUMN effect_started_at TEXT"),
+    ("metadata_json", "ALTER TABLE script_calls ADD COLUMN metadata_json TEXT"),
+)
 
 
 def migrate_legacy_script_run_columns(connection: sqlite3.Connection) -> None:
     """Add columns absent from script-run databases created by older releases."""
-    existing_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(script_runs)").fetchall()}
-    for column_name, statement in _SCRIPT_RUN_COLUMN_MIGRATIONS:
-        if column_name not in existing_columns:
-            connection.execute(statement)
+    for table, migrations in (
+        ("script_runs", _SCRIPT_RUN_COLUMN_MIGRATIONS),
+        ("script_calls", _SCRIPT_CALL_COLUMN_MIGRATIONS),
+    ):
+        existing_columns = {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        for column_name, statement in migrations:
+            if column_name not in existing_columns:
+                connection.execute(statement)

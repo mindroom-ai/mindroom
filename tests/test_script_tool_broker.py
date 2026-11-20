@@ -65,6 +65,7 @@ from mindroom.script_runs.store import (
     mint_script_capability,
 )
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.progress import report_tool_metadata
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -666,6 +667,36 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3.0}'
     assert events == ["tool:before_call", "tool:environment:calculator.add", "tool:after_call"]
+
+
+@pytest.mark.asyncio
+async def test_script_call_receipt_records_that_the_tool_was_invoked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A receipt says whether its tool was invoked; only a workflow node asks for the facts its tool reports."""
+
+    class ReportingCalculator(_Calculator):
+        def add(self, a: int, b: int) -> object:
+            report_tool_metadata(exit_code=a + b)
+            return "done"
+
+    _replace_calculator_toolkit(monkeypatch, ReportingCalculator)
+    broker, token = _broker(tmp_path, events=[])
+    denying, denying_token = _broker(
+        tmp_path / "denied",
+        events=[],
+        require_approval=True,
+        approval_decision=ToolApprovalDecision(approved=False, reason="Not this sum."),
+    )
+
+    receipt = await _call_through_gateway(broker, _request(), token)
+    denied = await _call_through_gateway(denying, _request(), denying_token)
+
+    assert receipt.effect_started_at is not None
+    assert (receipt.result, receipt.metadata) == ("done", None)
+    assert broker.store.get_call("run-1", "call-1") == receipt
+    assert (denied.state, denied.effect_started_at, denied.metadata) == (ScriptCallState.FAILED, None, None)
 
 
 @pytest.mark.asyncio
@@ -2240,6 +2271,7 @@ def test_a_receipt_the_store_cannot_publish_settles_indeterminate(
         state=state,
         result=3 if completed else None,
         error=None if completed else broker_module._INDETERMINATE_ERROR,
+        metadata=None,
     )
 
     assert receipt.state is ScriptCallState.INDETERMINATE

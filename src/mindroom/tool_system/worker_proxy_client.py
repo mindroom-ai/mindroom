@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
@@ -22,7 +22,7 @@ from mindroom.credentials.policy import credential_service_policy
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_system.progress import report_tool_progress
+from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress, structured_result_requested
 from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, normalize_sandbox_runner_api_root, worker_api_endpoint
 from mindroom.workers.protocol import (
@@ -436,7 +436,7 @@ def execute_worker_proxy_request(
         )
         with client_factory(timeout=config.proxy_timeout_seconds) as client:
             run_as_job = job_owns_execution()
-            sent: dict[str, object] = {"run_as_job": run_as_job}
+            sent: dict[str, object] = {"run_as_job": run_as_job, "structured_result": structured_result_requested()}
             if cancellation is not None:
                 sent["request_id"] = cancellation.request_id
                 cancel_url = (
@@ -481,6 +481,8 @@ def execute_worker_proxy_request(
                 if worker_handle is not None
                 else nullcontext()
             )
+            # Once sent, only the worker's own well-formed word says the call never started or how it ended.
+            report_tool_metadata(unanswered=True)
             with (
                 in_flight,
                 client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response,
@@ -489,7 +491,11 @@ def execute_worker_proxy_request(
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
                     response.read()
-                    raise _WorkerHttpError(exc.response) from exc
+                    refusal = _WorkerHttpError(exc.response)
+                    # Whatever sits between the primary and the worker may answer an error for a call that ran.
+                    if refusal.failure is not None and refusal.failure.failure_kind == "tool":
+                        report_tool_metadata(unanswered=False)
+                    raise refusal from exc
                 data = _read_execute_stream(response, deadline=deadline, cancellation=cancellation)
     except Exception as exc:
         _record_proxy_exception_for_worker(
@@ -499,6 +505,10 @@ def execute_worker_proxy_request(
         )
         raise
 
+    with suppress(ValidationError):
+        final = ExecuteResponse.model_validate(data)
+        if final.ok or final.failure_kind == "tool":
+            report_tool_metadata(unanswered=False)
     answer = _checked_worker_answer(
         data,
         ExecuteResponse,
@@ -509,6 +519,7 @@ def execute_worker_proxy_request(
     )
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)
+    report_tool_metadata(**(answer.metadata or {}))
     return answer.result
 
 

@@ -111,6 +111,7 @@ The script defines `def main(args):` and returns the final report, a string or a
   Ask two sessions at once with parallel([lambda: a.ask(x), lambda: b.ask(y)]).
 - ask_user(question, options=None) asks the user in the thread and returns the answer. Only that branch waits; parallel branches keep running.
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
+  shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow in the graph; log(text) shows a progress line. run(name, args) calls a saved workflow inside this one.
 - Agents in a run can talk to each other: each has the tools send_peer_message(to, text) and read_peer_messages(wait_seconds),
   addressed by the name you gave them. Say in each prompt whom to talk to. The script joins in with send(to, text),
@@ -205,6 +206,7 @@ def shell(command, *, timeout=3600, tail=2000, cached=True) -> "ShellResult":
     """Run a command with the owner's shell tool; returns ShellResult(ok, exit_code, output) and never raises on a non-zero exit.
 
     `output` is the last `tail` lines. With cached=False the command runs again on every resume.
+    shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
     """
 
 def tool(toolkit, function, /, *, cached=True, **arguments):
@@ -900,7 +902,7 @@ The removal gives back about 3,000 source lines.
 
 In v1: everything above.
 Cut from v1 in review round 2: paging of rows a frame left out and a list of an edge's messages in the panel (each agent's Sub-agents view shows its sends and reads); a workflow run as a report-publishing source and `mindroom.workflow` as a plugin import; local runs on macOS (a `kqueue` parent watch); the prompt-cache stagger for agents that share a prompt prefix.
-Later, in rough order of value: pushing peer messages into a busy agent's next tool result; early exit from a fan-out (the first good answer wins and the rest are cancelled); `agent(..., thread=True)` to show one agent's turn as a Matrix thread; stopping the script process while a run waits for hours and relaunching it on the answer (replay makes that possible); bundled and shared workflows; a `!workflow run` command with no model turn; stall detection with automatic agent restart.
+Later, in rough order of value: pushing peer messages into a busy agent's next tool result; early exit from a fan-out (the first good answer wins and the rest are cancelled); `agent(..., thread=True)` to show one agent's turn as a Matrix thread; stopping the script process while a run waits for hours and relaunching it on the answer (replay makes that possible); bundled and shared workflows; a `!workflow run` command with no model turn; stall detection with automatic agent restart; `shell()` output above the shell tool's 50 KiB limit, read back from the command's captured output.
 
 ## Testing
 

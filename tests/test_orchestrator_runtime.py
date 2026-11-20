@@ -1213,6 +1213,7 @@ class TestAgentBot(AgentBotTestBase):
                 set_api_server_address("127.0.0.1", 8765)
                 app_state = api_config_lifecycle.app_state(api_main.app)
                 assert api_main.app.state.script_tool_broker is script_runtime.broker
+                assert api_main.app.state.workflow_engine is runtime._workflow_runtime.engine
                 assert app_state.runtime.script_worker_keepalive is script_runtime.touch_live_workers
                 assert callable(self.on_started)
                 await self.on_started("127.0.0.1", 43210)
@@ -1240,6 +1241,7 @@ class TestAgentBot(AgentBotTestBase):
         script_runtime.bind_api.assert_called_once_with("http://127.0.0.1:43210/api/script-gateway")
         script_runtime.unbind_api.assert_awaited_once_with()
         assert api_main.app.state.script_tool_broker is None
+        assert api_main.app.state.workflow_engine is None
         assert api_config_lifecycle.app_state(api_main.app).embedded is None
         listener.assert_called_once_with(
             runtime_paths,
@@ -1247,6 +1249,7 @@ class TestAgentBot(AgentBotTestBase):
             broker=script_runtime.broker,
             log_level="INFO",
             agent_cli_registry=runtime.agent_cli_registry,
+            workflow_engine=runtime._workflow_runtime.engine,
         )
 
     @pytest.mark.asyncio

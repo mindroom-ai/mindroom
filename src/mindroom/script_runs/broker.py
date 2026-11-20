@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from threading import Event
 from typing import TYPE_CHECKING, Protocol
@@ -26,6 +27,7 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptToolGrant,
     script_worker_key_for_run,
+    utc_timestamp,
 )
 from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import (
@@ -41,10 +43,13 @@ from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, 
 from mindroom.tool_system.invocation import (
     DETACHED_SESSION_ID,
     CallResult,
+    ToolCall,
     ToolCallContext,
+    ToolNext,
     client_tool_result,
     run_tool_call,
 )
+from mindroom.tool_system.progress import structured_tool_result
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     tool_runtime_context,
@@ -258,11 +263,13 @@ class ScriptToolBroker:
         self,
         request: ScriptToolCallRequest,
         authorization: str | None,
+        authenticated: bool,
     ) -> ScriptCallClaim:
-        run = self.authenticate(request.run_id, authorization)
+        if not authenticated:
+            self._authenticate_plain(request.run_id, authorization)
         self._require_call_admission()
         return self.store.claim_call(
-            run_id=run.run_id,
+            run_id=request.run_id,
             call_id=request.call_id,
             grant=request.grant,
             arguments_digest=request.arguments_digest,
@@ -273,12 +280,13 @@ class ScriptToolBroker:
         request: ScriptToolCallRequest,
         *,
         authorization: str | None,
+        authenticated: bool = False,
     ) -> ScriptCallRecord:
         key = (request.run_id, request.call_id)
         self._preparing[key] = self._preparing.get(key, 0) + 1
         preparation_finished = False
         try:
-            claim = await asyncio.to_thread(self._claim_authenticated_call, request, authorization)
+            claim = await asyncio.to_thread(self._claim_authenticated_call, request, authorization, authenticated)
             call = claim.call
 
             if claim.created and not self._call_admission_open.is_set():
@@ -376,6 +384,13 @@ class ScriptToolBroker:
             raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
         return run
 
+    def _authenticate_plain(self, run_id: str, authorization: str | None) -> ScriptRunRecord:
+        """Authenticate a plain script's call; a workflow attempt's calls enter only as its nodes, so each has one claim."""
+        run = self.authenticate(run_id, authorization)
+        if run.workflow_run_id is not None:
+            raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
+        return run
+
     async def cancel_run(self, run_id: str) -> None:
         """Cancel this broker's work for a run whose capability is already revoked."""
         while any(key[0] == run_id for key in self._preparing):
@@ -410,6 +425,26 @@ class ScriptToolBroker:
             self._accept_prepared_call(request, authorization=authorization),
         )
 
+    async def execute_for_workflow(
+        self,
+        run: ScriptRunRecord,
+        *,
+        call_id: str,
+        grant: ScriptToolGrant,
+        arguments: dict[str, object],
+    ) -> ScriptCallRecord:
+        """Claim one call of the workflow attempt *run*, which its gateway authenticated, and await its receipt.
+
+        The stored receipt holds the tool's whole result, whatever its size, so the node can be settled from it later.
+        """
+        request = ScriptToolCallRequest(run.run_id, call_id, grant, arguments)
+        await run_coroutine_until_complete(self._accept_prepared_call(request, authorization=None, authenticated=True))
+        task = self._tasks.get((run.run_id, call_id))
+        if task is None:
+            return await asyncio.to_thread(self.get_call, run.run_id, call_id)
+        # The call stays the broker's: a caller that is cancelled must not stop a tool mid-effect.
+        return await asyncio.shield(task)
+
     async def get_authenticated(
         self,
         run_id: str,
@@ -417,7 +452,7 @@ class ScriptToolBroker:
         authorization: str | None,
     ) -> ScriptCallRecord:
         """Authenticate a receipt and settle approval debt discovered as orphaned."""
-        run = await asyncio.to_thread(self.authenticate, run_id, authorization)
+        run = await asyncio.to_thread(self._authenticate_plain, run_id, authorization)
         self._require_call_admission()
         receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
         if receipt.state is ScriptCallState.INDETERMINATE:
@@ -478,13 +513,19 @@ class ScriptToolBroker:
             # A failed connect raises before the call starts; the close finishes before its receipt is published.
             async with toolkit_call_lifetime(prepared.toolkit, self._cleanups):
                 execution_started = True
-                result = await self._run_prepared_execution(
-                    prepared,
-                    run=run,
-                    call=call,
-                    origin=origin,
-                    arguments=arguments,
-                )
+                # A workflow node's result goes to the workflow store whole, with the facts its tool reported.
+                structured = structured_tool_result() if run.workflow_run_id is not None else nullcontext()
+                with structured as metadata:
+                    result = await self._run_prepared_execution(
+                        prepared,
+                        run=run,
+                        call=call,
+                        origin=origin,
+                        arguments=arguments,
+                    )
+            if metadata and metadata.pop("unanswered", False) and not result.succeeded:
+                # The call left for a worker, and no answer says how the tool ended there.
+                return await self._publish_async(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
             if not result.succeeded:
                 error = {
                     "kind": "approval_denied" if result.status == "denied" else "tool_failure",
@@ -496,10 +537,12 @@ class ScriptToolBroker:
                     state=ScriptCallState.FAILED,
                     error=error,
                 )
+            value = _strict_json_result(result.value)
             return await self._publish_async(
                 call,
                 state=ScriptCallState.COMPLETED,
-                result=_strict_json_result(result.value),
+                result=value,
+                metadata=metadata or None,
             )
         except asyncio.CancelledError:
             raise
@@ -576,7 +619,13 @@ class ScriptToolBroker:
                 user_id=run.owner_user_id,
                 call_id=call.call_id,
             )
-            return await run_tool_call(function, arguments, call_context, middleware=(policy,))
+
+            async def mark_effect_started(tool_call: ToolCall, call_next: ToolNext) -> object:
+                # Past hooks and approval: from here a crash leaves the call's outcome unknown.
+                await asyncio.to_thread(self.store.mark_call_effect_started, run.run_id, call.call_id)
+                return await call_next(tool_call.arguments)
+
+            return await run_tool_call(function, arguments, call_context, middleware=(policy, mark_effect_started))
 
     async def _current_execution_decision(
         self,
@@ -612,7 +661,7 @@ class ScriptToolBroker:
         current_config = current_context.current_config
         if (
             not self._live_authorization(durable_run, config=current_config)
-            or call.grant not in durable_run.grants
+            or not durable_run.launch_allows(call.grant)
             or current_config != prepared.source_config
         ):
             raise _CurrentGrantRevokedError
@@ -630,11 +679,12 @@ class ScriptToolBroker:
     ) -> _PreparedExecution:
         context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
         source_config = context.current_config
-        if not self._live_authorization(run, config=source_config) or call.grant not in run.grants:
+        if not self._live_authorization(run, config=source_config) or not run.launch_allows(call.grant):
             raise _CurrentGrantRevokedError
         resolved = resolve_current_script_tool(
             context,
             call.grant,
+            workflow=run.workflow_run_id is not None,
             rejected_toolkit_cleanup=self._close_rejected_toolkit,
         )
         if resolved is None:
@@ -662,8 +712,9 @@ class ScriptToolBroker:
         state: ScriptCallState,
         result: object | None = None,
         error: object | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> ScriptCallRecord:
-        return await asyncio.to_thread(self._publish, call, state=state, result=result, error=error)
+        return await asyncio.to_thread(self._publish, call, state=state, result=result, error=error, metadata=metadata)
 
     def _publish(
         self,
@@ -672,6 +723,7 @@ class ScriptToolBroker:
         state: ScriptCallState,
         result: object | None,
         error: object | None,
+        metadata: dict[str, object] | None,
     ) -> ScriptCallRecord:
         try:
             return self.store.publish_call_result(
@@ -680,12 +732,13 @@ class ScriptToolBroker:
                 state=state,
                 result=result,
                 error=error,
+                metadata=metadata,
             )
         except ScriptReceiptTooLargeError:
             return self._publish_or_indeterminate(call, state=ScriptCallState.FAILED, error=_RESULT_TOO_LARGE_ERROR)
         except BaseException:
             if state is ScriptCallState.INDETERMINATE:
-                return replace(call, state=state, result=result, error=error)
+                return _unstored(call)
             return self._publish_or_indeterminate(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
 
     def _publish_or_indeterminate(
@@ -698,7 +751,13 @@ class ScriptToolBroker:
         try:
             return self.store.publish_call_result(run_id=call.run_id, call_id=call.call_id, state=state, error=error)
         except BaseException:
-            return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
+            return _unstored(call)
+
+
+def _unstored(call: ScriptCallRecord) -> ScriptCallRecord:
+    """Return what is known of a call whose receipt could not be stored: its tool may have been invoked."""
+    started = call.effect_started_at or utc_timestamp()
+    return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR, effect_started_at=started)
 
 
 async def drain_script_tool_cleanup(

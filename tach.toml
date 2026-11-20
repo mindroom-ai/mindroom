@@ -2083,9 +2083,23 @@ depends_on = [
 path = "mindroom.api.script_gateway"
 depends_on = [
     "mindroom.api.agent_cli",
+    "mindroom.api.workflow_gateway",
     "mindroom.bounded_bytes",
     "mindroom.json_utils",
 ]
+
+[[modules]]
+path = "mindroom.api.workflow_gateway"
+depends_on = [
+    "mindroom.json_utils",
+    "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.api.workflow_gateway"]
+expose = ["bind_workflow_engine", "router"]
 
 [[modules]]
 path = "mindroom.api.main"
@@ -2127,6 +2141,7 @@ depends_on = [
     "mindroom.api.request_body_limit",
     "mindroom.api.schedules",
     "mindroom.api.script_gateway",
+    "mindroom.api.workflow_gateway",
     "mindroom.api.secret_requests",
     "mindroom.api.skills",
     "mindroom.api.tools",
@@ -2491,6 +2506,23 @@ expose = [
     "split_key",
     "stale_keys",
 ]
+
+[[modules]]
+path = "mindroom.workflow_runs.engine"
+depends_on = [
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.engine"]
+expose = ["SupersededAttemptError", "WorkflowEngine", "WorkflowLimits"]
+
+[[modules]]
+path = "mindroom.orchestration.workflow_runtime"
+depends_on = ["mindroom.workflow_runs.engine", "mindroom.workflow_runs.store"]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.api.schedules"
@@ -3445,6 +3477,7 @@ depends_on = [
     "mindroom.orchestration.call_transcripts_runtime",
     "mindroom.orchestration.computer_runtime",
     "mindroom.orchestration.plugin_http_runtime",
+    "mindroom.orchestration.workflow_runtime",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.api.main",
@@ -5833,6 +5866,7 @@ depends_on = [
     "mindroom.atomic_file",
     "mindroom.constants",
     "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.progress",
 ]
 
 [[modules]]
@@ -5973,6 +6007,7 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.tool_hooks",
+    "mindroom.tool_system.output_files",
 ]
 
 [[modules]]
@@ -8402,7 +8437,7 @@ visibility = ["mindroom.loop_hooks"]
 [[modules]]
 path = "mindroom.json_utils"
 depends_on = []
-visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.private_storage.private_instance_identity_store", "mindroom.api.mcp_scim", "mindroom.api.script_gateway", "mindroom.agent_cli.json_io"]
+visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.private_storage.private_instance_identity_store", "mindroom.api.mcp_scim", "mindroom.api.script_gateway", "mindroom.api.workflow_gateway", "mindroom.agent_cli.json_io"]
 
 [[modules]]
 path = "mindroom.providers.tool_policy"

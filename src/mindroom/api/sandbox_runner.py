@@ -93,7 +93,7 @@ from mindroom.tool_system.output_files import (
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.plugins import refresh_plugins
-from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
+from mindroom.tool_system.progress import report_tool_progress, structured_tool_result, tool_progress_reporter
 from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
@@ -465,6 +465,7 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
     runtime_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_output_workspace_root: str | None = None
     run_as_job: bool = False
+    structured_result: bool = False
 
 
 @dataclass(frozen=True)
@@ -963,6 +964,7 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         tool_name=request.tool_name,
         function_name=request.function_name,
         run_as_job=request.run_as_job,
+        structured_result=request.structured_result,
         args=list(request.args),
         kwargs=kwargs,
         worker_scope=request.worker_scope,
@@ -1066,7 +1068,8 @@ async def _execute_prepared_request_inprocess(
                 values=prepared.call_environment,
                 path_prepend=tuple(prepared.call_path_prepend),
             )
-            with collected_tool_environment(call_environment):
+            structured = structured_tool_result() if prepared.structured_result else nullcontext()
+            with collected_tool_environment(call_environment), structured as metadata:
                 result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
             result = await asyncio.to_thread(serialize_worker_tool_result, result)
         except OAuthConnectionRequired as exc:
@@ -1084,10 +1087,7 @@ async def _execute_prepared_request_inprocess(
                 failure_kind="tool",
             )
 
-    return ExecuteResponse(
-        ok=True,
-        result=result,
-    )
+    return ExecuteResponse(ok=True, result=result, metadata=metadata or None)
 
 
 async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
