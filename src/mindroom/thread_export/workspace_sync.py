@@ -52,10 +52,12 @@ _DEBOUNCE_SECONDS = 60.0
 class _ThreadExportBot(Protocol):
     """What the runner reads from a running bot."""
 
-    agent_name: str
     running: bool
     client: nio.AsyncClient | None
     rooms: list[str]
+
+    @property
+    def agent_name(self) -> str: ...
 
     @property
     def matrix_id(self) -> MatrixID:
