@@ -200,12 +200,12 @@ def test_tool_name_lists_take_every_spelling() -> None:
         "filesystem.read_file",
     ]
     assert BackgroundToolJobsConfig(exclude_toolkits=["file"]).exclude_toolkits == ["filesystem"]
+    assert ContactsConfig(tools=["file", "calculator", "coding"]).tools == ["filesystem", "calculator"]
 
 
 def test_stored_selectors_and_grants_under_an_old_name_are_kept_as_written() -> None:
     """What re-reads a saved choice keeps its spelling, so an old name matches no toolkit until it is written anew."""
     assert ContactSide.model_validate({"tools": ["coding", "file"]}).tools == ["coding", "file"]
-    assert ContactsConfig(tools=["coding"]).tools == ["coding"]
     assert GeneratedAgentEdits(tools=["file", "shell"]).tools == ["file", "shell"]
     participant = SubagentParticipant.model_validate({"id": "p", "system_prompt": "P", "tools": ["coding", "file"]})
     assert participant.tools == ["coding", "file"]
