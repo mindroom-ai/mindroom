@@ -8581,14 +8581,17 @@ async def test_a_route_too_large_for_one_event_is_read_whole_from_its_file(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent", [ROUTER_AGENT_NAME, "general"], ids=["routed", "answered directly"])
+@pytest.mark.parametrize("kind", [EventKind.MESSAGE, EventKind.MEDIA], ids=["text", "long-text file"])
 async def test_a_correction_a_waiting_message_took_survives_a_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     agent: str,
+    kind: EventKind,
 ) -> None:
     """A message edited while it waited is answered as edited by the process that replays it after a crash.
 
     The edit is settled when the message takes it, so only the message replays, and nothing once it is settled.
+    A long text sent as a file and corrected to a short one replays as the text message it now is.
     """
     config = _two_agent_config(tmp_path)
     members = (ROUTER_AGENT_NAME, "general", "research") if agent == ROUTER_AGENT_NAME else ("general",)
@@ -8597,7 +8600,12 @@ async def test_a_correction_a_waiting_message_took_survives_a_restart(
         "mindroom.router.relay.suggest_responder_for_message",
         AsyncMock(return_value=ResponderSelection("general")),
     )
-    original = _text_event("June.", event_id="$question:localhost", thread_id=_THREAD_ROOT)
+    original: nio.Event = _text_event("June.", event_id="$question:localhost", thread_id=_THREAD_ROOT)
+    file = b""
+    if kind is EventKind.MEDIA:
+        long_text = {**original.source["content"], "body": "June. " + "Details. " * 8_000}
+        content, file = await _route_with_file(long_text)
+        original = nio.Event.parse_event({**original.source, "content": content})
     edit = _text_event("* July, not June.", event_id="$correction:localhost", origin_server_ts=1_000_001)
     edit.source["content"]["m.new_content"] = {"body": "July, not June.", "msgtype": "m.text"}
     edit.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": original.event_id}
@@ -8613,11 +8621,12 @@ async def test_a_correction_a_waiting_message_took_survives_a_restart(
             room=room,
         )
         _replace_harness_deps(harness, interactive_questions=dispatcher.store)
+        harness.runtime.client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadResponse, body=file))
         return harness, dispatcher
 
     crashed, journal = process("crashed")
     with patch.object(crashed.ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
-        await admit_dispatch_event(journal, room, original, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await admit_dispatch_event(journal, room, original, kind, EventClass.ACTIONABLE)
         await journal.drain_once()
 
         async def queued() -> None:

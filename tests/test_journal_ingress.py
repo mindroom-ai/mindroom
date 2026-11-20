@@ -1722,7 +1722,8 @@ class TestPendingEventWorker:
 
     async def test_a_pending_message_replays_as_its_sender_edited_it(self, alice: PrincipalStore) -> None:
         """A waiting message keeps the content its settled edit gave it, and a settled one keeps none."""
-        await self._admit(alice, text_event("$waiting", "June."))
+        # A long text waits as the file it was sent as, and is a text message once edited to a short one.
+        await alice.admit(_inbound_event(ROOM, image_event("$waiting"), EventKind.MEDIA, EventClass.ACTIONABLE))
         await self._admit(alice, text_event("$answered", "May.", ts=1_001))
         await alice.settle("$answered")
 
@@ -1731,11 +1732,15 @@ class TestPendingEventWorker:
 
         [waiting] = await alice.pending()
         assert waiting.event_id == "$waiting"
+        assert waiting.kind is EventKind.MESSAGE
         assert waiting.source["content"] == {"body": "July, not June.", "msgtype": "m.text"}
         assert waiting.source["sender"] == ALICE
         answered = await alice.load_event("$answered")
         assert answered is not None
         assert answered.source == {}
+        # An edit to a long text, whose file was not read, waits as the file event it is.
+        await alice.revise_pending("$waiting", {"body": "July, and", "msgtype": "m.file"})
+        assert [event.kind for event in await alice.pending()] == [EventKind.MEDIA]
 
     async def test_a_failed_event_stays_pending(self, alice: PrincipalStore) -> None:
         """A failed event stays pending."""

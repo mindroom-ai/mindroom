@@ -1359,12 +1359,15 @@ def load(
 
 
 def revise_pending(transaction: Transaction, principal_id: str, event_id: str, content: Mapping[str, object]) -> None:
-    """Store the content its sender edited a pending message to, which a replay of the message then reads."""
+    """Store the content its sender edited a pending message to, and the kind a replay of the message reads it as."""
     stored = load(transaction, principal_id, event_id)
     if stored is not None:
+        # A long text is a file event and a short one a text message, whichever the message was before its edit.
+        kind = EventKind.MEDIA if content.get("msgtype") == "m.file" else EventKind.MESSAGE
         transaction.execute(
-            "UPDATE journal_events SET source_json = ? WHERE principal_id = ? AND event_id = ? AND state = 'pending'",
-            (json.dumps({**stored.source, "content": content}), principal_id, event_id),
+            "UPDATE journal_events SET kind = ?, source_json = ? "
+            "WHERE principal_id = ? AND event_id = ? AND state = 'pending'",
+            (kind.value, json.dumps({**stored.source, "content": content}), principal_id, event_id),
         )
 
 
