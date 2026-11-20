@@ -481,6 +481,8 @@ def execute_worker_proxy_request(
                 if worker_handle is not None
                 else nullcontext()
             )
+            # Once sent, only the worker's own word says how the call ended: a refusal, or its final answer.
+            report_tool_metadata(unanswered=True)
             with (
                 in_flight,
                 client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response,
@@ -488,6 +490,7 @@ def execute_worker_proxy_request(
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
+                    report_tool_metadata(unanswered=False)
                     response.read()
                     raise _WorkerHttpError(exc.response) from exc
                 data = _read_execute_stream(response, deadline=deadline, cancellation=cancellation)
@@ -499,6 +502,8 @@ def execute_worker_proxy_request(
         )
         raise
 
+    if isinstance(data, dict) and (data.get("ok") is True or data.get("failure_kind") == "tool"):
+        report_tool_metadata(unanswered=False)
     answer = _checked_worker_answer(
         data,
         ExecuteResponse,

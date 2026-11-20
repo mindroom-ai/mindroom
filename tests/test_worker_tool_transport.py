@@ -52,7 +52,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_worker_routing import _create_routing_agent
 from tests.turn_model_helpers import turn_model
-from tests.workflow_helpers import tool_args, workflow_stack
+from tests.workflow_helpers import NodeFailed, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -182,7 +182,7 @@ def test_worker_shell_reports_its_exit_status_to_a_caller_that_asks_for_a_struct
     with structured_tool_result() as facts:
         result = _worker_shell(tmp_path, f"echo 'Exit code 7'; exit {exit_code}")
 
-    assert facts == {"exit_code": exit_code}
+    assert facts == {"exit_code": exit_code, "unanswered": False}
     assert "Exit code 7" in str(result)
     assert worker_requests[0]["structured_result"] is True
 
@@ -223,6 +223,46 @@ async def test_workflow_shell_node_on_a_worker_carries_the_real_exit_status(
     assert isinstance(result, dict)
     assert (result["exit_code"], len(worker_requests)) == (3, 1)
     assert "Exit code 7" in str(result["output"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "kind"),
+    [
+        (None, "indeterminate"),
+        (sandbox_runner.ExecuteResponse(ok=False, error="The tool gave up.", failure_kind="tool"), "failed"),
+        (sandbox_runner.ExecuteResponse(ok=False, error="The worker gave up.", failure_kind="worker"), "indeterminate"),
+    ],
+    ids=["answer-lost", "tool-ended-failed", "worker-failed"],
+)
+async def test_workflow_call_on_a_worker_fails_as_safe_to_rerun_only_when_the_tool_said_it_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+    answer: sandbox_runner.ExecuteResponse | None,
+    kind: str,
+) -> None:
+    """The worker ran the command; without the tool's own word on how it ended, the call is never run again."""
+    execute = sandbox_runner._execute_request_inprocess
+
+    async def answered(call: sandbox_runner._ExecuteCall) -> sandbox_runner.ExecuteResponse:
+        await execute(call)
+        if answer is None:
+            msg = "The connection dropped before the answer."
+            raise ConnectionError(msg)
+        return answer
+
+    monkeypatch.setattr(sandbox_runner, "_execute_request_inprocess", answered)
+    effect = tmp_path / "effect.txt"
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+        command = tool_args("shell", "run_shell_command", args=f"echo ran >> {effect}", timeout=30)
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", command)
+
+        await stack.engine.close()
+    assert (ended.value.kind, effect.read_text(), len(worker_requests)) == (kind, "ran\n", 1)
 
 
 @pytest.mark.asyncio

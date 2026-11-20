@@ -6,6 +6,7 @@ Level: engine harness (`WorkflowStack`): the real stores, broker and engine; the
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -393,6 +394,47 @@ async def test_settle_from_handle_reads_an_ended_receipt_by_whether_the_tool_was
     )
 
     assert _settled(stack, node) == (node_state, None, node_error_kind)
+
+
+@pytest.mark.asyncio
+async def test_receipt_that_could_not_be_stored_after_the_effect_is_never_safe_to_run_again(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the broker answers for a receipt it could not store proves nothing: the tool ran, so the call may have."""
+
+    def refuse(**_fields: object) -> ScriptCallRecord:
+        msg = "disk I/O error"
+        raise sqlite3.OperationalError(msg)
+
+    monkeypatch.setattr(stack.script_store, "publish_call_result", refuse)
+
+    with pytest.raises(NodeFailed) as lost:
+        await stack.result("@0", "tool", _APPEND)
+
+    assert (lost.value.kind, stack.counting_tool.lines) == ("indeterminate", ["a"])
+    assert _broker_call(stack).state is ScriptCallState.PENDING
+
+
+@pytest.mark.asyncio
+async def test_shell_answer_without_an_exit_status_may_have_run(stack: WorkflowStack) -> None:
+    """No status says the command ended: its answer was lost on the way, so nothing proves it did not run."""
+    node = _dispatched_node(stack)
+    stack.script_store.claim_call(
+        run_id=stack.attempt.run_id,
+        call_id=_CALL,
+        grant=ScriptToolGrant("shell", "run_shell_command"),
+        arguments_digest=digest_arguments({"args": "make deploy"}),
+    )
+    stack.script_store.mark_call_effect_started(stack.attempt.run_id, _CALL)
+    stack.script_store.publish_call_result(
+        run_id=stack.attempt.run_id,
+        call_id=_CALL,
+        state=ScriptCallState.COMPLETED,
+        result="Error: Shell supervisor did not respond in time.",
+    )
+
+    assert _settled(stack, node) == (WorkflowNodeState.INDETERMINATE, None, "indeterminate")
 
 
 @pytest.mark.asyncio

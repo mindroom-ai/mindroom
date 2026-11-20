@@ -364,8 +364,8 @@ def _call_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
         if call.grant != _SHELL_COMMAND:
             return WorkflowNodeState.COMPLETED, call.result, None
         if exit_code is None:
-            # The command did not run to an end here, and the shell tool's text says why.
-            return WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(call.result)}
+            # No status says the command ended: its answer was lost on the way, so it may have run.
+            return _indeterminate(node)
         return WorkflowNodeState.COMPLETED, {"output": call.result, "exit_code": exit_code}, None
     details = cast("dict[str, object]", call.error if isinstance(call.error, dict) else {})
     kind = details.get("kind")

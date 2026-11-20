@@ -27,6 +27,7 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptToolGrant,
     script_worker_key_for_run,
+    utc_timestamp,
 )
 from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import (
@@ -515,6 +516,9 @@ class ScriptToolBroker:
                         origin=origin,
                         arguments=arguments,
                     )
+            if metadata and metadata.pop("unanswered", False) and not result.succeeded:
+                # The call left for a worker, and no answer says how the tool ended there.
+                return await self._publish_async(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
             if not result.succeeded:
                 error = {
                     "kind": "approval_denied" if result.status == "denied" else "tool_failure",
@@ -733,7 +737,7 @@ class ScriptToolBroker:
             return self._publish_or_indeterminate(call, state=ScriptCallState.FAILED, error=_RESULT_TOO_LARGE_ERROR)
         except BaseException:
             if state is ScriptCallState.INDETERMINATE:
-                return replace(call, state=state, result=result, error=error)
+                return _unstored(call)
             return self._publish_or_indeterminate(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
 
     def _publish_or_indeterminate(
@@ -746,7 +750,13 @@ class ScriptToolBroker:
         try:
             return self.store.publish_call_result(run_id=call.run_id, call_id=call.call_id, state=state, error=error)
         except BaseException:
-            return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
+            return _unstored(call)
+
+
+def _unstored(call: ScriptCallRecord) -> ScriptCallRecord:
+    """Return what is known of a call whose receipt could not be stored: its tool may have been invoked."""
+    started = call.effect_started_at or utc_timestamp()
+    return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR, effect_started_at=started)
 
 
 async def drain_script_tool_cleanup(
