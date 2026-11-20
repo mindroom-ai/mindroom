@@ -925,6 +925,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "environment": {"set_names": [], "unset_names": [], "path_prepend": []},
         "extra_env_passthrough": None,
         "run_as_job": False,
+        "structured_result": False,
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
 

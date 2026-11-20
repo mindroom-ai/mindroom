@@ -96,15 +96,23 @@ def tool_progress_reporter(reporter: Callable[[str], None], *, forward: bool = F
 
 
 def report_tool_metadata(**metadata: object) -> None:
-    """Report structured facts about the call's result; nothing happens when nobody collects them."""
+    """Report structured facts about the call's result; nothing happens outside ``structured_tool_result``."""
     collected = _RESULT_METADATA.get()
     if collected is not None:
         collected.update(metadata)
 
 
+def structured_result_requested() -> bool:
+    """Whether the call's caller stores its result itself, so the result must reach it whole."""
+    return _RESULT_METADATA.get() is not None
+
+
 @contextmanager
-def collected_tool_metadata() -> Iterator[dict[str, object]]:
-    """Collect what the tool calls run in this context report with ``report_tool_metadata``."""
+def structured_tool_result() -> Iterator[dict[str, object]]:
+    """Run tool calls whose caller stores each result: it arrives whole, and what the tool reports is collected.
+
+    No result is saved to a workspace file by size, and a call a worker runs reports its facts across the wire.
+    """
     collected: dict[str, object] = {}
     token = _RESULT_METADATA.set(collected)
     try:

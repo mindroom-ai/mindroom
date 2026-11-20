@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from threading import Event
 from typing import TYPE_CHECKING, Protocol
@@ -47,7 +48,7 @@ from mindroom.tool_system.invocation import (
     client_tool_result,
     run_tool_call,
 )
-from mindroom.tool_system.progress import collected_tool_metadata
+from mindroom.tool_system.progress import structured_tool_result
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     tool_runtime_context,
@@ -504,7 +505,9 @@ class ScriptToolBroker:
             # A failed connect raises before the call starts; the close finishes before its receipt is published.
             async with toolkit_call_lifetime(prepared.toolkit, self._cleanups):
                 execution_started = True
-                with collected_tool_metadata() as metadata:
+                # A workflow node's result goes to the workflow store whole, with the facts its tool reported.
+                structured = structured_tool_result() if run.workflow_run_id is not None else nullcontext()
+                with structured as metadata:
                     result = await self._run_prepared_execution(
                         prepared,
                         run=run,

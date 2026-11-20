@@ -14,7 +14,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
 from uuid import uuid4
 
@@ -56,7 +56,7 @@ from tests.conftest import (
 from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
     from pathlib import Path
 
     import pytest
@@ -383,22 +383,21 @@ def owner_context(
     tmp_path: Path,
     *,
     extra_tools: tuple[str, ...] = (),
-    auto_save_threshold_bytes: int | None = None,
+    process_env: Mapping[str, str] = MappingProxyType({}),
 ) -> ToolRuntimeContext:
     """Return the tool context of the stack's owner: the agent `watcher` with `counter` and `shell`, for Alice.
 
     The operator allows shell on this machine and approves by default; only `append` asks first.
-    With *auto_save_threshold_bytes* the operator raised the size above which a tool result moves to a workspace file.
+    *process_env* is the primary's environment, which says for example where its sandbox runner listens.
     """
     defaults = DefaultsConfig(tools=[], allow_shell_without_worker=True)
-    if auto_save_threshold_bytes is not None:
-        defaults = defaults.model_copy(update={"tool_output_auto_save_threshold_bytes": auto_save_threshold_bytes})
     runtime_paths = RuntimePaths(
         config_path=tmp_path / "config.yaml",
         config_dir=tmp_path,
         env_path=tmp_path / ".env",
         storage_root=tmp_path / "storage",
         control_state_root=tmp_path / "control",
+        process_env=MappingProxyType(dict(process_env)),
     )
     config = bind_runtime_paths(
         Config(

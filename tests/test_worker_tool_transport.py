@@ -31,6 +31,7 @@ from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.progress import structured_tool_result
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
@@ -51,6 +52,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_worker_routing import _create_routing_agent
 from tests.turn_model_helpers import turn_model
+from tests.workflow_helpers import tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -146,6 +148,80 @@ def test_ordinary_json_is_opaque_across_worker_transport(
 
     assert len(worker_requests) == 1
     assert result == tool_result
+
+
+_PROXY_ENV = {
+    "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
+    "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
+}
+
+
+def _worker_shell(tmp_path: Path, command: str) -> object:
+    """Run *command* with the shell tool of the worker behind `worker_requests`."""
+    return call_proxy_sync_for_test(
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env=_PROXY_ENV,
+        ),
+        tool_name="shell",
+        function_name="run_shell_command",
+        args=(),
+        kwargs={"args": command, "timeout": 30},
+        credentials_manager=None,
+    )
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_worker_shell_reports_its_exit_status_to_a_caller_that_asks_for_a_structured_result(
+    tmp_path: Path,
+    worker_requests: list[dict[str, object]],
+    exit_code: int,
+) -> None:
+    """The status crosses the wire beside the output, so the caller never reads it out of what the command printed."""
+    with structured_tool_result() as facts:
+        result = _worker_shell(tmp_path, f"echo 'Exit code 7'; exit {exit_code}")
+
+    assert facts == {"exit_code": exit_code}
+    assert "Exit code 7" in str(result)
+    assert worker_requests[0]["structured_result"] is True
+
+
+def test_a_plain_worker_call_answers_without_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """A call that did not ask gets the answer it always got: no facts are collected for it or sent back."""
+    answers: list[sandbox_runner.ExecuteResponse] = []
+    execute = sandbox_runner._execute_request_inprocess
+
+    async def recording(call: sandbox_runner._ExecuteCall) -> sandbox_runner.ExecuteResponse:
+        answers.append(await execute(call))
+        return answers[-1]
+
+    monkeypatch.setattr(sandbox_runner, "_execute_request_inprocess", recording)
+
+    assert "Exit code 3" in str(_worker_shell(tmp_path, "exit 3"))
+    assert (worker_requests[0]["structured_result"], answers[0].metadata) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_workflow_shell_node_on_a_worker_carries_the_real_exit_status(
+    tmp_path: Path,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """A worker-routed `shell()` settles `completed` with its status, so a resume never runs the command again."""
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+        command = tool_args("shell", "run_shell_command", args="echo 'Exit code 7'; exit 3", timeout=30)
+
+        result = await stack.result("@0", "tool", command)
+
+        await stack.engine.close()
+    assert isinstance(result, dict)
+    assert (result["exit_code"], len(worker_requests)) == (3, 1)
+    assert "Exit code 7" in str(result["output"])
 
 
 @pytest.mark.asyncio

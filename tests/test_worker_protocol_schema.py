@@ -20,6 +20,7 @@ from mindroom.workers import protocol
 # changed, such as a pydantic upgrade that renders the same schema differently.
 _SCHEMA_DIGESTS = {
     8: "d6320479ed4156c12809f20bf04ebe9252c180c7a7965f46a898680301c59cf3",
+    9: "27c80ca9cd3a564fe325d1ae20d458c7d76fcbfa2dd92bd027316535b7191cae",
 }
 
 

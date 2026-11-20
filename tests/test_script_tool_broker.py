@@ -670,11 +670,11 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_script_call_receipt_records_that_the_tool_was_invoked_and_what_it_reported(
+async def test_script_call_receipt_records_that_the_tool_was_invoked(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A receipt says whether its tool was invoked, and keeps the structured facts the tool reported."""
+    """A receipt says whether its tool was invoked; only a workflow node asks for the facts its tool reports."""
 
     class ReportingCalculator(_Calculator):
         def add(self, a: int, b: int) -> object:
@@ -694,7 +694,7 @@ async def test_script_call_receipt_records_that_the_tool_was_invoked_and_what_it
     denied = await _call_through_gateway(denying, _request(), denying_token)
 
     assert receipt.effect_started_at is not None
-    assert (receipt.result, receipt.metadata) == ("done", {"exit_code": 3})
+    assert (receipt.result, receipt.metadata) == ("done", None)
     assert broker.store.get_call("run-1", "call-1") == receipt
     assert (denied.state, denied.effect_started_at, denied.metadata) == (ScriptCallState.FAILED, None, None)
 

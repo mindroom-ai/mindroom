@@ -5866,6 +5866,7 @@ depends_on = [
     "mindroom.atomic_file",
     "mindroom.constants",
     "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.progress",
 ]
 
 [[modules]]
@@ -6006,6 +6007,7 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.tool_hooks",
+    "mindroom.tool_system.output_files",
 ]
 
 [[modules]]

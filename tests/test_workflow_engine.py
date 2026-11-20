@@ -157,19 +157,10 @@ async def test_redelivered_request_in_the_same_attempt_returns_the_same_node_and
     assert (again.id, again.state, stack.counting_tool.calls) == (first.id, "failed", 1)
 
 
-@pytest_asyncio.fixture
-async def inline_stack(tmp_path: Path) -> AsyncIterator[WorkflowStack]:
-    """A started stack whose operator lets tool results of any size stay in the call's answer."""
-    with workflow_stack(tmp_path, auto_save_threshold_bytes=64 * 1024 * 1024) as stack:
-        await stack.start()
-        yield stack
-        await stack.engine.close()
-
-
 @pytest.mark.asyncio
-async def test_large_tool_result_is_returned_in_full(inline_stack: WorkflowStack) -> None:
-    """A 300 KiB result round-trips: the broker's 64 KiB receipt cap does not bound a node's result."""
-    stack, size = inline_stack, 300 * 1024
+async def test_large_tool_result_is_returned_in_full(stack: WorkflowStack) -> None:
+    """A 300 KiB result round-trips whole: neither the workspace auto-save nor the 64 KiB receipt cap bounds it."""
+    size = 300 * 1024
 
     assert await stack.result("@0", "tool", tool_args("counter", "text", size=size)) == "x" * size
     assert _broker_call(stack).error == {
@@ -180,21 +171,25 @@ async def test_large_tool_result_is_returned_in_full(inline_stack: WorkflowStack
 
 
 @pytest.mark.asyncio
-async def test_tool_result_over_the_auto_save_size_arrives_as_its_workspace_file_receipt(stack: WorkflowStack) -> None:
-    """With the operator's default, a large result is saved to the owner's workspace, as for the owner's own calls."""
-    result = await stack.result("@0", "tool", tool_args("counter", "text", size=300 * 1024))
+async def test_shell_output_over_the_auto_save_size_is_never_swapped_for_a_workspace_file(stack: WorkflowStack) -> None:
+    """A node's result lives in the run store, so all the shell tool keeps of the output, 50 KiB, arrives as text."""
+    command = "head -c 51200 /dev/zero | tr '\\0' Z"
+
+    result = await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args=command, timeout=30))
 
     assert isinstance(result, dict)
-    receipt = result["mindroom_tool_output"]
-    assert (receipt["auto_saved"], receipt["bytes"]) == (True, 300 * 1024)
+    output = str(result["output"])
+    assert (result["exit_code"], output.count("Z"), "mindroom_tool_output" in output) == (0, 51200, False)
+    assert len(output) > 51200
+    assert not list(stack.context.runtime_paths.storage_root.rglob("mindroom_tool_outputs/*"))
 
 
 @pytest.mark.asyncio
 async def test_result_over_eight_mebibytes_returns_a_reference_and_the_results_route_streams_all_of_it(
-    inline_stack: WorkflowStack,
+    stack: WorkflowStack,
 ) -> None:
     """The receipt of a result too large to inline names the route that returns all of it, also after a restart."""
-    stack, size = inline_stack, 8 * 1024 * 1024 + 1
+    size = 8 * 1024 * 1024 + 1
     receipt = await stack.submit("@0", "tool", tool_args("counter", "text", size=size))
     while receipt.state == "running":
         receipt = await stack.engine.node_receipt(stack.attempt, receipt.id, wait=SETTLE_TIMEOUT_SECONDS)

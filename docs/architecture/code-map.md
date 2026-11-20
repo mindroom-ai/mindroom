@@ -531,7 +531,7 @@ Matrix sync callback
 | `plugin_worker_relay.py` | The primary's client of a dedicated worker's runner relay, which plugin routes and tools open through `plugin_http.worker_relay` to reach their worker services by name or the agent's servers by port |
 | `worker_computer/agent_browser.py` | A worker service's own CDP session on the agent's browser page: an allowlist of watching commands, acting ones only under the Computer's control lease, following the agent between pages, and releasing held input |
 | `plugin_worker_services.py` | The primary's side of plugin worker services: the declaration plugins import, ensure and stop through the target's worker, and stopping the started ones when plugins reload or MindRoom stops |
-| `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
+| `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it, and the facts about its result, such as an exit status, that a caller storing the result whole collects |
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
 | `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |
 | `workers/placements.py` | The sessions whose worker-routed calls run in a dedicated subagent worker, bound for each attempt of such a child |

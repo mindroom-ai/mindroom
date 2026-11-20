@@ -472,15 +472,17 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
     try:
         payload = json.loads(line)
         message, handle, output_file_handled = payload["message"], payload["handle"], payload["output_file_handled"]
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return_code = payload.get("return_code")
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
         return ShellRunResult(message=f"Error: Invalid shell supervisor response: {exc}")
     if (
         not isinstance(message, str)
         or (handle is not None and not isinstance(handle, str))
         or not isinstance(output_file_handled, bool)
+        or (return_code is not None and not isinstance(return_code, int))
     ):
         return ShellRunResult(message="Error: Invalid shell supervisor response: invalid result fields.")
-    return ShellRunResult(message=message, handle=handle, output_file_handled=output_file_handled)
+    return ShellRunResult(message, handle=handle, output_file_handled=output_file_handled, return_code=return_code)
 
 
 # ---------------------------------------------------------------------------

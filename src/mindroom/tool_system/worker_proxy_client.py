@@ -22,7 +22,7 @@ from mindroom.credentials.policy import credential_service_policy
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_system.progress import report_tool_progress
+from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress, structured_result_requested
 from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, normalize_sandbox_runner_api_root, worker_api_endpoint
 from mindroom.workers.protocol import (
@@ -436,7 +436,7 @@ def execute_worker_proxy_request(
         )
         with client_factory(timeout=config.proxy_timeout_seconds) as client:
             run_as_job = job_owns_execution()
-            sent: dict[str, object] = {"run_as_job": run_as_job}
+            sent: dict[str, object] = {"run_as_job": run_as_job, "structured_result": structured_result_requested()}
             if cancellation is not None:
                 sent["request_id"] = cancellation.request_id
                 cancel_url = (
@@ -509,6 +509,7 @@ def execute_worker_proxy_request(
     )
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)
+    report_tool_metadata(**(answer.metadata or {}))
     return answer.result
 
 

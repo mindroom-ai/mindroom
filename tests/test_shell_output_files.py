@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from mindroom.shell.execution import ShellRunResult
     from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.workers.protocol import ExecuteResponse
 
 
 @dataclass(frozen=True)
@@ -467,6 +468,43 @@ def test_worker_subprocess_saves_supervised_capture(tmp_path: Path) -> None:
     assert "saved_to_file" in status
     saved = (workspace / "worker.txt").read_bytes().split(b"\n", 1)[1]
     assert saved == b"0123456789012345678\n" * 125000
+
+
+def test_worker_subprocess_answers_a_structured_call_with_the_exit_status_and_the_output_as_text(
+    tmp_path: Path,
+) -> None:
+    """The status crosses the supervisor, the request process and the wire; only a plain call's output is saved."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
+        "agents:\n  probe:\n    display_name: Probe\n    role: Test shell output\n    tools: [shell]\nrouter:\n  model: default\nmemory:\n  backend: file\n",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess"},
+    )
+    config = sandbox_runner._runtime_config_or_empty(runtime_paths)
+
+    def execute(*, structured: bool) -> ExecuteResponse:
+        return sandbox_runner._execute_request_subprocess_sync(
+            execute_call(
+                runtime_paths,
+                config,
+                tool_name="shell",
+                function_name="run_shell_command",
+                kwargs={"args": "head -c 51200 /dev/zero | tr '\\0' Z; exit 3", "timeout": 30},
+                routing_agent_name="probe",
+                base_dir=str(tmp_path / "storage/agents/probe/workspace"),
+                structured_result=structured,
+            ),
+        )
+
+    plain, structured = execute(structured=False), execute(structured=True)
+
+    assert (plain.metadata, "mindroom_tool_output" in str(plain.result)) == (None, True)
+    assert structured.metadata == {"exit_code": 3}
+    assert ("mindroom_tool_output" in str(structured.result), str(structured.result).count("Z")) == (False, 51200)
 
 
 @pytest.mark.asyncio

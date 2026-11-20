@@ -22,8 +22,9 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 #    protocol, so mixed releases fail instead of dropping fields; a request names its workspace in `base_dir`.
 # 7: a call's arguments arrive as the model sent them, and the worker validates and coerces them.
 # 8: a worker pinned to one subagent (`subagent=<id>` in its key) serves its normal worker's workspaces and credentials.
+# 9: a call that asks for a structured result gets it whole, with the facts its tool reported in `metadata`.
 # A wire model change bumps this; `tests/test_worker_protocol_schema.py` pins each version's schema.
-WORKER_PROTOCOL_VERSION = 8
+WORKER_PROTOCOL_VERSION = 9
 
 FailureKind = Literal["tool", "worker"]
 
@@ -95,6 +96,8 @@ class ExecuteRequest(WorkerRoute):
     request_id: str | None = Field(default=None, max_length=64)
     # A background job's call runs as long as its tool does, and its tools know they run as part of a job.
     run_as_job: bool = False
+    # The caller stores the result itself: no size moves it to a workspace file, and the answer carries `metadata`.
+    structured_result: bool = False
 
 
 class SaveAttachmentRequest(WorkerRoute):
@@ -146,6 +149,8 @@ class ExecuteResponse(_WireModel):
     result: Any | None = None
     error: str | None = None
     failure_kind: FailureKind | None = None
+    # What the tool reported about a structured result, such as a command's exit status.
+    metadata: dict[str, Any] | None = None
 
 
 class SaveAttachmentResponse(_WireModel):
