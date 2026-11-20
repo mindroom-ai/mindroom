@@ -4649,7 +4649,7 @@ requires-dist = [
     { name = "wikipedia", marker = "extra == 'wikipedia'" },
     { name = "yfinance", marker = "extra == 'yfinance'" },
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
-    { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=4.1" },
+    { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3,<4" },
 ]
 provides-extras = ["agent-manager", "agentql", "airflow", "apify", "approved-egress", "arxiv", "atlassian", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browser-mcp", "browserbase", "cal-com", "calculator", "callback-manager", "cartesia", "chat-ui", "chromadb", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "contacts", "crawl4ai", "csv", "custom-api", "daytona", "delegate", "desktop", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "egress-credentials", "eleven-labs", "email", "exa", "external-trigger-manager", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "google-tasks", "googlesearch", "groq", "hackernews", "homeassistant", "invite-router", "jina", "jira", "knowledge-graph", "kubernetes", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-user", "matrix-voice-message", "mem0", "memory", "microsoft-files", "microsoft-meetings", "microsoft-onenote", "microsoft-people", "microsoft-sharepoint", "microsoft-teams", "microsoft-todo", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "numpy", "oauth-connections", "openai", "openbb", "openclaw-compat", "openweather", "outlook-calendar", "outlook-mail", "oxylabs", "pandas", "postgres", "pubmed", "python", "react", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "script", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shared-directories", "shell", "shopify", "skill-manage", "slack", "sleep", "spider", "spotify", "sql", "stop-reply", "supabase", "tavily", "telegram", "temporary-secrets", "terminal", "thread-model", "thread-move", "thread-resolution", "thread-snooze", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "twilio", "unsplash", "update-awareness", "usage-stats", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
@@ -9821,17 +9821,18 @@ wheels = [
 
 [[package]]
 name = "zep-cloud"
-version = "4.1.0"
+version = "3.30.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
     { name = "pydantic-core" },
+    { name = "python-dateutil" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/25/21/6e64de11e57a5faf0712b0398596397d81bd75b9541c41fa7bf78abbf76e/zep_cloud-4.1.0.tar.gz", hash = "sha256:4c8bc9be2861c626363745d893625b6f16fd13aa8b66c2aa1909203958a3051b", size = 306785, upload-time = "2026-11-02T19:18:20.704Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/77/e2/c8a6b8e4eca1c039adc38d03499119656ece70091aed45c2a1a89405e535/zep_cloud-3.30.0.tar.gz", hash = "sha256:e33ddcba11250ee8322410acacdfcc18e228b57313bed910b3c3c6d0f74d7f26", size = 112278, upload-time = "2026-09-24T18:04:22.896Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/e4/3df889a72a1f17042a7dfef61468e5853e171f3898bdd22516248138a939/zep_cloud-4.1.0-py3-none-any.whl", hash = "sha256:066d3ace6b3ea59ca5b294c773d37fdcddd6851753886f0cf02b64a48d3039b5", size = 622623, upload-time = "2026-11-02T19:18:18.981Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/f5/8a876c25179249bf6f8e26696954463ac1269fe1bd0334d1f912cf6c94dd/zep_cloud-3.30.0-py3-none-any.whl", hash = "sha256:c3b68ca75f8628cc803f74baa351a1fc3c8c34bf3142828a61f40945951d6ea9", size = 198458, upload-time = "2026-09-24T18:04:21.334Z" },
 ]
 
 [[package]]

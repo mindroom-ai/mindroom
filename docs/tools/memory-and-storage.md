@@ -50,13 +50,12 @@ agents:
 It requires a Zep API key from `api_key` or `ZEP_API_KEY`; without one, the agent runs without the `zep` tool and logs `Could not load tool for agent construction`.
 
 - `add_zep_message(role, content)` adds a message to the Zep thread.
-- `get_zep_memory(memory_type="context")` returns Zep's context block for the thread, or the thread's most recent messages with `memory_type="messages"`.
-- `search_zep_memory(query, search_scope="edges")` searches the user graph and returns up to 10 facts, or node summaries with `search_scope="nodes"`.
+- `get_zep_memory(memory_type="context")` returns the thread's context summary, or the raw message history with `memory_type="messages"`.
+- `search_zep_memory(query, search_scope="edges")` searches the user graph and returns facts, or node summaries with `search_scope="nodes"`.
 
 Set `user_id` and `session_id` to keep using the same Zep user and thread across conversations.
 Without them, the tool generates a new Zep user and thread, so it does not find earlier memory.
-`user_id` is matched against the Zep user's user ID, and a user that does not exist yet in Zep is created with it.
-Zep Cloud 4 generates every thread's ID, so the tool records the thread it creates for a `session_id` in the Zep user's metadata, under `mindroom_zep_thread:<session_id>`, and finds it there next time; a session first used with Zep Cloud 3 keeps its existing thread.
+A `user_id` that does not exist yet in Zep is created automatically.
 The agent's prompt includes the default Zep usage instructions only while all three functions are enabled; instructions you set with `instructions` are always included.
 
 | Option | Type | Default | Notes |

@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from mindroom.tools.agno_compat_zep import MindRoomZepTools
+    from agno.tools.zep import ZepTools
 
 
 @register_tool_with_metadata(
@@ -92,8 +92,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.mindroom.chat/tools/memory-and-storage/#zep",
     function_names=("add_zep_message", "get_zep_memory", "search_zep_memory"),
 )
-def zep_tools() -> type[MindRoomZepTools]:
+def zep_tools() -> type[ZepTools]:
     """Return Zep memory tools for storing and retrieving conversational data."""
-    from mindroom.tools.agno_compat_zep import MindRoomZepTools
+    from agno.tools.zep import ZepTools
 
-    return MindRoomZepTools
+    return ZepTools

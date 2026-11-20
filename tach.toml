@@ -9840,19 +9840,6 @@ from = ["mindroom.tools.agno_compat_openai"]
 expose = ["MindRoomOpenAITools"]
 
 [[modules]]
-path = "mindroom.tools.zep"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_zep"]
-
-[[modules]]
-path = "mindroom.tools.agno_compat_zep"
-depends_on = []
-visibility = ["mindroom.tools.zep"]
-
-[[interfaces]]
-from = ["mindroom.tools.agno_compat_zep"]
-expose = ["MindRoomZepTools"]
-
-[[modules]]
 path = "mindroom.tools.groq"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_groq"]
 
