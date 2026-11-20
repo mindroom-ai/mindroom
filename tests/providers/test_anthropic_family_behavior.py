@@ -44,6 +44,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
 from mindroom.providers.anthropic.wire import (
@@ -555,15 +556,23 @@ async def test_default_sampling_models_lose_sampling_controls_everywhere(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("route", "model_id"),
+    ("route", "model_id", "version", "sampling"),
     [
-        ("anthropic", "claude-sonnet-4-5"),
-        ("bedrock_claude", "anthropic.claude-sonnet-4-5"),
-        ("vertexai_claude", "claude-sonnet-4-5"),
+        ("anthropic", "claude-sonnet-4-5", "2026-10-21", {}),
+        ("vertexai_claude", "claude-sonnet-4-5", "2026-10-21", {}),
+        ("bedrock_claude", "anthropic.claude-haiku-5-5", "2026-10-21", {}),
+        # Bedrock serves 2026-10-21 for Claude 4.7 and later only, so an older model keeps 2023-06-01 and sampling.
+        ("bedrock_claude", "anthropic.claude-haiku-4-5", "2023-06-01", {"temperature": 0.2, "top_k": 3, "top_p": 0.9}),
     ],
 )
-async def test_older_claude_models_lose_sampling_controls_too(tmp_path: Path, route: str, model_id: str) -> None:
-    """API version 2026-10-21 rejects sampling on every model, so an older one that took it gets none either."""
+async def test_only_an_older_claude_on_bedrock_keeps_the_old_api_version_and_sampling(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+    version: str,
+    sampling: dict[str, float],
+) -> None:
+    """API version 2026-10-21 rejects sampling on every model; Bedrock keeps a model older than 4.7 on 2023-06-01."""
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     provider = route_provider(
         route,
@@ -572,9 +581,44 @@ async def test_older_claude_models_lose_sampling_controls_too(tmp_path: Path, ro
         id=model_id,
         extra_kwargs={"temperature": 0.7, "top_k": 3, "request_params": {"top_p": 0.9}},
     )
-    assert provider.capabilities.provider_default_sampling is True
+    assert provider.capabilities.provider_default_sampling is not sampling
     await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
-    assert not {"temperature", "top_p", "top_k"} & wire.body().keys()
+    body = wire.body()
+    assert {name: body[name] for name in ("temperature", "top_p", "top_k") if name in body} == sampling
+    sent = body.get("anthropic_version") if route == "vertexai_claude" else wire.requests[0].headers["anthropic-version"]
+    assert sent == version
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", sorted(ROUTE_CONFIGS))
+async def test_env_custom_headers_reach_only_the_direct_api(tmp_path: Path, route: str) -> None:
+    """``ANTHROPIC_CUSTOM_HEADERS`` stays off Vertex and Bedrock requests, where a header the model configures goes."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider(route, tmp_path, wire, extra_kwargs={"default_headers": {"X-Shared": "configured"}})
+    with isolated_provider_environment(), pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Env-Marker: from-env\nX-Shared: from-env")
+        assert [event async for event in provider.stream(ModelRequest(messages=_user()))]
+    headers = wire.requests[0].headers
+    assert (headers.get("x-env-marker"), headers["x-shared"]) == (
+        "from-env" if route == "anthropic" else None,
+        "configured",
+    )
+
+
+@pytest.mark.asyncio
+async def test_dropped_sampling_controls_are_logged_once_per_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config whose sampling controls go unsent hears so once, naming them; a model that sends them hears nothing."""
+    monkeypatch.setattr(claude_messages, "_SAMPLING_WARNED", set())
+    authored = {"temperature": 0.7, "request_params": {"extra_body": {"top_k": 3}}}
+    with capture_logs() as logs:
+        for _ in range(2):
+            route_provider("anthropic", tmp_path, Wire(), extra_kwargs=authored)
+            route_provider("bedrock_claude", tmp_path, Wire(), id="anthropic.claude-haiku-4-5", extra_kwargs=authored)
+    warnings = [log for log in logs if log["event"] == "claude_sampling_controls_dropped"]
+    assert [(log["route"], log["names"]) for log in warnings] == [("anthropic", ["temperature", "top_k"])]
 
 
 @pytest.mark.asyncio
@@ -664,7 +708,7 @@ class _Answer(BaseModel):
 
 @pytest.mark.asyncio
 async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_outputs_beta(tmp_path: Path) -> None:
-    """Strict tools and a pydantic response format use the beta endpoint with its header."""
+    """Strict tools and a pydantic response format use the SDK's beta method with its header."""
     wire = Wire(sse_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
     provider = route_provider("anthropic", tmp_path, wire)
     tools = [
@@ -2099,12 +2143,11 @@ async def test_the_stable_prompt_stays_cacheable_when_the_turn_context_changes(
     assert len(_markers(monday)) <= 4
 
 
-def _unmarked(payload: object) -> object:
-    if isinstance(payload, dict):
-        return {key: _unmarked(value) for key, value in payload.items() if key != "cache_control"}
-    if isinstance(payload, list):
-        return [_unmarked(item) for item in payload]
-    return payload
+def _without_moving_marker(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the messages without the cache marker on the last block, which moves to the next turn's last block."""
+    *earlier, last = json.loads(json.dumps(messages))
+    assert last["content"][-1].pop("cache_control")
+    return [*earlier, last]
 
 
 @pytest.mark.asyncio
@@ -2130,9 +2173,14 @@ async def test_the_next_turn_resends_the_cached_prefix_byte_for_byte(tmp_path: P
     assert json.dumps(one["tools"]) == json.dumps(two["tools"])
     assert json.dumps(one["system"]) == json.dumps(two["system"])
     sent = len(one["messages"])
-    assert json.dumps(_unmarked(one["messages"])) == json.dumps(_unmarked(two["messages"][:sent]))
+    assert json.dumps(_without_moving_marker(one["messages"])) == json.dumps(two["messages"][:sent])
     for name in ("anthropic-version", "anthropic-beta"):
         assert wire.requests[0].headers.get(name) == wire.requests[1].headers.get(name)
+    versions = [
+        body.get("anthropic_version") if route == "vertexai_claude" else request.headers["anthropic-version"]
+        for body, request in zip((one, two), wire.requests, strict=True)
+    ]
+    assert versions == ["2026-10-21", "2026-10-21"]
     tokens = (first.message.metrics.tokens, second.message.metrics.tokens)
     assert [(t.cache_read_tokens, t.cache_write_tokens) for t in tokens] == [(5, 3), (30, 3)]
 

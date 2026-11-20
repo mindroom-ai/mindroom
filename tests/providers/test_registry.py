@@ -20,7 +20,7 @@ from google.oauth2.credentials import Credentials
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom.config.main import Config, iter_config_validation_messages
+from mindroom.config.main import Config, ConfigRuntimeValidationError, iter_config_validation_messages
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
@@ -633,9 +633,37 @@ async def test_a_llama_cpp_model_without_its_own_key_never_sends_a_shared_one(
 
 
 @pytest.mark.asyncio
-async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_paths: RuntimePaths, wire: Wire) -> None:
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
-    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs={"auth_token": "tok"})
+@pytest.mark.parametrize(
+    ("extra_kwargs", "dashboard_key", "sent"),
+    [
+        ({"auth_token": "tok"}, None, {"authorization": "Bearer tok"}),
+        ({"auth_token": "tok"}, "sk-dashboard", {"authorization": "Bearer tok"}),
+        ({"client_params": {"auth_token": "tok"}}, None, {"authorization": "Bearer tok"}),
+        ({"client_params": {"auth_token": "tok"}}, "sk-dashboard", {"authorization": "Bearer tok"}),
+        (
+            {"base_url": "https://gateway.example", "default_headers": {"X-Api-Key": "gw"}},
+            "sk-dashboard",
+            {"x-api-key": "gw"},
+        ),
+        ({"request_params": {"extra_headers": {"X-Api-Key": "gw"}}}, None, {"x-api-key": "gw"}),
+    ],
+    ids=["auth-token", "auth-token-dashboard", "client-token", "client-token-dashboard", "header", "request-header"],
+)
+async def test_an_authored_claude_credential_never_goes_out_beside_an_implicit_key(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_kwargs: dict[str, Any],
+    dashboard_key: str | None,
+    sent: dict[str, str],
+) -> None:
+    """The shared key, the dashboard's key, and the SDK's ``ANTHROPIC_API_KEY`` stay local beside an authored one."""
+    credentials = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials.save_credentials("anthropic", {"api_key": "sk-shared"})
+    if dashboard_key is not None:
+        credentials.save_credentials("model:target", {"api_key": dashboard_key})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-process")
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
     wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
 
     with pytest.raises(ProviderError):
@@ -644,8 +672,28 @@ async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_pat
             ModelRequest(messages=[_user()]),
         )
 
-    assert wire.requests[0].headers["authorization"] == "Bearer tok"
-    assert "x-api-key" not in wire.requests[0].headers
+    headers = wire.requests[0].headers
+    assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
+
+
+@pytest.mark.parametrize(
+    ("model", "named"),
+    [
+        ({"api_key": "sk-a", "extra_kwargs": {"auth_token": "tok"}}, "api_key and auth_token"),
+        ({"extra_kwargs": {"auth_token": "tok", "client_params": {"api_key": "sk-a"}}}, "api_key and auth_token"),
+        ({"extra_kwargs": {"api_key": "sk-a", "client_params": {"profile": "work"}}}, "api_key and client_params.profile"),
+    ],
+    ids=["key-and-token", "client-key-and-token", "key-and-profile"],
+)
+def test_config_load_rejects_two_authored_claude_credentials(
+    runtime_paths: RuntimePaths,
+    model: dict[str, Any],
+    named: str,
+) -> None:
+    """The SDK takes one credential, so a config that authors two fails at load, naming both, before any request."""
+    data = {"models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5-5", **model}}}
+    with pytest.raises(ConfigRuntimeValidationError, match=rf"^models\.default: sets {named}, but the Anthropic"):
+        Config.validate_with_runtime(data, runtime_paths)
 
 
 @pytest.mark.asyncio

@@ -480,10 +480,16 @@ def inject_credentials(
 ) -> tuple[list[tuple[bytes, bytes]], bytes]:
     """Return the headers and target with the credential injected, replacing any header of the same name.
 
-    A header that sends one of the service's ``placeholders`` goes too: a client can send its key in another header
-    than the rule's, as the Anthropic SDK sends ``Authorization`` since version 2, and the API must get one credential.
+    A credential header (``Authorization``, ``X-Api-Key``, or the rule's own) that sends one of the service's
+    ``placeholders`` goes too: a client can send its key in another header than the rule's, as the Anthropic SDK sends
+    ``Authorization`` since version 2, and the API must get one credential. Other headers stay whatever they hold.
     """
-    headers = [(k, v) for k, v in headers if not _carries_placeholder(v, placeholders)]
+    credential_names = {b"authorization", b"x-api-key"}
+    if auth.type == "header" and auth.name:
+        credential_names.add(auth.name.lower().encode())
+    headers = [
+        (k, v) for k, v in headers if not (k.lower() in credential_names and _carries_placeholder(v, placeholders))
+    ]
     if auth.type == "query":
         assert auth.name is not None  # The config requires a name for query auth.
         return headers, _inject_query_param(target, auth.name, auth.template, secret)
