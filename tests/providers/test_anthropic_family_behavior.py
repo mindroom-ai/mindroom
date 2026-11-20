@@ -585,7 +585,9 @@ async def test_only_an_older_claude_on_bedrock_keeps_the_old_api_version_and_sam
     await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
     body = wire.body()
     assert {name: body[name] for name in ("temperature", "top_p", "top_k") if name in body} == sampling
-    sent = body.get("anthropic_version") if route == "vertexai_claude" else wire.requests[0].headers["anthropic-version"]
+    sent = (
+        body.get("anthropic_version") if route == "vertexai_claude" else wire.requests[0].headers["anthropic-version"]
+    )
     assert sent == version
 
 

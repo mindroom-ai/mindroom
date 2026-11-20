@@ -225,7 +225,5 @@ def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -
         extra_kwargs.update(apply_reasoning_level(model_config.at_level(level)).extra_kwargs or {})
     reject_unsupported_extra_kwargs(extra_kwargs, allowed, provider=model_config.provider)
     if provider == "anthropic" and len(credentials := claude_authored_credentials(model_config)) > 1:
-        msg = (
-            f"sets {' and '.join(credentials)}, but the Anthropic client takes one credential; keep one of them."
-        )
+        msg = f"sets {' and '.join(credentials)}, but the Anthropic client takes one credential; keep one of them."
         raise ValueError(msg)

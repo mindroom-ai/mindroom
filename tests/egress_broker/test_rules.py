@@ -1138,7 +1138,7 @@ def test_inject_drops_a_placeholder_only_from_credential_headers(auth: EgressAut
 
     new_headers, _ = inject_credentials(headers, b"/v1", auth, "s3cret", placeholders=["en"])
 
-    kept = [(name, value) for name, value in new_headers if value != b"Bearer s3cret" and value != b"s3cret"]
+    kept = [(name, value) for name, value in new_headers if value not in {b"Bearer s3cret", b"s3cret"}]
     expected = [(b"Accept-Language", b"en")] + ([] if auth.type == "header" else [(b"x-goog-api-key", b"en")])
     assert kept == expected
 

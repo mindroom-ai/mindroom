@@ -93,7 +93,11 @@ def _claude_authors_credential(extra_kwargs: dict[str, Any]) -> bool:
     """Return whether a direct Claude model's config authors a credential other than ``api_key``, header included."""
     client_params = extra_kwargs.get("client_params") or {}
     request_params = extra_kwargs.get("request_params") or {}
-    headers = (extra_kwargs.get("default_headers"), client_params.get("default_headers"), request_params.get("extra_headers"))
+    headers = (
+        extra_kwargs.get("default_headers"),
+        client_params.get("default_headers"),
+        request_params.get("extra_headers"),
+    )
     return bool(
         extra_kwargs.get("auth_token")
         or any(client_params.get(name) for name in ("auth_token", *_CLAUDE_CLIENT_CREDENTIALS))

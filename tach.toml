@@ -6948,6 +6948,7 @@ from = ["mindroom.ai"]
 
 [[interfaces]]
 expose = [
+    "claude_authored_credentials",
     "api_key_env_reference",
     "dashboard_api_key",
     "gemini_uses_vertexai",

@@ -781,8 +781,9 @@ def _without_environment_headers(client: _AsyncClaudeClient, configured: Mapping
     configured_names = {name.casefold() for name in configured}
     environment = {name for name in with_environment_headers(None) or {} if name.casefold() not in configured_names}
     if environment:
-        client._custom_headers = {  # noqa: SLF001 - the SDK has no option to skip the variable
-            name: value for name, value in client._custom_headers.items() if name not in environment  # noqa: SLF001
+        # The SDK has no option to skip the variable, so its parsed headers come off the built client.
+        client._custom_headers = {
+            name: value for name, value in client._custom_headers.items() if name not in environment
         }
     return client
 

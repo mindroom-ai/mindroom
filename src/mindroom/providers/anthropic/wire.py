@@ -250,12 +250,13 @@ def _without_citations(blocks: list[Any]) -> list[Any]:
     shaped: list[Any] = []
     for item in blocks:
         block = as_dict(item)
-        if block is not None and block.get("type") == "text" and isinstance(block.get("citations"), list):
-            item = {key: value for key, value in block.items() if key != "citations"}
-        elif block is not None and block.get("type") in {"search_result", "tool_result"}:
-            if isinstance(content := block.get("content"), list):
-                item = {**block, "content": _without_citations(content)}
-        shaped.append(item)
+        kind = None if block is None else block.get("type")
+        if block is not None and kind == "text" and isinstance(block.get("citations"), list):
+            shaped.append({key: value for key, value in block.items() if key != "citations"})
+        elif block is not None and kind in {"search_result", "tool_result"} and isinstance(block.get("content"), list):
+            shaped.append({**block, "content": _without_citations(block["content"])})
+        else:
+            shaped.append(item)
     return shaped
 
 
@@ -324,7 +325,9 @@ def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
     if isinstance(result.content, list):
         payload = _without_citations(
             [
-                block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
+                block
+                if (block := as_dict(item)) is not None and block.get("type")
+                else {"type": "text", "text": str(item)}
                 for item in result.content
             ],
         )

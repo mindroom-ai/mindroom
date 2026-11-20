@@ -2266,6 +2266,7 @@ Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a b
 A model key written as `${NAME}`, such as `api_key: ${OPENROUTER_TEAM_API_KEY}`, is read from that environment variable (or `NAME_FILE`), so two models of one provider can use different accounts while the keys stay out of `config.yaml`; the whole value must be the reference.
 When the variable is unset and that key is the one the model uses, `mindroom config validate` and `mindroom doctor` name it and replies fail with an error naming it; a key saved in the dashboard that overrides it prevents both.
 A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
+An `anthropic` model also never receives the shared key or a dashboard key when its config sets a credential in `client_params` (`auth_token`, `credentials`, `config`, or `profile`) or an `Authorization` or `X-Api-Key` header in `default_headers` or `request_params.extra_headers`; a config that sets two of `api_key`, `auth_token`, and those `client_params` credentials fails to load, because the Claude client takes one.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
@@ -2578,7 +2579,7 @@ A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`
 `max_retries` is not accepted, since MindRoom retries failed requests itself (see [Retries](#retries)); a model that sets it fails config validation with an error that says to remove it.
 `role_map` is not accepted either: Chat Completions requests send the system prompt as `developer` to OpenAI's own API and as `system` to every other endpoint, including an OpenAI-compatible server such as vLLM or llama.cpp set as `provider: openai` with its `base_url`, so remove it.
 
-- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server or, on `anthropic`, an Anthropic-compatible gateway's root URL without a `/v1` suffix, because the Claude client appends its own API path; `client_params.base_url` wins when both are set, and either left empty or null sets no endpoint.
+- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server or, on `anthropic`, an Anthropic-compatible gateway's root URL without a `/v1` suffix, because the Claude client appends its own API path, and sends the key as `Authorization: Bearer`, so a gateway that reads only `X-Api-Key` needs the key there, in `default_headers` without `api_key`; `client_params.base_url` wins when both are set, and either left empty or null sets no endpoint.
 - `api_key` is the same as the model's `api_key` field.
 - `request_params` holds request body fields that MindRoom merges over its own.
 - `extra_body` adds JSON body fields, for example for [OpenRouter provider routing](#openrouter-provider-routing).
@@ -2611,7 +2612,8 @@ A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its max
 
 Some models reject sampling controls:
 
-- Claude API version `2026-10-21`, which MindRoom sends on Anthropic, Bedrock, and Vertex requests, rejects `temperature`, `top_p`, and `top_k` on every model, so MindRoom omits them there, from `request_params` too; a Claude model's `extra_kwargs` still accepts them, and they have no effect.
+- Claude API version `2026-10-21`, which MindRoom sends on Anthropic, Bedrock, and Vertex requests, rejects `temperature`, `top_p`, and `top_k` on every model, so MindRoom omits them there, from `request_params` too, and logs a warning once per model that sets them; a Claude model's `extra_kwargs` still accepts them, and they have no effect.
+  Bedrock serves `2026-10-21` only for Claude 4.7 and later, so a `bedrock_claude` model older than 4.7, such as `anthropic.claude-haiku-4-5`, keeps API version `2023-06-01` and its sampling controls.
 - MindRoom also omits those controls for direct Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
 - [GPT-6.2 Astra and GPT-6.2 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 
@@ -3743,6 +3745,7 @@ With `provider: ollama`, `config.host` names the Ollama server only when no `OLL
 With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
 With `provider: openai`, `config.openai_base_url` sets the server; without it, extraction uses [`OPENAI_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else OpenAI's API.
 With `provider: anthropic`, `config.anthropic_base_url` sets the server; without it, extraction uses [`ANTHROPIC_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else Anthropic's API.
+With `provider: anthropic`, Mem0 sends no `temperature`, `top_p`, or `top_k`, which Claude API version `2026-10-21` rejects on every model, so `config` sampling values have no effect.
 For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
 ```yaml

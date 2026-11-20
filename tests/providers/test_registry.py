@@ -681,7 +681,10 @@ async def test_an_authored_claude_credential_never_goes_out_beside_an_implicit_k
     [
         ({"api_key": "sk-a", "extra_kwargs": {"auth_token": "tok"}}, "api_key and auth_token"),
         ({"extra_kwargs": {"auth_token": "tok", "client_params": {"api_key": "sk-a"}}}, "api_key and auth_token"),
-        ({"extra_kwargs": {"api_key": "sk-a", "client_params": {"profile": "work"}}}, "api_key and client_params.profile"),
+        (
+            {"extra_kwargs": {"api_key": "sk-a", "client_params": {"profile": "work"}}},
+            "api_key and client_params.profile",
+        ),
     ],
     ids=["key-and-token", "client-key-and-token", "key-and-profile"],
 )
