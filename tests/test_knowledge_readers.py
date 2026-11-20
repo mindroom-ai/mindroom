@@ -10,25 +10,27 @@ are observed rather than inferred from attributes.
 They exercise ``FileIndexer``'s reader construction directly rather than
 through ``reindex_all``. That is deliberate, and the reason is the hazard in
 :func:`test_two_bases_neither_share_a_reader_nor_poison_the_factory_cache`:
-``ReaderFactory`` caches one reader per extension, and ``_build_reader``
-reconfigures a copy. Delete that copy and the existing end-to-end suites still
-pass, because within one refresh every ``_build_reader`` call re-applies that
-indexer's own chunking before the reader is used, so a sequential refresh stays
-internally consistent. The damage needs two bases' refreshes to interleave --
-a real possibility, since the source-root lock is per root and file reads run
-on worker threads, but not something a deterministic end-to-end test can
-stage. Observing the constructed reader is the only way to hold the invariant.
+``_build_reader`` configures the reader ``ReaderFactory`` returns in place,
+which is safe only while the factory builds a new reader per call, as Agno 3.2
+does (Agno 3.0 cached one per extension). Were readers shared again, the
+existing end-to-end suites would still pass, because within one refresh every
+``_build_reader`` call re-applies that indexer's own chunking before the reader
+is used, so a sequential refresh stays internally consistent. The damage needs
+two bases' refreshes to interleave -- a real possibility, since the source-root
+lock is per root and file reads run on worker threads, but not something a
+deterministic end-to-end test can stage. Observing the constructed reader is
+the only way to hold the invariant.
 """
 
 from __future__ import annotations
 
 import json
+from importlib.util import find_spec
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
@@ -37,8 +39,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.embeddings.batching import RefreshEmbedder
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.knowledge.chunking import LegacyDocumentChunking, LegacyFixedSizeChunking, SafeFixedSizeChunking
 from mindroom.knowledge.file_indexer import FileIndexer, _InMemoryTextReader, _MalformedJSONSourceError
+from mindroom.knowledge.readers import Document
 from mindroom.knowledge.vector_store import KnowledgeCollection
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.knowledge_test_support import _FakeEmbedder
@@ -116,12 +119,12 @@ def _assert_carries_base_chunking(reader: Reader) -> None:
 
 
 def test_two_bases_neither_share_a_reader_nor_poison_the_factory_cache(tmp_path: Path) -> None:
-    """Configuring a reader must copy it first, because the factory's instance is shared.
+    """Configuring a reader must leave every other caller's reader as it was.
 
-    ``ReaderFactory`` hands out one cached reader per extension. Configuring
-    that instance in place would give two bases the same object: whichever
-    refreshed second would re-chunk the other's corpus at its own size, and the
-    cache would keep serving that size for the rest of the process.
+    ``_build_reader`` configures the factory's reader in place. Were that
+    instance shared, two bases would get the same object: whichever refreshed
+    second would re-chunk the other's corpus at its own size, and the factory
+    would keep serving that size for the rest of the process.
     """
     cached = ReaderFactory.get_reader_for_extension(".md")
     cached_strategy = cached.chunking_strategy
@@ -141,12 +144,11 @@ def test_two_bases_neither_share_a_reader_nor_poison_the_factory_cache(tmp_path:
 
 
 def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(indexer: FileIndexer) -> None:
-    """The JSON subclass must copy the factory's chunker, not alias it.
+    """The JSON subclass must not share its chunker with another caller's reader.
 
     Nothing mutates a JSON reader's strategy today, so this pins the same
-    copy-before-use rule one branch over rather than a present defect: an
-    aliased strategy would put the shared cache one in-place edit away from
-    every base that reads JSON.
+    no-sharing rule one branch over rather than a present defect: a shared
+    strategy would put one in-place edit between every base that reads JSON.
     """
     cached = ReaderFactory.get_reader_for_extension(".json")
 
@@ -154,6 +156,58 @@ def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(indexer: F
 
     assert reader is not cached
     assert reader.chunking_strategy is not cached.chunking_strategy
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ({"value": "A\u00a0B\u2028C\u3000D"}, ['{"value": "A B C D"}']),
+        # Agno 3.2's whitespace would split this into chunks of 5, 5000, and 1005 characters.
+        ({"v": ("A\u00a0\u00a0" * 2000) + "B"}, ['{"v": "' + "A " * 2000 + 'B"}']),
+    ],
+    ids=["unicode-whitespace", "long"],
+)
+def test_json_files_chunk_as_agno_3_0_did(
+    value: dict[str, str],
+    expected: list[str],
+    tmp_path: Path,
+    indexer: FileIndexer,
+) -> None:
+    """JSON keeps Agno's 5000/0 fixed-size split, and its chunks collapse Unicode whitespace as 3.0.9's did."""
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+    documents = indexer._build_reader(source).read(source, name=source.name)
+
+    # What Agno 3.0.9's JSON reader returned for this file.
+    assert [document.content for document in documents] == expected
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        ".pdf",
+        ".docx",
+        # MindRoom ships no python-pptx, so its indexer skips PPTX files unless a deployment installs it.
+        pytest.param(".pptx", marks=pytest.mark.skipif(find_spec("pptx") is None, reason="python-pptx not installed")),
+    ],
+)
+def test_document_readers_chunk_paragraphs_as_agno_3_0_did(suffix: str, indexer: FileIndexer) -> None:
+    """PDF, DOCX, and PPTX keep Agno's paragraph chunking at its size, and its chunks keep 3.0.9's whitespace.
+
+    Agno 3.2 keeps the line breaks inside a paragraph, which would change every chunk of a re-indexed document.
+    """
+    paragraphs = ["\n".join(f"Paragraph {n}, line {i}:\tsome  words\there." for i in range(70)) for n in range(3)]
+    reader = indexer._build_reader(Path(f"source{suffix}"))
+    strategy = reader.chunking_strategy
+
+    assert isinstance(strategy, LegacyDocumentChunking)
+    assert (strategy.chunk_size, strategy.overlap) == (5000, 0)
+    chunks = strategy.chunk(Document(name="source", content="\n\n".join(paragraphs)))
+    # What Agno 3.0.9's DocumentChunking returned for this input: one chunk per 2719-character paragraph.
+    assert [chunk.content for chunk in chunks] == [
+        " ".join(f"Paragraph {n}, line {i}: some words here." for i in range(70)) for n in range(3)
+    ]
 
 
 @pytest.mark.parametrize("suffix", _CHUNKED_SUFFIXES)
@@ -221,8 +275,9 @@ def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
     """
     reader = indexer._build_reader(Path("source.json"))
 
-    assert type(reader.chunking_strategy) is FixedSizeChunking
-    assert reader.chunking_strategy.chunk_size == 5000
+    # Agno's fixed-size split at its 5000/0, with the legacy whitespace (``test_json_files_chunk_as_agno_3_0_did``).
+    assert type(reader.chunking_strategy) is LegacyFixedSizeChunking
+    assert (reader.chunking_strategy.chunk_size, reader.chunking_strategy.overlap) == (5000, 0)
 
     # The broken key is indented so line and column differ; equal values would
     # make the assertion below blind to the two being swapped.

@@ -236,7 +236,6 @@ _._validate_client_settings  # Pydantic field validator (src/mindroom/config/mod
 _._normalize_api_key  # Pydantic field validator (src/mindroom/config/memory.py)
 _._normalize_extra_kwargs_api_key  # Pydantic field validator (src/mindroom/config/models.py)
 _._validate_single_api_key  # Pydantic model validator (src/mindroom/config/models.py)
-_.handle_starttag  # unused method (src/mindroom/matrix/message_builder.py)
 _.validate_history_settings  # unused method (src/mindroom/config/agent.py)
 _.serialize_model  # unused method (src/mindroom/config/agent.py)
 _.validate_match  # unused method (src/mindroom/config/approval.py)

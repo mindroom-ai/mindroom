@@ -214,12 +214,12 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
     # The adapter's caller names each function's toolkit (``ToolFunction.toolkit``).
     ("owning_toolkit",): "ignored",
     # Set only by Agno's component registry, which MindRoom does not use.
-    ("source_toolkit",): "ignored",
+    ("source_toolkit", "bound_toolkit"): "ignored",
 }
 
 
 # AGNO_COMPAT: Agno toolkits' default instructions name functions the agent may not be offered.
-# Reason: Agno 3.0.9's ReasoningTools, ZepTools, DaytonaTools, GoogleCalendarTools, and GmailTools build default
+# Reason: Agno 3.2.1's ReasoningTools, ZepTools, DaytonaTools, GoogleCalendarTools, and GmailTools build default
 # instructions that name functions their enable switches can leave out, and the function filters MindRoom applies after
 # construction can remove any named function, so the prompt would tell the model to call a function it does not have.
 # Upstream issue: Tracking gap; searches of Agno's issues and PRs for these toolkits' instructions found no match.

@@ -64,7 +64,7 @@ class MindRoomOpenAITools(OpenAITools):
         )
 
     # AGNO_COMPAT: OpenAITools.transcribe_audio opens the model-chosen audio path by name.
-    # Reason: Agno 3.0.9 passes audio_path to open() in whichever process runs the toolkit, so a
+    # Reason: Agno 3.2.1 passes audio_path to open() in whichever process runs the toolkit, so a
     # prompt could upload any file that process can read, such as MindRoom's config or credentials,
     # or block on a FIFO, whatever the agent's file_access.
     # Upstream issue: Tracking gap; upstream tracking has not been verified.
@@ -100,7 +100,7 @@ class MindRoomOpenAITools(OpenAITools):
         return transcript
 
     # AGNO_COMPAT: OpenAITools.generate_speech speaks only through /v1/audio/speech.
-    # Reason: Agno 3.0.9 sends every text-to-speech model to the speech endpoint, whose OpenAI models
+    # Reason: Agno 3.2.1 sends every text-to-speech model to the speech endpoint, whose OpenAI models
     # (tts-1, tts-1-hd, gpt-4o-mini-tts) shut down on 2027-01-06; their gpt-realtime replacement is served
     # only over the Realtime API, so the toolkit's default speech would stop working.
     # Upstream issue: Tracking gap; a search of agno-agi/agno issues and PRs on 2026-10-29 found none.

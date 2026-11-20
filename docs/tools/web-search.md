@@ -48,7 +48,7 @@ It provides `web_search(query, max_results=5)` and `search_news(query, max_resul
 | --- | --- | --- | --- |
 | `enable_search` | `boolean` | `true` | Enable `web_search()`. |
 | `enable_news` | `boolean` | `true` | Enable `search_news()`. |
-| `modifier` | `text` | `null` | Text prepended to every `web_search()` query, for example `site:docs.example.com`. |
+| `modifier` | `text` | `null` | Text prepended to every `web_search()` and `search_news()` query, for example `site:docs.example.com`. |
 | `fixed_max_results` | `number` | `null` | Result count for every call, replacing the per-call `max_results`. |
 | `timelimit` | `text` | `null` | Age filter: `d`, `w`, `m`, or `y`. |
 | `region` | `text` | `null` | DDGS region code, such as `us-en`. |
@@ -178,11 +178,16 @@ Search results include title, author, published date, URL, and page text truncat
 | `category` | `text` | `null` | Content category, such as `news`; replaces the per-call `category`. |
 | `include_domains` | `string[]` | `null` | Domain allowlist. |
 | `exclude_domains` | `string[]` | `null` | Domain denylist. |
+| `include_text` | `string[]` | `null` | Text every result must contain; Exa takes a list of one string of at most five words. |
+| `exclude_text` | `string[]` | `null` | Text no result may contain; Exa takes a list of one string of at most five words. |
+| `user_location` | `text` | `null` | Two-letter country code that localizes `search_exa()` results. |
+| `moderation` | `boolean` | `null` | Filter unsafe content from `search_exa()` results. |
+| `highlights` | `boolean` | `false` | Add the most relevant snippets of each page to results. |
 | `start_published_date` | `text` | `null` | Earliest publication date, ISO 8601. |
 | `end_published_date` | `text` | `null` | Latest publication date, ISO 8601. |
 | `start_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
 | `end_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
-| `livecrawl` | `text` | `always` | Has no effect. |
+| `livecrawl` | `text` | `null` | Live-crawl mode such as `always`, `fallback`, or `never`, deprecated by Exa. Unset sends none; a saved value, `always` included, now takes effect. |
 | `model` | `text` | `null` | Model for `exa_answer()` only: `exa` or `exa-pro`. |
 | `research_model` | `text` | `exa-research` | Model for `research()` only: `exa-research` or `exa-research-pro`. |
 | `timeout` | `number` | `30` | API timeout in seconds. |

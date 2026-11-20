@@ -1037,7 +1037,7 @@
       },
       {
         "name": "inline_image",
-        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.",
+        "description": "Upload an image so it can appear inline; unencrypted rooms only.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.\nIn an encrypted room, or when this refuses, send the file with ``matrix_message(attachments=[...])`` instead.\nNever link an image to a placeholder or made-up address.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -11594,7 +11594,7 @@
             },
             "limit": {
               "type": "integer",
-              "description": "(int) The maximum number of pull requests to return. Defaults to 20."
+              "description": "(int) The maximum number of pull requests to return. Defaults to 50."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13572,7 +13572,8 @@
               "description": "Maximum number of threads to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string"
+              "type": "string",
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13633,7 +13634,8 @@
               "description": "Maximum number of drafts to return (default 10, max 500)."
             },
             "page_token": {
-              "type": "string"
+              "type": "string",
+              "description": "Token from a previous response to fetch the next page."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -13972,7 +13974,7 @@
       },
       {
         "name": "find_available_slots",
-        "description": "Find available time slots within a date range based on your calendar.\nChecks existing events against working hours to find free windows.",
+        "description": "Find available time slots within a date range based on your calendar.\nChecks existing events against working hours to find free windows.\nDates, working hours and the returned slots are in your Google Calendar timezone, or UTC if that\ntimezone cannot be loaded; the result's \"timezone\" field names the one used.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -27483,7 +27485,7 @@
             },
             "limit": {
               "type": "integer",
-              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results."
+              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results.\nNon-positive values return no rows."
             },
             "mindroom_output_path": {
               "anyOf": [

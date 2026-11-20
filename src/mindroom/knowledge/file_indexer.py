@@ -13,7 +13,6 @@ import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import cached_property, partial
 from pathlib import Path
@@ -32,12 +31,21 @@ from mindroom.embeddings.errors import (
     embedder_failure_is_transient,
 )
 from mindroom.knowledge.chunk_context import chunk_contexts
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.knowledge.chunking import LegacyDocumentChunking, LegacyFixedSizeChunking, SafeFixedSizeChunking
 from mindroom.knowledge.collections import KnowledgeChunk, write_file_rows
 from mindroom.knowledge.corpus_signature import file_signature
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.memory_entries import split_memory_entries
-from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
+from mindroom.knowledge.readers import (
+    Document,
+    DocumentChunking,
+    FixedSizeChunking,
+    JSONReader,
+    MarkdownReader,
+    Reader,
+    ReaderFactory,
+    TextReader,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -90,6 +98,13 @@ def max_concurrent_file_indexes(runtime_paths: RuntimePaths) -> int:
         )
         raise ValueError(msg)
     return value
+
+
+# Agno 3.2's chunkers keep whitespace that every chunk indexed so far had collapsed; each maps to its legacy twin.
+_LEGACY_WHITESPACE_CHUNKING: dict[type, type[LegacyFixedSizeChunking | LegacyDocumentChunking]] = {
+    FixedSizeChunking: LegacyFixedSizeChunking,
+    DocumentChunking: LegacyDocumentChunking,
+}
 
 
 class _MalformedJSONSourceError(Exception):
@@ -292,20 +307,24 @@ class FileIndexer:
 
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
+        # ReaderFactory builds a new reader for each call, so configuring it changes no other caller's reader.
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
 
-        # ReaderFactory hands out cached shared instances, so any branch that
-        # configures a reader copies it first instead of mutating the cache.
+        strategy = reader.chunking_strategy
+        if (legacy := _LEGACY_WHITESPACE_CHUNKING.get(type(strategy))) is not None:
+            # JSON, PDF, DOCX, and PPTX readers keep Agno's split algorithm and its size, with the legacy whitespace.
+            reader.chunking_strategy = legacy(chunk_size=strategy.chunk_size, overlap=strategy.overlap)
+
         if isinstance(reader, JSONReader):
             # Carry the factory reader's configuration (encoding, chunking) onto
             # the subclass that tags its own decode failures for the text fallback.
-            return _FallbackAwareJSONReader(**deepcopy(vars(reader)))
+            return _FallbackAwareJSONReader(**vars(reader))
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
         if not isinstance(reader, (TextReader, MarkdownReader)):
             return reader
 
-        return self._configure_text_reader(deepcopy(reader))
+        return self._configure_text_reader(reader)
 
     def _read_file(self, file_path: Path) -> _PreparedFile | None:
         """Read and chunk one listed file through a private snapshot; None when its reader dependency is missing.
