@@ -497,12 +497,12 @@ async def thread_is_unchanged(
     if any(row[0] == ignoring_event_id for row in rows):
         # A read counts the ignored message against its page's limit and budgets before its caller drops it, so the
         # page is whole only if that message, read here as the thread's newest, still fits beside ``history``.
+        if len(rows) >= HYDRATED_PROMPT_WINDOW_MESSAGES:
+            return False
         newest = await reader.read(room_id=room_id, thread_id=thread_id, limit=1)
         echo = [(ignoring_event_id, m.revision_event_id, None, m.content_generation) for m in newest.messages]
-        if (
-            not rows.issuperset(echo or [()])
-            or len(rows) >= HYDRATED_PROMPT_WINDOW_MESSAGES
-            or any(used + more > 1 for used, more in zip(history.budget_used, newest.budget_used, strict=True))
+        if not rows.issuperset(echo or [()]) or any(
+            used + more > 1 for used, more in zip(history.budget_used, newest.budget_used, strict=True)
         ):
             return False
     return True

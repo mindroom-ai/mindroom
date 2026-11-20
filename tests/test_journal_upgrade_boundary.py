@@ -467,3 +467,34 @@ async def test_messages_from_before_content_generations_get_one(legacy_database:
     ((logical, revision, refresh, generation),) = fingerprint[1]
     assert (logical, revision, refresh) == ("$root", "$edit", None)
     assert generation != 0
+
+
+@pytest.mark.asyncio
+async def test_a_reopened_journal_numbers_bodies_above_every_stored_one(legacy_database: _LegacyDatabase) -> None:
+    """A body stored after opening takes a generation above every one on disk, whatever the clock says."""
+    room_id = "!room:example.org"
+    store = legacy_database.open()
+    try:
+        await admit(store.principal("agent@alice"), "$root", room_id=room_id)
+    finally:
+        await store.close()
+    stored = 9_000_000_000_000_000_000
+    legacy_database.execute(f"UPDATE visible_messages SET content_generation = {stored}")  # noqa: S608 - a literal
+
+    store = legacy_database.open()
+    try:
+        principal = store.principal("agent@alice")
+        await admit(principal, "$edit", room_id=room_id, ts=2_000, content=edit("$root", "edited"))
+        assert await principal.install_hydrated_conversation(
+            room_id=room_id,
+            thread_id="$root",
+            events=(),
+            complete=True,
+            expected_membership_epoch=await principal.membership_epoch(room_id),
+        )
+        fingerprint = await principal.thread_fingerprint(room_id=room_id, thread_id="$root")
+    finally:
+        await store.close()
+    assert fingerprint is not None
+    ((*_, generation),) = fingerprint[1]
+    assert generation > stored

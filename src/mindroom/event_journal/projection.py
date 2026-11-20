@@ -31,10 +31,32 @@ if TYPE_CHECKING:
 
     from .backend import Row, Transaction
 
-# Every stored body's generation, a new row's or an edit's: the clock when this runtime started, then one more for each
-# body, so a message deleted and stored again never repeats a number. One runtime holds a journal, and the next starts
-# at a later clock.
-_GENERATIONS = itertools.count(time.time_ns())
+
+class _Generations:
+    """Every stored body's generation, a new row's or an edit's, so a message deleted and stored again repeats none.
+
+    One more for each body, from the clock when this runtime started or above the highest a journal held when it
+    opened, whichever is later. One runtime holds a journal, so nothing else numbers its bodies meanwhile.
+    """
+
+    def __init__(self) -> None:
+        self._count = itertools.count(time.time_ns())
+
+    def take(self) -> int:
+        return next(self._count)
+
+    def above(self, stored: int) -> None:
+        self._count = itertools.count(max(next(self._count), stored + 1))
+
+
+_GENERATIONS = _Generations()
+
+
+def number_bodies_above_stored(transaction: Transaction) -> None:
+    """Number every body this runtime stores above the ones the journal holds, on opening it."""
+    row = transaction.fetchone("SELECT MAX(content_generation) AS stored FROM visible_messages")
+    _GENERATIONS.above(int(row["stored"] or 0) if row is not None else 0)
+
 
 _RELATES_TO = "m.relates_to"
 _REL_TYPE = "rel_type"
@@ -235,7 +257,7 @@ def _project_original(
             content_json,
             refresh_token,
             membership_epoch,
-            next(_GENERATIONS),
+            _GENERATIONS.take(),
         ),
     )
     record_projected_prompt(
@@ -507,7 +529,7 @@ def _install_revision(
             revision_ts,
             content_json,
             refresh_token,
-            next(_GENERATIONS),
+            _GENERATIONS.take(),
             principal_id,
             room_id,
             logical_event_id,
@@ -681,7 +703,7 @@ def install_refetched_revision(
             revision_event_id,
             revision_ts,
             content_json,
-            next(_GENERATIONS),
+            _GENERATIONS.take(),
             principal_id,
             room_id,
             logical_event_id,
