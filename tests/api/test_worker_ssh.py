@@ -56,12 +56,16 @@ pathlib.Path(sys.argv[2]).write_text(str(child.pid))
 """
 
 
-def test_session_interactive_is_login_bash_in_workspace() -> None:
-    """A login gets Bash as a login shell, at home in the workspace, with the agent's environment and sshd's terminal."""
+def test_session_interactive_is_bash_in_workspace() -> None:
+    """A login gets Bash at home in the workspace, with the agent's environment and sshd's terminal.
+
+    Not as a login shell, whose ``/etc/profile`` replaces the launch's ``PATH``.
+    """
     argv, env, cwd = session.session_command(_LAUNCH, {"TERM": "xterm", "SSH_CONNECTION": "c"})
 
-    assert argv == ["bash", "-l"]
+    assert argv == ["bash"]
     assert cwd == "/data/ws"
+    assert env["PATH"] == _LAUNCH["env"]["PATH"]
     assert env == {
         "PATH": "/x",
         "HTTPS_PROXY": "http://proxy",

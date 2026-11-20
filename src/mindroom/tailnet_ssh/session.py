@@ -5,6 +5,9 @@ starts the session instead: in the agent's workspace as its home, with the envir
 the runner keeps in ``LAUNCH_PATH`` (``mindroom.api.worker_ssh``). So a session reaches the network through the
 proxy the agent's commands use, and ``scp notes.md host:`` lands where the agent looks.
 
+A login gets Bash, but not as a login shell: that reads ``/etc/profile``, which on the image replaces ``PATH``, and
+with it the agent's tools. The shell still reads the workspace's ``.bashrc``.
+
 It imports only the standard library, because every session starts it.
 """
 
@@ -30,7 +33,7 @@ def session_command(launch: Mapping[str, Any], environ: Mapping[str, str]) -> tu
     """Return the program, environment and directory of the session sshd started with ``environ``.
 
     ``launch`` is the stored launch of the agent's shell. The session runs the command the client named, the SFTP
-    server for the ``sftp`` subsystem (``internal-sftp`` in ``sshd_config``), or else Bash as a login shell.
+    server for the ``sftp`` subsystem (``internal-sftp`` in ``sshd_config``), or else an interactive Bash.
     """
     cwd = launch["cwd"]
     env = {name: value for name, value in launch["env"].items() if name not in _TERMINAL_ONLY}
@@ -38,7 +41,7 @@ def session_command(launch: Mapping[str, Any], environ: Mapping[str, str]) -> tu
     env.update({name: environ[name] for name in _FROM_SSHD if name in environ})
     command = environ.get("SSH_ORIGINAL_COMMAND")
     if command is None:
-        argv = ["bash", "-l"]
+        argv = ["bash"]
     elif command == "internal-sftp":
         argv = [_SFTP_SERVER]
     else:
