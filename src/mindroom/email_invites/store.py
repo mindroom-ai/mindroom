@@ -17,12 +17,13 @@ if TYPE_CHECKING:
 
 # Caps: 5 requests per asker and 3 sends per address per 24 hours, 20 open requests per room, 50 sends per day.
 _DAY = 86400
-_OPEN = "revoked = 0 AND expires_at > ? AND invited_at IS NULL"
+# A request is open, then `sending` (its one Matrix invite is on its way), then used or revoked; never open again.
+_OPEN = "revoked = 0 AND expires_at > ? AND invited_at IS NULL AND sending_at IS NULL"
 _SCHEMA = """CREATE TABLE IF NOT EXISTS email_invites (
     id INTEGER PRIMARY KEY AUTOINCREMENT, room_id TEXT NOT NULL, thread_id TEXT, email TEXT NOT NULL,
     requested_by TEXT NOT NULL, agent_name TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
     inviter_id TEXT, code_hash TEXT UNIQUE, sent_at INTEGER, revoked INTEGER NOT NULL DEFAULT 0,
-    claimed_by TEXT, claimed_at INTEGER, invited_at INTEGER)"""
+    claimed_by TEXT, claimed_at INTEGER, invited_at INTEGER, sending_at INTEGER)"""
 
 _LimitName = Literal["asker", "room", "address", "deployment"]
 
@@ -53,6 +54,7 @@ class EmailInvite:
     claimed_by: str | None
     claimed_at: int | None
     invited_at: int | None
+    sending_at: int | None
 
 
 _COLUMNS = ", ".join(field.name for field in fields(EmailInvite))
@@ -197,8 +199,8 @@ def _update(paths: RuntimePaths, now: int | None, sql: str, params: tuple) -> bo
 
 
 def revoke(paths: RuntimePaths, invite_id: int, now: int | None = None) -> bool:
-    """Revoke a request not yet used; true only for the call that revoked it."""
-    sql = "UPDATE email_invites SET revoked = 1 WHERE id = ? AND revoked = 0 AND invited_at IS NULL"
+    """Revoke an open request; true only for the call that revoked it."""
+    sql = "UPDATE email_invites SET revoked = 1 WHERE id = ? AND revoked = 0 AND invited_at IS NULL AND sending_at IS NULL"
     return _update(paths, now, sql, (invite_id,))
 
 
@@ -210,6 +212,27 @@ def bind_claim(paths: RuntimePaths, invite_id: int, claimant: str, now: int | No
         " AND expires_at > ? AND invited_at IS NULL AND (claimed_by IS NULL OR claimed_by = ?)"
     )
     return _update(paths, current, sql, (claimant, current, invite_id, current, claimant))
+
+
+def start_sending(paths: RuntimePaths, invite_id: int, claimant: str, now: int | None = None) -> bool:
+    """Move an open request bound to `claimant` to sending; only the one call that wins may send its Matrix invite."""
+    current = _now(now)
+    sql = (
+        "UPDATE email_invites SET sending_at = ? WHERE id = ? AND claimed_by = ? AND revoked = 0"
+        " AND expires_at > ? AND invited_at IS NULL AND sending_at IS NULL"
+    )
+    return _update(paths, current, sql, (current, invite_id, claimant, current))
+
+
+def abandon_sending(paths: RuntimePaths, invite_id: int | None = None) -> list[EmailInvite]:
+    """Revoke one request, or at startup all, left sending with an unknown outcome; return those this call revoked."""
+    where = "sending_at IS NOT NULL AND invited_at IS NULL AND revoked = 0" + (
+        "" if invite_id is None else " AND id = ?"
+    )
+    with _write(paths, _now(None)) as connection:
+        rows = _select(connection, where, () if invite_id is None else (invite_id,))
+        connection.executemany("UPDATE email_invites SET revoked = 1 WHERE id = ?", [(row.id,) for row in rows])
+    return rows
 
 
 def mark_invited(paths: RuntimePaths, invite_id: int, now: int | None = None) -> bool:

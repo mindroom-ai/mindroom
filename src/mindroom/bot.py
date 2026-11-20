@@ -1655,7 +1655,7 @@ class AgentBot:
                 membership_index=self._runtime_view.agent_reply_memberships,
                 callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
             )
-            register_email_invite_receiver(
+            await register_email_invite_receiver(
                 client=client,
                 agent_name=self.agent_name,
                 runtime_paths=self.runtime_paths,

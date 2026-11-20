@@ -168,6 +168,23 @@ def test_revoke_wins_once_and_frees_the_address(tmp_path: Path) -> None:
     assert store.revoke(paths, fresh.id, now=NOW + 5) is False
 
 
+def test_one_send_per_link_and_sending_is_terminal(tmp_path: Path) -> None:
+    """Only one call moves a link to sending; it can no longer be revoked or reopened, and is revoked once if lost."""
+    paths = test_runtime_paths(tmp_path)
+    invite, code = _sent(paths)
+    assert store.bind_claim(paths, invite.id, "@alice:example.org", now=NOW + 1)
+    assert store.start_sending(paths, invite.id, "@mallory:example.org", now=NOW + 1) is False
+    assert store.start_sending(paths, invite.id, "@alice:example.org", now=NOW + 1) is True
+    assert store.start_sending(paths, invite.id, "@alice:example.org", now=NOW + 1) is False
+    assert store.revoke(paths, invite.id, now=NOW + 2) is False
+    assert store.open_invites(paths, ROOM, now=NOW + 2) == []
+    assert [row.id for row in store.abandon_sending(paths)] == [invite.id]
+    assert store.abandon_sending(paths) == []
+    assert store.find_by_code(paths, code, now=NOW + 2) is None
+    fresh, _fresh_code = _issue(paths, now=NOW + 3)
+    assert fresh.id != invite.id
+
+
 def test_two_claimants_one_winner(tmp_path: Path) -> None:
     """Two accounts binding the same code at once: exactly one wins."""
     paths = test_runtime_paths(tmp_path)

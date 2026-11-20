@@ -92,11 +92,12 @@ class _Receiver:
             return "rejected", None
         if invite.invited_at is not None:
             return "invited", None
+        if invite.sending_at is not None:  # A link causes at most one Matrix invite, ever.
+            return "rejected", None
         room_id, config = invite.room_id, self.config_getter()
         membership = await self._membership(room_id, sender)
         if membership in ("join", "invite"):
-            # A bound claim whose invite went through before a restart is completed here, notice included.
-            return "invited", self._used(invite, sender) if invite.claimed_by == sender else None
+            return "invited", None
         if membership == "ban" or not store.bind_claim(self.paths, invite.id, sender):
             return "rejected", None
         kind = await refused_room_kind(self.client, config, self.paths, room_id)
@@ -107,31 +108,27 @@ class _Receiver:
         router_id = entity_identity_registry(config, self.paths).current_id(ROUTER_AGENT_NAME).full_id
         if kind == "unknown" or approver_right is None or await may_invite(self.client, room_id, router_id) is not True:
             return "retry", None
-        if not store.bind_claim(self.paths, invite.id, sender):  # A revoke or expiry during the reads wins.
+        if not store.start_sending(self.paths, invite.id, sender):  # The one winner; a revoke or expiry wins first.
             return "rejected", None
         return await self._invite(invite, sender)
 
     async def _invite(self, invite: store.EmailInvite, sender: str) -> tuple[_Status, str | None]:
-        """Send the Matrix invite; an unknown outcome kills the link, and the call that revoked it posts the notice."""
+        """Send the one Matrix invite; any other outcome revokes the link, and the call that revoked it posts the notice."""
         try:
             response = await self.client.room_invite(invite.room_id, sender)
         except (aiohttp.ClientError, TimeoutError):
             response = None
         if isinstance(response, nio.RoomInviteResponse):
-            return "invited", self._used(invite, sender)
-        if getattr(response, "status_code", None) == "M_FORBIDDEN":
-            return "rejected", None
-        # An unknown outcome kills the link; a new approved invite for the address is not blocked by it.
-        unknown = (
-            f"The invite for {invite.email} may or may not have gone out, so its link no longer works."
-            f" {invite.inviter_id} can send a new link if needed."
-        )
-        return "rejected", unknown if store.revoke(self.paths, invite.id) else None
+            used = f"Invite for {invite.email} (approved by {invite.inviter_id}) was used by {sender}."
+            return "invited", used if store.mark_invited(self.paths, invite.id) else None
+        await self.abandoned(store.abandon_sending(self.paths, invite.id))
+        return "rejected", None
 
-    def _used(self, invite: store.EmailInvite, sender: str) -> str | None:
-        """Record the invite as used and return its notice, only for the call that recorded it."""
-        first = store.mark_invited(self.paths, invite.id)
-        return f"Invite for {invite.email} (approved by {invite.inviter_id}) was used by {sender}." if first else None
+    async def abandoned(self, invites: list[store.EmailInvite]) -> None:
+        """Post the one notice of each link revoked while sending, by a failed invite or, at startup, a crash."""
+        for invite in invites:
+            body = f"The invite for {invite.email} may or may not have gone out, so its link no longer works."
+            await self._notice(invite, f"{body} {invite.inviter_id} can send a new link if needed.")
 
     async def _notice(self, invite: store.EmailInvite, body: str) -> None:
         thread, notice = invite.thread_id, {"msgtype": "m.notice"}
@@ -149,7 +146,7 @@ class _Receiver:
             logger.warning("email_invite_notice_failed", invite_id=invite.id)
 
 
-def register_email_invite_receiver(
+async def register_email_invite_receiver(
     *,
     client: nio.AsyncClient,
     agent_name: str,
@@ -157,10 +154,12 @@ def register_email_invite_receiver(
     config_getter: Callable[[], Config],
     callback_wrapper: Callable[[Callable[..., Awaitable[None]]], Callable[..., Awaitable[None]]],
 ) -> None:
-    """Register the claim receiver on the router only, admitting claims before a task is created."""
+    """Register the claim receiver on the router only, revoking links a crash left sending, before any claim."""
     if agent_name != ROUTER_AGENT_NAME:
         return
     receiver = _Receiver(client, runtime_paths, config_getter)
+    if abandoned := store.abandon_sending(runtime_paths):
+        await callback_wrapper(receiver.abandoned)(abandoned)
     wrapped = callback_wrapper(receiver.on_event)
 
     async def on_event(event: nio.UnknownToDeviceEvent) -> None:

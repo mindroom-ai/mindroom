@@ -58,10 +58,10 @@ Everyone who can read it there is already in the room, the link works once, and 
 
 The link is a bearer token: whoever holds it can join the room once, with any Matrix account.
 MindRoom cannot check that the account belongs to the mailed address, so when someone uses a link, the router posts "Invite for alice@example.com (approved by @bas:example.org) was used by @alice:example.org." in the thread where the invite was asked for.
-A link stops working once used, when it expires, or when it is revoked; a revoke that loses to a claim already being let in says who used the link.
+A link stops working once used, when it expires, or when it is revoked. A link causes at most one Matrix invite: once the router starts sending it, the link cannot be revoked and never sends again.
 The approver's right is checked again when the link is used; if they lost it, the invite is revoked.
 A person removed from the room cannot use the same link to come back.
-When the homeserver gives no clear answer to the Matrix invite (a timeout or an unexpected error), the link stops working and the thread is told once that the invite may or may not have gone out; the approver can send a new link, which is not blocked by the old one.
+When the Matrix invite does not clearly succeed (a refusal, a timeout or an unexpected error), or the router stopped while sending it, the link stops working and the thread is told once that the invite may or may not have gone out; the approver can send a new link, which is not blocked by the old one.
 
 In an encrypted room, the newcomer does not see messages sent before they joined; the mail says so.
 Whether agents answer the newcomer follows the normal [access rules](authorization.md): in a room that is not one of an agent's managed rooms, the agent may stay silent for them.
@@ -82,5 +82,5 @@ Known limits:
 
 - The router's Matrix sync store keeps the claim event, code included, in plain text on the router's own disk. The code works once and is bound to the first account that uses it.
 - A claim that arrives just before the router crashes may get no answer; the person clicks Join again.
-- A revoke that lands while a claim's Matrix invite is already on its way does not stop that invite; the thread is then told who used the link.
+- A revoke that lands while a claim's Matrix invite is already on its way does not stop that invite; the thread is then told the outcome.
 Members who may not invite can fill a room's 20 open requests; someone who may invite clears them with `revoke_email_invite`.

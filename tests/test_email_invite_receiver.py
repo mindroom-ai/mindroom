@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+import pytest_asyncio
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -92,7 +93,11 @@ class Harness:
         self.client.add_to_device_callback = MagicMock(
             side_effect=lambda callback, _type: self.callbacks.append(callback),
         )
-        register_email_invite_receiver(
+
+    async def start(self) -> None:
+        """Register the receiver, as the router does at each start."""
+        self.callbacks.clear()
+        await register_email_invite_receiver(
             client=self.client,
             agent_name=ROUTER_AGENT_NAME,
             runtime_paths=self.paths,
@@ -142,10 +147,12 @@ class Harness:
         return row
 
 
-@pytest.fixture
-def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
+@pytest_asyncio.fixture
+async def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     """A router receiver with one approver who may invite."""
-    return Harness(tmp_path, monkeypatch)
+    started = Harness(tmp_path, monkeypatch)
+    await started.start()
+    return started
 
 
 @pytest.mark.asyncio
@@ -288,39 +295,17 @@ async def test_router_without_right_answers_retry(harness: Harness) -> None:
 
 
 @pytest.mark.asyncio
-async def test_forbidden_invite_is_rejected_and_keeps_the_link(harness: Harness) -> None:
-    """M_FORBIDDEN is a definite refusal: no notice, and the link stays bound and open."""
+@pytest.mark.parametrize(
+    "outcome",
+    [nio.RoomInviteError("forbidden", "M_FORBIDDEN"), nio.RoomInviteError("unknown", "M_UNKNOWN"), TimeoutError()],
+)
+async def test_failed_invite_kills_the_link_with_one_notice(harness: Harness, outcome: object) -> None:
+    """Any outcome but success revokes the link with one notice; it never sends again, and a new link can be sent."""
     invite, code = harness.sent_invite()
-    harness.client.room_invite = AsyncMock(return_value=nio.RoomInviteError("forbidden", "M_FORBIDDEN"))
+    harness.client.room_invite = AsyncMock(side_effect=[outcome])
     assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
-    row = harness.row(invite.id)
-    assert (row.claimed_by, row.revoked, row.invited_at) == (ALICE, False, None)
-    assert harness.notices == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", [nio.RoomInviteError("unknown", "M_UNKNOWN"), TimeoutError()])
-async def test_unknown_invite_outcome_kills_the_link_with_one_notice(harness: Harness, outcome: object) -> None:
-    """Two claims meet an unknown outcome: the link dies, one notice says so, and a new link can be sent."""
-    invite, code = harness.sent_invite()
-    release, both = asyncio.Event(), asyncio.Event()
-
-    async def unknown(_room: str, _user: str) -> object:
-        if harness.client.room_invite.await_count == 2:
-            both.set()
-        await release.wait()
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
-
-    harness.client.room_invite = AsyncMock(side_effect=unknown)
-    (callback,) = harness.callbacks
-    claims = [asyncio.create_task(callback(_event(ALICE, code, f"r{n}"))) for n in (1, 2)]
-    await both.wait()
-    release.set()
-    await asyncio.gather(*claims)
-    statuses = [call.args[0].content["status"] for call in harness.client.to_device.await_args_list]
-    assert statuses == ["rejected", "rejected"]
+    assert (await harness.claim(ALICE, code, "r2") or {})["status"] == "rejected"
+    harness.client.room_invite.assert_awaited_once()
     assert harness.row(invite.id).revoked is True
     (notice,) = harness.notices
     assert "may or may not have gone out" in notice["body"]
@@ -375,7 +360,7 @@ async def test_registered_for_router_only(harness: Harness) -> None:
     harness.client.add_to_device_callback.assert_called_once()
     assert harness.client.add_to_device_callback.call_args.args[1] is nio.UnknownToDeviceEvent
     other = MagicMock()
-    register_email_invite_receiver(
+    await register_email_invite_receiver(
         client=other,
         agent_name="code",
         runtime_paths=harness.paths,
@@ -414,26 +399,23 @@ async def test_expiry_during_rights_read_wins(harness: Harness, monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_one_success_posts_one_notice(harness: Harness) -> None:
-    """A second claim that sees the invite before the first one's response returns wins the record; one notice."""
+async def test_overlapping_claims_send_one_invite(harness: Harness) -> None:
+    """Two claims of the same account at once: exactly one Matrix invite and one notice; the loser never sends."""
     _invite, code = harness.sent_invite()
-    release, posted = asyncio.Event(), asyncio.Event()
+    release = asyncio.Event()
 
-    async def slow_invite(_room: str, user: str) -> nio.RoomInviteResponse:
-        harness.memberships[user] = "invite"
-        posted.set()
+    async def slow_invite(_room: str, _user: str) -> nio.RoomInviteResponse:
         await release.wait()
         return nio.RoomInviteResponse()
 
     harness.client.room_invite = AsyncMock(side_effect=slow_invite)
     (callback,) = harness.callbacks
-    first = asyncio.create_task(callback(_event(ALICE, code, "r1")))
-    await posted.wait()
-    await callback(_event(ALICE, code, "r2"))
+    claims = [asyncio.create_task(callback(_event(ALICE, code, f"r{n}"))) for n in (1, 2)]
+    await asyncio.wait(claims, return_when=asyncio.FIRST_COMPLETED)
     release.set()
-    await first
+    await asyncio.gather(*claims)
     statuses = [call.args[0].content["status"] for call in harness.client.to_device.await_args_list]
-    assert statuses == ["invited", "invited"]
+    assert statuses == ["rejected", "invited"]
     assert len(harness.notices) == 1
     harness.client.room_invite.assert_awaited_once()
 
@@ -449,15 +431,23 @@ async def test_unreadable_membership_answers_retry_without_binding(harness: Harn
 
 
 @pytest.mark.asyncio
-async def test_invite_sent_before_a_crash_is_completed_once(harness: Harness) -> None:
-    """An invite the homeserver accepted before a crash is recorded, with one notice, and never sent again."""
+async def test_crash_while_sending_revokes_the_link_at_restart(harness: Harness) -> None:
+    """A crash after the invite went out but before it was recorded: at restart the link is revoked, with one notice.
+
+    The newcomer joined and was removed meanwhile; the same link sends no second invite.
+    """
     invite, code = harness.sent_invite()
     assert store.bind_claim(harness.paths, invite.id, ALICE)
-    harness.memberships[ALICE] = "invite"
-    assert (await harness.claim(ALICE, code) or {})["status"] == "invited"
-    assert (await harness.claim(ALICE, code) or {})["status"] == "invited"
-    assert len(harness.notices) == 1
+    assert store.start_sending(harness.paths, invite.id, ALICE)
+    harness.memberships[ALICE] = "leave"
+    await harness.start()
+    assert harness.row(invite.id).revoked is True
+    (notice,) = harness.notices
+    assert "may or may not have gone out" in notice["body"]
+    assert (await harness.claim(ALICE, code) or {})["status"] == "rejected"
     harness.client.room_invite.assert_not_awaited()
+    await harness.start()
+    assert len(harness.notices) == 1
 
 
 @pytest.mark.asyncio

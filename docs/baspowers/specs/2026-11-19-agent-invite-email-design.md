@@ -124,9 +124,9 @@ Chat, new folder `src/app/invites/`: `inviteLink.ts` (parse the fragment), `invi
 6. The newcomer opens the link. Signed out, Chat's protected-route guard sends them to sign-in and brings them back, fragment included.
 7. On the invite page the newcomer clicks Join. Chat sends the claim.
 8. The router's receiver admits the event (shape, rate limits, human sender) and finds the request by the code's hash. A code that is unknown, revoked, expired, or bound to another account is `rejected`. A request this sender already used is answered `invited` again.
-9. If the sender is already joined or already invited to the room, it answers `invited`, and records the invitation when the request is bound to this sender.
-10. Otherwise it binds the request to the sender with one conditional update, checks again that the approver may invite, that the router may invite and that the room is not refused, repeats the conditional update (so a revoke or expiry during those reads wins), and invites the sender. There is no dispatch lock: a second claim by the same account may send the same Matrix invite again, which is harmless because a Matrix invite of the same user is idempotent.
-11. It records the invitation with a conditional update (`invited_at IS NULL`), answers `invited` with the room ID, and, only when that update won, posts the notice "Invite for alice@example.com (approved by @bas:example.org) was used by @alice:example.org." in the thread of the request.
+9. A request in `sending` is `rejected`, whoever claims. If the sender is already joined or already invited to the room, it answers `invited` and changes nothing.
+10. Otherwise it binds the request to the sender with one conditional update, checks again that the approver may invite, that the router may invite and that the room is not refused, then moves the row `open → sending` with one conditional update (bound to this sender, not revoked, not expired, not used, not sending). Only the call that wins this update calls `room_invite`; a revoke or expiry during the reads wins over it.
+11. On success it records the invitation (`sending → used`), answers `invited` with the room ID, and posts the notice "Invite for alice@example.com (approved by @bas:example.org) was used by @alice:example.org." in the thread of the request.
 12. Chat joins the room, with the router's server as `via`, and opens it.
 
 ### Storage
@@ -149,8 +149,19 @@ Table `email_invites`:
 | `revoked` | 0 or 1. |
 | `claimed_by`, `claimed_at` | The account the code is bound to. |
 | `invited_at` | When the router's Matrix invite succeeded. |
+| `sending_at` | When the one call that may send the Matrix invite won the right to send it. |
 
-A request is *open* when it is not revoked, not expired, and `invited_at` is null.
+Claim state machine, with one invariant: **a link causes at most one Matrix invite, ever.**
+
+| State | Means | Moves to |
+|---|---|---|
+| `waiting` | No code yet. | `open` (code issued), `revoked`. |
+| `open` | Code valid, not expired, no invite attempted. May be bound to one claimant. | `sending` (one conditional update, only the winner sends), `revoked`, expired. |
+| `sending` | The Matrix invite is on its way. Never sends again; a claim finding it is `rejected`. | `used` on success, with the one success notice. `revoked` on any other outcome (`M_FORBIDDEN`, another error, a timeout), with the one "may or may not have gone out" notice. `revoked` at router start (a crash left it), with the same notice. |
+| `used` | Invited. The same claimant is answered `invited`; no second invite. | — |
+| `revoked` | Dead link. Does not block a new request for the address. | — |
+
+No locks and no retries: the conditional updates decide. A request is *open* when it is not revoked, not expired, not sending, and `invited_at` is null.
 At most one open request exists per room and address.
 Rows stay one day past expiry, so the 24-hour counts are complete, and are purged after that whenever the store is opened for a write.
 
@@ -165,11 +176,11 @@ Rows stay one day past expiry, so the 24-hour counts are complete, and are purge
 | SMTP send fails | Request revoked; the error text goes back to the agent. The attempt still counts toward the caps. |
 | MindRoom offline when the claim is sent | The homeserver queues the event; it is handled on the next sync. Chat shows the offline text and keeps listening. |
 | Room state unreadable at claim | `retry`. The claim stays bound. |
-| Matrix invite refused (`M_FORBIDDEN`) | `rejected`. The claim stays bound; it is never reopened for another account. |
-| Matrix invite outcome unknown (timeout, connection error, any error other than `M_FORBIDDEN`) | `rejected`. The request is revoked, so the link is dead; the call whose revoke won posts exactly one notice in the thread: the invite may or may not have gone out, and the approver can send a new link if needed. A fresh `invite_by_email` for the address is not blocked. nio retrying the POST is harmless (idempotent invite). Stricter than a retry: the person may need a new link. |
+| Matrix invite not a success (`M_FORBIDDEN`, any other error, a timeout, a connection error) | `rejected`. `sending → revoked`, so the link is dead; that one update posts exactly one notice in the thread: the invite may or may not have gone out, and the approver can send a new link if needed. A fresh `invite_by_email` for the address is not blocked. Stricter than a retry: the person may need a new link. |
+| Router crashes while a row is `sending` | At the next start, before any claim is handled, every `sending` row becomes `revoked` with the same notice. A person who joined through that invite and was removed meanwhile cannot use the link again. |
 | Claim repeated (page reload, durable replay) | Same account: `invited` again once the invite succeeded, with no second Matrix invite. Another account: `rejected`. Chat sends each claim once; a duplicate `request_id` gets no special handling. |
-| Claimant already joined, or already invited | `invited`. The request is marked used only when it is bound to this account; otherwise it is not changed. |
-| Revoke races a claim | The conditional updates decide; a revoke before the claim's last update wins. A revoke that lands while the Matrix invite is already being sent does not stop it; the notice then reports the use. A revoke of a used link reports the account that used it. |
+| Claimant already joined, or already invited | `invited`. The request is not changed. |
+| Revoke races a claim | The conditional updates decide; a revoke before `open → sending` wins. A row in `sending` cannot be revoked; its outcome posts the notice. A revoke of a used link reports the account that used it. |
 | Approver lost the right before the claim | Request revoked, `rejected`. |
 | Router lost the invite right before the claim | `retry`. The claim stays bound; a room admin can restore the router's power. |
 | Room became a personal or onboarding room before the claim | Request revoked, `rejected`. |
@@ -237,7 +248,7 @@ Checks that carry this:
 - Claims are bounded before any work: at most 10 per sender per minute and 60 in total per minute, with at most 1024 senders tracked.
 - Binding is one conditional update (`claimed_by IS NULL OR claimed_by = sender`, not revoked, not expired), so two accounts cannot both win and a failed invite never frees the code for someone else.
 - Rights are read from live room state at request time and again at claim time.
-- A repeat claim never sends a second Matrix invite once one succeeded, so a person removed from the room cannot use the link to return.
+- A link causes at most one Matrix invite, ever (`open → sending` has one winner; `sending` is never reopened, and a crash leaves it revoked), so a person removed from the room cannot use the link to return.
 - Mail headers are built with `email.message.EmailMessage`, which refuses line breaks.
 - Caps: 5 requests per asker per 24 hours; 20 open requests per room; 3 sends per address per 24 hours; 50 sends per deployment per 24 hours. Without them, anyone who is admin of a room of their own could use the operator's mail server as a relay.
 
@@ -248,6 +259,9 @@ Known limits:
 - **The asker's card appears before the right is checked.** The gate runs before the tool body, so an asker who may not invite approves a card and is then told the request is waiting.
 - **Plaintext code in the router's sync store.** nio's durable sync store keeps the claim event, code included, on the router's own disk. Accepted: the code is single-use and bound to the first claimant. (An earlier per-claim WAL checkpoint did not achieve hash-only storage and was removed.)
 - **A claim lost in a crash right after the sync ack gets no answer.** The person clicks Join again.
+- **Revoking a link that is `sending`** fails; the tool reports no open invite, and the outcome's notice follows.
+- **nio's own transport retry** may repeat the one `room_invite` HTTP request inside that single call after a timeout. This is not a second application-level invite; a removal between those repeats within seconds is not covered.
+- **A crash after recording `used` but before the notice** loses the notice; the invite stays recorded.
 - **An unknown Matrix-invite outcome costs a new link.** The link is revoked even if the invite went out; the thread notice says so.
 - **Store I/O is only partly offloaded.** The personal-room scan runs in a worker thread; the invite store's short SQLite transactions (2-second busy timeout) still run on the event loop.
 - **Encrypted rooms:** the newcomer cannot read messages from before they joined.
