@@ -48,13 +48,13 @@ async def test_live_delegations_capture_new_context_and_pending_speech_once() ->
     runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
     context = ChatContext.empty()
     context.add_message(role="user", content="I am in Paris.")
-    runner.submit(GPTLiveDelegation("one", "What is the weather?"), context)
+    runner.submit(GPTLiveDelegation(id="one", pending_transcript="What is the weather?"), context)
     # The SDK finalizes this after emitting delegation_created.
     context.add_message(role="user", content="What is the weather?")
     await asyncio.gather(*runner._tasks)
     context.add_message(role="assistant", content="It is sunny.")
-    runner.submit(GPTLiveDelegation("two", "And tomorrow?"), context)
-    runner.submit(GPTLiveDelegation("two", "And tomorrow?"), context)
+    runner.submit(GPTLiveDelegation(id="two", pending_transcript="And tomorrow?"), context)
+    runner.submit(GPTLiveDelegation(id="two", pending_transcript="And tomorrow?"), context)
     await asyncio.gather(*runner._tasks)
 
     assert respond.await_count == 2
@@ -66,6 +66,22 @@ async def test_live_delegations_capture_new_context_and_pending_speech_once() ->
     assert "It is sunny." in second
     assert "And tomorrow?" in second
     assert sink.results == [("Sunny.", "one"), ("Sunny.", "two")]
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_answers_only_client_delegations() -> None:
+    """A delegation the SDK runs on its backend model is not handed to the MindRoom agent."""
+    respond = AsyncMock(return_value=CallAgentResponse("Done."))
+    sink = CommentarySink()
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
+
+    runner.submit(GPTLiveDelegation(id="backend", mode="responses", pending_transcript="Book it."), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="client", pending_transcript="Book it."), ChatContext.empty())
+    await asyncio.gather(*runner._tasks)
+
+    assert respond.await_count == 1
+    assert sink.results == [("Done.", "client")]
     await runner.aclose()
 
 
@@ -86,11 +102,11 @@ async def test_live_dispatched_request_cannot_replay_an_action(
     context = ChatContext.empty()
     if not pending:
         context.add_message(role="user", content="Send the update.")
-    runner.submit(GPTLiveDelegation("one", "Send the update." if pending else ""), context)
+    runner.submit(GPTLiveDelegation(id="one", pending_transcript="Send the update." if pending else ""), context)
     if pending:
         context.add_message(role="user", content="Send the update.")
     context.add_message(role="user", content="What is the weather?")
-    runner.submit(GPTLiveDelegation("two", ""), context)
+    runner.submit(GPTLiveDelegation(id="two", pending_transcript=""), context)
     await asyncio.gather(*runner._tasks)
 
     assert "Send the update." in respond.await_args_list[0].args[0]
@@ -107,7 +123,7 @@ async def test_live_empty_result_still_answers_without_claiming_completion() -> 
         _options(AsyncMock(return_value=CallAgentResponse(""))),
         cast("GPTLiveSession", sink),
     )
-    runner.submit(GPTLiveDelegation("one", "Perform a task."), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="one", pending_transcript="Perform a task."), ChatContext.empty())
     await asyncio.gather(*runner._tasks)
 
     assert sink.results == [("No response is available from the agent for this request.", "one")]
@@ -132,11 +148,11 @@ async def test_live_serializes_responder_admission_and_cancels_queued_work() -> 
 
     sink = CommentarySink()
     runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
-    runner.submit(GPTLiveDelegation("one", "First task"), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="one", pending_transcript="First task"), ChatContext.empty())
     await started.wait()
-    runner.submit(GPTLiveDelegation("two", "Second task"), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="two", pending_transcript="Second task"), ChatContext.empty())
     await runner.aclose()
-    runner.submit(GPTLiveDelegation("three", "Late task"), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="three", pending_transcript="Late task"), ChatContext.empty())
 
     assert cancelled.is_set()
     assert len(requests) == 1
@@ -159,7 +175,7 @@ async def test_live_reconnect_discards_results_from_old_connection() -> None:
 
     sink = CommentarySink()
     runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
-    runner.submit(GPTLiveDelegation("old", "Check status"), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="old", pending_transcript="Check status"), ChatContext.empty())
     await started.wait()
     runner.on_reconnected()
     await asyncio.gather(*runner._tasks)
@@ -173,8 +189,8 @@ async def test_live_pending_speech_growth_only_delegates_new_words() -> None:
     """Multiple delegations during one unfinished utterance share its prefix."""
     respond = AsyncMock(return_value=CallAgentResponse("Done."))
     runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
-    runner.submit(GPTLiveDelegation("one", "Check weather"), ChatContext.empty())
-    runner.submit(GPTLiveDelegation("two", "Check weather and trains"), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="one", pending_transcript="Check weather"), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="two", pending_transcript="Check weather and trains"), ChatContext.empty())
     await asyncio.gather(*runner._tasks)
     assert "Check weather" in respond.await_args_list[0].args[0]
     assert "Check weather" not in respond.await_args_list[1].args[0]
@@ -194,16 +210,16 @@ async def test_live_reconnect_retains_context_from_cancelled_queue() -> None:
 
     respond = AsyncMock(side_effect=wait_for_cancel)
     runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
-    runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="one", pending_transcript="First"), ChatContext.empty())
     await started.wait()
     context = ChatContext.empty()
     context.add_message(role="user", content="Also check train times.")
-    runner.submit(GPTLiveDelegation("queued", ""), context)
+    runner.submit(GPTLiveDelegation(id="queued", pending_transcript=""), context)
     runner.on_reconnected()
     await asyncio.gather(*runner._tasks, return_exceptions=True)
     respond.side_effect = None
     respond.return_value = CallAgentResponse("Done.")
-    runner.submit(GPTLiveDelegation("new", "Please continue."), context)
+    runner.submit(GPTLiveDelegation(id="new", pending_transcript="Please continue."), context)
     await asyncio.gather(*runner._tasks)
     assert "Also check train times." in respond.await_args.args[0]
     await runner.aclose()
@@ -219,7 +235,10 @@ async def test_live_delegation_joins_split_speech_into_one_turn() -> None:
     context.add_message(role="assistant", content=" I am checking.")
     context.add_message(role="user", content=" Wait")
     context.add_message(role="user", content=", can you check")
-    runner.submit(GPTLiveDelegation("one", ". Can you check whether the bakery opens early?"), context)
+    runner.submit(
+        GPTLiveDelegation(id="one", pending_transcript=". Can you check whether the bakery opens early?"),
+        context,
+    )
     await asyncio.gather(*runner._tasks)
 
     assert respond.await_args.args[0].endswith(
@@ -235,10 +254,10 @@ async def test_live_finalized_speech_with_leading_space_does_not_repeat_dispatch
     respond = AsyncMock(return_value=CallAgentResponse("Done."))
     runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
     context = ChatContext.empty()
-    runner.submit(GPTLiveDelegation("one", " Check weather"), context)
+    runner.submit(GPTLiveDelegation(id="one", pending_transcript=" Check weather"), context)
     await asyncio.gather(*runner._tasks)
     context.add_message(role="user", content=" Check weather and trains")
-    runner.submit(GPTLiveDelegation("two", ""), context)
+    runner.submit(GPTLiveDelegation(id="two", pending_transcript=""), context)
     await asyncio.gather(*runner._tasks)
 
     assert respond.await_args.args[0].endswith("\n\nuser: and trains")
@@ -252,7 +271,7 @@ async def test_live_splits_large_unicode_results_without_losing_content() -> Non
     sink = CommentarySink()
     respond = AsyncMock(return_value=CallAgentResponse(result))
     runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
-    runner.submit(GPTLiveDelegation("one", "Give details"), ChatContext.empty())
+    runner.submit(GPTLiveDelegation(id="one", pending_transcript="Give details"), ChatContext.empty())
     await asyncio.gather(*runner._tasks)
 
     assert "".join(text for text, _ in sink.results) == result
@@ -272,8 +291,8 @@ async def test_live_delegation_failure_returns_safe_notice_and_next_turn_works()
         cast("GPTLiveSession", sink),
     )
     with capture_logs() as logs:
-        runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
-        runner.submit(GPTLiveDelegation("two", "Second"), ChatContext.empty())
+        runner.submit(GPTLiveDelegation(id="one", pending_transcript="First"), ChatContext.empty())
+        runner.submit(GPTLiveDelegation(id="two", pending_transcript="Second"), ChatContext.empty())
         await asyncio.gather(*runner._tasks)
 
     assert len(notices) == 1
@@ -297,8 +316,8 @@ async def test_live_delegation_times_each_stage_and_matches_acks_by_client_event
     sink = CommentarySink()
     runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
     with capture_logs() as logs:
-        runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
-        runner.submit(GPTLiveDelegation("two", "Second"), ChatContext.empty())
+        runner.submit(GPTLiveDelegation(id="one", pending_transcript="First"), ChatContext.empty())
+        runner.submit(GPTLiveDelegation(id="two", pending_transcript="Second"), ChatContext.empty())
         await asyncio.sleep(0.01)
         release.set()
         await asyncio.gather(*runner._tasks)
