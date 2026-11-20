@@ -34,14 +34,14 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "Optional MindRoom-managed workspace-relative path. "
     "If set, the full supported tool output is written to this file in your workspace and the tool returns only a "
     "compact receipt. "
-    "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+    "Use this for large output you plan to inspect later with filesystem, python, or shell tools."
 )
 # Beside a workdir, the path is below the saved outputs, which tools working in the workdir open by absolute path.
 _WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "Optional MindRoom-managed path relative to your saved tool outputs directory. "
     "If set, the full supported tool output is written to this file there and the tool returns only a compact "
     "receipt naming it by absolute path. "
-    "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+    "Use this for large output you plan to inspect later with filesystem, python, or shell tools."
 )
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _AUTO_SAVE_PREVIEW_BYTES = 8192
