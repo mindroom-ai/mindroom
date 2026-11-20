@@ -30251,6 +30251,169 @@
       }
     ]
   },
+  "workflow": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "start_workflow",
+        "description": "Run a workflow: a Python script that puts many agents to work in the background.\n\nGive exactly one of `source` (inline Python) or `path` (a file in your workspace).\nThe script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.\n\n    from mindroom.workflow import shell, tool, phase, log\n\n- shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.\n  shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.\n- phase(title) groups the calls that follow in the graph; log(text) shows a progress line.\n\nEvery agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,\nso do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.\n\nModels: default.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inline Python source."
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Workspace-relative path of a Python file."
+            },
+            "args": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "JSON object passed to main(args)."
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Three to six words shown on the run's card."
+            },
+            "max_concurrent": {
+              "type": "integer",
+              "description": "How many agents run at once. Raise it for large fan-outs."
+            },
+            "resource_profile": {
+              "type": "string",
+              "enum": [
+                "small",
+                "standard",
+                "large"
+              ],
+              "description": "Worker size for the script itself."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "get_workflow",
+        "description": "Return a run's status, cost, open questions, failed calls and nodes. nodes is \"active\" (default), \"failed\" or \"all\".",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "description": "The run's ID, as start_workflow returned it."
+            },
+            "nodes": {
+              "type": "string",
+              "enum": [
+                "active",
+                "failed",
+                "all"
+              ],
+              "description": "Which calls to list: \"active\", \"failed\" or \"all\"."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "run_id"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "cancel_workflow",
+        "description": "Stop a run and its agents. Finished calls stay saved.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "description": "The run's ID, as start_workflow returned it."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "run_id"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
   "x": {
     "instructions": null,
     "guidance": null,

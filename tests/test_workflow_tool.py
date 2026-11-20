@@ -252,6 +252,21 @@ async def test_two_requesters_with_the_same_tool_call_id_get_their_own_runs_and_
 
 
 @pytest.mark.asyncio
+async def test_a_repeated_inline_call_waits_for_the_run_the_first_one_started(stack: WorkflowStack) -> None:
+    """The same call of the same model run, delivered again, finds its run: one process, and both get the report."""
+    first = await _inline(stack, call_id="call-1")
+    second = await _inline(stack, call_id="call-1")
+    [run] = stack.store.list_runs()
+    stack.run_id = run.run_id
+    await stack.finish_attempt(result="the report")
+
+    assert await asyncio.wait_for(first, SETTLE_TIMEOUT_SECONDS) == "the report"
+    assert await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS) == "the report"
+    assert await stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT) == "the report"
+    assert len(stack.scripts.launched) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_repeated_inline_call_with_another_script_is_refused_and_tells_nothing_of_the_run(
     stack: WorkflowStack,
 ) -> None:
@@ -399,6 +414,18 @@ async def test_cancelling_the_job_cancels_the_run(stack: WorkflowStack) -> None:
     await wait_for_status(stack.jobs, handle["job_id"], "cancelled")
 
     assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.CANCELLED
+    assert stack.script_store.get_run(stack.scripts.launched[0].run_id).state is ScriptRunState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_job_whose_grant_is_revoked_stops_its_run(stack: WorkflowStack) -> None:
+    """A run must stop acting for someone who lost access: the revoked job is cancelled, and its run with it."""
+    handle = await _started(stack)
+
+    stack.refuse_admission()
+    await stack.jobs.cancel_revoked()
+    await stack.until(lambda: stack.store.get_run(handle["run_id"]).state is WorkflowRunState.CANCELLED)
+
     assert stack.script_store.get_run(stack.scripts.launched[0].run_id).state is ScriptRunState.CANCELLED
 
 

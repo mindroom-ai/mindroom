@@ -11,6 +11,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.delegation.lifecycle import running_child_id
 from mindroom.script_runs.manager import workflow_placement
 from mindroom.tool_jobs.control import job_owns_execution, job_stopped_by_shutdown
@@ -29,7 +30,6 @@ from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunSt
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.config.main import Config
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction

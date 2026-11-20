@@ -2528,6 +2528,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.custom_tools.workflow"
 depends_on = [
+    "mindroom.config.main",
     "mindroom.delegation.lifecycle",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.results",
