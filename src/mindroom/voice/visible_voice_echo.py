@@ -329,7 +329,10 @@ class VisibleVoiceEchoLifecycle:
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            raise
+            current = asyncio.current_task()
+            # Only the caller's own cancellation propagates; a settle cancelled from inside failed like any error.
+            if not task.cancelled() or (current is not None and current.cancelling()):
+                raise
         except Exception:  # noqa: S110 - the background task logs the traceback once
             # The runtime-owned task logs its exception, including the traceback.
             # Readiness still depends on whether an initial publication exists.
