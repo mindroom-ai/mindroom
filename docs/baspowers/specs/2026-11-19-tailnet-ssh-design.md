@@ -119,6 +119,8 @@ Links live in `tracking_dir(runtime_paths) / "tailnet_ssh.json"`, primary-only, 
 | `created_at`, `enrolled_at` | For the card and for dropping links never enrolled within 24 hours. |
 
 The same file holds `keys: {requester_id: [public key lines]}`, at most 20 per person, each parsed with `cryptography`'s `load_ssh_public_key`.
+It also holds `enrollment` (`login` or `auth_key`, what the gateway's last `POST /status` said, absent before its first), so after a primary restart an existing operator-key link admits its configured login and is parked on Disconnect before the gateway reports again; operator links for further workers are added only after a report in the new primary session, since the gateway may have switched to `login` meanwhile.
+It also holds `seen_keys: {requester_id: [key identities]}`, every key each person with a link could sign in with at the last reconcile, so a key the operator removes from the config closes that person's sessions, also when a primary restart came with the change.
 What the gateway reports (`state`, `login_url`, `dns_name`, `open_connections`) is kept in memory only and is empty until the gateway's first post after a primary restart.
 Node keys exist only in the gateway's volume.
 
