@@ -154,12 +154,11 @@ def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
     _refresh_runner_app_from_env()
 
 
-def _shell_command_output(result: object, *, cwd: Path) -> str:
-    """Assert and remove the workspace cwd line from a shell command result."""
+def _shell_command_output(result: object) -> str:
+    """Return a shell command result, which holds the command's output alone."""
     assert isinstance(result, str)
-    prefix = f"[cwd: {cwd.resolve()}]\n"
-    assert result.startswith(prefix)
-    return result.removeprefix(prefix)
+    assert not result.startswith("[cwd: ")
+    return result
 
 
 def _set_worker_tool_validation_snapshot(monkeypatch: pytest.MonkeyPatch, *tool_names: str) -> None:
@@ -469,7 +468,7 @@ def test_startup_manifest_rewritten_after_startup_changes_nothing(
 
     assert response.ok is True
     assert call.route.workspace is not None
-    assert _shell_command_output(response.result, cwd=call.route.workspace) == "ok"
+    assert _shell_command_output(response.result) == "ok"
     assert runtime_paths.config_path == payload_runtime.config_path
     assert sandbox_exec_module.runner_uses_subprocess(runtime_paths)
     assert sandbox_runner_module.app_runtime_config(app) is startup_config
@@ -1004,7 +1003,7 @@ async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
 
     assert response.ok is True
     assert call.route.workspace is not None
-    assert _shell_command_output(response.result, cwd=call.route.workspace) == "|||"
+    assert _shell_command_output(response.result) == "|||"
 
 
 def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) -> None:
@@ -1582,7 +1581,7 @@ async def test_inprocess_execution_tool_uses_encrypted_persisted_config_after_ke
     )
 
     assert response.ok is True, response
-    assert _shell_command_output(response.result, cwd=workspace) == f"{workspace}|"
+    assert _shell_command_output(response.result) == f"{workspace}|"
 
 
 def test_subprocess_execution_preloads_encrypted_persisted_config_without_runtime_key(
@@ -3128,7 +3127,7 @@ def test_sandbox_runner_runs_agent_known_only_to_primary_config_snapshot(
     assert response.status_code == 200
     data = response.json()
     assert data["ok"] is True, data
-    assert _shell_command_output(data["result"], cwd=workspace) == "from-mind-workspace"
+    assert _shell_command_output(data["result"]) == "from-mind-workspace"
 
 
 @pytest.mark.parametrize(("file_access", "readable"), [("workspace", False), ("unrestricted", True)])
@@ -3376,7 +3375,7 @@ def test_static_runner_relies_on_primary_private_template_from_snapshot(
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "shell",
             "function_name": "run_shell_command",
-            "args": [["bash", "-c", "printf ok"]],
+            "args": [["pwd", "-P"]],
             "execution_env": {"PATH": os.environ["PATH"]},
             "worker_key": worker_key,
             "worker_scope": "user",
@@ -3391,7 +3390,9 @@ def test_static_runner_relies_on_primary_private_template_from_snapshot(
     assert response.status_code == 200
     data = response.json()
     assert data["ok"] is True, data
-    assert _shell_command_output(data["result"], cwd=runtime_paths.storage_root / private_workspace_relative) == "ok"
+    assert _shell_command_output(data["result"]) == str(
+        (runtime_paths.storage_root / private_workspace_relative).resolve(),
+    )
 
 
 def test_sandbox_runner_applies_tool_init_overrides(
@@ -5422,7 +5423,7 @@ def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
     assert response.status_code == 200
     data = response.json()
     assert data["ok"] is True
-    assert json.loads(_shell_command_output(data["result"], cwd=private_workspace)) == {
+    assert json.loads(_shell_command_output(data["result"])) == {
         "cwd": str(private_workspace),
         "owner": "alice",
     }
@@ -5620,7 +5621,7 @@ def test_sandbox_runner_worker_shell_uses_workspace_home_and_worker_venv(
     worker_root = storage_root / "workers" / worker_dir_name("worker-a")
     workspace = worker_root / "workspace"
     expected_result = f"{workspace}|{worker_root / 'venv'}|{workspace}"
-    assert _shell_command_output(data["result"], cwd=workspace) == expected_result
+    assert _shell_command_output(data["result"]) == expected_result
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
@@ -6777,7 +6778,7 @@ def test_worker_routed_shell_uses_agent_workspace_as_home(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    shell_output = _shell_command_output(payload["result"], cwd=workspace)
+    shell_output = _shell_command_output(payload["result"])
     pwd, home, agent_workspace, xdg_config, xdg_cache, virtual_env = shell_output.split("|", 5)
     assert pwd == str(workspace.resolve())
     assert home == str(workspace.resolve())
@@ -6845,7 +6846,7 @@ def test_worker_routed_shell_ignores_dotenv_for_workspace_home_contract(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    shell_output = _shell_command_output(payload["result"], cwd=workspace)
+    shell_output = _shell_command_output(payload["result"])
     home, agent_workspace, xdg_config, xdg_cache, pip_cache, uv_cache, pycache, virtual_env = shell_output.split(
         "|",
         7,
@@ -6971,7 +6972,7 @@ def test_worker_attachment_save_can_be_read_through_shell_home(
     assert read_response.status_code == 200
     read_payload = read_response.json()
     assert read_payload["ok"] is True, read_payload
-    assert _shell_command_output(read_payload["result"], cwd=workspace) == payload_bytes.decode()
+    assert _shell_command_output(read_payload["result"]) == payload_bytes.decode()
 
 
 def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_path: Path) -> None:
@@ -7289,7 +7290,7 @@ def test_workspace_env_hook_shell_side_effects_do_not_reach_command(tmp_path: Pa
     response = sandbox_runner_module._execute_request_subprocess_sync(call)
 
     assert response.ok is True, response
-    token, pwd = _shell_command_output(response.result, cwd=workspace).split("|", 1)
+    token, pwd = _shell_command_output(response.result).split("|", 1)
     assert token == "hooked"  # noqa: S105
     assert pwd == str(workspace)
 
@@ -7367,7 +7368,7 @@ def test_workspace_env_hook_overlays_shell_execution(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    token, path_value = _shell_command_output(payload["result"], cwd=workspace).split("|", 1)
+    token, path_value = _shell_command_output(payload["result"]).split("|", 1)
     assert token == "hello-from-hook"  # noqa: S105
     assert path_value.startswith(f"{workspace.resolve()}/.local/bin:")
 
@@ -7404,7 +7405,7 @@ def test_workspace_env_hook_edits_take_effect_on_next_call(
 
         assert first.status_code == 200
         assert first.json()["ok"] is True
-        assert _shell_command_output(first.json()["result"], cwd=workspace) == "first"
+        assert _shell_command_output(first.json()["result"]) == "first"
 
         _write_workspace_env_hook(workspace, "export WORKSPACE_HOOK_TOKEN=second\n")
 
@@ -7424,7 +7425,7 @@ def test_workspace_env_hook_edits_take_effect_on_next_call(
 
     assert second.status_code == 200
     assert second.json()["ok"] is True
-    assert _shell_command_output(second.json()["result"], cwd=workspace) == "second"
+    assert _shell_command_output(second.json()["result"]) == "second"
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
@@ -7481,7 +7482,7 @@ def test_workspace_env_hook_keeps_user_credentials_and_filters_runner_control(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    shell_output = _shell_command_output(payload["result"], cwd=workspace)
+    shell_output = _shell_command_output(payload["result"])
     api_key, stripe_secret, token, proxy_token, sandbox_value = shell_output.split("|", 4)
     assert api_key == "from-hook"
     assert stripe_secret == "from-hook"  # noqa: S105
@@ -7757,7 +7758,7 @@ def test_workspace_env_hook_unkeyed_proxy_uses_init_override_base_dir(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    assert _shell_command_output(payload["result"], cwd=workspace) == "visible"
+    assert _shell_command_output(payload["result"]) == "visible"
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)

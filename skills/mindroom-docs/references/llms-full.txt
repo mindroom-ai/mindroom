@@ -767,6 +767,18 @@ The default chat website is `https://chat.mindroom.chat`; for a self-hosted clie
 Use **Open in Browser** to use your browser session or a sign-in provider that requires a browser.
 **Reload** returns to the configured chat website, or reloads the approval page while you connect local agents.
 
+## Install MindRoom Chat
+
+MindRoom Chat is the separate chat app for the Mac, with voice messages, Quick Capture, and its own updates.
+On **Overview**, select **Install MindRoom Chat**, or choose **Install MindRoom Chat…** from the menu bar.
+MindRoom downloads the newest release from GitHub, checks that it is the notarized MindRoom Chat signed by MindRoom, and copies it to `/Applications/MindRoom Chat.app`, or to `~/Applications` when you cannot write to `/Applications`.
+It installs only into a folder that just you and this Mac's administrators can change.
+It then opens the app, and the button and menu item change to **Open MindRoom Chat**.
+If MindRoom Chat is already on this Mac, from the Mac App Store, Homebrew, or a disk image, MindRoom opens that copy and installs nothing.
+MindRoom checks the copy's signature first; if **Overview** says a copy was not opened because it is not the MindRoom Chat that MindRoom publishes, remove the app at the path it names and install again.
+MindRoom never replaces or updates MindRoom Chat; the app updates itself.
+The **Chat** section keeps working with or without it.
+
 ## Set Up Local Agents
 
 **Local agents** has four numbered steps, each with its own status.
@@ -5574,6 +5586,7 @@ When an agent calls tools, MindRoom shows inline markers in the message text:
 ```
 
 The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, result preview, and `tool_call_id` for call `[N]`.
+A completed call that did not succeed (it errored, was refused or denied, or was cancelled or interrupted) also carries `is_error: true`, and its result preview says why; the key is omitted on a call that succeeded and on a started one, in live frames and the final event alike.
 A secret request card (`io.mindroom.secret_request`) that a reply's tool call posted names that reply's event (`response_event_id`) and the call (`tool_call_id`), so a client can draw the card at the call's line; a call made through the CLI from a Bash call has its own line, which the card names.
 Tools that start in quick succession appear together in one edit.
 Markers and tool-trace metadata are shown by default; to hide them, set `show_tool_calls: false` on one agent or under `defaults` for every agent that leaves it unset (see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/#defaults)).
@@ -6562,7 +6575,8 @@ The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoev
 
 ### Let pages load libraries
 
-Pages can also load libraries such as Chart.js, D3, Mermaid, or KaTeX from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
+Chart.js, D3, Mermaid, and KaTeX need no switch: MindRoom Chat serves its own copies to pages whose agent names them in `show_canvas`, and no viewer's address reaches a CDN.
+Pages can also load any other npm library from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
 This takes two more switches, both off by default; turn on both, because a page that needs a library breaks where Chat blocks it.
 
 ```yaml
@@ -6590,7 +6604,7 @@ agents:
 
 `enable_canvas_libraries` (boolean, default `false`) tells the agent it may use the source, and Chat's `libraries` lets pages load from it.
 Pages may then load scripts, styles, and fonts from `/npm/` paths only; fetching data, external images, workers, and every other site stay blocked, and libraries that evaluate strings, such as Alpine or Vue in-page templates, do not run.
-Opening a page that uses a library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
+Opening a page that uses a CDN library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
 
 ### Let pages load remote assets
 
@@ -9334,7 +9348,7 @@ Use them for agents with many optional tools.
 | `initial` | bool | `false` | Send a deferred tool as an ordinary tool on every request; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
-The starter Mind agent from `mindroom config init` keeps `shell`, `memory`, `scheduler`, `update_awareness`, `todo`, and `matrix_message` eager and defers its other tools.
+The starter Mind agent from `mindroom config init` keeps `shell`, `coding`, `memory`, `scheduler`, `update_awareness`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:
@@ -10776,9 +10790,13 @@ save_file("temporary notes\n", "scratch/notes.txt")
 `shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 It runs commands only in a worker unless [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults) lets them run in the MindRoom process; otherwise each call there is refused.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and stderr under `Stderr:`.
-With a working directory, the returned output and any saved file start with a `[cwd: <dir>]` line.
+The tool returns the last `tail` lines of stdout (default 100), then the last `tail` lines of any stderr under `Stderr:`, each capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and all of stderr under `Stderr:`.
+When `tail` or the cap leaves lines out of a successful result, it starts with a notice for each stream that lost lines, such as `[Showing the last 100 of 230 lines. Pass a larger tail, or narrow the command.]` or `[Showing the last 100 of 230 stderr lines. ...]`.
+Blank lines count as lines in a notice and in the tail; output shown whole loses only its trailing newlines, and stderr of only blank lines still gets its `Stderr:` heading.
+A result that leads with a status line keeps it first and puts the notice at the start of the stream it describes: `Exit code <code>` on a failure, `Stopped after <timeout>s.` at the timeout, and `Status: FINISHED` or `Status: RUNNING` when a background command is checked.
+The command runs in the agent's workspace, or in its workdir, and the result holds only the command's output.
 With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
+A successful command saves its stdout alone, and when it also printed to stderr, the receipt gives its size as `stderr_bytes`; add `2>&1` to the command to save that text too.
 
 A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
 Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
@@ -16064,6 +16082,7 @@ Ended jobs that no reply collected get one follow-up: a new message in the conve
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
 Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
+The agent then posts one notice in the conversation that results wait for a reply, which starts no turn of its own.
 Another requester's reply in a shared room never hears of these results.
 A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 

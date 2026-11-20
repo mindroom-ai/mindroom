@@ -426,13 +426,89 @@ async def test_run_shell_command_nonzero_foreground_exit_with_inherited_pipe_chi
 
 @pytest.mark.asyncio
 async def test_run_shell_command_tail_parameter(tmp_path: Path) -> None:
-    """Only the last N lines should be returned."""
+    """Only the last N lines are returned, after a notice of how many it cut; uncut output has no notice."""
     tool = _get_toolkit(tmp_path)
     entrypoint = tool.functions["run_shell_command"]
 
-    result = await entrypoint(["bash", "-c", "for i in $(seq 1 20); do echo line$i; done"], tail=3)
-    lines = result.strip().split("\n")
-    assert lines == ["line18", "line19", "line20"]
+    result = await entrypoint("seq 1 20", tail=3)
+    assert result.splitlines() == [
+        "[Showing the last 3 of 20 lines. Pass a larger tail, or narrow the command.]",
+        "18",
+        "19",
+        "20",
+    ]
+    assert await entrypoint("seq 1 20", tail=20) == "\n".join(str(number) for number in range(1, 21))
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_keeps_stderr_on_success(tmp_path: Path) -> None:
+    """A command that succeeds returns its stderr after its stdout, under the same tail rule."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.functions["run_shell_command"]
+
+    assert await entrypoint("echo out; echo warn >&2") == "out\nStderr:\nwarn"
+    # The notice of a cut leads the result even when only stderr was cut, and names the stream.
+    assert await entrypoint("seq 1 5 >&2", tail=2) == (
+        "[Showing the last 2 of 5 stderr lines. Pass a larger tail, or narrow the command.]\nStderr:\n4\n5"
+    )
+
+
+def test_a_tail_cut_of_byte_capped_output_gives_one_notice() -> None:
+    """Output cut by both the byte cap and ``tail`` says so in one notice, counting every line printed."""
+    buffer = _OutputBuffer(max_bytes=12)
+    buffer.append("1\n2\n3\n4\n5\n6\n7\n8\n")
+
+    assert buffer.render(tail=2) == (
+        "[Showing the last 2 of 8 lines; output truncated to the last 12 bytes. "
+        "Redirect command output to a file for complete results.]\n7\n8"
+    )
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_notice_counts_blank_lines_and_a_missing_final_newline_alike(newline: str) -> None:
+    """A blank last line counts as a line with LF as with CRLF; uncut output keeps its old form."""
+    buffer = _OutputBuffer()
+    buffer.append(f"a{newline}b{newline}{newline}")
+    unterminated = _OutputBuffer()
+    unterminated.append(f"a{newline}b")
+
+    # The one line shown is the blank one, which holds a carriage return when the command ended lines with CRLF.
+    assert buffer.render(tail=1) == "[Showing the last 1 of 3 lines. Pass a larger tail, or narrow the command.]" + (
+        "\n\r" if newline == "\r\n" else ""
+    )
+    assert len(buffer) == 3
+    assert buffer.render() == f"a{newline}b{newline}{newline}".rstrip("\n")
+    assert unterminated.render(tail=1).splitlines() == [
+        "[Showing the last 1 of 2 lines. Pass a larger tail, or narrow the command.]",
+        "b",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_keeps_blank_stderr_and_trims_only_whole_stdout(tmp_path: Path) -> None:
+    """Stderr that holds only blank lines keeps its section, with LF as with CRLF; whole stdout is as it always was."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.functions["run_shell_command"]
+    notice = "[Showing the last 1 of 2 stderr lines. Pass a larger tail, or narrow the command.]"
+
+    assert await entrypoint("echo out; echo >&2") == "out\nStderr:\n"
+    assert await entrypoint("echo >&2; exit 1") == "Exit code 1\nStderr:\n"
+    assert await entrypoint(r"printf 'a\n\n' >&2", tail=1) == f"{notice}\nStderr:\n"
+    assert await entrypoint(r"printf 'a\r\n\r\n' >&2", tail=1) == f"{notice}\nStderr:\n\r"
+    assert await entrypoint(r"printf 'a\n\n\n'") == "a"
+    assert await entrypoint("echo") == ""
+
+
+def test_the_line_cap_keeps_line_boundaries_across_appends() -> None:
+    """Trimming to the line cap keeps the newline before the next append, and the notice names the cap."""
+    buffer = _OutputBuffer(max_lines=2)
+    buffer.append("1\n2\n3\n")
+    buffer.append("4\n")
+
+    assert buffer.render() == (
+        "[Showing the last 2 of 4 lines; output truncated to the last 2 lines. "
+        "Redirect command output to a file for complete results.]\n3\n4"
+    )
 
 
 @pytest.mark.asyncio
@@ -444,7 +520,8 @@ async def test_run_shell_command_truncates_large_output_by_bytes(tmp_path: Path)
     script = "for i in range(120): print(f'{i:03d}:' + 'x' * 1000)"
     result = await entrypoint([sys.executable, "-c", script], tail=120)
 
-    assert "Output truncated to the last" in result
+    assert result.startswith("[Showing the last ")
+    assert " of 120 lines; output truncated to the last 51200 bytes." in result
     assert "119:" in result
     assert "000:" not in result
     assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
@@ -459,7 +536,8 @@ async def test_run_shell_command_truncates_large_stderr_by_bytes(tmp_path: Path)
     script = "import sys\nfor i in range(120): print(f'{i:03d}:' + 'x' * 1000, file=sys.stderr)\nsys.exit(1)\n"
     result = await entrypoint([sys.executable, "-c", script])
 
-    assert result.startswith("Exit code 1\nStderr:\n[Output truncated to the last")
+    assert result.startswith("Exit code 1\nStderr:\n[Showing the last ")
+    assert " of 120 lines; output truncated to the last 51200 bytes." in result
     assert "119:" in result
     assert "000:" not in result
     assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
@@ -474,7 +552,8 @@ async def test_run_shell_command_truncates_many_short_lines_by_rendered_bytes(tm
     script = "for _ in range(10000): print('xxxxxx')"
     result = await entrypoint([sys.executable, "-c", script], tail=10000)
 
-    assert result.startswith("[Output truncated to the last")
+    assert result.startswith("[Showing the last ")
+    assert " of 10000 lines; output truncated to the last 51200 bytes." in result
     assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
 
 
@@ -531,7 +610,7 @@ async def test_run_shell_command_respects_base_dir(tmp_path: Path) -> None:
     entrypoint = tool.functions["run_shell_command"]
 
     result = await entrypoint(["pwd"])
-    assert result.splitlines() == [f"[cwd: {tmp_path}]", str(tmp_path)]
+    assert result == str(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -673,7 +752,7 @@ async def test_local_shell_replaces_stale_agent_workspace_env(tmp_path: Path) ->
     entrypoint = tool.functions["run_shell_command"]
 
     result = await entrypoint('printf %s "$MINDROOM_AGENT_WORKSPACE"')
-    assert result.splitlines() == [f"[cwd: {workspace}]", str(workspace.resolve())]
+    assert result == str(workspace.resolve())
 
 
 def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: Path) -> None:
@@ -696,6 +775,8 @@ def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: P
     assert "worker-routed execution maps `~` to the workspace" in description
     assert "local execution maps it to the host home" in description
     assert description.count("Working method:") == 1
+    assert "[cwd:" not in description
+    assert "until <check>; do sleep 10; done" in description
 
 
 def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path: Path) -> None:
@@ -816,7 +897,7 @@ async def test_run_shell_command_stops_a_command_past_its_timeout(tmp_path: Path
 
     result = await entrypoint(["bash", "-c", "echo started; sleep 300"], timeout=1)
 
-    assert result == f"[cwd: {tmp_path}]\nStopped after 1s.\nOutput:\nstarted"
+    assert result == "Stopped after 1s.\nOutput:\nstarted"
 
 
 @pytest.mark.asyncio
