@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import (
@@ -25,6 +26,7 @@ from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
 from mindroom.room_reply_modes import ReplyModeRead, refresh_room_reply_mode
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
+from mindroom.steward_duties import room_state_response_as_steward
 from mindroom.teams.formation import (
     TeamIntent,
     TeamMemberStatus,
@@ -728,7 +730,12 @@ class TurnPolicy:
         context = dispatch.context
         read = None
         if (client := self.deps.runtime.client) is not None:
-            read = await refresh_room_reply_mode(client, self.deps.runtime_paths, dispatch.target.room_id)
+            read = await refresh_room_reply_mode(
+                client,
+                self.deps.runtime_paths,
+                dispatch.target.room_id,
+                put_state=partial(room_state_response_as_steward, self.deps.runtime.orchestrator.room_steward),
+            )
         if not self._reply_mode_requires_mention(
             dispatch.target.room_id,
             dispatch.envelope,

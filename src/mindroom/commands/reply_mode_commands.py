@@ -62,7 +62,7 @@ async def handle_reply_mode_command(  # noqa: PLR0911 - one answer per outcome
     """Show, set, or clear the room's `reply_mode` setting, written through ``put_state``, the room steward's."""
     requested = args_text.strip().lower()
     # A command reads the room's state itself, so it never trusts a copy that missed a change.
-    read = await refresh_room_reply_mode(client, runtime_paths, room_id, force=True)
+    read = await refresh_room_reply_mode(client, runtime_paths, room_id, force=True, put_state=put_state)
     if not requested or requested in _LIST_ARGUMENTS:
         if not read.ok:
             return "❌ Could not read this room's reply mode setting. Try again."

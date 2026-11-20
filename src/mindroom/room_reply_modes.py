@@ -118,11 +118,13 @@ async def refresh_room_reply_mode(
     room_id: str,
     *,
     force: bool = False,
+    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]] | None = None,
 ) -> ReplyModeRead:
     """Read the room's reply mode setting unless a read confirmed the copy recently, and return what it found.
 
     ``force`` reads it whatever the copy's age. A caller deciding now uses the result, not the copy, which a later
-    event may already have changed. A failed read keeps the copy.
+    event may already have changed. A failed read keeps the copy. ``put_state``, the room steward's, writes an older
+    runtime's override into a room without the setting, which the reading client itself never publishes.
     """
     import nio  # noqa: PLC0415 - config reads the copy above without loading the Matrix client
 
@@ -143,7 +145,7 @@ async def refresh_room_reply_mode(
         # A room without the setting takes the override an older runtime stored on disk, which then leaves the file.
         # While the room refuses the write, the stored override still applies and the next read tries again.
         mode = _legacy_override(runtime_paths, room_id)
-        if mode is not None and await write_room_reply_mode(client, runtime_paths, room_id, mode):
+        if mode is not None and await write_room_reply_mode(client, runtime_paths, room_id, mode, put_state=put_state):
             _drop_legacy_override(runtime_paths, room_id)
             return ReplyModeRead(ok=True, mode=mode)
     else:
@@ -182,9 +184,12 @@ async def write_room_reply_mode(
         logger.warning("room_reply_mode_write_failed", room_id=room_id, exc_info=True)
         return False
     if not isinstance(response, nio.RoomPutStateResponse):
-        logger.warning("room_reply_mode_write_failed", room_id=room_id, error=str(response))
         refused = response is None or (
             isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+        )
+        # A refusal is the room's rule, which a command's answer names; any other failure is worth a warning.
+        (logger.debug if refused else logger.warning)(
+            "room_reply_mode_write_failed", room_id=room_id, error=str(response)
         )
         return None if refused else False
     known = _known.get(key)
@@ -192,7 +197,7 @@ async def write_room_reply_mode(
         _take(key, mode, next(_order), confirmed=False)
     else:
         _known[key] = known._replace(order=next(_order), confirmed_at=_UNCONFIRMED)
-        await refresh_room_reply_mode(client, runtime_paths, room_id, force=True)
+        await refresh_room_reply_mode(client, runtime_paths, room_id, force=True, put_state=put_state)
     return True
 
 

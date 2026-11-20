@@ -111,7 +111,7 @@ from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .room_reply_modes import observe_room_settings_event, refresh_room_reply_mode
-from .steward_duties import StewardDuties, StewardDutiesDeps
+from .steward_duties import StewardDuties, StewardDutiesDeps, room_state_response_as_steward
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
 from .tool_jobs.follow_ups import follow_up_event
@@ -1089,7 +1089,8 @@ class AgentBot:
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
     async def _reread_reply_mode(self, client: nio.AsyncClient, room_id: str) -> None:
-        await refresh_room_reply_mode(client, self.runtime_paths, room_id, force=True)
+        put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
+        await refresh_room_reply_mode(client, self.runtime_paths, room_id, force=True, put_state=put_state)
 
     def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop."""

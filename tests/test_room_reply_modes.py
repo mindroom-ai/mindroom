@@ -484,6 +484,59 @@ async def test_an_override_an_older_runtime_stored_moves_into_the_room(tmp_path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("powered", [True, False], ids=["steward-writes", "steward-refused"])
+async def test_an_older_override_moves_into_the_room_through_its_steward(tmp_path: Path, *, powered: bool) -> None:
+    """A bot that only answers reads the older override and the room's steward writes it, once.
+
+    While the room refuses the steward, nobody writes it and the override still applies from disk.
+    """
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    legacy = _write_legacy_overrides(runtime_paths, {ROOM_ID: "mentions"})
+    homeserver = _Homeserver()
+    policy = _policy_for(config, "general", steward="research")
+    reader = policy.deps.runtime.client = homeserver.client()
+    steward = SimpleNamespace(agent_name="research", client=homeserver.client())
+    policy.deps.runtime.orchestrator.room_steward = lambda _room_id: steward
+    if not powered:
+        steward.client.room_put_state.side_effect = None
+        steward.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+
+    plan = await policy.plan_turn(
+        _room_with_members(SENDER, _entity_id(config, "general").full_id, room_id=ROOM_ID),
+        _text_event("hello agents"),
+        _dispatch(_context(), agent_name="general", room_id=ROOM_ID),
+        has_active_response_for_target=lambda _target: False,
+    )
+
+    assert plan.kind == "ignore"
+    reader.room_put_state.assert_not_awaited()
+    steward.client.room_put_state.assert_awaited_once()
+    assert ((ROOM_SETTINGS_EVENT_TYPE, "reply_mode") in homeserver.events) is powered
+    assert (ROOM_ID in json.loads(legacy.read_text())) is (not powered)
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+
+
+@pytest.mark.asyncio
+async def test_a_sync_reread_moves_an_older_override_through_the_steward(tmp_path: Path) -> None:
+    """The reread a live setting event starts also leaves the write of an older override to the room's steward."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    legacy = _write_legacy_overrides(runtime_paths, {ROOM_ID: "mentions"})
+    homeserver = _Homeserver()
+    reader = homeserver.client()
+    steward = SimpleNamespace(client=homeserver.client())
+    bot = SimpleNamespace(
+        runtime_paths=runtime_paths, orchestrator=SimpleNamespace(room_steward=lambda _room_id: steward)
+    )
+
+    await AgentBot._reread_reply_mode(bot, reader, ROOM_ID)
+
+    reader.room_put_state.assert_not_awaited()
+    steward.client.room_put_state.assert_awaited_once()
+    assert ROOM_ID not in json.loads(legacy.read_text())
+
+
+@pytest.mark.asyncio
 async def test_a_stalled_move_keeps_the_older_override_and_the_turn_moving(tmp_path: Path) -> None:
     """A write that hangs while an older override moves into the room gives up in time and keeps the override."""
     runtime_paths = test_runtime_paths(tmp_path)
