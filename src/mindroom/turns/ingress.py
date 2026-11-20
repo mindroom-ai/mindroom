@@ -378,14 +378,21 @@ class TurnIngress:
         if facts.sender_is_managed:
             return None
         event_info = EventInfo.from_event(event.source)
+        # A steward that only routes this sender still routes their queued message as edited.
+        async with self.deps.ingress.admitted_reply_decision(
+            facts.lane_requester_id,
+            room.room_id,
+            unanswered=(event.event_id,),
+            or_routed=True,
+        ) as allowed:
+            if not allowed or await self._edit_queued_message(room, event, event_info):
+                return None
         async with self.deps.ingress.admitted_reply_decision(
             facts.lane_requester_id,
             room.room_id,
             unanswered=(event.event_id,),
         ) as allowed:
             if not allowed:
-                return None
-            if await self._edit_queued_message(room, event, event_info):
                 return None
             return await self.deps.edit_regenerator.handle_message_edit(room, event, event_info, facts)
 
