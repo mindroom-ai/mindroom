@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 ROOM = "!room:example.org"
 OTHER_ROOM = "!other:example.org"
 ANN = "@ann:example.org"
-POSTER = "@mindroom_code:example.org"
 BOB = "@bob:example.org"
 
 
@@ -48,7 +47,6 @@ def test_a_room_has_at_most_one_live_call(tmp_path: Path) -> None:
         started_at=100.0,
         ended_at=None,
         row_event_id=None,
-        row_sender=None,
         retry_at=None,
         notes_failures=0,
         transcript_done_at=None,
@@ -92,31 +90,14 @@ def test_an_ended_call_makes_way_for_the_next_one(tmp_path: Path) -> None:
 
 
 def test_the_call_row_is_remembered(tmp_path: Path) -> None:
-    """The call's row and the account that sent it are recorded once it is posted."""
+    """The call's row is recorded once it is posted."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
 
-    store.set_row_event_id(call.id, "$row", POSTER)
+    store.set_row_event_id(call.id, "$row")
 
-    assert store.live_call(ROOM) == replace(call, row_event_id="$row", row_sender=POSTER)
-    assert CallTranscriptStore(tmp_path).call(call.id) == replace(call, row_event_id="$row", row_sender=POSTER)
-
-
-def test_a_database_made_before_rows_kept_their_sender_still_opens(tmp_path: Path) -> None:
-    """Its calls come back with no row sender, and a row posted from then on keeps its own."""
-    store = CallTranscriptStore(tmp_path)
-    old, _ = store.ensure_live_call(ROOM, at=100.0)
-    with closing(sqlite3.connect(store.path)) as connection:
-        connection.execute("UPDATE calls SET row_event_id = '$old'")
-        connection.execute("ALTER TABLE calls DROP COLUMN row_sender")
-        connection.commit()
-
-    store = CallTranscriptStore(tmp_path)
-    new, _ = store.ensure_live_call(OTHER_ROOM, at=100.0)
-    store.set_row_event_id(new.id, "$new", POSTER)
-
-    assert store.call(old.id) == replace(old, row_event_id="$old")
-    assert store.call(new.id) == replace(new, row_event_id="$new", row_sender=POSTER)
+    assert store.live_call(ROOM) == replace(call, row_event_id="$row")
+    assert CallTranscriptStore(tmp_path).call(call.id) == replace(call, row_event_id="$row")
 
 
 def test_lines_are_read_in_the_order_they_were_added_all_or_those_after_one(tmp_path: Path) -> None:
@@ -220,7 +201,7 @@ def test_a_finished_call_whose_row_is_still_owed_is_kept_until_it_is_made_or_giv
     for room_id in (ROOM, OTHER_ROOM, "!third:example.org"):
         call, _ = store.ensure_live_call(room_id, at=100.0)
         if room_id != ROOM:
-            store.set_row_event_id(call.id, "$row", POSTER)
+            store.set_row_event_id(call.id, "$row")
         store.end_call(call.id, at=200.0)
         store.finish_transcript(call.id, at=225.0, event_id="$transcript")
         store.record_row_edit(call.id, "ended")
@@ -368,7 +349,7 @@ def test_an_edit_for_the_end_never_replaces_one_for_the_transcript(tmp_path: Pat
     """The row's last recorded edit is the latest it was sent: the transcript's, once that went out."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
-    store.set_row_event_id(call.id, "$row", POSTER)
+    store.set_row_event_id(call.id, "$row")
     store.end_call(call.id, at=200.0)
 
     store.record_row_edit(call.id, "ended")

@@ -14,7 +14,7 @@ from mindroom.call_transcripts.service import AgentCallRoom, CallTranscriptServi
 from mindroom.call_transcripts.store import CallTranscriptStore, database_path
 from mindroom.call_transcripts.transcriber import SpeechTranscriber
 from mindroom.logging_config import get_logger
-from mindroom.room_steward import joined_bot, room_poster, room_steward
+from mindroom.room_steward import room_poster, room_steward
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -112,7 +112,7 @@ class CallTranscriptsRuntimeCoordinator:
             room = CallRoom(
                 ready=lambda _room_id: _synced_client(self.bots().get(agent_name)) is not None,
                 reader=reader,
-                poster=lambda *_: None,
+                poster=lambda _room_id: None,
                 retitle=lambda *_: None,
             )
             self._agent_rooms[agent_name] = room
@@ -125,7 +125,7 @@ class CallTranscriptsRuntimeCoordinator:
                 CallRoom(
                     ready=self._ready,
                     reader=lambda room_id: _synced_client(room_steward(self.bots(), room_id)),
-                    poster=self._poster_client,
+                    poster=lambda room_id: _synced_client(room_poster(self.bots(), room_id)),
                     retitle=self._retitle,
                 ),
                 SpeechTranscriber(self.config_provider, self.runtime_paths),
@@ -148,11 +148,6 @@ class CallTranscriptsRuntimeCoordinator:
             and any(bot.running for bot in bots.values())
             and all(bot.first_sync_complete for bot in acting or bots.values() if bot.running)
         )
-
-    def _poster_client(self, room_id: str, user_id: str | None) -> nio.AsyncClient | None:
-        """Return the synced client of the room's poster, or of the named account while it runs in the room."""
-        bots = self.bots()
-        return _synced_client(room_poster(bots, room_id) if user_id is None else joined_bot(bots, room_id, user_id))
 
     def _retitle(self, room_id: str, thread_id: str, event_id: str, body: str) -> None:
         """Have the room's poster summarize the thread now, whatever its count, counting the message it just posted."""

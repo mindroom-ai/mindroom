@@ -38,7 +38,6 @@ OTHER_ROOM = "!other:example.org"
 THIRD_ROOM = "!third:example.org"
 ANN = "@ann:example.org"
 BOB = "@bob:example.org"
-POSTER = "@mindroom_code:example.org"
 CAROL = "@carol:example.org"
 OUTSIDER = "@eve:example.org"
 AGENT = "@mindroom_helper:example.org"
@@ -137,7 +136,7 @@ class FakeRoom:
     def _gated(self, room_id: str) -> bool:
         return self.gated_rooms is None or room_id in self.gated_rooms
 
-    async def post_row(self, room_id: str, call_id: str) -> tuple[str, str] | None:
+    async def post_row(self, room_id: str, call_id: str) -> str | None:
         """Post a row while the router is ready and may post, after ``row_gate`` opens; posting again finds the one posted.
 
         The first ``lost_row_answers`` posts reach the room, but their answers are lost.
@@ -154,7 +153,7 @@ class FakeRoom:
         if self.lost_row_answers:
             self.lost_row_answers -= 1
             return None
-        return f"$row-{self.rows.index((room_id, call_id)) + 1}", POSTER
+        return f"$row-{self.rows.index((room_id, call_id)) + 1}"
 
     async def post_transcript(self, message: TranscriptMessage) -> str | None:
         """Post the message while the router is ready and may post, after ``transcript_gate`` opens and failures asked for.
@@ -691,7 +690,6 @@ async def test_the_row_is_edited_when_the_call_ends_and_again_once_its_transcrip
         room_id=ROOM,
         call_id=call.id,
         row_event_id="$row-1",
-        row_sender=POSTER,
         body="Call ended · 2 min",
         ended_at=START + 120,
         duration_seconds=120,
@@ -922,7 +920,6 @@ async def test_the_transcript_message_is_posted_30_seconds_after_the_end(world: 
             room_id=ROOM,
             call_id=call.id,
             row_event_id="$row-1",
-            row_sender=POSTER,
             body="## About\nThe launch.",
             transcript=CallTranscript(
                 call_id=call.id,

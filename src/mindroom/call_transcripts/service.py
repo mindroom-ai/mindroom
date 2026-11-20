@@ -154,8 +154,6 @@ class TranscriptMessage:
     room_id: str
     call_id: str
     row_event_id: str
-    row_sender: str | None
-    """The account that posted the row, which also posts this message; None when unknown, and the room's poster does."""
     body: str
     transcript: CallTranscript
 
@@ -167,8 +165,6 @@ class EndedRow:
     room_id: str
     call_id: str
     row_event_id: str
-    row_sender: str | None
-    """The account that posted the row, which alone can edit it; None when unknown, and the room's poster tries."""
     body: str
     ended_at: float
     duration_seconds: int
@@ -207,16 +203,16 @@ class _CallRoom(_RoomReader, Protocol):
         """Return whether the room's poster may post messages by its power levels, None when it cannot tell."""
         ...
 
-    async def post_row(self, room_id: str, call_id: str) -> tuple[str, str] | None:
-        """Post the notice that stands for the call in the room; return its event ID and sender, None if not sent."""
+    async def post_row(self, room_id: str, call_id: str) -> str | None:
+        """Post the notice that stands for the call in the room; return its event ID, None when nothing went out."""
         ...
 
     async def post_transcript(self, message: TranscriptMessage) -> str | None:
-        """Post the call's message in its row's thread, as the row's sender; return its event ID, None if not sent."""
+        """Post the call's message in its row's thread; return its event ID, None when nothing went out."""
         ...
 
     async def edit_row(self, row: EndedRow) -> str | None:
-        """Replace the row's text with the ended call's, as the row's sender; return the edit's event ID, None if not sent."""
+        """Replace the row's text with the ended call's; return the edit's event ID, None when nothing went out."""
         ...
 
     def title_thread(self, message: TranscriptMessage, event_id: str) -> None:
@@ -783,11 +779,11 @@ class CallTranscriptService:
             else:
                 await self._postpone(call, reason="poster-may-not-post")
         elif call.row_event_id is None:
-            posted = await self._room.post_row(call.room_id, call.id)
-            if posted is None:
+            event_id = await self._room.post_row(call.room_id, call.id)
+            if event_id is None:
                 await self._postpone(call, reason="row-not-posted")
             else:
-                await asyncio.to_thread(self._store.set_row_event_id, call.id, *posted)
+                await asyncio.to_thread(self._store.set_row_event_id, call.id, event_id)
         elif (row := _owed_row_edit(call)) is not None:
             if await self._room.edit_row(row) is None:
                 await self._postpone(call, reason="row-not-edited")
@@ -853,7 +849,6 @@ class CallTranscriptService:
             room_id=call.room_id,
             call_id=call.id,
             row_event_id=call.row_event_id,
-            row_sender=call.row_sender,
             body=notes if notes is not None else _summary(transcript),
             transcript=transcript,
         )
@@ -1052,7 +1047,6 @@ def _owed_row_edit(call: StoredCall) -> EndedRow | None:
         room_id=call.room_id,
         call_id=call.id,
         row_event_id=call.row_event_id,
-        row_sender=call.row_sender,
         body=f"Call ended · {call_minutes(duration_seconds)} min",
         ended_at=call.ended_at,
         duration_seconds=duration_seconds,
