@@ -28,6 +28,22 @@ type fakeNode struct {
 	// reloginHeld, when set, holds every Relogin until it is closed; reloginEntered tells of each one held.
 	reloginHeld    chan struct{}
 	reloginEntered chan struct{}
+	// logoutHeld and logoutEntered do the same for Logout.
+	logoutHeld    chan struct{}
+	logoutEntered chan struct{}
+}
+
+// hold tells entered of a call and keeps it until held is closed or the call's context ends; without held it
+// returns at once.
+func hold(ctx context.Context, held, entered chan struct{}) {
+	if held == nil {
+		return
+	}
+	entered <- struct{}{}
+	select {
+	case <-held:
+	case <-ctx.Done():
+	}
 }
 
 func (n *fakeNode) Listener() net.Listener { return n.listener }
@@ -42,15 +58,12 @@ func (n *fakeNode) Observed() NodeObserved {
 	return n.observed
 }
 
-func (n *fakeNode) Relogin(context.Context) error {
+func (n *fakeNode) Relogin(ctx context.Context) error {
 	n.mu.Lock()
 	n.calls = append(n.calls, "Relogin")
-	held, err := n.reloginHeld, n.loginErr
+	held, entered, err := n.reloginHeld, n.reloginEntered, n.loginErr
 	n.mu.Unlock()
-	if held != nil {
-		n.reloginEntered <- struct{}{}
-		<-held
-	}
+	hold(ctx, held, entered)
 	return err
 }
 
@@ -68,12 +81,14 @@ func (n *fakeNode) holdRelogin(t *testing.T) (release func()) {
 
 func (n *fakeNode) Logout(ctx context.Context) error {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	n.calls = append(n.calls, "Logout")
 	if deadline, ok := ctx.Deadline(); ok {
 		n.logoutIn = time.Until(deadline).Round(time.Second)
 	}
-	return n.logoutErr
+	held, entered, err := n.logoutHeld, n.logoutEntered, n.logoutErr
+	n.mu.Unlock()
+	hold(ctx, held, entered)
+	return err
 }
 
 func (n *fakeNode) Close() error {
@@ -108,6 +123,22 @@ type fakeNodes struct {
 	started   []*fakeNode
 	startErr  error
 	logoutErr error
+	// logoutHeld and logoutEntered are given to every node started from now on.
+	logoutHeld    chan struct{}
+	logoutEntered chan struct{}
+}
+
+// holdLogouts makes the Logout of every node started from now on wait for the returned release, which the test's
+// end calls too; entered tells of each one that waits.
+func (f *fakeNodes) holdLogouts(t *testing.T) (entered <-chan struct{}, release func()) {
+	t.Helper()
+	held := make(chan struct{})
+	release = sync.OnceFunc(func() { close(held) })
+	t.Cleanup(release)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logoutHeld, f.logoutEntered = held, make(chan struct{}, 16)
+	return f.logoutEntered, release
 }
 
 func (f *fakeNodes) start(dir, hostname string) (Node, error) {
@@ -129,6 +160,9 @@ func (f *fakeNodes) start(dir, hostname string) (Node, error) {
 		listener:  listener,
 		observed:  NodeObserved{State: "needs_login"},
 		logoutErr: f.logoutErr,
+
+		logoutHeld:    f.logoutHeld,
+		logoutEntered: f.logoutEntered,
 	}
 	f.started = append(f.started, node)
 	return node, nil
@@ -931,6 +965,68 @@ func TestStatusIsPostedWhileTheLinksCannotBeReadAgain(t *testing.T) {
 	}
 	if _, held := posted[1]["links"].(map[string]any)[idA]; !held {
 		t.Errorf("status body = %v, want the node the gateway still holds", posted[1])
+	}
+}
+
+func TestStatusIsPostedWhileTheFirstPassIsHeldUp(t *testing.T) {
+	f := newFixtures(t, "login")
+	mkdir(t, filepath.Join(f.state, idB))
+	logouts, endLogout := f.nodes.holdLogouts(t)
+	// The link to remove is listed first, and its logout does not end.
+	f.primary.list(t, removing(idB), on(idA))
+	f.start(t)
+	await(t, logouts, "the logout of its first pass")
+	f.clock.asleep(t, 1)
+
+	// The other link's node is up by then, and its row is the one connections are checked against.
+	healthy := f.nodes.node(t, 0)
+	f.gateway.mu.Lock()
+	_, known := f.gateway.links[idA]
+	f.gateway.mu.Unlock()
+	if healthy.dir != filepath.Join(f.state, idA) || !known {
+		t.Fatalf("the first node started in %s and the link is known: %v; want the link that is on, before any logout", healthy.dir, known)
+	}
+
+	// Its status is posted 5 s after the start, long before a report would be stale.
+	f.clock.advance(5 * time.Second)
+	f.clock.asleep(t, 1)
+	want := []map[string]any{{
+		"enrollment": "login",
+		"links": map[string]any{idA: map[string]any{
+			"state": "needs_login", "login_url": nil, "tailnet": nil, "dns_name": nil, "login_name": nil,
+			"key_expiry": nil, "open_connections": 0.0, "last_error": nil,
+		}},
+	}}
+	if got := f.posted(t); !reflect.DeepEqual(got, want) {
+		t.Fatalf("status posts while the first pass is held up = %v, want %v", got, want)
+	}
+
+	// While the next post has no answer the pass ends, with one more change, and the next 30 s pass.
+	posts := f.holdPosts(t)
+	healthy.observe(NodeObserved{State: "running"})
+	f.clock.advance(5 * time.Second)
+	await(t, posts.entered, "the post of the changed status")
+	endLogout()
+	f.clock.advance(30 * time.Second)
+	if !quiet(posts.entered) {
+		t.Error("a second POST /status was sent while the first had no answer")
+	}
+	posts.release()
+	f.clock.settle(t)
+
+	posted := f.posted(t)
+	if len(posted) != 3 {
+		t.Fatalf("%d status posts, want 3: the link that is on, its change, and the removal once it was done", len(posted))
+	}
+	changed, done := posted[1]["links"].(map[string]any), posted[2]["links"].(map[string]any)
+	if changed[idA].(map[string]any)["state"] != "running" || changed[idB] != nil {
+		t.Errorf("second status post = %v, want the link that is on as running, and nothing of the other", changed)
+	}
+	if done[idA].(map[string]any)["state"] != "running" || done[idB].(map[string]any)["state"] != "removed" {
+		t.Errorf("third status post = %v, want one link running and the other removed", done)
+	}
+	if posts.atOnce() != 1 {
+		t.Errorf("%d POST /status were in flight at once, want 1", posts.atOnce())
 	}
 }
 

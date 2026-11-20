@@ -78,7 +78,10 @@ type Gateway struct {
 	mu sync.Mutex
 	// links is what the primary listed last, by link id.
 	links map[string]DesiredLink
-	nodes map[string]Node
+	// started says that a pass has started the node of every link listed as on or suspended; until then the
+	// gateway holds none of them, and a report without them would tell the primary they are gone.
+	started bool
+	nodes   map[string]Node
 	// relogin holds the links whose node gets a Relogin once it needs a login: it ran, or the last Relogin failed.
 	relogin map[string]bool
 	// removed holds the links listed as removing whose state is gone.
@@ -139,14 +142,14 @@ func (g *Gateway) Run(ctx context.Context) {
 	}()
 	defer func() { <-stopped }()
 
-	// Until a pass read the links the gateway holds none of its nodes, and a report without them would tell the
-	// primary they are gone.
-	read := false
 	// What the primary last took, and when; nil while it has to be told again.
 	var posted map[string]LinkStatus
 	var postedAt time.Time
 	report := func() {
-		if !read {
+		g.mu.Lock()
+		started := g.started
+		g.mu.Unlock()
+		if !started {
 			return
 		}
 		status := g.Status()
@@ -168,8 +171,6 @@ func (g *Gateway) Run(ctx context.Context) {
 		case err := <-passed:
 			if err != nil {
 				log.Printf("reconcile: %v", err)
-			} else {
-				read = true
 			}
 			report()
 			select {
@@ -189,13 +190,16 @@ func (g *Gateway) Run(ctx context.Context) {
 // A link that is on or suspended has its node running. A link that is removing is logged out and its state deleted.
 // A node the primary does not list is stopped and its state kept, so an empty answer destroys no enrolment, and a
 // pass that cannot read the links returns the error and changes nothing.
+//
+// The removals come last, since a logout may take 10 s: by then every other link has its node and its new row, and
+// the status may be reported.
 func (g *Gateway) Reconcile(ctx context.Context) error {
 	answer, err := g.primary.Links(ctx)
 	if err != nil {
 		return err
 	}
 	listed := make(map[string]DesiredLink, len(answer))
-	removed := map[string]bool{}
+	var removing []DesiredLink
 	for _, link := range answer {
 		if !linkID.MatchString(link.ID) {
 			log.Printf("ignoring a link whose id is not 16 hex characters: %q", link.ID)
@@ -205,9 +209,7 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 		case "on", "suspended":
 			g.keep(ctx, link)
 		case "removing":
-			if g.remove(ctx, link) {
-				removed[link.ID] = true
-			}
+			removing = append(removing, link)
 		default:
 			log.Printf("link %s: ignoring the unknown desired state %q", link.ID, link.Desired)
 			continue
@@ -227,7 +229,12 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 			delete(g.lastError, id)
 		}
 	}
-	g.links, g.removed = listed, removed
+	for id := range g.removed {
+		if listed[id].Desired != "removing" {
+			delete(g.removed, id)
+		}
+	}
+	g.links, g.started = listed, true
 	g.mu.Unlock()
 	for _, id := range unlisted {
 		if node := g.drop(id); node != nil {
@@ -235,6 +242,16 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 				log.Printf("link %s: closing its node: %v", id, err)
 			}
 		}
+	}
+	for _, link := range removing {
+		gone := g.remove(ctx, link)
+		g.mu.Lock()
+		if gone {
+			g.removed[link.ID] = true
+		} else {
+			delete(g.removed, link.ID)
+		}
+		g.mu.Unlock()
 	}
 	return nil
 }
