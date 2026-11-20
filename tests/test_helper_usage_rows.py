@@ -172,7 +172,7 @@ async def _room_topic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 async def _thread_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     paths = test_runtime_paths(tmp_path)
     config = _system_config(paths)
-    _scripted(monkeypatch, json.dumps({"summary": "A summary"}))
+    _scripted(monkeypatch, json.dumps({"title": "A summary"}))
     await generate_summary(
         [ResolvedVisibleMessage.synthetic(sender="@person:localhost", body="Help", event_id="$message")],
         config,

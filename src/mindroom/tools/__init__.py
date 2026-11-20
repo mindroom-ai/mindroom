@@ -70,6 +70,7 @@ from mindroom.tools.duckduckgo import duckduckgo_tools
 from mindroom.tools.e2b import e2b_tools
 from mindroom.tools.eleven_labs import eleven_labs_tools
 from mindroom.tools.email import email_tools
+from mindroom.tools.email_invite import email_invite_tools
 from mindroom.tools.exa import exa_tools
 from mindroom.tools.external_trigger_manager import external_trigger_manager_tools
 from mindroom.tools.fal import fal_tools

@@ -52,10 +52,10 @@ from mindroom.thread_summary.generation import (
     GeneratedSummary,
     _ThreadEnrichment,
     _ThreadSummary,
-    clamp_generated_title,
     generate_summary,
     resolve_thread_summary_model_name,
     room_summary_instructions,
+    title_error,
 )
 from mindroom.thread_summary.notices import (
     ThreadSummaryWriteError,
@@ -382,7 +382,7 @@ def _summary_model(*contents: BaseModel | str | Await) -> ScriptedModel:
     """
     return ScriptedModel(
         [
-            [content, *answer('{"summary": "unused"}')]
+            [content, *answer('{"title": "unused"}')]
             if isinstance(content, Await)
             else answer(_summary_answer(content))
             for content in contents
@@ -392,7 +392,7 @@ def _summary_model(*contents: BaseModel | str | Await) -> ScriptedModel:
 
 
 def _title(summary: str) -> _ThreadSummary:
-    return _ThreadSummary(summary=summary)
+    return _ThreadSummary(title=summary)
 
 
 def _prompt(request: ModelRequest) -> str:
@@ -459,39 +459,34 @@ def test_title_schemas_are_valid_strict_openai_schemas(schema: type[BaseModel]) 
 
     assert '"default"' not in json.dumps(emitted)
     assert "keep_current" in emitted["required"]
-    assert schema.model_validate({"summary": "🧵 Trip", "tags": ["x"]}).keep_current is False
+    assert schema.model_validate({"title": "🧵 Trip", "tags": ["x"]}).keep_current is False
 
 
-def test_thread_summary_model_accepts_a_long_answer_for_the_cut() -> None:
-    """An overlong answer parses, so the cut after normalization shortens it instead of losing the title."""
+def test_thread_summary_model_accepts_a_long_answer_to_reject() -> None:
+    """An overlong answer parses, so the title check can send it back instead of a parse error losing it."""
     assert GENERATED_TITLE_MAX_LENGTH < THREAD_SUMMARY_MAX_LENGTH
-    assert _ThreadSummary(summary="x" * (THREAD_SUMMARY_MAX_LENGTH + 1)).keep_current is False
+    assert _ThreadSummary(title="x" * (THREAD_SUMMARY_MAX_LENGTH + 1)).keep_current is False
+
+
+def _too_long(words: int, characters: int) -> str:
+    return f"The title has {words} words and {characters} characters; the limit is 6 words and 80 characters."
 
 
 @pytest.mark.parametrize(
-    ("title", "clamped"),
+    ("title", "error"),
     [
-        ("🛠 Plan migration for all backend service instances", "🛠 Plan migration for all backend service"),
-        ("🧪 ISSUE-148 cache-refetch live test — done", "🧪 ISSUE-148 cache-refetch live test — done"),
-        ("🧵 " + "foo " * 3 + "x" * 70, "🧵 foo foo foo"),
-        ("讨论" * 50, "讨论" * 40),
-        ("🧵 Short " + "x" * 80, "🧵 Short"),
-        ("🧵 " + "x" * 90, "🧵 " + "x" * 78),
-        (_EIGHTY_CHARACTER_TITLE, _EIGHTY_CHARACTER_TITLE),
+        ("🛠 Plan migration for all backend service instances", _too_long(7, 50)),
+        ("🧪 ISSUE-148 cache-refetch live test — done", None),
+        ("讨论" * 50, _too_long(1, 100)),
+        (_EIGHTY_CHARACTER_TITLE, None),
+        (f"{_EIGHTY_CHARACTER_TITLE}b", _too_long(5, 81)),
+        ("", "The title is empty."),
     ],
-    ids=[
-        "seven-words",
-        "emoji-dash-and-ids-free",
-        "word-boundary",
-        "unspaced-cjk",
-        "drop-overlong-second-word",
-        "only-one-word",
-        "exactly-eighty",
-    ],
+    ids=["seven-words", "emoji-dash-and-ids-free", "unspaced-cjk", "exactly-eighty", "eighty-one", "empty"],
 )
-def test_generated_titles_are_cut_to_six_words_and_80_characters(title: str, clamped: str) -> None:
-    """The cut counts only tokens with letters or digits, and drops whole words to fit 80 characters."""
-    assert clamp_generated_title(title) == clamped
+def test_title_error_checks_six_words_and_80_characters(title: str, error: str | None) -> None:
+    """Only tokens with letters or digits count as words, and a title over either limit or empty is rejected."""
+    assert title_error(title) == error
 
 
 @pytest.mark.parametrize(
@@ -932,7 +927,7 @@ class TestMaybeGenerateThreadSummary:
             ("Trip plan", "Trip plan (forked)"),
             ("Trip plan (forked)", "Trip plan (forked)"),
             (None, "Prompt title (forked)"),
-            ("A" * 300, "A" * 80 + " (forked)"),
+            ("A" * 300, "Prompt title (forked)"),
         ],
         ids=["parent-title", "fork-of-a-fork", "untitled-parent", "longest-parent-title"],
     )
@@ -964,7 +959,8 @@ class TestMaybeGenerateThreadSummary:
         (sent,) = _sent_summaries(self.client)
         assert sent["summary"] == fork_title
         assert sent["message_count"] == 0
-        assert len(model.requests) == (parent_title is None)
+        # An untitled parent's fork, and one whose parent title is over the limits, title their prompt.
+        assert len(model.requests) == (parent_title is None or len(parent_title) > GENERATED_TITLE_MAX_LENGTH)
 
     @pytest.mark.parametrize("parent_title", ["Trip plan", None], ids=["parent-title", "untitled-parent"])
     async def test_a_batch_starting_a_fork_gets_only_its_parents_title(self, parent_title: str | None) -> None:
@@ -1063,15 +1059,18 @@ class TestMaybeGenerateThreadSummary:
         (sent,) = _sent_summaries(self.client)
         assert sent["summary"] == "Fork answer (forked)"
 
-    async def test_provisional_title_is_cut_to_six_words(self) -> None:
-        """A prompt title the model wrote too long is shortened, not dropped."""
-        self._summarizer(_title("🛠 Plan migration for all backend service instances"))
+    async def test_provisional_title_too_long_is_written_again(self) -> None:
+        """A prompt title the model wrote too long goes back to the model, and only the short retry is posted."""
+        self._summarizer(
+            _title("🛠 Plan migration for all backend service instances"),
+            _title("🛠 Backend migration plan"),
+        )
         self._history(_make_thread_history(1))
 
         await self._provisional(config=_mock_config(first_threshold=2))
 
         (sent,) = _sent_summaries(self.client)
-        assert sent["summary"] == "🛠 Plan migration for all backend service"
+        assert sent["summary"] == "🛠 Backend migration plan"
 
     async def test_provisional_title_uses_prompt_and_keeps_first_threshold(self) -> None:
         """A provisional title must not consume the first post-reply summary or request tags."""
@@ -1635,7 +1634,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_second_summary_call_persists_summary_and_tags_once(self, prior_model: str) -> None:
         """The first refresh should update either kind of prior summary and assign initial tags."""
         model = self._summarizer(
-            _ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug", "authentication"]),
+            _ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug", "authentication"]),
         )
         self._history(_make_due_second_summary_history(prior_model=prior_model))
 
@@ -1674,7 +1673,7 @@ class TestMaybeGenerateThreadSummary:
             self.room_state.tag(_THREAD, "question")
         else:
             self.room_state.tag(_THREAD, "question", content={})
-        self._summarizer(_ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug"]))
+        self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
         self._history(_make_due_second_summary_history())
 
         await self._maybe_generate(_mock_config(first_threshold=1))
@@ -1755,7 +1754,7 @@ class TestMaybeGenerateThreadSummary:
             ("🧵 A&not B review", _title("🧵 A&not B review")),
             ("🧵 Login failure investigation", _title("🧵 Login failure investigation.")),
             ("🛠 Deploy fix", _title("🛠️ Deploy fix")),
-            ("🧵 Login failure investigation", _ThreadSummary(summary="🔧 Something else", keep_current=True)),
+            ("🧵 Login failure investigation", _ThreadSummary(title="🔧 Something else", keep_current=True)),
             ("🧵 Trip plan (forked)", _title("🧵 Trip plan (forked).")),
             (_EIGHTY_CHARACTER_TITLE, _title(f"{_EIGHTY_CHARACTER_TITLE}.")),
         ],
@@ -1812,22 +1811,24 @@ class TestMaybeGenerateThreadSummary:
     @pytest.mark.parametrize("case", ["long-legacy-title", "retitle"])
     async def test_keep_is_not_offered_for_a_long_title_or_a_retitle(self, case: str) -> None:
         """A title past the 6-word rule is rewritten once, and a retitle asks for a new title outright."""
-        title = "🧵 Review of PR #548 session persistence hooks" if case == "long-legacy-title" else "🧵 Short title"
-        model = self._summarizer(_title(title))
+        long_title = case == "long-legacy-title"
+        title = "🧵 Review of PR #548 session persistence hooks" if long_title else "🧵 Short title"
+        # The model repeats the long title, which is rejected like any new title that is too long.
+        retry = [_title("🧵 PR #548 session persistence")] if long_title else []
+        model = self._summarizer(_title(title), *retry)
         self._refresh_due(summary=title)
 
         await self._maybe_generate(_mock_config(), retitle=case == "retitle")
 
-        (request,) = model.requests
-        assert "<current_title>" not in _prompt(request)
-        assert "keep_current" not in request.messages[0].get_content_string()
+        assert len(model.requests) == 1 + len(retry)
+        assert "<current_title>" not in _prompt(model.requests[0])
+        assert "keep_current" not in model.requests[0].messages[0].get_content_string()
         (sent,) = _sent_summaries(self.client)
-        # A new title is cut to 6 words, even when the model repeats a longer one.
-        assert sent["summary"] == ("🧵 Review of PR #548 session persistence" if case == "long-legacy-title" else title)
+        assert sent["summary"] == ("🧵 PR #548 session persistence" if long_title else title)
 
     async def test_kept_title_with_tags_posts_the_current_title_once(self) -> None:
         """A keep on the tagging refresh posts the current title verbatim, which records the tags as done."""
-        model = self._summarizer(_ThreadEnrichment(summary="🔧 Other", tags=["bug"], keep_current=True))
+        model = self._summarizer(_ThreadEnrichment(title="🔧 Other", tags=["bug"], keep_current=True))
         self._history(_make_due_second_summary_history())
 
         await self._maybe_generate(_mock_config(first_threshold=1))
@@ -1843,7 +1844,7 @@ class TestMaybeGenerateThreadSummary:
         """The first reply keeping its prompt title posts it unchanged, so its count schedules the tagging refresh."""
         model = self._summarizer(
             _title("🧵 Existing thread summary"),
-            _ThreadEnrichment(summary="🧵 Existing thread summary", tags=["bug"]),
+            _ThreadEnrichment(title="🧵 Existing thread summary", tags=["bug"]),
         )
         provisional = _make_summary_notice_message(_THREAD, message_count=0, initial_enrichment_complete=None)
         config = _mock_config(first_threshold=1)
@@ -1869,7 +1870,7 @@ class TestMaybeGenerateThreadSummary:
         """Background maintenance and Matrix summary failures should stay isolated from tag writes."""
         self.room_state.failing_reads = frozenset({1})
         self.client.room_send.side_effect = RuntimeError("send failed")
-        self._summarizer(_ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug"]))
+        self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
         self._history(_make_due_second_summary_history())
 
         await self._maybe_generate(_mock_config(first_threshold=1))
@@ -1880,7 +1881,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_raw_tag_write_failure_does_not_block_remaining_tags_or_summary(self) -> None:
         """A failure writing one tag should not abort the enrichment delivery."""
         self.room_state.failing_tags = frozenset({"bug"})
-        self._summarizer(_ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug", "authentication"]))
+        self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug", "authentication"]))
         self._history(_make_due_second_summary_history())
 
         await self._maybe_generate(_mock_config(first_threshold=1))
@@ -1915,7 +1916,7 @@ class TestMaybeGenerateThreadSummary:
         with capture_logs() as logs:
             for history in histories:
                 self._summarizer(
-                    _ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug", "authentication"]),
+                    _ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug", "authentication"]),
                 )
                 self._history(history)
                 await self._maybe_generate(config)
@@ -1932,7 +1933,7 @@ class TestMaybeGenerateThreadSummary:
             self.client.room_put_state.assert_not_awaited()
             # Once the power levels allow it, a later summary tags the thread.
             self.room_state.power_level = 100
-            self._summarizer(_ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug"]))
+            self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
             self._history(
                 [
                     *_make_thread_history(40),
@@ -1952,7 +1953,7 @@ class TestMaybeGenerateThreadSummary:
         """A transient tag-state read failure must not durably suppress later retries."""
         # Reads 1 and 2 are the vocabulary rebuild and the resolved check; read 3 is the conditional tag write's.
         self.room_state.failing_reads = frozenset({3})
-        self._summarizer(_ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug"]))
+        self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
         self._history(_make_due_second_summary_history())
 
         await self._maybe_generate(_mock_config(first_threshold=1))
@@ -1964,7 +1965,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_all_tag_write_failures_mark_enrichment_retryable(self) -> None:
         """A summary may survive failed tag writes without claiming enrichment completed."""
         self.room_state.failing_tags = frozenset({"bug"})
-        self._summarizer(_ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug"]))
+        self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
         self._history(_make_due_second_summary_history())
 
         await self._maybe_generate(_mock_config(first_threshold=1))
@@ -1975,7 +1976,7 @@ class TestMaybeGenerateThreadSummary:
         """The vocabulary the freshness upkeep rebuilt is what the initial enrichment offers."""
         self.room_state.tag("$other1", "bug")
         self.room_state.tag("$other2", "bug")
-        model = self._summarizer(_ThreadEnrichment(summary="Summary", tags=["bug"]))
+        model = self._summarizer(_ThreadEnrichment(title="Summary", tags=["bug"]))
         self._history(_make_due_second_summary_history())
 
         await self._maybe_generate(_mock_config())
@@ -2200,7 +2201,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_cancellation_after_initial_tags_does_not_advance_summary_count(self) -> None:
         """Cancellation during summary delivery must leave enrichment incomplete and retryable."""
         self.client.room_send.side_effect = asyncio.CancelledError
-        self._summarizer(_ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug"]))
+        self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
         self._history(_make_due_second_summary_history())
 
         with pytest.raises(asyncio.CancelledError):
@@ -2262,7 +2263,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_recovered_incomplete_enrichment_retries_tags_at_next_threshold(self) -> None:
         """A durable failed marker should retry structured enrichment after restart."""
-        model = self._summarizer(_ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug"]))
+        model = self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
         self._history(
             [
                 *_make_thread_history(15),
@@ -2276,6 +2277,25 @@ class TestMaybeGenerateThreadSummary:
         assert "(no reusable short tags in use yet)" in _prompt(request)
         assert self.room_state.tags(_THREAD) == ["bug"]
         assert _sent_summaries(self.client)[0]["initial_enrichment_complete"] is True
+        assert self._count() == 15
+
+    async def test_three_rejected_enrichment_titles_post_no_title_and_no_tags(self) -> None:
+        """Tags ride on an accepted title, so a tagging refresh whose titles are all too long writes neither."""
+        overlong = "🧵 Review of the login failure investigation meeting notes"
+        model = self._summarizer(*[_ThreadEnrichment(title=overlong, tags=["bug"])] * 3)
+        self._history(
+            [
+                *_make_thread_history(15),
+                _make_summary_notice_message(_THREAD, message_count=5, initial_enrichment_complete=False),
+            ],
+        )
+
+        await self._maybe_generate(_mock_config())
+
+        assert len(model.requests) == 3
+        assert all(request.output_schema is _ThreadEnrichment for request in model.requests)
+        assert _sent_summaries(self.client) == []
+        assert self.room_state.tags(_THREAD) == []
         assert self._count() == 15
 
     async def test_concurrent_calls_serialize_history_fetch_inside_lock(self) -> None:
@@ -2657,9 +2677,36 @@ class TestGenerateSummary:
             "(tags are not requested for this summary refresh)\n"
             "</tag_vocabulary>\n\n"
             f"<thread_messages>\n{conversation}\n</thread_messages>\n\n"
-            "Summarize the above thread and follow the response schema."
+            "Write the title of the above thread and follow the response schema."
         )
         assert request.output_schema is _ThreadSummary
+
+    async def test_a_title_too_long_goes_back_to_the_model_with_the_reason(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An overlong title is sent back with its error, and the short retry is the result."""
+        rejected = "🧵 Review of the login failure investigation meeting notes"
+        model = _summary_model(_title(rejected), _title("🧵 Login failure investigation"))
+        install_model_providers(monkeypatch, {"default": model})
+
+        result = await self._summarize(_make_thread_history(3), _mock_config(), _mock_runtime_paths())
+
+        assert result == GeneratedSummary(summary="🧵 Login failure investigation")
+        first, second = (_prompt(request) for request in model.requests)
+        assert second.startswith(f"{first}\n\n")
+        assert f"<rejected_title>\n{rejected}\n</rejected_title>\n{title_error(rejected)}" in second
+        assert "The title has 8 words" in second
+
+    async def test_three_titles_too_long_give_no_title(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """After three rejected answers the summarizer gives up rather than posting an overlong title."""
+        model = _summary_model(*[_title("🧵 Review of the login failure investigation meeting notes")] * 3)
+        install_model_providers(monkeypatch, {"default": model})
+
+        result = await self._summarize(_make_thread_history(3), _mock_config(), _mock_runtime_paths())
+
+        assert result is None
+        assert len(model.requests) == 3
 
     async def test_current_title_follows_an_overridden_user_prompt_escaped(
         self,
@@ -2704,7 +2751,7 @@ class TestGenerateSummary:
                 event_id="$event",
             ),
         ]
-        enrichment = _ThreadEnrichment(summary="🧵 Login parser hardening", tags=["Bug Fix", "bug-fix", "resolved!"])
+        enrichment = _ThreadEnrichment(title="🧵 Login parser hardening", tags=["Bug Fix", "bug-fix", "resolved!"])
         model = self._summarizer(monkeypatch, enrichment, model_name="qwen")
 
         result = await self._summarize(
@@ -2743,7 +2790,7 @@ class TestGenerateSummary:
         generated_tags: list[str],
     ) -> None:
         """Invalid or automatic-excluded tags should not discard the valid refreshed summary."""
-        self._summarizer(monkeypatch, _ThreadEnrichment(summary="🧵 Invalid tags", tags=generated_tags))
+        self._summarizer(monkeypatch, _ThreadEnrichment(title="🧵 Invalid tags", tags=generated_tags))
 
         result = await self._summarize(
             _make_thread_history(3),
@@ -2756,7 +2803,7 @@ class TestGenerateSummary:
 
     async def test_later_summary_ignores_tags_the_model_adds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A later summary call keeps only the summary, so it never revives automatic tagging."""
-        model = self._summarizer(monkeypatch, _ThreadEnrichment(summary="🧵 Unexpected retag", tags=["bug"]))
+        model = self._summarizer(monkeypatch, _ThreadEnrichment(title="🧵 Unexpected retag", tags=["bug"]))
 
         result = await self._summarize(_make_thread_history(3), _mock_config(), _mock_runtime_paths())
 
@@ -2963,7 +3010,7 @@ class TestGenerateSummary:
 
     async def test_unexpected_structured_content_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An answer that does not match the schema must not be stringified into a visible summary."""
-        self._summarizer(monkeypatch, '{"title": "unvalidated"}')
+        self._summarizer(monkeypatch, '{"summary": "unvalidated"}')
 
         result = await self._summarize(_make_thread_history(5), _mock_config(), _mock_runtime_paths())
 

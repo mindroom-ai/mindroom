@@ -195,6 +195,7 @@ eleven_labs = [
   "elevenlabs",
 ]
 email = []
+email_invite = []
 exa = [
   "exa-py",
 ]

@@ -2314,6 +2314,37 @@
       "title": "EgressService",
       "type": "object"
     },
+    "EmailInvitesConfig": {
+      "additionalProperties": false,
+      "description": "Settings of the `email_invite` tool: the Chat link, the expiry, and the approvers.",
+      "properties": {
+        "chat_url": {
+          "default": "https://chat.mindroom.chat",
+          "description": "Origin of the MindRoom Chat web app the invite link opens, without a path",
+          "title": "Chat Url",
+          "type": "string"
+        },
+        "expiry_days": {
+          "default": 7,
+          "description": "Days an invite link stays valid",
+          "maximum": 30,
+          "minimum": 1,
+          "title": "Expiry Days",
+          "type": "integer"
+        },
+        "approvers": {
+          "default": [],
+          "description": "Matrix user IDs who may approve email invites in any room",
+          "items": {
+            "type": "string"
+          },
+          "title": "Approvers",
+          "type": "array"
+        }
+      },
+      "title": "EmailInvitesConfig",
+      "type": "object"
+    },
     "EmbedderConfig": {
       "additionalProperties": false,
       "description": "Configuration for memory embedder.",
@@ -6369,6 +6400,15 @@
         "scheduled_any_arguments": true
       },
       "description": "Tool-approval rules for agent-initiated tool calls"
+    },
+    "email_invites": {
+      "$ref": "#/$defs/EmailInvitesConfig",
+      "default": {
+        "chat_url": "https://chat.mindroom.chat",
+        "expiry_days": 7,
+        "approvers": []
+      },
+      "description": "Invites to a room by email through the email_invite tool"
     },
     "router": {
       "$ref": "#/$defs/RouterConfig",

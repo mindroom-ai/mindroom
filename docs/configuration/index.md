@@ -81,6 +81,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |
 | `slack` | How Slack workspace members map to Matrix users | [Slack](../tools/slack.md#slack-configuration) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
+| `email_invites` | Chat link, expiry, and approvers of invites to a room by email | [Email Invites](#email-invites) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](../deployment/egress-broker.md) |
 | `background_tool_jobs` | Background execution of tool calls, on by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
@@ -164,6 +165,21 @@ diff before.yaml after.yaml
 
 When the configuration uses include tags, structured saves from the dashboard and the self-config tools are rejected, so edit the source files instead; the raw config editor still edits the top-level file's text (see [Dashboard](../dashboard.md#configurations-split-with-include)).
 `MINDROOM_CONFIG_TEMPLATE` copies only the single template file, so a template that uses includes needs its included files shipped next to the config path.
+
+## Email Invites
+
+The optional root `email_invites` block configures the [`email_invite`](../email-invites.md) tool; the feature is on for an agent when `email_invite` is in its `tools`.
+
+```yaml
+email_invites:
+  chat_url: https://chat.mindroom.chat   # origin of the Chat web app the link opens; default shown
+  expiry_days: 7                         # 1 to 30
+  approvers: []                          # Matrix user IDs who may approve in any room
+```
+
+`chat_url` must be an `https` origin, or an `http` origin on a local address, with no path.
+The mail server comes from the environment: `MINDROOM_SMTP_URL` (`smtps://[user:password@]host[:port]` or `smtp://[user:password@]host[:port]`, kept out of workers like other secrets) and `MINDROOM_SMTP_FROM`, the sender, for example `MindRoom <invites@example.org>`.
+Without both, the tool returns the link for the approver to forward by hand.
 
 ## Built-In Prompt Overrides
 
