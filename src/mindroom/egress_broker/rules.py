@@ -464,16 +464,29 @@ def _inject_query_param(target: bytes, param_name: str, template: str, secret: s
     return f"{parsed.path}?{'&'.join(kept)}".encode("latin-1")
 
 
+def _carries_placeholder(value: bytes, placeholders: Collection[str]) -> bool:
+    """Return whether a header value is one of ``placeholders``, alone or after a scheme such as ``Bearer``."""
+    words = value.split()
+    return 0 < len(words) <= 2 and words[-1].decode("latin-1") in placeholders
+
+
 def inject_credentials(
     headers: list[tuple[bytes, bytes]],
     target: bytes,
     auth: EgressAuth,
     secret: str,
+    *,
+    placeholders: Collection[str] = (),
 ) -> tuple[list[tuple[bytes, bytes]], bytes]:
-    """Return the headers and target with the credential injected, replacing any header of the same name."""
+    """Return the headers and target with the credential injected, replacing any header of the same name.
+
+    A header that sends one of the service's ``placeholders`` goes too: a client can send its key in another header
+    than the rule's, as the Anthropic SDK sends ``Authorization`` since version 2, and the API must get one credential.
+    """
+    headers = [(k, v) for k, v in headers if not _carries_placeholder(v, placeholders)]
     if auth.type == "query":
         assert auth.name is not None  # The config requires a name for query auth.
-        return list(headers), _inject_query_param(target, auth.name, auth.template, secret)
+        return headers, _inject_query_param(target, auth.name, auth.template, secret)
     if auth.type == "header":
         assert auth.name is not None  # The config requires a name for header auth.
         name, value = auth.name.lower().encode(), auth.template.replace("{secret}", secret).encode()

@@ -52,7 +52,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.request_context import with_request_headers
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, claude_rejects_sampling_controls
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.anthropic.native_compaction import (
     COMPACTION_BETA,
@@ -142,6 +142,7 @@ _VERTEX_ENDPOINTS = {
     "us": "https://aiplatform.us.rep.googleapis.com/v1",
     "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
 }
+# API version 2026-10-21, which every route of the SDK sends, rejects these on every model, even at their defaults.
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # The SDK's ``messages.stream`` arguments that are request options or headers, not body fields. The SDK adds its own
 # ``stream`` flag to the body, and its Vertex AI and Bedrock clients rewrite the body for their platform.
@@ -368,11 +369,6 @@ class ClaudeProvider:
             params["output_config"] = dict(settings.output_config)
         if settings.stop_sequences:
             params["stop_sequences"] = list(settings.stop_sequences)
-        temperature = settings.temperature
-        if overrides.temperature is not None and not self.capabilities.provider_default_sampling:
-            temperature = overrides.temperature
-        sampling = {"temperature": temperature, "top_p": settings.top_p, "top_k": settings.top_k}
-        params.update({name: value for name, value in sampling.items() if value is not None})
         if settings.context_management is not None:
             params["context_management"] = dict(settings.context_management)
         replay = request.native_compaction
@@ -380,19 +376,6 @@ class ClaudeProvider:
             params["context_management"] = compaction_context_management(replay.threshold)
         # The raw request overrides merge last, as the SDK merges a raw body.
         params.update(_raw_request_params(settings, omit_thinking_setting=overrides.omit_thinking_setting))
-        return params
-
-    def _with_sampling_in_extra_body(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Move sampling controls into ``extra_body`` and drop them for the generations that reject them."""
-        moved = {name: params.pop(name) for name in _SAMPLING_CONTROL_NAMES if name in params}
-        extra_body: dict[str, Any] = {**moved, **(params.get("extra_body") or {})}
-        if claude_rejects_sampling_controls(self.identity.id):
-            for name in _SAMPLING_CONTROL_NAMES:
-                extra_body.pop(name, None)
-        if extra_body:
-            params["extra_body"] = extra_body
-        else:
-            params.pop("extra_body", None)
         return params
 
     def _with_thinking_binding(self, params: dict[str, Any], request: ModelRequest) -> dict[str, Any]:
@@ -436,7 +419,7 @@ class ClaudeProvider:
 
         Only the direct API gets the structured-outputs beta header; Bedrock sends strict tools without it.
         """
-        params = self._with_thinking_binding(self._with_sampling_in_extra_body(self._authored_params(request)), request)
+        params = self._with_thinking_binding(_without_sampling(self._authored_params(request)), request)
         extra_body = params.get("extra_body") or {}
         compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
         extra_headers, header_betas = _split_beta_header(params.pop("extra_headers", None))
@@ -744,6 +727,18 @@ def _sends_thinking_binding(params: dict[str, Any]) -> bool:
     return isinstance(thinking, dict) and thinking.get("block_binding") is not None
 
 
+def _without_sampling(params: dict[str, Any]) -> dict[str, Any]:
+    """Drop the sampling controls the raw request overrides set, in ``extra_body`` too (``_SAMPLING_CONTROL_NAMES``)."""
+    for name in _SAMPLING_CONTROL_NAMES:
+        params.pop(name, None)
+    extra_body = {key: value for key, value in (params.get("extra_body") or {}).items() if key not in _SAMPLING_CONTROL_NAMES}
+    if extra_body:
+        params["extra_body"] = extra_body
+    else:
+        params.pop("extra_body", None)
+    return params
+
+
 def _raw_request_params(settings: ClaudeSettings, *, omit_thinking_setting: bool) -> dict[str, Any]:
     """Return a copy of the authored raw request overrides, without thinking when the request omits the setting."""
     request_params = {
@@ -810,9 +805,8 @@ def _claude_capabilities(
             settings=settings,
             endpoint=endpoint,
         ),
-        # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
-        # non-default sampling on every route.
-        provider_default_sampling=route == "vertexai_claude" or claude_rejects_sampling_controls(model_id),
+        # No request sends sampling controls (``_SAMPLING_CONTROL_NAMES``).
+        provider_default_sampling=True,
     )
 
 

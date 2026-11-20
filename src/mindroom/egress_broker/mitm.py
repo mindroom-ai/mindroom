@@ -78,7 +78,8 @@ def _injected_request(
 ) -> h11.Request | None:
     """Build the upstream request with the secret injected; None when h11 refuses it, such as a secret with CR/LF."""
     try:
-        injected_headers, target = inject_credentials(headers, request.target, match.auth, secret)
+        placeholders = match.definition.placeholder_env.values()
+        injected_headers, target = inject_credentials(headers, request.target, match.auth, secret, placeholders=placeholders)
         return h11.Request(method=request.method, target=target, headers=injected_headers)
     except h11.LocalProtocolError:
         # The error message can quote the offending header value, which may be the secret, so it is dropped here.

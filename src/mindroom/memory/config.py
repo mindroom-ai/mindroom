@@ -21,7 +21,6 @@ from mindroom.model_defaults import (
     ANTHROPIC_BASE_URL_DEFAULT,
     MEMORY_OLLAMA_LLM,
     OPENROUTER_BASE_URL_DEFAULT,
-    claude_rejects_sampling_controls,
     openai_rejects_sampling_controls,
 )
 from mindroom.timing import timed
@@ -233,9 +232,9 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
             llm_provider_config["api_key"] = api_key
 
     model = llm_provider_config.get("model")
-    if llm_provider == "anthropic" and isinstance(model, str) and claude_rejects_sampling_controls(model):
-        # Mem0's Anthropic LLM sends its default temperature of 0.1, else a set top_p, and never top_k; these models
-        # reject every sampling value, and Mem0 sends neither when both are None.
+    if llm_provider == "anthropic":
+        # Mem0's Anthropic LLM sends its default temperature of 0.1, else a set top_p, and never top_k, and sends
+        # neither when both are None; the SDK takes no sampling argument, and API version 2026-10-21 none on any model.
         llm_provider_config["temperature"] = None
         llm_provider_config["top_p"] = None
 
