@@ -21,7 +21,7 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON, ToolJobOwnershipLostError
+from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.background_after import validate_wait_seconds
@@ -158,7 +158,7 @@ def _updated(job: BackgroundJob, **changes: object) -> BackgroundJob:
     return replace(job, **changes, updated_at=datetime.now(UTC).isoformat())
 
 
-def parse_saved_job(saved: SavedToolJob) -> BackgroundJob:
+def _parse_saved_job(saved: SavedToolJob) -> BackgroundJob:
     """Validate one saved snapshot without claiming or changing its execution."""
     msg = f"Invalid tool job snapshot {saved.job_id!r}."
     try:
@@ -410,14 +410,6 @@ class ToolJobRuntime:
         """Return every job this runtime retains, unfiltered by access, for the coordinator's own passes."""
         return tuple(entry.job for entry in self._entries.values())
 
-    async def owns_jobs(self) -> bool:
-        """Return whether no newer runtime took the saved jobs over from this one."""
-        try:
-            await self._store.require_ownership()
-        except ToolJobOwnershipLostError:
-            return False
-        return True
-
     def awaited_job_ids(self) -> frozenset[str]:
         """Return the jobs whose outcome a call holds the claim on, as the call that started one does until released."""
         return frozenset(job_id for job_id, entry in self._entries.items() if entry.claim is not None)
@@ -560,7 +552,7 @@ class ToolJobRuntime:
             for saved in await self._store.load_all():
                 if saved.job_id in self._entries:
                     continue
-                entry = _Entry(await asyncio.to_thread(parse_saved_job, saved))
+                entry = _Entry(await asyncio.to_thread(_parse_saved_job, saved))
                 if entry.job.status not in TERMINAL_STATUSES:
                     await self._settle_stopped(entry)
                 self._add_entry(entry)

@@ -122,7 +122,7 @@ The fix is one rule: every fact that decides whether a stopped job goes on is re
 - **Minors.**
   The job note reads the continuing jobs before the ended ones and drops those that ended meanwhile, and lists only jobs whose access is allowed and that no cancel was requested for.
   Shutdown's last publication leaves the kept jobs out of the rooms' state, since the next start may have jobs off.
-  (Since changed: it keeps them listed, and a start with jobs off clears their listing; see `docs/architecture/background-tool-jobs.md`.)
+  (Since changed: it keeps them listed unless the config has turned jobs off; see `docs/architecture/background-tool-jobs.md`.)
   The continued child's lost turn attachments are documented.
 
 ### Size
