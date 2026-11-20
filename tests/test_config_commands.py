@@ -1081,7 +1081,10 @@ async def test_confirmation_reactions_serialize_one_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Competing confirm/cancel reactions must produce one side effect and response."""
+    """Competing confirm/cancel reactions must produce one side effect and response.
+
+    The second waits for the first even while the first's read of the room is under way.
+    """
     preview_event_id = "$preview"
     pending_change = _pending_config_change()
     monkeypatch.setattr(config_confirmation, "_pending_changes", {preview_event_id: pending_change})
@@ -1113,24 +1116,36 @@ async def test_confirmation_reactions_serialize_one_decision(
         key="❌",
         reacts_to=preview_event_id,
     )
+    reading = asyncio.Event()
+    read = asyncio.Event()
+
+    async def read_room(*_args: object, **_kwargs: object) -> frozenset[str]:
+        reading.set()
+        await read.wait()
+        return frozenset()
 
     with (
         patch(
             "mindroom.commands.config_confirmation.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
-            return_value=frozenset(),
-        ),
+            side_effect=read_room,
+        ) as room_reads,
         patch(
             "mindroom.commands.config_commands.apply_config_change",
             new_callable=AsyncMock,
             return_value="✅ Configuration updated successfully.",
         ) as apply_change,
     ):
-        await asyncio.gather(
-            handle_confirmation_reaction(_confirmation_context(bot), room, confirm),
-            handle_confirmation_reaction(_confirmation_context(bot), room, cancel),
-        )
+        first = asyncio.ensure_future(handle_confirmation_reaction(_confirmation_context(bot), room, confirm))
+        await reading.wait()
+        second = asyncio.ensure_future(handle_confirmation_reaction(_confirmation_context(bot), room, cancel))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert room_reads.await_count == 1
+        read.set()
+        await asyncio.gather(first, second)
 
+    assert room_reads.await_count == 1
     apply_change.assert_awaited_once()
     bot._delivery_gateway.send_text.assert_awaited_once()
     assert config_confirmation._pending_changes.get(preview_event_id) is None
