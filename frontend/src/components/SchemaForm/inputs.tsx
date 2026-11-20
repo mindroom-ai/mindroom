@@ -699,22 +699,19 @@ function dumpYaml(value: unknown): string {
   return value === undefined ? "" : dump(value);
 }
 
-const BINARY_INT = /^[-+]?0b[01]+$/;
-
-/** YAML 1.2 core integers plus the `0b101` binary form js-yaml 4 also read as a number. */
+/**
+ * Plain scalars read as integers the way js-yaml 4 read them: core integers plus signed hex and octal and binary
+ * (`-0x10`, `+0o20`, `0b101`), which the core rule accepts only behind an explicit `!!int`. One too large for a
+ * number stays a string, as before.
+ */
 const intTag = defineScalarTag("tag:yaml.org,2002:int", {
   ...intCoreTag,
-  resolve: (source, isExplicit, tagName) => {
-    if (!BINARY_INT.test(source)) {
-      return intCoreTag.resolve(source, isExplicit, tagName);
-    }
-    const sign = source.startsWith("-") ? -1 : 1;
-    return sign * parseInt(source.replace(/^[-+]?0b/, ""), 2);
-  },
+  resolve: (source, _isExplicit, tagName) =>
+    intCoreTag.resolve(source, true, tagName),
 });
 
-// js-yaml 5 loads with the bare YAML 1.2 core schema. Merge keys (`<<: *defaults`) and binary integers keep the
-// values js-yaml 4 gave them; dates stay the strings that were typed.
+// js-yaml 5 loads with the bare YAML 1.2 core schema. Merge keys (`<<: *defaults`) and signed or binary integers
+// keep the values js-yaml 4 gave them; dates stay the strings that were typed.
 const YAML_LOAD_OPTIONS = {
   schema: CORE_SCHEMA.withTags(mergeTag, intTag),
 };

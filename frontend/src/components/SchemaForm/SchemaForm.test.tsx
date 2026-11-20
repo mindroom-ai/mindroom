@@ -572,10 +572,21 @@ describe("SchemaFields", () => {
       defaults: { timeout: 30 },
       client: { timeout: 30, retries: 2 },
     });
-    // js-yaml 4.3 read neither underscore digits nor dates as anything but strings, and a binary integer as a number.
-    expect(settingsAfter("big: 1_000\nmask: 0b101\nday: 2026-01-01\n")).toEqual(
-      { big: "1_000", mask: 5, day: "2026-01-01" },
-    );
+    // js-yaml 4.3 kept underscore digits and integers too large for a number as strings and read signed hex, octal
+    // and binary integers as numbers. It made dates Date objects; dates now stay the strings that were typed.
+    const tooLarge = `0b${"1".repeat(1100)}`;
+    expect(
+      settingsAfter(
+        `big: 1_000\nmask: 0b101\nneg: -0x10\npos: +0o20\nhuge: ${tooLarge}\nday: 2026-01-01\n`,
+      ),
+    ).toEqual({
+      big: "1_000",
+      mask: 5,
+      neg: -16,
+      pos: 16,
+      huge: tooLarge,
+      day: "2026-01-01",
+    });
   });
 
   it("stores an explicit empty string when the default is not empty", () => {
